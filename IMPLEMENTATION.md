@@ -926,16 +926,28 @@ The app should skip the blocker entirely and go straight to the normal screen.
 
 **Test 4 — gh not installed** (optional, if you want to verify the fallback):
 
-Temporarily rename the `gh` binary or add a bogus PATH. The app should show the
-blocker (since `exec.Command("gh", ...)` will fail, returning an error → `false`).
+Temporarily hide `gh` from your shell so `exec.Command("gh", ...)` fails:
+
+- **macOS (Apple Silicon)**: `gh` is typically at `/opt/homebrew/bin/gh`.
+  ```bash
+  sudo mv /opt/homebrew/bin/gh /opt/homebrew/bin/gh.bak
+  # test the app — it should show the blocker
+  sudo mv /opt/homebrew/bin/gh.bak /opt/homebrew/bin/gh
+  ```
+- **Linux**: `gh` is typically at `/usr/bin/gh` or `/usr/local/bin/gh`.
+  ```bash
+  sudo mv $(which gh) $(which gh).bak
+  # test the app — it should show the blocker
+  sudo mv $(which gh).bak $(which gh)
+  ```
+
+The app should show the blocker (since `exec.Command("gh", ...)` will fail, returning an error → `false`).
 
 **Phase 2 is complete when**: the app blocks all functionality when `gh auth status`
 fails, shows the auth blocker, re-checks on keypress, and proceeds normally once
 authenticated.
 
 ## Phase 3 — Repository Selection
-
-> **Before you start**: Section 3.3 shows `expandTilde` (lowercase), but section 3.5 requires `ExpandTilde` (uppercase). In Go, uppercase = exported (callable from other packages). Write it as `ExpandTilde` from the start in both the function definition and the call in `DiscoverRepos`.
 
 **Goal**: After authentication passes, the app needs to figure out which git repository
 to open. There are three ways, tried in order:
@@ -1134,7 +1146,7 @@ func DiscoverRepos(scanPaths []string, maxDepth int) []string {
 
 	for _, scanPath := range scanPaths {
 		// Expand tilde to home directory
-		expanded := expandTilde(scanPath)
+		expanded := ExpandTilde(scanPath)
 
 		// Resolve to absolute path
 		abs, err := filepath.Abs(expanded)
@@ -1213,9 +1225,8 @@ func scanForRepos(dir, root string, maxDepth int, seen map[string]bool, repos *[
 	}
 }
 
-// expandTilde replaces a leading ~ with the user's home directory.
-// NOTE: Type this as "ExpandTilde" (capital E) so other packages can use it (see section 3.5).
-func expandTilde(path string) string {
+// ExpandTilde replaces a leading ~ with the user's home directory.
+func ExpandTilde(path string) string {
 	if !strings.HasPrefix(path, "~") {
 		return path
 	}
@@ -1898,25 +1909,6 @@ func (m Model) viewMain() string {
 6. User types to filter, navigates with j/k, presses Enter → `RepoSelectedMsg`
 7. `RepoSelectedMsg` arrives → `repoPath` is set, state becomes `stateMain`,
    `repos-state.json` is updated
-
-**Important**: The `expandTilde` function in `discover.go` needs to be exported so
-`app.go` can use it for manual paths. Rename it to `ExpandTilde`:
-
-In `internal/git/discover.go`, the function is already written as `expandTilde`
-(lowercase). Change it to `ExpandTilde` (uppercase) so it's exported:
-
-```go
-// ExpandTilde replaces a leading ~ with the user's home directory.
-func ExpandTilde(path string) string {
-```
-
-And update the call inside `DiscoverRepos` to use `ExpandTilde` as well:
-
-```go
-		expanded := ExpandTilde(scanPath)
-```
-
-Both references appear in the code above — just make sure both use `ExpandTilde`.
 
 ### 3.6 Test It
 
@@ -16436,7 +16428,7 @@ func parseDiffTree(raw string) []FileEntry {
 		case strings.HasPrefix(statusCode, "R"):
 			entry.Status = StatusRenamed
 			if len(parts) > 2 {
-				entry.OrigPath = parts[1] // NOTE: the field is OrigPath (defined earlier), not OldPath
+				entry.OrigPath = parts[1]
 				entry.Path = parts[2]
 			}
 		case strings.HasPrefix(statusCode, "C"):
