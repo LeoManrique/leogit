@@ -107,16 +107,16 @@ func (m FileListModel) Update(msg tea.Msg) (FileListModel, tea.Cmd) {
 			}
 			return m, nil
 
-		// space and 'a' are reserved for staging.
+		// space and 'a' are reserved for selection toggle.
 		// Handling them here as no-ops prevents them from bubbling up
 		// to the global key handler (where 'a' might conflict with
 		// future shortcuts).
 		case " ":
-			// toggle staging for the selected file
+			// toggle selection for the selected file (Phase 8)
 			return m, nil
 
 		case "a":
-			// stage/unstage all files
+			// select/deselect all files (Phase 8)
 			return m, nil
 		}
 	}
@@ -150,8 +150,8 @@ func (m FileListModel) View() string {
 		Foreground(lipgloss.Color("#FFFFFF")).
 		Background(lipgloss.Color("#264F78"))
 
-	stagedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#3FB950"))
-	unstagedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#484F58"))
+	selectedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#3FB950"))
+	//deselectedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#484F58"))
 
 	statusColors := map[git.FileStatus]color.Color{
 		git.StatusNew:        lipgloss.Color("#3FB950"), // green
@@ -168,11 +168,9 @@ func (m FileListModel) View() string {
 	for i := m.offset; i < end; i++ {
 		file := m.Files[i]
 
-		// Staging indicator: ● staged, ○ unstaged
-		staging := unstagedStyle.Render("○")
-		if file.Staged {
-			staging = stagedStyle.Render("●")
-		}
+		// Selection indicator: ● selected (will be committed), ○ excluded
+		// All files start as selected — Phase 8 adds toggle logic.
+		staging := selectedStyle.Render("●")
 
 		// Status icon [M], [+], [-], [R], [!] with color
 		iconColor := statusColors[file.Status]

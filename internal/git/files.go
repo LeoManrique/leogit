@@ -57,7 +57,6 @@ type FileEntry struct {
 	Path     string     // file path relative to repo root
 	OrigPath string     // original path (only set for renames, empty otherwise)
 	Status   FileStatus // user-facing status category
-	Staged   bool       // true if the file has changes in the index (staging area)
 	XY       string     // raw 2-character status code from porcelain v2
 }
 
@@ -155,7 +154,6 @@ func ParseFiles(rawOutput string) []FileEntry {
 			entries = append(entries, FileEntry{
 				Path:   path,
 				Status: StatusNew,
-				Staged: false,
 				XY:     "??",
 			})
 		}
@@ -186,7 +184,6 @@ func parseOrdinaryEntry(line string) *FileEntry {
 	return &FileEntry{
 		Path:   path,
 		Status: statusFromXY(xy),
-		Staged: isStagedXY(xy),
 		XY:     xy,
 	}
 }
@@ -207,7 +204,6 @@ func parseRenameEntry(line string, origPath string) *FileEntry {
 		Path:     path,
 		OrigPath: origPath,
 		Status:   StatusRenamed,
-		Staged:   isStagedXY(xy),
 		XY:       xy,
 	}
 }
@@ -227,7 +223,6 @@ func parseUnmergedEntry(line string) *FileEntry {
 	return &FileEntry{
 		Path:   path,
 		Status: StatusConflicted,
-		Staged: false, // conflicts are not considered "staged"
 		XY:     xy,
 	}
 }
@@ -271,19 +266,4 @@ func statusFromXY(xy string) FileStatus {
 
 	// Modified (M in either position, C for copied, or any other combination)
 	return StatusModified
-}
-
-// isStagedXY returns true if the file has changes in the index (staging area).
-// X represents the index status:
-//   - '.' means unmodified in the index
-//   - '?' means untracked
-//   - '!' means ignored
-//
-// Any other X value means the file has staged changes.
-func isStagedXY(xy string) bool {
-	if len(xy) != 2 {
-		return false
-	}
-	x := xy[0]
-	return x != '.' && x != '?' && x != '!'
 }

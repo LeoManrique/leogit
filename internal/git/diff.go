@@ -5,13 +5,13 @@ import (
 )
 
 // GetDiff runs the appropriate git diff command for a file and returns the raw
-// NOTE: FileEntry (with Status and Staged fields) is defined in internal/git/files.go.
+// NOTE: FileEntry (with Status field) is defined in internal/git/files.go.
 // unified diff output. The command chosen depends on the file's status:
-//   - Staged files use --cached to diff the index against HEAD
 //   - Untracked files use --no-index against /dev/null to show the full file as added
-//   - All other tracked files diff the working tree against HEAD
+//   - All tracked files diff the working tree against HEAD
 //
-// The returned string is the full unified diff output, ready for parsing.
+// We always diff against HEAD (not the index) because leogit uses in-memory selection
+// for commit staging. Git's index is only modified at commit time.
 func GetDiff(repoPath string, file FileEntry) (string, error) {
 	var args []string
 
@@ -28,19 +28,8 @@ func GetDiff(repoPath string, file FileEntry) (string, error) {
 			"--", "/dev/null", file.Path,
 		}
 
-	case file.Staged:
-		// Staged (indexed) changes: diff the index against HEAD.
-		args = []string{
-			"diff",
-			"--no-ext-diff",
-			"--patch-with-raw",
-			"--no-color",
-			"--cached",
-			"--", file.Path,
-		}
-
 	default:
-		// Tracked file with working-tree changes: diff working tree against HEAD.
+		// Tracked file: diff the working tree against HEAD.
 		args = []string{
 			"diff",
 			"--no-ext-diff",
@@ -81,12 +70,6 @@ func GetDiffWhitespaceIgnored(repoPath string, file FileEntry) (string, error) {
 			"diff", "--no-ext-diff", "--patch-with-raw", "--no-color",
 			"--no-index", "-w",
 			"--", "/dev/null", file.Path,
-		}
-	case file.Staged:
-		args = []string{
-			"diff", "--no-ext-diff", "--patch-with-raw", "--no-color",
-			"--cached", "-w",
-			"--", file.Path,
 		}
 	default:
 		args = []string{
