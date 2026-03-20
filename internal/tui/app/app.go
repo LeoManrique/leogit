@@ -10,6 +10,7 @@ import (
 
 	"github.com/LeoManrique/leogit/internal/config"
 	"github.com/LeoManrique/leogit/internal/core"
+	"github.com/LeoManrique/leogit/internal/diff"
 	"github.com/LeoManrique/leogit/internal/gh"
 	"github.com/LeoManrique/leogit/internal/git"
 	"github.com/LeoManrique/leogit/internal/tui/components"
@@ -130,6 +131,8 @@ type Model struct {
 
 	// Changed files
 	fileList components.FileListModel
+	// Diff view
+	diffView components.DiffViewModel
 }
 
 // New creates the root model with the loaded config and optional repo path.
@@ -143,6 +146,7 @@ func New(cfg *config.Config, repoPath string) Model {
 		activePane:   core.Pane1,
 		focusMode:    core.Navigable,
 		fileList:     components.NewFileList(),
+		diffView:     components.NewDiffView(),
 	}
 }
 
@@ -260,9 +264,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case components.FileSelectedMsg:
-		// A file was selected from the list.
-		// This is used to display the diff in Pane 2.
-		// For now, just acknowledge the selection (no-op).
+		// A file was selected from the list — load its diff.
+		m.diffView.SetLoading()
+		return m, loadDiffCmd(m.repoPath, msg.File)
+
+	case components.DiffLoadedMsg:
+		if msg.Err != nil {
+			m.diffView.SetError(msg.Err.Error())
+		} else {
+			m.diffView.SetDiff(msg.File, msg.FileDiff)
+		}
 		return m, nil
 
 	case tea.KeyPressMsg:
@@ -283,6 +294,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) updateFileListSize() {
 	dim := layout.Calculate(m.width, m.height, m.terminalOpen, m.terminalHeight)
 	m.fileList.SetSize(dim.SidebarWidth-2, dim.FileListHeight-3)
+	// Diff viewer: subtract border (2) and title line (1) from pane dimensions
+	m.diffView.SetSize(dim.MainWidth-2, dim.DiffHeight-3)
 }
 
 // ── Key Handling ────────────────────────────────────────
@@ -417,7 +430,12 @@ func (m Model) handlePaneKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m, nil
 
 	case core.Pane2:
-		// Changes tab → Diff Viewer
+		if m.activeTab == core.ChangesTab {
+			// Changes tab → Pane 2 = Diff Viewer
+			var cmd tea.Cmd
+			m.diffView, cmd = m.diffView.Update(msg)
+			return m, cmd
+		}
 		// History tab → Changed Files in commit
 		return m, nil
 
@@ -572,9 +590,18 @@ func (m Model) viewMain() string {
 	sidebar := lipgloss.JoinVertical(lipgloss.Left, pane1, pane3)
 
 	// ── Main column: pane 2 (top) + terminal (bottom, if open) ──
+	var pane2Content string
+	var pane2Title string
+	if m.activeTab == core.ChangesTab {
+		pane2Title = "Diff"
+		pane2Content = m.diffView.View()
+	} else {
+		pane2Title = core.PaneName(core.Pane2, m.activeTab)
+		pane2Content = "(commit list)"
+	}
 	pane2 := renderPane(
-		core.PaneName(core.Pane2, m.activeTab),
-		"(diff viewer)",
+		pane2Title,
+		pane2Content,
 		dim.MainWidth, dim.DiffHeight,
 		m.activePane == core.Pane2,
 	)
@@ -624,4 +651,19 @@ func renderPane(title, content string, width, height int, focused bool) string {
 		Width(innerW).
 		Height(innerH).
 		Render(titleLine + "\n" + content)
+}
+
+// loadDiffCmd runs git diff for a file and returns the parsed result.
+// It returns a tea.Cmd, which is a function that Bubbletea runs on a separate
+// goroutine. When the function finishes, its return value (a tea.Msg) is sent
+// back to Update(). This keeps the UI responsive while git runs.
+func loadDiffCmd(repoPath string, file git.FileEntry) tea.Cmd {
+	return func() tea.Msg {
+		raw, err := git.GetDiff(repoPath, file)
+		if err != nil {
+			return components.DiffLoadedMsg{File: file, Err: err}
+		}
+		parsed := diff.Parse(raw)
+		return components.DiffLoadedMsg{File: file, FileDiff: parsed}
+	}
 }
