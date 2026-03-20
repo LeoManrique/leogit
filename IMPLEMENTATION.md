@@ -4694,6 +4694,7 @@ package components
 
 import (
 	"fmt"
+	"image/color"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -4844,7 +4845,7 @@ func (m FileListModel) View() string {
 	stagedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#3FB950"))
 	unstagedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#484F58"))
 
-	statusColors := map[git.FileStatus]lipgloss.Color{
+	statusColors := map[git.FileStatus]color.Color{
 		git.StatusNew:        lipgloss.Color("#3FB950"), // green
 		git.StatusModified:   lipgloss.Color("#D29922"), // yellow
 		git.StatusDeleted:    lipgloss.Color("#F85149"), // red

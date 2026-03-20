@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/LeoManrique/leogit/internal/core"
 	"github.com/LeoManrique/leogit/internal/gh"
 	"github.com/LeoManrique/leogit/internal/git"
+	"github.com/LeoManrique/leogit/internal/tui/components"
 	"github.com/LeoManrique/leogit/internal/tui/layout"
 	"github.com/LeoManrique/leogit/internal/tui/views"
 )
@@ -75,12 +77,8 @@ func refreshStatusCmd(repoPath string) tea.Cmd {
 	}
 }
 
-// startTickCmd starts the 2-second polling timer. When it fires, it sends a
-// statusTickMsg which triggers a status refresh. The timer is restarted after
-// each refresh completes, creating a continuous polling loop.
+// startTickCmd starts the 2-second polling timer.
 func startTickCmd() tea.Cmd {
-	// tea.Tick waits for the given duration, then calls the callback.
-	// The callback receives the current time (t) and must return a tea.Msg.
 	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
 		return statusTickMsg{}
 	})
@@ -129,6 +127,9 @@ type Model struct {
 	ahead       int    // commits ahead of upstream
 	behind      int    // commits behind upstream
 	hasUpstream bool   // whether an upstream tracking branch is configured
+
+	// Changed files
+	fileList components.FileListModel
 }
 
 // New creates the root model with the loaded config and optional repo path.
@@ -141,6 +142,7 @@ func New(cfg *config.Config, repoPath string) Model {
 		activeTab:    core.ChangesTab,
 		activePane:   core.Pane1,
 		focusMode:    core.Navigable,
+		fileList:     components.NewFileList(),
 	}
 }
 
@@ -167,6 +169,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Keep error modal dimensions in sync
 		if m.errorModal.Visible {
 			m.errorModal, _ = m.errorModal.Update(msg)
+		}
+		// Update file list dimensions when in main state
+		if m.state == stateMain {
+			m.updateFileListSize()
 		}
 		return m, nil
 
@@ -216,7 +222,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case statusTickMsg:
 		// Timer fired — refresh status and restart the timer.
-		// Only poll when in the main state (don't poll during auth/picker).
 		if m.state == stateMain {
 			return m, tea.Batch(
 				refreshStatusCmd(m.repoPath),
@@ -227,8 +232,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case statusResultMsg:
 		if msg.err != nil {
-			// Status command failed — show error but keep polling.
-			// This can happen if the repo is deleted or git is broken.
 			m.errorModal = views.ShowError(
 				"Git Status Error",
 				"Failed to read repository status: "+msg.err.Error(),
@@ -238,19 +241,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			)
 			return m, nil
 		}
-		// Update model with fresh status data
+		// Update branch info
 		m.branchName = msg.status.Branch
 		m.ahead = msg.status.Ahead
 		m.behind = msg.status.Behind
 		m.hasUpstream = msg.status.HasUpstream
+		// Parse and update changed files
+		files := git.ParseFiles(msg.status.RawOutput)
+		m.fileList.SetFiles(files)
+		m.updateFileListSize()
 		return m, nil
 
 	case tea.FocusMsg:
-		// Terminal gained focus (user switched back to this window).
-		// Trigger an immediate status refresh for instant feedback.
+		// Terminal gained focus — trigger immediate refresh
 		if m.state == stateMain {
 			return m, refreshStatusCmd(m.repoPath)
 		}
+		return m, nil
+
+	case components.FileSelectedMsg:
+		// A file was selected from the list.
+		// This is used to display the diff in Pane 2.
+		// For now, just acknowledge the selection (no-op).
 		return m, nil
 
 	case tea.KeyPressMsg:
@@ -258,6 +270,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// updateFileListSize recalculates and sets the file list dimensions from the current layout.
+// Inner dimensions = pane dimensions minus borders (2) and title line (1).
+//
+// Why -2 for width? The border draws 1 character on the left and 1 on the right,
+// so the usable inner width is SidebarWidth minus 2.
+//
+// Why -3 for height? The border takes 2 rows (top + bottom) and the pane title
+// takes 1 row, leaving FileListHeight minus 3 rows for actual file entries.
+func (m *Model) updateFileListSize() {
+	dim := layout.Calculate(m.width, m.height, m.terminalOpen, m.terminalHeight)
+	m.fileList.SetSize(dim.SidebarWidth-2, dim.FileListHeight-3)
 }
 
 // ── Key Handling ────────────────────────────────────────
@@ -293,7 +318,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 }
 
 // handleMainKey processes keys when the app is in the main layout state.
-// Priority: error modal → help overlay → focused mode → navigable keybindings.
+// Priority: error modal → help overlay → focused mode → navigable keybindings → pane keys.
 func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	// ── Error modal takes priority over everything ──
 	if m.errorModal.Visible {
@@ -361,10 +386,48 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		} else if m.activePane == core.PaneTerminal {
 			m.activePane = core.Pane1
 		}
+		// Recalculate file list size since terminal toggle changes available height
+		m.updateFileListSize()
 		return m, nil
 
 	case "escape":
 		// Already navigable — Esc is a no-op
+		return m, nil
+	}
+
+	// ── Forward unhandled keys to the active pane ──
+	// This routes j/k/enter/space/a/g/G to the correct pane component.
+	// Keys the pane doesn't handle are silently dropped (no-op).
+	return m.handlePaneKey(msg)
+}
+
+// handlePaneKey forwards key events to the component that owns the active pane.
+// Each pane's component handles its own navigation and selection keys.
+func (m Model) handlePaneKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
+	switch m.activePane {
+
+	case core.Pane1:
+		if m.activeTab == core.ChangesTab {
+			// Changes tab → Pane 1 = Changed Files list
+			var cmd tea.Cmd
+			m.fileList, cmd = m.fileList.Update(msg)
+			return m, cmd
+		}
+		// History tab → Pane 1 = Commit List
+		return m, nil
+
+	case core.Pane2:
+		// Changes tab → Diff Viewer
+		// History tab → Changed Files in commit
+		return m, nil
+
+	case core.Pane3:
+		// Changes tab → Commit Message
+		// History tab → Diff Viewer
+		return m, nil
+
+	case core.PaneTerminal:
+		// Terminal pane
 		return m, nil
 	}
 
@@ -386,12 +449,6 @@ func (m *Model) saveRepoState() {
 // ── View ────────────────────────────────────────────────
 
 // View renders the current state to the terminal.
-//
-// Returns tea.View (not string) — this is the proper Bubbletea v2 API.
-// The View struct lets us declaratively set terminal features:
-// - AltScreen: use the alternate screen buffer (fullscreen mode)
-// - MouseMode: enable mouse tracking for click/scroll events
-// - ReportFocus: receive tea.FocusMsg / tea.BlurMsg when the terminal gains/loses focus
 func (m Model) View() tea.View {
 	var content string
 
@@ -483,9 +540,26 @@ func (m Model) viewMain() string {
 	tabBar := views.RenderTabBar(m.activeTab, dim.Width)
 
 	// ── Sidebar column: pane 1 (top) + pane 3 (bottom) ──
+	var pane1Content string
+	var pane1Title string
+	if m.activeTab == core.ChangesTab {
+		// Changes tab → Pane 1 = Changed Files list with file count in title
+		fileCount := len(m.fileList.Files)
+		if fileCount > 0 {
+			pane1Title = fmt.Sprintf("Changed Files (%d)", fileCount)
+		} else {
+			pane1Title = "Changed Files"
+		}
+		pane1Content = m.fileList.View()
+	} else {
+		// History tab → Pane 1 = Commit List
+		pane1Title = core.PaneName(core.Pane1, m.activeTab)
+		pane1Content = "(commit list)"
+	}
+
 	pane1 := renderPane(
-		core.PaneName(core.Pane1, m.activeTab),
-		"(file list)",
+		pane1Title,
+		pane1Content,
 		dim.SidebarWidth, dim.FileListHeight,
 		m.activePane == core.Pane1,
 	)
@@ -520,9 +594,11 @@ func (m Model) viewMain() string {
 	return lipgloss.JoinVertical(lipgloss.Left, header, tabBar, content)
 }
 
-// renderPane draws a bordered box with a title and placeholder content.
+// renderPane draws a bordered box with a title and content.
 // Active panes get a blue border; inactive panes get a gray border.
-func renderPane(title, placeholder string, width, height int, focused bool) string {
+// The content string manages its own styling — renderPane does NOT
+// apply any foreground color to it (unlike the earlier version which grayed out placeholders).
+func renderPane(title, content string, width, height int, focused bool) string {
 	borderColor := lipgloss.Color("#484F58")
 	titleColor := lipgloss.Color("#8B949E")
 	if focused {
@@ -541,12 +617,11 @@ func renderPane(title, placeholder string, width, height int, focused bool) stri
 	}
 
 	titleLine := lipgloss.NewStyle().Bold(true).Foreground(titleColor).Render(title)
-	body := lipgloss.NewStyle().Foreground(lipgloss.Color("#484F58")).Render(placeholder)
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(borderColor).
 		Width(innerW).
 		Height(innerH).
-		Render(titleLine + "\n" + body)
+		Render(titleLine + "\n" + content)
 }
