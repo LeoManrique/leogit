@@ -2,6 +2,7 @@ package git
 
 import (
 	"os/exec"
+	"strings"
 )
 
 // GetDiff runs the appropriate git diff command for a file and returns the raw
@@ -114,4 +115,26 @@ func GetCommitDiff(repoPath, sha, filePath string) (string, error) {
 		return "", err
 	}
 	return string(out), nil
+}
+
+// GetSelectedDiff returns the combined diff of the given files.
+// Used as input for AI commit message generation. Each file is diffed
+// individually (working tree vs HEAD) and the results are concatenated.
+func GetSelectedDiff(repoPath string, files []FileEntry) (string, error) {
+	if len(files) == 0 {
+		return "", nil
+	}
+
+	var combined strings.Builder
+	for _, f := range files {
+		d, err := GetDiff(repoPath, f)
+		if err != nil {
+			continue // skip files that fail to diff
+		}
+		if d != "" {
+			combined.WriteString(d)
+			combined.WriteString("\n")
+		}
+	}
+	return combined.String(), nil
 }

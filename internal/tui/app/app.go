@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/LeoManrique/leogit/internal/ai"
 	"github.com/LeoManrique/leogit/internal/config"
 	"github.com/LeoManrique/leogit/internal/core"
 	"github.com/LeoManrique/leogit/internal/diff"
@@ -133,10 +134,30 @@ type Model struct {
 	fileList components.FileListModel
 	// Diff view
 	diffView components.DiffViewModel
+
+	// Commit message
+	commitMsg   components.CommitMsgModel
+	aiProviders []ai.CommitMessageProvider // available providers
+	aiActiveIdx int                        // index into aiProviders
 }
 
 // New creates the root model with the loaded config and optional repo path.
 func New(cfg *config.Config, repoPath string) Model {
+	// Build the AI provider list from config
+	claudeProvider := ai.NewClaudeProvider(
+		cfg.AI.Claude.Model,
+		cfg.AI.Claude.Timeout,
+		cfg.AI.Claude.MaxDiffSize,
+	)
+	ollamaProvider := ai.NewOllamaProvider(
+		cfg.AI.Ollama.Model,
+		cfg.AI.Ollama.ServerURL,
+		cfg.AI.Ollama.Timeout,
+		cfg.AI.Ollama.MaxDiffSize,
+	)
+
+	providers := []ai.CommitMessageProvider{claudeProvider, ollamaProvider}
+
 	return Model{
 		config:       cfg,
 		cliPath:      repoPath,
@@ -146,7 +167,9 @@ func New(cfg *config.Config, repoPath string) Model {
 		activePane:   core.Pane1,
 		focusMode:    core.Navigable,
 		fileList:     components.NewFileList(),
-		diffView:     components.NewDiffView(),
+		commitMsg:    components.NewCommitMsg(),
+		aiProviders:  providers,
+		aiActiveIdx:  0,
 	}
 }
 
@@ -278,6 +301,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
+
+	case components.AIGenerateMsg:
+		// User pressed ctrl+g — run the active AI provider with selected files
+		if len(m.aiProviders) > 0 {
+			provider := m.aiProviders[m.aiActiveIdx]
+			selectedFiles := m.fileList.SelectedFiles()
+			return m, generateCommitMsgCmd(m.repoPath, selectedFiles, provider)
+		}
+		return m, nil
+
+	case components.AICycleProviderMsg:
+		// User pressed ctrl+p — cycle to the next AI provider
+		if len(m.aiProviders) > 0 {
+			m.aiActiveIdx = (m.aiActiveIdx + 1) % len(m.aiProviders)
+			provider := m.aiProviders[m.aiActiveIdx]
+			m.commitMsg.SetAIProvider(provider.DisplayName())
+		}
+		return m, nil
+
+	case components.AIResultMsg:
+		// AI generation completed
+		if msg.Err != nil {
+			m.commitMsg.SetAIError(msg.Err.Error())
+			return m, nil
+		}
+		m.commitMsg.SetAIResult(msg.Title, msg.Description)
+		return m, nil
+
+	case components.CommitRequestMsg:
+		// User pressed ctrl+enter — commit
+		// For now, just acknowledge the request
+		return m, nil
 	}
 
 	return m, nil
@@ -296,6 +351,7 @@ func (m *Model) updateFileListSize() {
 	m.fileList.SetSize(dim.SidebarWidth-2, dim.FileListHeight-3)
 	// Diff viewer: subtract border (2) and title line (1) from pane dimensions
 	m.diffView.SetSize(dim.MainWidth-2, dim.DiffHeight-3)
+	m.commitMsg.SetSize(dim.SidebarWidth-2, dim.CommitMsgHeight-3) // -3 for border + title
 }
 
 // ── Key Handling ────────────────────────────────────────
@@ -342,7 +398,7 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 	// ── Help overlay ──
 	if m.showHelp {
-		if msg.String() == "?" || msg.String() == "escape" {
+		if msg.String() == "?" || msg.String() == "esc" {
 			m.showHelp = false
 		}
 		return m, nil
@@ -350,11 +406,18 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 	// ── Focused mode — only Esc escapes ──
 	if m.focusMode == core.Focused {
-		if msg.String() == "escape" {
+		if msg.String() == "esc" {
 			m.focusMode = core.Navigable
+			m.commitMsg.Blur()
 			return m, nil
 		}
-		// TODO: forward to active pane (commit msg, terminal)
+		// Forward to active pane component
+		if m.activePane == core.Pane3 && m.activeTab == core.ChangesTab {
+			var cmd tea.Cmd
+			m.commitMsg, cmd = m.commitMsg.Update(msg)
+			return m, cmd
+		}
+		// TODO: forward to other panes (terminal)
 		return m, nil
 	}
 
@@ -387,6 +450,10 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 	case "3":
 		m.activePane = core.Pane3
+		if m.activeTab == core.ChangesTab {
+			m.focusMode = core.Focused
+			m.commitMsg.Focus()
+		}
 		return m, nil
 
 	case "`":
@@ -403,7 +470,7 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		m.updateFileListSize()
 		return m, nil
 
-	case "escape":
+	case "esc":
 		// Already navigable — Esc is a no-op
 		return m, nil
 	}
@@ -440,7 +507,12 @@ func (m Model) handlePaneKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m, nil
 
 	case core.Pane3:
-		// Changes tab → Commit Message
+		if m.activeTab == core.ChangesTab {
+			// Changes tab → Pane 3 = Commit Message
+			var cmd tea.Cmd
+			m.commitMsg, cmd = m.commitMsg.Update(msg)
+			return m, cmd
+		}
 		// History tab → Diff Viewer
 		return m, nil
 
@@ -581,9 +653,9 @@ func (m Model) viewMain() string {
 		dim.SidebarWidth, dim.FileListHeight,
 		m.activePane == core.Pane1,
 	)
-	pane3 := renderPane(
+	pane3 := renderPaneWithContent(
 		core.PaneName(core.Pane3, m.activeTab),
-		"(commit message)",
+		m.commitMsg.View(),
 		dim.SidebarWidth, dim.CommitMsgHeight,
 		m.activePane == core.Pane3,
 	)
@@ -653,6 +725,33 @@ func renderPane(title, content string, width, height int, focused bool) string {
 		Render(titleLine + "\n" + content)
 }
 
+func renderPaneWithContent(title, content string, width, height int, focused bool) string {
+	borderColor := lipgloss.Color("#484F58")
+	titleColor := lipgloss.Color("#8B949E")
+	if focused {
+		borderColor = lipgloss.Color("#58A6FF")
+		titleColor = lipgloss.Color("#58A6FF")
+	}
+
+	innerW := width - 2
+	innerH := height - 2
+	if innerW < 1 {
+		innerW = 1
+	}
+	if innerH < 1 {
+		innerH = 1
+	}
+
+	titleLine := lipgloss.NewStyle().Bold(true).Foreground(titleColor).Render(title)
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(borderColor).
+		Width(innerW).
+		Height(innerH).
+		Render(titleLine + "\n" + content)
+}
+
 // loadDiffCmd runs git diff for a file and returns the parsed result.
 // It returns a tea.Cmd, which is a function that Bubbletea runs on a separate
 // goroutine. When the function finishes, its return value (a tea.Msg) is sent
@@ -665,5 +764,35 @@ func loadDiffCmd(repoPath string, file git.FileEntry) tea.Cmd {
 		}
 		parsed := diff.Parse(raw)
 		return components.DiffLoadedMsg{File: file, FileDiff: parsed}
+	}
+}
+
+// generateCommitMsgCmd runs the active AI provider asynchronously.
+// It builds the diff from the currently selected files (in-memory selection),
+// not from git's staging area.
+func generateCommitMsgCmd(repoPath string, selectedFiles []git.FileEntry, provider ai.CommitMessageProvider) tea.Cmd {
+	return func() tea.Msg {
+		// Get the combined diff of selected files
+		diff, err := git.GetSelectedDiff(repoPath, selectedFiles)
+		if err != nil {
+			return components.AIResultMsg{Err: err}
+		}
+
+		if strings.TrimSpace(diff) == "" {
+			return components.AIResultMsg{
+				Err: &ai.AIError{Code: ai.ErrEmptyDiff, Message: "no files selected — select files first"},
+			}
+		}
+
+		// Generate the commit message
+		msg, err := provider.GenerateCommitMessage(diff)
+		if err != nil {
+			return components.AIResultMsg{Err: err}
+		}
+
+		return components.AIResultMsg{
+			Title:       msg.Title,
+			Description: msg.Description,
+		}
 	}
 }

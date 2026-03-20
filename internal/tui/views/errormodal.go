@@ -40,7 +40,7 @@ func (m ErrorModalModel) Update(msg tea.Msg) (ErrorModalModel, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		switch msg.String() {
-		case "escape", "q":
+		case "esc", "q":
 			m.Visible = false
 			return m, func() tea.Msg { return ErrorDismissedMsg{} }
 

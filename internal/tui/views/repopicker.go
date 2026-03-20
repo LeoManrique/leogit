@@ -50,7 +50,7 @@ func (m RepoPickerModel) Update(msg tea.Msg) (RepoPickerModel, tea.Cmd) {
 		case "ctrl+c":
 			return m, tea.Quit
 
-		case "escape":
+		case "esc":
 			// If there's a filter, clear it first
 			if m.filter != "" {
 				m.filter = ""
