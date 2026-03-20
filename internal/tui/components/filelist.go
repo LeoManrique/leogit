@@ -20,16 +20,19 @@ type FileSelectedMsg struct {
 
 // FileListModel displays a scrollable list of changed files with status icons.
 type FileListModel struct {
-	Files  []git.FileEntry // current list of changed files
-	cursor int             // index of the highlighted file
-	offset int             // scroll offset (first visible index)
-	width  int             // available width for rendering (inner, excluding borders)
-	height int             // available height in rows (inner, excluding borders and title)
+	Files    []git.FileEntry // current list of changed files
+	cursor   int             // index of the highlighted file
+	offset   int             // scroll offset (first visible index)
+	width    int             // available width for rendering (inner, excluding borders)
+	height   int             // available height in rows (inner, excluding borders and title)
+	selected map[string]bool // in-memory selection state: path → selected (true = will be committed)
 }
 
 // NewFileList creates an empty file list. Files are set via SetFiles().
 func NewFileList() FileListModel {
-	return FileListModel{}
+	return FileListModel{
+		selected: make(map[string]bool),
+	}
 }
 
 // SetFiles replaces the file list contents and resets the cursor if out of bounds.
@@ -38,6 +41,22 @@ func (m *FileListModel) SetFiles(files []git.FileEntry) {
 	m.Files = files
 	if m.cursor >= len(m.Files) {
 		m.cursor = max(0, len(m.Files)-1)
+	}
+	// New files default to selected. Files already in the map keep their state.
+	for _, f := range files {
+		if _, exists := m.selected[f.Path]; !exists {
+			m.selected[f.Path] = true // default: selected for commit
+		}
+	}
+	// Clean up paths that no longer exist in the file list
+	validPaths := make(map[string]bool, len(files))
+	for _, f := range files {
+		validPaths[f.Path] = true
+	}
+	for path := range m.selected {
+		if !validPaths[path] {
+			delete(m.selected, path)
+		}
 	}
 	m.clampOffset()
 }
@@ -107,16 +126,23 @@ func (m FileListModel) Update(msg tea.Msg) (FileListModel, tea.Cmd) {
 			}
 			return m, nil
 
-		// space and 'a' are reserved for selection toggle.
-		// Handling them here as no-ops prevents them from bubbling up
-		// to the global key handler (where 'a' might conflict with
-		// future shortcuts).
-		case " ":
-			// toggle selection for the selected file (Phase 8)
+		case "space":
+			// Toggle selection for the current file (in-memory only, no git commands)
+			if len(m.Files) > 0 && m.cursor < len(m.Files) {
+				path := m.Files[m.cursor].Path
+				m.selected[path] = !m.IsSelected(path)
+			}
 			return m, nil
 
 		case "a":
-			// select/deselect all files (Phase 8)
+			// Select all or deselect all — toggle based on current state.
+			// If all files are selected, deselect all. Otherwise, select all.
+			if len(m.Files) > 0 {
+				allSelected := !m.AnyDeselected()
+				for _, f := range m.Files {
+					m.selected[f.Path] = !allSelected
+				}
+			}
 			return m, nil
 		}
 	}
@@ -151,7 +177,7 @@ func (m FileListModel) View() string {
 		Background(lipgloss.Color("#264F78"))
 
 	selectedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#3FB950"))
-	//deselectedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#484F58"))
+	deselectedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#484F58"))
 
 	statusColors := map[git.FileStatus]color.Color{
 		git.StatusNew:        lipgloss.Color("#3FB950"), // green
@@ -169,8 +195,10 @@ func (m FileListModel) View() string {
 		file := m.Files[i]
 
 		// Selection indicator: ● selected (will be committed), ○ excluded
-		// All files start as selected — Phase 8 adds toggle logic.
-		staging := selectedStyle.Render("●")
+		staging := deselectedStyle.Render("○")
+		if m.IsSelected(file.Path) {
+			staging = selectedStyle.Render("●")
+		}
 
 		// Status icon [M], [+], [-], [R], [!] with color
 		iconColor := statusColors[file.Status]
@@ -244,4 +272,31 @@ func (m *FileListModel) clampOffset() {
 	if m.offset > maxOffset {
 		m.offset = maxOffset
 	}
+}
+
+// IsSelected returns whether the file at the given path is selected for commit.
+func (m FileListModel) IsSelected(path string) bool {
+	selected, exists := m.selected[path]
+	return !exists || selected // default to selected if not in map
+}
+
+// SelectedFiles returns all files that are currently selected for commit.
+func (m FileListModel) SelectedFiles() []git.FileEntry {
+	var result []git.FileEntry
+	for _, f := range m.Files {
+		if m.IsSelected(f.Path) {
+			result = append(result, f)
+		}
+	}
+	return result
+}
+
+// AnyDeselected returns true if any file has been deselected.
+func (m FileListModel) AnyDeselected() bool {
+	for _, f := range m.Files {
+		if !m.IsSelected(f.Path) {
+			return true
+		}
+	}
+	return false
 }

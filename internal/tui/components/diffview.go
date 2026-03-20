@@ -19,17 +19,22 @@ type DiffLoadedMsg struct {
 
 // DiffViewModel displays a scrollable, syntax-highlighted diff in a pane.
 type DiffViewModel struct {
-	file       git.FileEntry  // the file currently being displayed
-	fileDiff   *diff.FileDiff // parsed diff for the current file
-	hasContent bool           // true once a diff has been loaded
+	file       git.FileEntry
+	fileDiff   *diff.FileDiff
+	hasContent bool
 
-	offset     int    // scroll position: index of the first visible line
-	totalLines int    // total number of lines across all hunks
-	width      int    // available pane width (inner, excluding borders)
-	height     int    // available pane height in rows (inner, excluding borders and title)
-	sideBySide bool   // true = side-by-side mode (stub), false = unified
-	loading    bool   // true while waiting for the diff to load
-	errMsg     string // non-empty if the diff command failed
+	offset     int
+	totalLines int
+	width      int
+	height     int
+	sideBySide bool
+	loading    bool
+	errMsg     string
+
+	// Line selection
+	cursor    int                // highlighted line index (in flat AllLines array)
+	selection diff.DiffSelection // tracks which lines are selected for staging
+	allLines  []diff.Line        // cached flat line array for quick access
 }
 
 // NewDiffView creates an empty diff viewer. Content is set via SetDiff().
@@ -46,10 +51,16 @@ func (m *DiffViewModel) SetDiff(file git.FileEntry, fileDiff *diff.FileDiff) {
 	m.loading = false
 	m.errMsg = ""
 	m.offset = 0
+	m.cursor = 0
 	if fileDiff != nil {
 		m.totalLines = fileDiff.TotalLines()
+		m.allLines = fileDiff.AllLines()
+		// Default: all lines selected (everything is included in the commit by default)
+		m.selection = diff.NewDiffSelection(fileDiff, diff.SelectAll)
 	} else {
 		m.totalLines = 0
+		m.allLines = nil
+		m.selection = diff.DiffSelection{}
 	}
 }
 
@@ -96,42 +107,88 @@ func (m *DiffViewModel) clampOffset() {
 	}
 }
 
-// Update handles key events for the diff viewer.
-// Returns the updated model and an optional command.
 func (m DiffViewModel) Update(msg tea.Msg) (DiffViewModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "j", "down":
-			m.offset++
+			if m.cursor < m.totalLines-1 {
+				m.cursor++
+			}
+			// Auto-scroll to keep cursor visible
+			if m.cursor >= m.offset+m.height {
+				m.offset = m.cursor - m.height + 1
+			}
 			m.clampOffset()
 
 		case "k", "up":
-			m.offset--
+			if m.cursor > 0 {
+				m.cursor--
+			}
+			if m.cursor < m.offset {
+				m.offset = m.cursor
+			}
 			m.clampOffset()
 
 		case "g":
-			// Jump to top
+			m.cursor = 0
 			m.offset = 0
 
 		case "G":
-			// Jump to bottom
+			if m.totalLines > 0 {
+				m.cursor = m.totalLines - 1
+			}
 			m.offset = m.totalLines - m.height
 			m.clampOffset()
 
 		case "s":
-			// Toggle unified / side-by-side
 			m.sideBySide = !m.sideBySide
 
 		case "d":
-			// Page down (half screen)
 			m.offset += m.height / 2
+			m.cursor += m.height / 2
+			if m.cursor >= m.totalLines {
+				m.cursor = m.totalLines - 1
+			}
 			m.clampOffset()
 
 		case "u":
-			// Page up (half screen)
 			m.offset -= m.height / 2
+			m.cursor -= m.height / 2
+			if m.cursor < 0 {
+				m.cursor = 0
+			}
 			m.clampOffset()
+
+		case "space":
+			// Toggle selection on the current line
+			if m.totalLines > 0 && m.selection.IsSelectable(m.cursor) {
+				m.selection = m.selection.WithToggle(m.cursor)
+			}
+
+		case "h":
+			// Toggle selection for the entire hunk containing the cursor
+			if m.totalLines > 0 && m.fileDiff != nil {
+				start, count := hunkRange(m.fileDiff, m.cursor)
+				if count > 0 {
+					// Check if majority of hunk is selected — if so, deselect all; otherwise select all
+					selectedInHunk := 0
+					selectableInHunk := 0
+					for i := start; i < start+count; i++ {
+						if m.selection.IsSelectable(i) {
+							selectableInHunk++
+							if m.selection.IsSelected(i) {
+								selectedInHunk++
+							}
+						}
+					}
+					// If half or fewer lines are selected, select all; otherwise deselect all.
+					// This gives a natural "toggle" feel for the hunk.
+					selectAll := selectedInHunk <= selectableInHunk/2
+					m.selection = m.selection.WithRangeSelection(start, count, selectAll)
+				}
+			}
+
 		}
 	}
 
@@ -167,6 +224,28 @@ func (m DiffViewModel) View() string {
 			Render("No changes in this file")
 	}
 
-	// Render only the visible window
-	return render.RenderDiff(m.fileDiff, m.offset, m.height, m.width)
+	// Render the visible window with cursor and selection indicators.
+	// Selection is in-memory — ● means the line will be included in the commit.
+	return render.RenderDiffWithSelection(
+		m.fileDiff, m.allLines, m.selection,
+		m.offset, m.height, m.width, m.cursor,
+	)
+}
+
+// HunkRange returns the flat line index range for the hunk containing the given line index.
+// Returns (startIdx, count) for use with WithRangeSelection.
+func hunkRange(fileDiff *diff.FileDiff, flatIdx int) (int, int) {
+	if fileDiff == nil {
+		return 0, 0
+	}
+
+	offset := 0
+	for _, hunk := range fileDiff.Hunks {
+		hunkLen := len(hunk.Lines)
+		if flatIdx >= offset && flatIdx < offset+hunkLen {
+			return offset, hunkLen
+		}
+		offset += hunkLen
+	}
+	return 0, 0
 }

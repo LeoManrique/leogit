@@ -34,6 +34,19 @@ var DiffColors = struct {
 	NoNewline: lipgloss.NewStyle().Foreground(lipgloss.Color("#6E7681")).Italic(true),
 }
 
+// SelectionColors holds styles for selection indicators in the diff viewer.
+// Selected (●) = line will be included in the commit.
+// Unselected (○) = line will be excluded from the commit.
+var SelectionColors = struct {
+	Selected   lipgloss.Style
+	Unselected lipgloss.Style
+	CursorLine lipgloss.Style
+}{
+	Selected:   lipgloss.NewStyle().Foreground(lipgloss.Color("#2EA043")), // green: included
+	Unselected: lipgloss.NewStyle().Foreground(lipgloss.Color("#484F58")), // dim: excluded
+	CursorLine: lipgloss.NewStyle().Background(lipgloss.Color("#1F2937")), // subtle highlight
+}
+
 // chromaStyle is the Chroma color theme used for syntax highlighting within diff lines.
 // "monokai" works well on dark terminal backgrounds. This is applied on top of the
 // diff coloring — context lines get full Chroma colors, while add/delete lines get
@@ -191,6 +204,81 @@ func RenderDiff(fileDiff *diff.FileDiff, offset, visibleRows, width int) string 
 	var rendered []string
 	for i := offset; i < end; i++ {
 		rendered = append(rendered, RenderDiffLine(allLines[i], lexer, width))
+	}
+
+	return strings.Join(rendered, "\n")
+}
+
+// RenderDiffWithSelection renders the visible diff with selection indicators and cursor.
+// Each selectable line (Add/Delete) gets a checkbox: [●] selected, [○] unselected.
+// The cursor line gets a subtle background highlight.
+//
+// Parameters:
+//   - fileDiff: the parsed diff
+//   - allLines: pre-flattened lines (cached for performance)
+//   - selection: which lines are selected for staging
+//   - offset: scroll position
+//   - visibleRows: how many lines fit in the pane
+//   - width: pane width
+//   - cursor: the currently highlighted line index (flat)
+func RenderDiffWithSelection(
+	fileDiff *diff.FileDiff,
+	allLines []diff.Line,
+	selection diff.DiffSelection,
+	offset, visibleRows, width, cursor int,
+) string {
+	if fileDiff == nil || len(allLines) == 0 {
+		return ""
+	}
+
+	total := len(allLines)
+
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= total {
+		offset = total - 1
+	}
+
+	end := offset + visibleRows
+	if end > total {
+		end = total
+	}
+
+	filePath := fileDiff.NewPath
+	if filePath == "" || filePath == "/dev/null" {
+		filePath = fileDiff.OldPath
+	}
+	lexer := getLexer(filePath)
+
+	var rendered []string
+	for i := offset; i < end; i++ {
+		line := allLines[i]
+
+		// Selection indicator for selectable lines
+		var indicator string
+		if selection.IsSelectable(i) {
+			if selection.IsSelected(i) {
+				indicator = SelectionColors.Selected.Render("●") + " "
+			} else {
+				indicator = SelectionColors.Unselected.Render("○") + " "
+			}
+		} else {
+			indicator = "  " // non-selectable lines get blank space to align columns
+		}
+
+		// Render the diff line content (gutter + prefix + highlighted code)
+		lineContent := RenderDiffLine(line, lexer, width-4) // -4 for indicator + space + margins
+
+		// Compose: indicator + line content
+		fullLine := indicator + lineContent
+
+		// Apply cursor highlight
+		if i == cursor {
+			fullLine = SelectionColors.CursorLine.Render(fullLine)
+		}
+
+		rendered = append(rendered, fullLine)
 	}
 
 	return strings.Join(rendered, "\n")
