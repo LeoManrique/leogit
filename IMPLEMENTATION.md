@@ -1324,7 +1324,7 @@ func (m RepoPickerModel) Update(msg tea.Msg) (RepoPickerModel, tea.Cmd) {
 		case "ctrl+c":
 			return m, tea.Quit
 
-		case "escape":
+		case "esc":
 			// If there's a filter, clear it first
 			if m.filter != "" {
 				m.filter = ""
@@ -2503,7 +2503,7 @@ func (m ErrorModalModel) Update(msg tea.Msg) (ErrorModalModel, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		switch msg.String() {
-		case "escape", "q":
+		case "esc", "q":
 			m.Visible = false
 			return m, func() tea.Msg { return ErrorDismissedMsg{} }
 
@@ -2858,7 +2858,7 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 	// ── Help overlay ──
 	if m.showHelp {
-		if msg.String() == "?" || msg.String() == "escape" {
+		if msg.String() == "?" || msg.String() == "esc" {
 			m.showHelp = false
 		}
 		return m, nil
@@ -2866,7 +2866,7 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 	// ── Focused mode — only Esc escapes ──
 	if m.focusMode == core.Focused {
-		if msg.String() == "escape" {
+		if msg.String() == "esc" {
 			m.focusMode = core.Navigable
 			return m, nil
 		}
@@ -2917,7 +2917,7 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "escape":
+	case "esc":
 		// Already navigable — Esc is a no-op
 		return m, nil
 	}
@@ -3876,7 +3876,7 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 	// ── Help overlay ──
 	if m.showHelp {
-		if msg.String() == "?" || msg.String() == "escape" {
+		if msg.String() == "?" || msg.String() == "esc" {
 			m.showHelp = false
 		}
 		return m, nil
@@ -3884,7 +3884,7 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 	// ── Focused mode — only Esc escapes ──
 	if m.focusMode == core.Focused {
-		if msg.String() == "escape" {
+		if msg.String() == "esc" {
 			m.focusMode = core.Navigable
 			return m, nil
 		}
@@ -3935,7 +3935,7 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "escape":
+	case "esc":
 		// Already navigable — Esc is a no-op
 		return m, nil
 	}
@@ -5278,7 +5278,7 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 	// ── Help overlay ──
 	if m.showHelp {
-		if msg.String() == "?" || msg.String() == "escape" {
+		if msg.String() == "?" || msg.String() == "esc" {
 			m.showHelp = false
 		}
 		return m, nil
@@ -5286,7 +5286,7 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 	// ── Focused mode — only Esc escapes ──
 	if m.focusMode == core.Focused {
-		if msg.String() == "escape" {
+		if msg.String() == "esc" {
 			m.focusMode = core.Navigable
 			return m, nil
 		}
@@ -5339,7 +5339,7 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		m.updateFileListSize()
 		return m, nil
 
-	case "escape":
+	case "esc":
 		// Already navigable — Esc is a no-op
 		return m, nil
 	}
@@ -9288,7 +9288,7 @@ Replace the focused mode section:
 ```go
 	// ── Focused mode — only Esc escapes ──
 	if m.focusMode == core.Focused {
-		if msg.String() == "escape" {
+		if msg.String() == "esc" {
 			m.focusMode = core.Navigable
 			m.commitMsg.Blur()
 			return m, nil
@@ -9323,6 +9323,8 @@ message fields and enter focused mode (since text input requires capturing all k
 func (m *Model) updateFileListSize() {
 	dim := layout.Calculate(m.width, m.height, m.terminalOpen, m.terminalHeight)
 	m.fileList.SetSize(dim.SidebarWidth-2, dim.FileListHeight-3)
+	// Diff viewer: subtract border (2) and title line (1) from pane dimensions
+	m.diffView.SetSize(dim.MainWidth-2, dim.DiffHeight-3)
 	m.commitMsg.SetSize(dim.SidebarWidth-2, dim.CommitMsgHeight-3) // -3 for border + title
 }
 ```
@@ -9440,7 +9442,7 @@ Press `ctrl+p` — it should cycle to `AI: Ollama`. Press `ctrl+p` again — bac
 
 Prerequisites: Claude CLI installed (`claude --version` works), some files selected.
 
-1. Stage some changes: `git add -A`
+1. Make some changes in the repo (files will be selected by default)
 2. Press `3` to focus the commit message pane
 3. Press `ctrl+g` to trigger AI generation
 4. The button bar should show `⟳ Generating...`
@@ -10935,7 +10937,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pushing = true
 		return m, pushCmd(m.repoPath, m.branchName, m.upstream, m.hasUpstream)
 
-	case "escape":
+	case "esc":
 		return m, nil
 	}
 ```
@@ -11604,7 +11606,7 @@ when the terminal pane is focused. Find the existing focused mode section (from 
 ```go
 	// ── Focused mode — only Esc escapes ──
 	if m.focusMode == core.Focused {
-		if msg.String() == "escape" {
+		if msg.String() == "esc" {
 			m.focusMode = core.Navigable
 			if m.activePane == core.PaneTerminal {
 				m.terminal.Blur()
@@ -11738,7 +11740,7 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	// ── Focused mode — only Esc escapes ──
 	if m.focusMode == core.Focused {
 		// Esc always unfocuses, regardless of which pane
-		if msg.String() == "escape" {
+		if msg.String() == "esc" {
 			m.focusMode = core.Navigable
 			if m.activePane == core.PaneTerminal {
 				m.terminal.Blur()
@@ -11819,7 +11821,7 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		m.pushing = true
 		return m, pushCmd(m.repoPath, m.branchName, m.upstream, m.hasUpstream)
 
-	case "escape":
+	case "esc":
 		return m, nil
 	}
 
@@ -11899,7 +11901,7 @@ Constraints from the layout module (defined in Phase 4):
 		}
 
 		// Esc always unfocuses
-		if msg.String() == "escape" {
+		if msg.String() == "esc" {
 			m.focusMode = core.Navigable
 			if m.activePane == core.PaneTerminal {
 				m.terminal.Blur()
@@ -12561,7 +12563,7 @@ func (m SettingsModel) Update(msg tea.Msg) (SettingsModel, tea.Cmd) {
 // handleNavigateKey processes keys when browsing the settings list.
 func (m SettingsModel) handleNavigateKey(msg tea.KeyPressMsg) (SettingsModel, tea.Cmd) {
 	switch msg.String() {
-	case "escape", "S":
+	case "esc", "S":
 		// Close settings view
 		return m, func() tea.Msg { return SettingsClosedMsg{} }
 
@@ -12618,7 +12620,7 @@ func (m SettingsModel) handleNavigateKey(msg tea.KeyPressMsg) (SettingsModel, te
 // handleEditKey processes keys while editing a Number or Text field.
 func (m SettingsModel) handleEditKey(msg tea.KeyPressMsg) (SettingsModel, tea.Cmd) {
 	switch msg.String() {
-	case "escape":
+	case "esc":
 		// Cancel editing — discard changes
 		m.editing = false
 		m.editBuffer = ""
@@ -14896,7 +14898,7 @@ func (m BranchDropdownModel) Update(msg tea.Msg) (BranchDropdownModel, tea.Cmd) 
 // updateBrowse handles keys in browse mode (the default branch list view).
 func (m BranchDropdownModel) updateBrowse(msg tea.KeyPressMsg) (BranchDropdownModel, tea.Cmd) {
 	switch msg.String() {
-	case "escape":
+	case "esc":
 		// If there's a filter, clear it first
 		if m.filter != "" {
 			m.filter = ""
@@ -15000,7 +15002,7 @@ func (m BranchDropdownModel) updateBrowse(msg tea.KeyPressMsg) (BranchDropdownMo
 // updateCreate handles keys in create mode (typing a new branch name).
 func (m BranchDropdownModel) updateCreate(msg tea.KeyPressMsg) (BranchDropdownModel, tea.Cmd) {
 	switch msg.String() {
-	case "escape":
+	case "esc":
 		m.mode = branchModeBrowse
 		m.inputText = ""
 		return m, nil
@@ -15036,7 +15038,7 @@ func (m BranchDropdownModel) updateCreate(msg tea.KeyPressMsg) (BranchDropdownMo
 // updateRename handles keys in rename mode (typing the new branch name).
 func (m BranchDropdownModel) updateRename(msg tea.KeyPressMsg) (BranchDropdownModel, tea.Cmd) {
 	switch msg.String() {
-	case "escape":
+	case "esc":
 		m.mode = branchModeBrowse
 		m.inputText = ""
 		m.renameFrom = ""
@@ -15646,7 +15648,7 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 	// ── Help overlay ──
 	if m.showHelp {
-		if msg.String() == "?" || msg.String() == "escape" {
+		if msg.String() == "?" || msg.String() == "esc" {
 			m.showHelp = false
 		}
 		return m, nil
@@ -17907,7 +17909,7 @@ func (m MergeOverlayModel) Update(msg tea.Msg) (MergeOverlayModel, tea.Cmd) {
 				}
 			}
 
-		case "escape":
+		case "esc":
 			m.Visible = false
 			return m, func() tea.Msg {
 				return MergeCancelMsg{}
@@ -19207,7 +19209,7 @@ func (m PROverlayModel) Update(msg tea.Msg) (PROverlayModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
-		case "escape":
+		case "esc":
 			m.Visible = false
 			return m, func() tea.Msg { return PROverlayCloseMsg{} }
 
@@ -19823,7 +19825,7 @@ func (m PRCreateOverlayModel) Update(msg tea.Msg) (PRCreateOverlayModel, tea.Cmd
 
 		// Global keys (work in any field)
 		switch key {
-		case "escape":
+		case "esc":
 			m.Visible = false
 			return m, func() tea.Msg { return PRCreateCancelMsg{} }
 
