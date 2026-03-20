@@ -4302,12 +4302,12 @@ sidebar (Pane 1), and let the user navigate with `j`/`k` and select files with `
 This phase introduces:
 1. **Porcelain v2 file entry parsing** — extracting paths and statuses from NUL-separated entries
 2. **File status classification** — mapping XY codes to human-friendly labels and icons
-3. **A custom scrollable list component** — lightweight file list with status icons and staging indicators
+3. **A custom scrollable list component** — lightweight file list with status icons and selection indicators
 4. **Pane-aware keyboard routing** — `j`/`k`/`Enter` only affect the file list when Pane 1 is focused
 
 After this phase, changed files appear in the sidebar with colored status icons, the user can
 scroll through them, and pressing `Enter` emits a selection message (consumed by Phase 7 for
-diff viewing). Staging toggle (`space`/`a`) is wired as a no-op — Phase 8 implements it.
+diff viewing). Selection toggle (`space`/`a`) is wired as a no-op — Phase 8 implements it.
 
 ### 6.1 Parse `git status --porcelain=2 -z`
 
@@ -4403,7 +4403,6 @@ type FileEntry struct {
 	Path     string     // file path relative to repo root
 	OrigPath string     // original path (only set for renames, empty otherwise)
 	Status   FileStatus // user-facing status category
-	Staged   bool       // true if the file has changes in the index (staging area)
 	XY       string     // raw 2-character status code from porcelain v2
 }
 
@@ -4501,7 +4500,6 @@ func ParseFiles(rawOutput string) []FileEntry {
 			entries = append(entries, FileEntry{
 				Path:   path,
 				Status: StatusNew,
-				Staged: false,
 				XY:     "??",
 			})
 		}
@@ -4532,7 +4530,6 @@ func parseOrdinaryEntry(line string) *FileEntry {
 	return &FileEntry{
 		Path:   path,
 		Status: statusFromXY(xy),
-		Staged: isStagedXY(xy),
 		XY:     xy,
 	}
 }
@@ -4553,7 +4550,6 @@ func parseRenameEntry(line string, origPath string) *FileEntry {
 		Path:     path,
 		OrigPath: origPath,
 		Status:   StatusRenamed,
-		Staged:   isStagedXY(xy),
 		XY:       xy,
 	}
 }
@@ -4573,7 +4569,6 @@ func parseUnmergedEntry(line string) *FileEntry {
 	return &FileEntry{
 		Path:   path,
 		Status: StatusConflicted,
-		Staged: false, // conflicts are not considered "staged"
 		XY:     xy,
 	}
 }
@@ -4619,20 +4614,6 @@ func statusFromXY(xy string) FileStatus {
 	return StatusModified
 }
 
-// isStagedXY returns true if the file has changes in the index (staging area).
-// X represents the index status:
-//   - '.' means unmodified in the index
-//   - '?' means untracked
-//   - '!' means ignored
-//
-// Any other X value means the file has staged changes.
-func isStagedXY(xy string) bool {
-	if len(xy) != 2 {
-		return false
-	}
-	x := xy[0]
-	return x != '.' && x != '?' && x != '!'
-}
 ```
 
 ### 6.2 File Status Labels (New, Modified, Deleted, Renamed, Conflicted)
@@ -4640,28 +4621,29 @@ func isStagedXY(xy string) bool {
 The `statusFromXY()` function in `files.go` maps the raw 2-character XY codes to five
 user-facing statuses. Here is the complete mapping:
 
-| XY Code | X (Index) | Y (Worktree) | Status | Icon | Staged? |
-|---------|-----------|-------------|--------|------|---------|
-| `??` | `?` | `?` | New | `[+]` | No |
-| `A.` | `A` (added) | `.` (unchanged) | New | `[+]` | Yes |
-| `AM` | `A` (added) | `M` (modified) | New | `[+]` | Yes |
-| `.M` | `.` (unchanged) | `M` (modified) | Modified | `[M]` | No |
-| `M.` | `M` (modified) | `.` (unchanged) | Modified | `[M]` | Yes |
-| `MM` | `M` (modified) | `M` (modified) | Modified | `[M]` | Yes |
-| `.D` | `.` (unchanged) | `D` (deleted) | Deleted | `[-]` | No |
-| `D.` | `D` (deleted) | `.` (unchanged) | Deleted | `[-]` | Yes |
-| `R.` | `R` (renamed) | `.` (unchanged) | Renamed | `[R]` | Yes |
-| `RM` | `R` (renamed) | `M` (modified) | Renamed | `[R]` | Yes |
-| `UU` | `U` (unmerged) | `U` (unmerged) | Conflicted | `[!]` | No |
-| `AA` | `A` (both added) | `A` (both added) | Conflicted | `[!]` | No |
-| `DD` | `D` (both deleted) | `D` (both deleted) | Conflicted | `[!]` | No |
-| `AU` | `A` (added by us) | `U` (unmerged) | Conflicted | `[!]` | No |
-| `UA` | `U` (unmerged) | `A` (added by them) | Conflicted | `[!]` | No |
+| XY Code | X (Index) | Y (Worktree) | Status | Icon |
+|---------|-----------|-------------|--------|------|
+| `??` | `?` | `?` | New | `[+]` |
+| `A.` | `A` (added) | `.` (unchanged) | New | `[+]` |
+| `AM` | `A` (added) | `M` (modified) | New | `[+]` |
+| `.M` | `.` (unchanged) | `M` (modified) | Modified | `[M]` |
+| `M.` | `M` (modified) | `.` (unchanged) | Modified | `[M]` |
+| `MM` | `M` (modified) | `M` (modified) | Modified | `[M]` |
+| `.D` | `.` (unchanged) | `D` (deleted) | Deleted | `[-]` |
+| `D.` | `D` (deleted) | `.` (unchanged) | Deleted | `[-]` |
+| `R.` | `R` (renamed) | `.` (unchanged) | Renamed | `[R]` |
+| `RM` | `R` (renamed) | `M` (modified) | Renamed | `[R]` |
+| `UU` | `U` (unmerged) | `U` (unmerged) | Conflicted | `[!]` |
+| `AA` | `A` (both added) | `A` (both added) | Conflicted | `[!]` |
+| `DD` | `D` (both deleted) | `D` (both deleted) | Conflicted | `[!]` |
+| `AU` | `A` (added by us) | `U` (unmerged) | Conflicted | `[!]` |
+| `UA` | `U` (unmerged) | `A` (added by them) | Conflicted | `[!]` |
 
-**The "Staged?" column** is determined by `isStagedXY()`: if `X` is anything other than
-`.`, `?`, or `!`, the file has changes in the staging area. This is a simplification —
-a file can have BOTH staged and unstaged changes (e.g., `MM` means modified in index AND
-modified in worktree). Phase 8 will handle the nuance of partial staging.
+> **Note on git staging**: The X column shows the index (staging area) status, but leogit
+> does NOT use git's staging area for its UI. Instead, the app uses an in-memory selection
+> model: all changed files start as "selected" (●) and the user toggles them before committing.
+> Git staging only happens at commit time. The XY code is still useful for determining the
+> file status category (New, Modified, Deleted, etc.).
 
 **The `Icon()` and `Label()` methods** on `FileStatus` provide the display strings used
 in the file list component (section 6.3 below).
@@ -4680,7 +4662,7 @@ Each line in the list shows:
  ○ [+] new_file.go
 ```
 
-- **`●`** (green) = file has staged changes, **`○`** (gray) = unstaged only
+- **`●`** (green) = file is selected for commit (default), **`○`** (gray) = excluded from commit
 - **`[M]`** = status icon with color (green for new, yellow for modified, red for deleted/conflicted, blue for renamed)
 - **`filename.go`** = file name (bright)
 - **`src/lib/`** = directory path (dim, omitted if file is at repo root)
@@ -4799,16 +4781,16 @@ func (m FileListModel) Update(msg tea.Msg) (FileListModel, tea.Cmd) {
 			}
 			return m, nil
 
-		// space and 'a' are reserved for staging.
+		// space and 'a' are reserved for selection toggle.
 		// Handling them here as no-ops prevents them from bubbling up
 		// to the global key handler (where 'a' might conflict with
 		// future shortcuts).
 		case " ":
-			// toggle staging for the selected file
+			// toggle selection for the selected file (Phase 8)
 			return m, nil
 
 		case "a":
-			// stage/unstage all files
+			// select/deselect all files (Phase 8)
 			return m, nil
 		}
 	}
@@ -4842,8 +4824,7 @@ func (m FileListModel) View() string {
 		Foreground(lipgloss.Color("#FFFFFF")).
 		Background(lipgloss.Color("#264F78"))
 
-	stagedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#3FB950"))
-	unstagedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#484F58"))
+	selectedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#3FB950"))
 
 	statusColors := map[git.FileStatus]color.Color{
 		git.StatusNew:        lipgloss.Color("#3FB950"), // green
@@ -4860,11 +4841,9 @@ func (m FileListModel) View() string {
 	for i := m.offset; i < end; i++ {
 		file := m.Files[i]
 
-		// Staging indicator: ● staged, ○ unstaged
-		staging := unstagedStyle.Render("○")
-		if file.Staged {
-			staging = stagedStyle.Render("●")
-		}
+		// Selection indicator: ● selected (will be committed), ○ excluded
+		// All files start as selected — Phase 8 adds toggle logic.
+		staging := selectedStyle.Render("●")
 
 		// Status icon [M], [+], [-], [R], [!] with color
 		iconColor := statusColors[file.Status]
@@ -5637,7 +5616,7 @@ go build -o leogit ./cmd/leogit && ./leogit /path/to/any/git/repo
 
 **Test 1 — Changed files appear in sidebar**:
 
-Navigate to a repo with some changes (modified, untracked, or staged files). The "Changed
+Navigate to a repo with some changes (modified, untracked, or new files). The "Changed
 Files" pane (top-left, Pane 1) should show a list of files with status icons:
 
 ```
@@ -5671,22 +5650,20 @@ Press `Enter` on a file — nothing visible happens yet (Phase 7 will show the d
 the `FileSelectedMsg` is sent and handled (you can verify by temporarily adding a debug
 print in the `FileSelectedMsg` handler in `app.go`).
 
-**Test 4 — Staged files show ● indicator**:
+**Test 4 — All files show ● (selected) by default**:
 
-```bash
-# Stage a file:
-cd /path/to/repo
-git add somefile.go
-```
-
-Wait 2 seconds for the status poll. The staged file should show a green `●` instead of
-the gray `○`. Files with only unstaged changes show `○`.
+All changed files should appear with a green `●` indicator, meaning they are selected for
+commit. There is no `○` (deselected) state yet — Phase 8 adds the toggle.
 
 ```
 Changed Files (2)
- ● [M] somefile.go  src/     ← staged (green dot)
- ○ [M] otherfile.go  src/   ← unstaged (gray dot)
+ ● [M] somefile.go  src/     ← selected (green dot)
+ ● [M] otherfile.go  src/   ← selected (green dot)
 ```
+
+> **Important**: Staging files externally (e.g., `git add somefile.go` in the terminal)
+> does NOT affect the selection state in leogit. The `●`/`○` indicators reflect leogit's
+> in-memory selection, not git's staging area.
 
 **Test 5 — Rename detection**:
 
@@ -5752,7 +5729,7 @@ the app should NOT quit or show the help overlay — these keys are consumed by 
 component even though their real functionality comes in Phase 8.
 
 **Phase 6 is complete when**: the sidebar shows changed files with colored status icons and
-staging indicators; files update every 2 seconds from git status polling; `j`/`k` navigate
+selection indicators (all `●` by default); files update every 2 seconds from git status polling; `j`/`k` navigate
 the list; `g`/`G` jump to top/bottom; `Enter` emits a selection message; `space` and `a`
 are reserved no-ops; the file count appears in the pane title; and pane focus routing
 sends keys only to the active pane's component.
@@ -5764,7 +5741,7 @@ syntax-highlighted, scrollable diff in the Diff Viewer pane (Pane 2). This is th
 pane that renders real git content on the right side of the layout.
 
 This phase introduces:
-1. **Git diff commands** — running `git diff` for working-tree and staged changes, plus
+1. **Git diff commands** — running `git diff` for working-tree changes and
    `git diff --no-index` for untracked files
 2. **Diff parsing** — extracting file headers, hunk headers, and individual lines from
    unified diff output into structured Go types
@@ -5779,18 +5756,22 @@ green, deleted lines are red, hunk headers are cyan, and code tokens are syntax-
 within each line. The user can scroll the diff with `j`/`k` or `g`/`G`. Pressing `s`
 toggles a flag for future side-by-side support (Phase 7 always renders unified).
 
-### 7.1 Generate Diff (`git diff` / `git diff --cached`)
+### 7.1 Generate Diff (`git diff`)
 
 **File**: `internal/git/diff.go` (new file)
 
 This file runs the appropriate `git diff` command based on the file's status. There are
-three cases:
+two cases:
 
 | File status | Command | Why |
 |-------------|---------|-----|
-| Tracked, unstaged changes | `git diff HEAD -- <path>` | Shows working tree vs HEAD |
-| Tracked, staged changes | `git diff --cached -- <path>` | Shows index vs HEAD |
+| Tracked (any changes) | `git diff HEAD -- <path>` | Shows working tree vs HEAD |
 | Untracked (new file) | `git diff --no-index -- /dev/null <path>` | Treats the entire file as added |
+
+> **Why always diff against HEAD?** Leogit uses an in-memory selection model — all changed
+> files start as "selected" and the user toggles them before committing. Git's staging area
+> (index) is only used at commit time. So during browsing, we always want to see the full
+> working tree changes compared to the last commit (HEAD), regardless of what's in the index.
 
 All commands use `--no-ext-diff` (disable external diff tools), `--no-color` (we do our own
 coloring with Chroma), and `--patch-with-raw` (includes raw diff stat header for rename
@@ -5814,13 +5795,13 @@ import (
 )
 
 // GetDiff runs the appropriate git diff command for a file and returns the raw
-// NOTE: FileEntry (with Status and Staged fields) is defined in internal/git/files.go.
+// NOTE: FileEntry (with Status field) is defined in internal/git/files.go.
 // unified diff output. The command chosen depends on the file's status:
-//   - Staged files use --cached to diff the index against HEAD
 //   - Untracked files use --no-index against /dev/null to show the full file as added
-//   - All other tracked files diff the working tree against HEAD
+//   - All tracked files diff the working tree against HEAD
 //
-// The returned string is the full unified diff output, ready for parsing.
+// We always diff against HEAD (not the index) because leogit uses in-memory selection
+// for commit staging. Git's index is only modified at commit time.
 func GetDiff(repoPath string, file FileEntry) (string, error) {
 	var args []string
 
@@ -5837,19 +5818,8 @@ func GetDiff(repoPath string, file FileEntry) (string, error) {
 			"--", "/dev/null", file.Path,
 		}
 
-	case file.Staged:
-		// Staged (indexed) changes: diff the index against HEAD.
-		args = []string{
-			"diff",
-			"--no-ext-diff",
-			"--patch-with-raw",
-			"--no-color",
-			"--cached",
-			"--", file.Path,
-		}
-
 	default:
-		// Tracked file with working-tree changes: diff working tree against HEAD.
+		// Tracked file: diff the working tree against HEAD.
 		args = []string{
 			"diff",
 			"--no-ext-diff",
@@ -5890,12 +5860,6 @@ func GetDiffWhitespaceIgnored(repoPath string, file FileEntry) (string, error) {
 			"diff", "--no-ext-diff", "--patch-with-raw", "--no-color",
 			"--no-index", "-w",
 			"--", "/dev/null", file.Path,
-		}
-	case file.Staged:
-		args = []string{
-			"diff", "--no-ext-diff", "--patch-with-raw", "--no-color",
-			"--cached", "-w",
-			"--", file.Path,
 		}
 	default:
 		args = []string{
@@ -5946,8 +5910,8 @@ func GetCommitDiff(repoPath, sha, filePath string) (string, error) {
 **How it works**:
 
 - `GetDiff` is the primary function called when a user selects a file in the Changes tab.
-  The `FileEntry.Status` and `FileEntry.Staged` fields (from Phase 6) determine which
-  variant of `git diff` to run.
+  The `FileEntry.Status` field (from Phase 6) determines which variant of `git diff` to run:
+  untracked files use `--no-index`, all tracked files diff against HEAD.
 - `GetDiffWhitespaceIgnored` is identical but adds `-w` for the "hide whitespace" config
   option (`[diff] hide_whitespace` in config.toml).
 - `GetCommitDiff` is included now but won't be called until Phase 16 (History tab). It
@@ -6932,16 +6896,15 @@ Wait 2 seconds for the status poll to pick it up. Select it in the file list and
 `Enter`. The diff should show every line as added (green `+`), since the entire file is new.
 The hunk header should read something like `@@ -0,0 +1,1 @@`.
 
-**Test 5 — Staged file diff**:
+**Test 5 — Modified file diff**:
 
 ```bash
 cd /path/to/repo
 echo "new line" >> somefile.go
-git add somefile.go
 ```
 
-Wait for the status poll. Select the staged file (shown with `●` indicator). The diff
-should show the staged changes (what's in the index vs HEAD), not the working tree.
+Wait for the status poll. Select the modified file. The diff should show the working tree
+changes compared to HEAD — all modifications since the last commit.
 
 **Test 6 — Side-by-side toggle**:
 
@@ -6980,33 +6943,41 @@ syntax-highlighted unified diff in Pane 2; the diff has a gutter with old/new li
 added lines are green, deleted lines are red, hunk headers are cyan; Chroma syntax
 highlighting colors code tokens within diff lines; `j`/`k`/`g`/`G`/`d`/`u` scroll the diff;
 `s` toggles the side-by-side flag (rendering is a stub); untracked files show as fully added;
-staged files show index-vs-HEAD diffs; and the loading/error/empty states display correctly.
+all tracked files show working-tree-vs-HEAD diffs; and the loading/error/empty states display correctly.
 
-## Phase 8 — Staging
+## Phase 8 — Selection & Commit Staging
 
-**Goal**: Let the user stage and unstage files at three granularities: entire files, individual
-hunks, and individual lines. This is the most complex feature in the Changes tab — it requires
-generating partial patches and piping them to `git apply --cached`.
+**Goal**: Let the user select and deselect files, hunks, and individual lines for the next
+commit. Selection is entirely **in-memory** — no git commands run during browsing. Git's
+staging area (index) is only modified at commit time, when the app stages the selected
+files/lines and commits them.
+
+This is the most complex feature in the Changes tab — it requires tracking selection state,
+generating partial patches, and piping them to `git apply --cached` at commit time.
 
 This phase introduces:
-1. **Whole-file staging** — `git update-index` for adding/removing entire files
-2. **DiffSelection** — a data structure that tracks which lines the user has selected for staging
+1. **Whole-file staging functions** — `git update-index` / `git reset HEAD` (only used at commit time)
+2. **DiffSelection** — a data structure that tracks which lines the user has selected
 3. **Partial patch generation** — building a valid unified diff from only the selected lines
-4. **`git apply --cached`** — applying the generated patch to the index
-5. **UI integration** — `space` toggles staging for a file, `a` stages/unstages all, hunk/line
-   selection in the diff viewer
+4. **`git apply --cached`** — applying the generated patch to the index (at commit time)
+5. **UI integration** — `space` toggles selection for a file, `a` selects/deselects all,
+   hunk/line selection in the diff viewer
 
-After this phase, pressing `space` on a file in the Changed Files list toggles it between staged
-and unstaged. Pressing `a` stages all files or unstages all files (toggles based on whether any
-files are currently staged). In the diff viewer (Pane 2), the user can select individual hunks
-or lines and stage only those changes. The staging indicator (`●`/`○`) updates in real-time.
+**Key design principle**: All changed files start as **selected** (`●`) by default. The user
+can deselect (`○`) files or individual lines they don't want to include in the commit. They
+can also re-select them at any time — selection is freely toggleable. If the user doesn't
+change anything, everything gets committed. Git's index is only touched when the user actually
+commits (Phase 10).
 
-### 8.1 Stage / Unstage Entire File
+### 8.1 Stage / Unstage Entire File (Commit-Time Only)
 
 **File**: `internal/git/staging.go` (new file)
 
 This file provides functions to stage and unstage entire files using `git update-index` and
-`git reset HEAD`. Staging whole files is a three-step process because renamed files and deleted
+`git reset HEAD`. These functions are **only called at commit time** — not during browsing.
+When the user commits, the app uses these to stage the selected files before running `git commit`.
+
+Staging whole files is a three-step process because renamed files and deleted
 files require different `update-index` flags:
 
 | File type | Command | Flags |
@@ -7027,6 +6998,7 @@ import (
 )
 
 // StageFiles stages the given files using git update-index.
+// Called at commit time to stage only the files the user has selected.
 // Files are grouped by type (renamed old paths, normal files, deleted files)
 // and processed in three passes with appropriate flags.
 //
@@ -7143,7 +7115,7 @@ func UnstageFile(repoPath string, file FileEntry) error {
 
 **File**: `internal/diff/selection.go` (new file)
 
-The `DiffSelection` struct tracks which lines in a diff the user has selected for staging.
+The `DiffSelection` struct tracks which lines in a diff the user has selected for committing.
 It uses a space-efficient representation: instead of storing a boolean per line, it stores
 a `DefaultState` (all selected or none selected) plus a set of lines that diverge from
 the default.
@@ -7167,7 +7139,7 @@ const (
 	SelectNone                       // no lines selected by default
 )
 
-// DiffSelection tracks which diff lines are selected for staging or discarding.
+// DiffSelection tracks which diff lines are selected for committing or discarding.
 // Uses a DefaultState + diverging set for space efficiency.
 type DiffSelection struct {
 	DefaultState    SelectionState // initial state for all lines
@@ -7177,8 +7149,8 @@ type DiffSelection struct {
 
 // NewDiffSelection creates a DiffSelection for a parsed diff.
 // Scans all lines to build the SelectableLines set.
-// defaultState determines whether lines start selected (for staging unstaged files)
-// or unselected (for unstaging staged files).
+// defaultState determines whether lines start selected (default: all selected)
+// or unselected (user manually picks lines to include).
 func NewDiffSelection(fileDiff *FileDiff, defaultState SelectionState) DiffSelection {
 	sel := DiffSelection{
 		DefaultState:    defaultState,
@@ -7253,7 +7225,7 @@ func (s DiffSelection) WithToggle(lineIdx int) DiffSelection {
 	return s.WithLineSelection(lineIdx, !s.IsSelected(lineIdx))
 }
 
-// WithRangeSelection sets selection for a range of lines (used for hunk-level staging).
+// WithRangeSelection sets selection for a range of lines (used for hunk-level toggle).
 // Only affects selectable lines in the range [from, from+count).
 func (s DiffSelection) WithRangeSelection(from, count int, selected bool) DiffSelection {
 	result := s
@@ -7293,7 +7265,7 @@ func (s DiffSelection) NoneSelected() bool {
 **How the selection model works**:
 
 - `DefaultState = SelectAll` means "everything is selected unless explicitly deselected".
-  This is the natural state when staging an unstaged file — all changes are included by default.
+  This is the default state — all changes are included in the commit by default.
 - `DefaultState = SelectNone` is used when the UI starts with nothing selected and the user
   picks individual lines.
 - `DivergingLines` is a set (map) of flat line indices that differ from the default. Toggling
@@ -7308,9 +7280,9 @@ func (s DiffSelection) NoneSelected() bool {
 
 **File**: `internal/diff/patch.go` (new file)
 
-This is the core staging logic. It takes a parsed `FileDiff` and a `DiffSelection`, and
-generates a valid unified diff patch containing only the selected changes. This patch is
-then piped to `git apply --cached` to stage the selected lines.
+This is the core commit-time staging logic. It takes a parsed `FileDiff` and a `DiffSelection`,
+and generates a valid unified diff patch containing only the selected changes. At commit time,
+this patch is piped to `git apply --cached` to stage the selected lines before committing.
 
 The rules for generating a partial patch from a selection:
 
@@ -7564,11 +7536,12 @@ func generateInverseHunkPatch(hunk Hunk, selection DiffSelection, flatIdx *int) 
 > calls. Each line needs a globally unique index that matches the `DiffSelection` indices. A
 > plain `int` would reset each call, causing wrong selection lookups.
 
-### 8.4 Apply Patch to Index
+### 8.4 Apply Patch to Index (Commit-Time Only)
 
 **File**: `internal/git/staging.go` (add to existing file from 8.1)
 
-Add these functions to the `staging.go` file created in section 8.1:
+Add these functions to the `staging.go` file created in section 8.1. These are called at
+commit time when the user has partially selected lines within a file:
 
 ```go
 // ApplyPatchToIndex stages a partial patch using git apply --cached.
@@ -7636,26 +7609,94 @@ func ApplyPatchToWorkingTree(repoPath, patch string) error {
 - `ApplyPatchToWorkingTree` is the same but without `--cached` — it modifies the actual files
   on disk. Used for "discard changes" where the user wants to revert selected lines.
 
-### 8.5 Staging UI — File List Integration
+### 8.5 Selection UI — File List Integration
 
 **File**: `internal/tui/components/filelist.go` (modify existing from Phase 6)
 
-Update the file list component to handle `space` and `a` keys. These were previously no-ops
-reserved for Phase 8. Now they emit staging messages that the app handles.
+Update the file list component to handle `space` and `a` keys for in-memory selection.
+These were previously no-ops reserved for Phase 8. Now they toggle the selection state
+directly in the component — **no git commands are run**.
 
-**New message types** — add above the `FileListModel` struct:
+**New field** — add a `selected` map to `FileListModel`:
 
 ```go
-// FileStagingToggleMsg is sent when the user presses space on a file.
-// The app handles the actual git staging/unstaging.
-type FileStagingToggleMsg struct {
-	File git.FileEntry
+// FileListModel displays a scrollable list of changed files with status icons.
+type FileListModel struct {
+	Files    []git.FileEntry  // current list of changed files
+	cursor   int              // index of the highlighted file
+	offset   int              // scroll offset (first visible index)
+	width    int              // available width for rendering (inner, excluding borders)
+	height   int              // available height in rows (inner, excluding borders and title)
+	selected map[string]bool  // in-memory selection state: path → selected (true = will be committed)
+}
+```
+
+**Update `NewFileList()`** — initialize the selected map:
+
+```go
+func NewFileList() FileListModel {
+	return FileListModel{
+		selected: make(map[string]bool),
+	}
+}
+```
+
+**Update `SetFiles()`** — new files default to selected, existing files keep their state:
+
+```go
+func (m *FileListModel) SetFiles(files []git.FileEntry) {
+	m.Files = files
+	if m.cursor >= len(m.Files) {
+		m.cursor = max(0, len(m.Files)-1)
+	}
+	// New files default to selected. Files already in the map keep their state.
+	for _, f := range files {
+		if _, exists := m.selected[f.Path]; !exists {
+			m.selected[f.Path] = true // default: selected for commit
+		}
+	}
+	// Clean up paths that no longer exist in the file list
+	validPaths := make(map[string]bool, len(files))
+	for _, f := range files {
+		validPaths[f.Path] = true
+	}
+	for path := range m.selected {
+		if !validPaths[path] {
+			delete(m.selected, path)
+		}
+	}
+	m.clampOffset()
+}
+```
+
+**Add selection query methods**:
+
+```go
+// IsSelected returns whether the file at the given path is selected for commit.
+func (m FileListModel) IsSelected(path string) bool {
+	selected, exists := m.selected[path]
+	return !exists || selected // default to selected if not in map
 }
 
-// StageAllMsg is sent when the user presses 'a' to stage/unstage all files.
-// StageAll is true when files should be staged, false when they should be unstaged.
-type StageAllMsg struct {
-	StageAll bool   // true = stage all, false = unstage all
+// SelectedFiles returns all files that are currently selected for commit.
+func (m FileListModel) SelectedFiles() []git.FileEntry {
+	var result []git.FileEntry
+	for _, f := range m.Files {
+		if m.IsSelected(f.Path) {
+			result = append(result, f)
+		}
+	}
+	return result
+}
+
+// AnyDeselected returns true if any file has been deselected.
+func (m FileListModel) AnyDeselected() bool {
+	for _, f := range m.Files {
+		if !m.IsSelected(f.Path) {
+			return true
+		}
+	}
+	return false
 }
 ```
 
@@ -7663,56 +7704,63 @@ type StageAllMsg struct {
 
 ```go
 		case " ":
-			// Toggle staging for the selected file
+			// Toggle selection for the current file (in-memory only, no git commands)
 			if len(m.Files) > 0 && m.cursor < len(m.Files) {
-				file := m.Files[m.cursor]
-				return m, func() tea.Msg {
-					return FileStagingToggleMsg{File: file}
-				}
+				path := m.Files[m.cursor].Path
+				m.selected[path] = !m.IsSelected(path)
 			}
 			return m, nil
 
 		case "a":
-			// Stage all or unstage all — toggle based on current state.
-			// If any files are staged, unstage all. If none are staged, stage all.
+			// Select all or deselect all — toggle based on current state.
+			// If all files are selected, deselect all. Otherwise, select all.
 			if len(m.Files) > 0 {
-				anyStaged := false
+				allSelected := !m.AnyDeselected()
 				for _, f := range m.Files {
-					if f.Staged {
-						anyStaged = true
-						break
-					}
-				}
-				return m, func() tea.Msg {
-					return StageAllMsg{StageAll: !anyStaged}
+					m.selected[f.Path] = !allSelected
 				}
 			}
 			return m, nil
 ```
 
-**How the toggle logic works**:
+**Update the rendering** in `View()` — use `m.IsSelected()` instead of `file.Staged`:
 
-- `space` emits a `FileStagingToggleMsg` with the currently selected file. The app receives
-  this and calls either `git.StageFile()` or `git.UnstageFile()` based on the file's `Staged`
-  field, then triggers a status refresh so the `●`/`○` indicators update.
-- `a` checks whether any files are currently staged. If at least one file is staged, pressing
-  `a` unstages ALL files. If no files are staged, pressing `a` stages ALL files. `a` always flips the "bulk" state.
+```go
+		// Selection indicator: ● selected (will be committed), ○ excluded
+		staging := deselectedStyle.Render("○")
+		if m.IsSelected(file.Path) {
+			staging = selectedStyle.Render("●")
+		}
+```
 
-> **Beginner note — `func() tea.Msg` pattern**: In bubbletea, `Update()` returns
-> `(model, tea.Cmd)` where `tea.Cmd` is `func() tea.Msg`. Returning an anonymous function like
-> `func() tea.Msg { return FileStagingToggleMsg{...} }` tells bubbletea to run it async and
-> feed the resulting message back into the parent app's `Update()`. This is how child components
-> communicate with the parent without importing it directly.
+**How the selection logic works**:
+
+- All selection is **in-memory** — toggling `space` or `a` only updates the `selected` map.
+  No git commands run. The UI updates instantly without waiting for a status refresh.
+- `space` toggles the selection for the highlighted file. The `●`/`○` indicator flips
+  immediately.
+- `a` checks whether all files are selected. If they are, `a` deselects all. Otherwise,
+  `a` selects all. This gives a natural "toggle all" feel.
+- `SetFiles()` preserves selection state across status refreshes — when the 2-second poll
+  updates the file list, files that were deselected stay deselected.
+- `SelectedFiles()` is used at commit time (Phase 10) to determine what to stage and commit.
+
+> **Beginner note — why `map[string]bool`?** Using the file path as the key means selection
+> survives across status refreshes (where the `FileEntry` slice is replaced with fresh data).
+> If we used an index-based approach, a file appearing/disappearing from the list would shift
+> all indices and corrupt the selection state.
 
 ### 8.6 Diff Viewer — Line Selection UI
 
 **File**: `internal/tui/components/diffview.go` (modify existing from Phase 7)
 
-The diff viewer needs new fields and key bindings for hunk/line-level staging. When the user
+The diff viewer needs new fields and key bindings for line-level selection. When the user
 is viewing a diff, they can:
 - Press `space` on a line to toggle its selection
 - Press `h` on a hunk header to toggle the entire hunk
-- Press `S` (capital) to stage the current selection (applies the partial patch)
+
+Selection is **in-memory only** — it determines which lines will be included when the user
+commits. No git commands run during selection.
 
 The diff viewer now tracks a `cursor` position (the currently highlighted line) and a
 `DiffSelection` that records which lines are selected.
@@ -7754,7 +7802,7 @@ func (m *DiffViewModel) SetDiff(file git.FileEntry, fileDiff *diff.FileDiff) {
 	if fileDiff != nil {
 		m.totalLines = fileDiff.TotalLines()
 		m.allLines = fileDiff.AllLines()
-		// Default: all lines selected (staging an unstaged file includes everything)
+		// Default: all lines selected (everything is included in the commit by default)
 		m.selection = diff.NewDiffSelection(fileDiff, diff.SelectAll)
 	} else {
 		m.totalLines = 0
@@ -7767,14 +7815,6 @@ func (m *DiffViewModel) SetDiff(file git.FileEntry, fileDiff *diff.FileDiff) {
 **New message types** — add to `diffview.go`:
 
 ```go
-// StagePatchMsg is sent when the user presses S to stage the current line selection.
-// The app receives this and applies the generated patch via git apply --cached.
-type StagePatchMsg struct {
-	File      git.FileEntry
-	FileDiff  *diff.FileDiff
-	Selection diff.DiffSelection
-}
-
 // HunkRange returns the flat line index range for the hunk containing the given line index.
 // Returns (startIdx, count) for use with WithRangeSelection.
 func hunkRange(fileDiff *diff.FileDiff, flatIdx int) (int, int) {
@@ -7879,17 +7919,6 @@ func (m DiffViewModel) Update(msg tea.Msg) (DiffViewModel, tea.Cmd) {
 				}
 			}
 
-		case "S":
-			// Stage the current selection — emit a message for the app to handle
-			if m.totalLines > 0 && m.fileDiff != nil && !m.selection.NoneSelected() {
-				return m, func() tea.Msg {
-					return StagePatchMsg{
-						File:      m.file,
-						FileDiff:  m.fileDiff,
-						Selection: m.selection,
-					}
-				}
-			}
 		}
 	}
 
@@ -7928,7 +7957,8 @@ func (m DiffViewModel) View() string {
 			Render("No changes in this file")
 	}
 
-	// Render only the visible window with cursor and selection indicators
+	// Render the visible window with cursor and selection indicators.
+	// Selection is in-memory — ● means the line will be included in the commit.
 	return render.RenderDiffWithSelection(
 		m.fileDiff, m.allLines, m.selection,
 		m.offset, m.height, m.width, m.cursor,
@@ -7947,13 +7977,15 @@ Add this function to `diff.go`:
 
 ```go
 // SelectionColors holds styles for selection indicators in the diff viewer.
+// Selected (●) = line will be included in the commit.
+// Unselected (○) = line will be excluded from the commit.
 var SelectionColors = struct {
 	Selected   lipgloss.Style
 	Unselected lipgloss.Style
 	CursorLine lipgloss.Style
 }{
-	Selected:   lipgloss.NewStyle().Foreground(lipgloss.Color("#2EA043")), // green checkmark
-	Unselected: lipgloss.NewStyle().Foreground(lipgloss.Color("#484F58")), // dim circle
+	Selected:   lipgloss.NewStyle().Foreground(lipgloss.Color("#2EA043")), // green: included
+	Unselected: lipgloss.NewStyle().Foreground(lipgloss.Color("#484F58")), // dim: excluded
 	CursorLine: lipgloss.NewStyle().Background(lipgloss.Color("#1F2937")), // subtle highlight
 }
 
@@ -8044,128 +8076,38 @@ func RenderDiffWithSelection(
   index) to apply the highlight. The cursor is always within the visible window because the
   diff viewer auto-scrolls in `Update()`.
 
-### 8.8 Wire Staging Into the App
+### 8.8 Selection Is Local — No App Wiring Needed
 
-**File**: `internal/tui/app/app.go` (modify existing)
+Unlike a traditional staging UI that runs git commands on every toggle, leogit's selection
+is entirely in-memory within the file list and diff viewer components. **No changes to
+`app.go` are needed for selection toggling.**
 
-This section connects the staging UI to the actual git operations. The app handles staging
-messages by running git commands in async `tea.Cmd` functions, then refreshing the status.
+The `space` and `a` keys in the file list update `m.selected` directly (section 8.5).
+The `space` and `h` keys in the diff viewer update `m.selection` directly (section 8.6).
+The `●`/`○` indicators update instantly without waiting for a git status refresh.
 
-**New message types** — add to `app.go`:
-
-```go
-// stagingResultMsg is returned by async staging commands.
-type stagingResultMsg struct {
-	err error
-}
-```
-
-**New async commands** — add to `app.go`:
-
-```go
-// stageFileCmd stages or unstages a single file asynchronously.
-// It checks file.Staged to decide the direction: staged files get unstaged, and vice versa.
-func stageFileCmd(repoPath string, file git.FileEntry) tea.Cmd {
-	return func() tea.Msg {
-		var err error
-		if file.Staged {
-			err = git.UnstageFile(repoPath, file)
-		} else {
-			err = git.StageFile(repoPath, file)
-		}
-		return stagingResultMsg{err: err}
-	}
-}
-
-// stageAllCmd stages or unstages all files asynchronously.
-func stageAllCmd(repoPath string, files []git.FileEntry, stageAll bool) tea.Cmd {
-	return func() tea.Msg {
-		var err error
-		if stageAll {
-			err = git.StageFiles(repoPath, files)
-		} else {
-			err = git.UnstageFiles(repoPath, files)
-		}
-		return stagingResultMsg{err: err}
-	}
-}
-
-// stagePatchCmd generates a partial patch from the selection and applies it.
-func stagePatchCmd(repoPath string, file git.FileEntry, fileDiff *diff.FileDiff, selection diff.DiffSelection) tea.Cmd {
-	return func() tea.Msg {
-		patch := diff.GeneratePatch(fileDiff, selection)
-		if patch == "" {
-			return stagingResultMsg{err: nil}
-		}
-		err := git.ApplyPatchToIndex(repoPath, patch)
-		return stagingResultMsg{err: err}
-	}
-}
-```
-
-**Changes to `Update()`** — add handlers for the new messages. Add these cases to the
-`switch msg := msg.(type)` block:
-
-```go
-	case components.FileStagingToggleMsg:
-		// Toggle staging for a single file
-		return m, stageFileCmd(m.repoPath, msg.File)
-
-	case components.StageAllMsg:
-		// Stage or unstage all files
-		return m, stageAllCmd(m.repoPath, m.fileList.Files, msg.StageAll)
-
-	case components.StagePatchMsg:
-		// Stage a partial patch (hunk/line selection)
-		return m, stagePatchCmd(m.repoPath, msg.File, msg.FileDiff, msg.Selection)
-
-	case stagingResultMsg:
-		if msg.err != nil {
-			m.errorModal = views.ShowError(
-				"Staging Error",
-				"Failed to update staging: "+msg.err.Error(),
-				true,
-				nil,
-				m.width, m.height,
-			)
-			return m, nil
-		}
-		// Staging succeeded — re-run git status so the file list updates.
-		// The Staged field on each FileEntry comes from git status output,
-		// so we must refresh to reflect the change in the UI.
-		return m, refreshStatusCmd(m.repoPath)
-```
-
-**New imports for `app.go`** — ensure the `diff` package is imported (should already be
-present from Phase 7):
-
-```go
-import (
-	// ... existing imports ...
-	"github.com/LeoManrique/leogit/internal/diff"
-)
-```
+The app only needs to interact with git staging at **commit time** (Phase 10), where it
+reads `m.fileList.SelectedFiles()` and the diff viewer's `DiffSelection` to determine
+what to stage before committing.
 
 **What changed from Phase 7**:
 
 1. **New file `internal/git/staging.go`**: `StageFiles`, `UnstageFiles`, `StageFile`,
-   `UnstageFile`, `ApplyPatchToIndex`, `ApplyPatchToWorkingTree` — all git staging operations
+   `UnstageFile`, `ApplyPatchToIndex`, `ApplyPatchToWorkingTree` — git staging operations
+   used at commit time only
 2. **New file `internal/diff/selection.go`**: `DiffSelection` with `DefaultState`,
    `DivergingLines`, `SelectableLines`, and methods `IsSelected`, `WithLineSelection`,
    `WithToggle`, `WithRangeSelection`, `AllSelected`, `NoneSelected`
 3. **New file `internal/diff/patch.go`**: `GeneratePatch`, `GenerateInversePatch` — creates
-   valid unified diff patches from partial selections
-4. **`filelist.go` updated**: `space` emits `FileStagingToggleMsg`, `a` emits `StageAllMsg`
-   (no longer no-ops)
+   valid unified diff patches from partial selections (used at commit time)
+4. **`filelist.go` updated**: new `selected` map field, `IsSelected()`, `SelectedFiles()`,
+   `AnyDeselected()` methods. `space` toggles file selection in-memory, `a` toggles all
+   (no longer no-ops, but no git commands either)
 5. **`diffview.go` updated**: new `cursor` field, `selection` field, `allLines` cache.
-   `space` toggles line selection, `h` toggles hunk selection, `S` emits `StagePatchMsg`.
+   `space` toggles line selection, `h` toggles hunk selection.
    `View()` calls `RenderDiffWithSelection` to show checkboxes and cursor
 6. **`render/diff.go` updated**: new `RenderDiffWithSelection` function with selection
    indicators (`●`/`○`) and cursor highlighting
-7. **`app.go` updated**: new `FileStagingToggleMsg`, `StageAllMsg`, `StagePatchMsg`,
-   `stagingResultMsg` handlers. New async commands `stageFileCmd`, `stageAllCmd`,
-   `stagePatchCmd`. Staging errors show in the error modal. Successful staging triggers
-   a status refresh
 
 ### 8.9 Test It
 
@@ -8176,146 +8118,75 @@ go build -o leogit ./cmd/leogit && ./leogit /path/to/any/git/repo
 # or: go run ./cmd/leogit /path/to/any/git/repo
 ```
 
-**Test 1 — Stage a single file with space**:
+**Test 1 — All files start selected**:
 
-Make changes to a file (e.g., edit `main.go`). In the Changed Files list (Pane 1), highlight
-the file and press `space`. The file's indicator should change from `○` (gray, unstaged) to
-`●` (green, staged) after the status refreshes (~2 seconds, or faster if the staging triggers
-an immediate refresh).
+Make changes to several files. All files in the Changed Files list should show `●` (green,
+selected) by default. This means they will all be included in the next commit.
 
-Verify with git:
+**Test 2 — Deselect a file with space**:
 
-```bash
-git status
-# Should show the file in "Changes to be committed"
-```
+Highlight a file and press `space`. The indicator should change from `●` (selected) to
+`○` (deselected) **instantly** — no waiting for a status refresh.
 
-**Test 2 — Unstage a single file with space**:
+> **Important**: Check `git status` in a separate terminal — the git index should be
+> **unchanged**. Deselecting a file in leogit does NOT run `git reset` or any git command.
 
-With the file now staged (`●`), press `space` again. The indicator should change back to
-`○` (unstaged).
+**Test 3 — Re-select a file with space**:
 
-```bash
-git status
-# Should show the file in "Changes not staged for commit"
-```
+With the file deselected (`○`), press `space` again. The indicator should change back to
+`●` (selected). Selection is freely toggleable.
 
-**Test 3 — Stage all with 'a'**:
+**Test 4 — Deselect all with 'a'**:
 
-Create several changed files:
+With all files selected (`●`), press `a`. All files should change to `○` (deselected).
 
-```bash
-cd /path/to/repo
-echo "change1" >> file1.txt
-echo "change2" >> file2.txt
-echo "new" > file3.txt
-```
+**Test 5 — Select all with 'a'**:
 
-All files should show `○` (unstaged). Press `a` — all files should change to `●` (staged).
+With all files deselected (`○`), press `a` again. All files should change back to `●`.
 
-```bash
-git status
-# All files should be in "Changes to be committed"
-```
+**Test 6 — Selection persists across status refreshes**:
 
-**Test 4 — Unstage all with 'a'**:
+1. Deselect a file with `space` (it shows `○`)
+2. Wait for the 2-second status poll to refresh the file list
+3. The deselected file should **still** show `○` — selection state survives refreshes
 
-With all files staged, press `a` again. All files should change back to `○` (unstaged).
-
-**Test 5 — Line-level selection in diff viewer**:
+**Test 7 — Line-level selection in diff viewer**:
 
 1. Make a multi-line change to a file (add several lines)
 2. Select the file with `Enter` to show its diff in Pane 2
 3. Press `2` to focus the diff viewer
 4. Navigate to an added line with `j`/`k` — you should see the cursor highlight
 5. All selectable lines (Add/Delete) should show `●` (selected by default)
-6. Press `space` on a line — it should toggle to `○` (unselected)
+6. Press `space` on a line — it should toggle to `○` (deselected)
 7. Press `space` again — it should toggle back to `●` (selected)
 
-**Test 6 — Hunk-level selection**:
+**Test 8 — Hunk-level selection**:
 
 1. View a diff with multiple hunks (make changes in different parts of a file)
 2. Navigate to a hunk header (`@@ ... @@` line, cyan)
 3. Press `h` — all selectable lines in that hunk should toggle
 4. If most lines were selected, they should all become unselected (and vice versa)
 
-**Test 7 — Stage partial selection with S**:
+**Test 9 — Selection indicator visual consistency**:
 
-1. View a diff with several added lines
-2. Deselect some lines with `space` (so only some lines show `●`)
-3. Press `S` (capital S) to stage the selection
-4. The status should refresh — the file may show as both staged and unstaged if only some
-   changes were staged
-
-Verify with git:
-
-```bash
-git diff --cached -- <filename>
-# Should show only the lines you selected
-git diff -- <filename>
-# Should show only the lines you deselected
-```
-
-**Test 8 — Stage untracked file**:
-
-Create a brand-new file:
-
-```bash
-echo "hello" > brand_new.txt
-```
-
-Press `space` on it in the file list. The file should be staged (`●`).
-
-```bash
-git status
-# "brand_new.txt" should be in "Changes to be committed: new file"
-```
-
-**Test 9 — Stage renamed file**:
-
-```bash
-git mv oldname.go newname.go
-```
-
-The file should show as `[R]` in the list. Press `space` to stage it. Both the old path
-removal and new path addition should be staged correctly.
-
-**Test 10 — Stage deleted file**:
-
-```bash
-rm somefile.go
-```
-
-The file shows as `[-]`. Press `space` to stage the deletion.
-
-```bash
-git status
-# Should show "deleted: somefile.go" in "Changes to be committed"
-```
-
-**Test 11 — Error handling**:
-
-If a staging operation fails (e.g., file was modified externally during staging), the error
-modal should appear with the error message. Press `Esc` to dismiss.
-
-**Test 12 — Staging indicator visual consistency**:
-
-After staging/unstaging several files, switch to the History tab with `Tab` and back. The
-staging indicators should persist correctly. Resize the terminal — indicators should still
+After toggling several files and lines, switch to the History tab with `Tab` and back.
+File-level selection should persist. Resize the terminal — indicators should still
 render correctly.
 
-**Phase 8 is complete when**: `space` toggles staging for individual files; `a` stages all
-or unstages all files (toggle based on current state); the diff viewer shows a cursor and
-selection indicators (`●`/`○`) on Add/Delete lines; `space` in the diff viewer toggles line
-selection; `h` toggles hunk selection; `S` stages the partial selection via a generated patch
-piped to `git apply --cached`; staging operations trigger a status refresh; and errors are
-displayed in the error modal.
+> **Note**: Line-level selection in the diff viewer resets when switching to a different
+> file. File-level selection persists across the session.
+
+**Phase 8 is complete when**: `space` toggles selection for individual files (in-memory);
+`a` selects/deselects all files (toggle based on current state); the diff viewer shows a
+cursor and selection indicators (`●`/`○`) on Add/Delete lines; `space` in the diff viewer
+toggles line selection; `h` toggles hunk selection; no git commands run during selection;
+and selection state persists across status refreshes.
 
 ## Phase 9 — Commit Message
 
 **Goal**: Build the commit message pane (Pane 3 in the Changes tab) with a summary field,
 a description field, an AI-generation button, and the provider infrastructure to generate
-commit messages from the staged diff using Claude CLI or Ollama.
+commit messages from the selected files' diff using Claude CLI or Ollama.
 
 This phase introduces:
 1. **Commit message component** — a `CommitMsgModel` with a single-line summary input and
@@ -8328,7 +8199,7 @@ This phase introduces:
 
 After this phase, pressing `3` focuses the commit message pane. The summary field accepts
 a single line (≤72 chars). `Tab` moves focus between summary and description. `ctrl+g`
-generates a commit message from the staged diff using the active AI provider. `ctrl+p`
+generates a commit message from the selected files' diff using the active AI provider. `ctrl+p`
 cycles between Claude and Ollama. The generated title and description are inserted into
 the fields. A spinner shows during generation. The actual commit execution is Phase 10.
 
@@ -8675,8 +8546,8 @@ type CommitMessageProvider interface {
 	// IsAvailable checks whether the provider can be used (binary exists, server reachable).
 	IsAvailable() (bool, error)
 
-	// GenerateCommitMessage takes a staged diff and returns a commit message.
-	// The diff is the full output of `git diff --no-ext-diff --patch-with-raw --no-color --staged`.
+	// GenerateCommitMessage takes a diff of the selected files and returns a commit message.
+	// The diff is the combined output of `git diff HEAD` for each selected file.
 	GenerateCommitMessage(diff string) (*CommitMessage, error)
 }
 
@@ -8688,7 +8559,7 @@ type CommitMessage struct {
 
 // Error codes for AI generation failures.
 const (
-	ErrEmptyDiff      = "EMPTY_DIFF"       // nothing staged
+	ErrEmptyDiff      = "EMPTY_DIFF"       // no files selected
 	ErrDiffTooLarge   = "DIFF_TOO_LARGE"   // exceeds provider's size limit
 	ErrTimeout        = "TIMEOUT"          // provider didn't respond in time
 	ErrCLIError       = "CLI_ERROR"        // claude CLI non-zero exit
@@ -8709,7 +8580,7 @@ func (e *AIError) Error() string {
 }
 
 // PromptTemplate is the shared prompt used by both providers.
-// The placeholder {DIFF} is replaced with the actual staged diff.
+// The placeholder {DIFF} is replaced with the actual diff of selected files.
 const PromptTemplate = `You are a Git commit message generator. Analyze the provided git diff
 and generate a commit message.
 
@@ -8804,13 +8675,13 @@ func ParseCommitMessage(raw string) (*CommitMessage, error) {
 - `CommitMessageProvider` is the interface both providers implement. `IsAvailable()` lets
   the app check at startup whether a provider can be used (is `claude` installed? Is the
   Ollama server running?).
-- `BuildPrompt()` inserts the staged diff into the shared prompt template. Both providers
+- `BuildPrompt()` inserts the diff into the shared prompt template. Both providers
   use the same prompt — only the transport differs.
 - `ParseCommitMessage()` handles the messy reality of LLM output: strips markdown fences,
   normalizes field names (the AI might return `summary` instead of `title`), truncates
   overlong titles. This function is shared by both providers.
 - `AIError` carries a structured error code so the UI can show appropriate messages (e.g.,
-  "Nothing staged" for `EMPTY_DIFF`, "Model not found — run `ollama pull`" for
+  "No files selected" for `EMPTY_DIFF`, "Model not found — run `ollama pull`" for
   `MODEL_NOT_FOUND`).
 
 ### 9.3 AI Commit Message — Claude CLI Provider
@@ -8886,11 +8757,11 @@ func (p *ClaudeProvider) IsAvailable() (bool, error) {
 	return true, nil
 }
 
-// GenerateCommitMessage runs the Claude CLI with the staged diff and returns
+// GenerateCommitMessage runs the Claude CLI with the selected files' diff and returns
 // a parsed commit message.
 func (p *ClaudeProvider) GenerateCommitMessage(diff string) (*CommitMessage, error) {
 	if strings.TrimSpace(diff) == "" {
-		return nil, &AIError{Code: ErrEmptyDiff, Message: "nothing staged"}
+		return nil, &AIError{Code: ErrEmptyDiff, Message: "no files selected"}
 	}
 
 	if len(diff) > p.MaxDiffSize {
@@ -9098,10 +8969,10 @@ func (p *OllamaProvider) IsAvailable() (bool, error) {
 	return resp.StatusCode == http.StatusOK, nil
 }
 
-// GenerateCommitMessage sends the staged diff to Ollama and returns a parsed commit message.
+// GenerateCommitMessage sends the selected files' diff to Ollama and returns a parsed commit message.
 func (p *OllamaProvider) GenerateCommitMessage(diff string) (*CommitMessage, error) {
 	if strings.TrimSpace(diff) == "" {
-		return nil, &AIError{Code: ErrEmptyDiff, Message: "nothing staged"}
+		return nil, &AIError{Code: ErrEmptyDiff, Message: "no files selected"}
 	}
 
 	if len(diff) > p.MaxDiffSize {
@@ -9218,43 +9089,42 @@ type ollamaResponse struct {
 6. HTTP 404 is specifically caught and mapped to `MODEL_NOT_FOUND` with a helpful message
    telling the user to run `ollama pull <model>`.
 
-### 9.5 Get Staged Diff (for AI Input)
+### 9.5 Get Selected Diff (for AI Input)
 
 **File**: `internal/git/diff.go` (add to existing file from Phase 7)
 
-Add a function to get the full staged diff — this is what gets sent to the AI providers.
-It runs `git diff --no-ext-diff --patch-with-raw --no-color --staged` (no path filter —
-all staged files).
+Add a function to get the combined diff of all selected files — this is what gets sent to
+the AI providers. Since leogit uses in-memory selection (not git's staging area), we build
+the combined diff by calling `GetDiff()` for each selected file and concatenating the results.
 
 ```go
-// GetStagedDiff returns the full staged diff for the repository.
-// This is the combined diff of all files in the index vs HEAD.
-// Used as input for AI commit message generation.
-func GetStagedDiff(repoPath string) (string, error) {
-	cmd := exec.Command("git",
-		"diff",
-		"--no-ext-diff",
-		"--patch-with-raw",
-		"--no-color",
-		"--staged",
-	)
-	cmd.Dir = repoPath
-	// cmd.Environ() copies all environment variables from the current process,
-	// so the child inherits PATH, HOME, etc. We then append TERM=dumb on top
-	// to prevent git from emitting ANSI escape codes in its output.
-	cmd.Env = append(cmd.Environ(), "TERM=dumb")
-
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("git diff --staged: %w", err)
+// GetSelectedDiff returns the combined diff of the given files.
+// Used as input for AI commit message generation. Each file is diffed
+// individually (working tree vs HEAD) and the results are concatenated.
+func GetSelectedDiff(repoPath string, files []FileEntry) (string, error) {
+	if len(files) == 0 {
+		return "", nil
 	}
-	return string(out), nil
+
+	var combined strings.Builder
+	for _, f := range files {
+		d, err := GetDiff(repoPath, f)
+		if err != nil {
+			continue // skip files that fail to diff
+		}
+		if d != "" {
+			combined.WriteString(d)
+			combined.WriteString("\n")
+		}
+	}
+	return combined.String(), nil
 }
 ```
 
-**Why a separate function**: `GetDiff()` from Phase 7 diffs a single file. `GetStagedDiff()`
-diffs ALL staged files at once — the AI needs the complete picture of what's being committed,
-not one file at a time.
+**Why a separate function**: `GetDiff()` from Phase 7 diffs a single file. `GetSelectedDiff()`
+combines diffs for all selected files — the AI needs the complete picture of what's being
+committed, not one file at a time. Unlike the old `GetStagedDiff()` approach, this does not
+touch git's staging area.
 
 ### 9.6 Provider Selection & Loading State — App Integration
 
@@ -9315,17 +9185,19 @@ func New(cfg *config.Config, repoPath string) Model {
 
 ```go
 // generateCommitMsgCmd runs the active AI provider asynchronously.
-func generateCommitMsgCmd(repoPath string, provider ai.CommitMessageProvider) tea.Cmd {
+// It builds the diff from the currently selected files (in-memory selection),
+// not from git's staging area.
+func generateCommitMsgCmd(repoPath string, selectedFiles []git.FileEntry, provider ai.CommitMessageProvider) tea.Cmd {
 	return func() tea.Msg {
-		// Get the full staged diff
-		diff, err := git.GetStagedDiff(repoPath)
+		// Get the combined diff of selected files
+		diff, err := git.GetSelectedDiff(repoPath, selectedFiles)
 		if err != nil {
 			return components.AIResultMsg{Err: err}
 		}
 
 		if strings.TrimSpace(diff) == "" {
 			return components.AIResultMsg{
-				Err: &ai.AIError{Code: ai.ErrEmptyDiff, Message: "nothing staged — stage files first"},
+				Err: &ai.AIError{Code: ai.ErrEmptyDiff, Message: "no files selected — select files first"},
 			}
 		}
 
@@ -9354,10 +9226,11 @@ func generateCommitMsgCmd(repoPath string, provider ai.CommitMessageProvider) te
 
 ```go
 	case components.AIGenerateMsg:
-		// User pressed ctrl+g — run the active AI provider
+		// User pressed ctrl+g — run the active AI provider with selected files
 		if len(m.aiProviders) > 0 {
 			provider := m.aiProviders[m.aiActiveIdx]
-			return m, generateCommitMsgCmd(m.repoPath, provider)
+			selectedFiles := m.fileList.SelectedFiles()
+			return m, generateCommitMsgCmd(m.repoPath, selectedFiles, provider)
 		}
 		return m, nil
 
@@ -9514,7 +9387,7 @@ import (
    --output-format json --model <model>`, parses nested JSON response, binary lookup
 4. **New file `internal/ai/ollama.go`**: `OllamaProvider` — HTTP POST to `/api/generate`,
    availability check via `/api/tags`, model-not-found detection
-5. **`internal/git/diff.go` updated**: new `GetStagedDiff()` function — full staged diff
+5. **`internal/git/diff.go` updated**: new `GetSelectedDiff()` function — combined diff of selected files
    without path filter (all files), used as AI input
 6. **`app.go` updated**: new `commitMsg` field, `aiProviders` list, `aiActiveIdx`. `New()`
    creates both providers from config. New handlers: `AIGenerateMsg` → `generateCommitMsgCmd`,
@@ -9557,7 +9430,7 @@ Press `ctrl+p` — it should cycle to `AI: Ollama`. Press `ctrl+p` again — bac
 
 **Test 5 — AI generation with Claude**:
 
-Prerequisites: Claude CLI installed (`claude --version` works), some files staged.
+Prerequisites: Claude CLI installed (`claude --version` works), some files selected.
 
 1. Stage some changes: `git add -A`
 2. Press `3` to focus the commit message pane
@@ -9570,17 +9443,17 @@ Prerequisites: Claude CLI installed (`claude --version` works), some files stage
 **Test 6 — AI generation with Ollama**:
 
 Prerequisites: Ollama running (`ollama serve`), model pulled (`ollama pull
-tavernari/git-commit-message:latest`), some files staged.
+tavernari/git-commit-message:latest`), some files selected.
 
 1. Press `ctrl+p` to switch to Ollama
 2. Press `ctrl+g` to generate
 3. Same flow as Test 5 — fields should fill after generation completes
 
-**Test 7 — AI error handling — no staged files**:
+**Test 7 — AI error handling — no files selected**:
 
-1. Make sure nothing is staged (`git reset HEAD`)
+1. Deselect all files with `a` (all should show `○`)
 2. Press `ctrl+g`
-3. The button bar should show an error: "nothing staged — stage files first"
+3. The button bar should show an error: "no files selected — select files first"
 
 **Test 8 — AI error handling — provider unavailable**:
 
@@ -9613,29 +9486,33 @@ description. The AI-generated text is not locked — it's just a starting point.
 **Phase 9 is complete when**: pressing `3` focuses the commit message pane with a summary
 text input and description textarea; `Tab` switches between summary and description; `Esc`
 exits focused mode; `ctrl+p` cycles between Claude and Ollama providers; `ctrl+g` generates
-a commit message from the staged diff using the active provider; the button bar shows the
+a commit message from the selected files' diff using the active provider; the button bar shows the
 active provider, loading spinner during generation, and error messages on failure; generated
 messages fill both fields; and `ctrl+enter` emits a commit request (handled in Phase 10).
 
 ## Phase 10 — Commit
 
 **Goal**: Execute `git commit` when the user presses `ctrl+enter` in the commit message pane,
-with proper validation (non-empty summary, staged files present), message formatting with
+with proper validation (non-empty summary, selected files present), message formatting with
 optional co-author trailers, and a full post-commit refresh that clears the fields, reloads
 git status, and resets the diff viewer.
+
+This is where leogit's in-memory selection meets git's staging area. At commit time, the
+app first **resets the index** (to clear any external staging), then **stages only the
+selected files/lines**, and finally runs `git commit`.
 
 This phase introduces:
 1. **Commit execution** — a `Commit()` function in `internal/git/` that runs `git commit -F -`
    with the commit message piped to stdin
-2. **Staged files check** — a `HasStagedChanges()` function that runs `git diff --cached --quiet`
-   to verify something is actually staged before committing
+2. **Pre-commit staging** — at commit time, stage only the files/lines the user has selected
+   (using functions from Phase 8.1 and 8.4)
 3. **Message formatting** — builds the full commit message string from summary + description +
    optional co-author trailers
 4. **App integration** — handles `CommitRequestMsg` with validation, async commit execution,
    success/error feedback, field clearing, and status refresh
 
-After this phase, pressing `ctrl+enter` with a non-empty summary and staged files creates a
-real git commit. If validation fails (no summary or nothing staged), the commit message pane
+After this phase, pressing `ctrl+enter` with a non-empty summary and selected files creates a
+real git commit. If validation fails (no summary or no files selected), the commit message pane
 shows an error in the button bar. On success, the summary and description fields are cleared,
 the git status refreshes (showing the committed files are gone from the changes list), and the
 diff viewer resets.
@@ -9755,9 +9632,12 @@ func FormatCommitMessage(summary, description string, coAuthors []string) string
 **How `HasStagedChanges()` works**:
 
 1. `git diff --cached --quiet` compares the index against HEAD silently.
-2. Exit code 0 = no differences (nothing staged).
-3. Exit code 1 = differences found (something is staged).
+2. Exit code 0 = no differences (nothing staged in git's index).
+3. Exit code 1 = differences found (something is staged in git's index).
 4. Any other exit code = actual error (repo not found, corrupt index, etc.).
+
+> **Note**: This function checks git's actual staging area, not leogit's in-memory selection.
+> It's used at commit time to verify that the pre-commit staging step succeeded.
 
 **How `FormatCommitMessage()` works**:
 
@@ -9768,7 +9648,7 @@ func FormatCommitMessage(summary, description string, coAuthors []string) string
    The `Co-authored-by` trailer format is a git convention recognized by GitHub, GitLab,
    and other platforms.
 
-### 10.2 Commit Validation (Non-Empty Message, Staged Files)
+### 10.2 Commit Validation (Non-Empty Message, Selected Files)
 
 **File**: `internal/tui/components/commitmsg.go` (modify existing from Phase 9)
 
@@ -10249,9 +10129,9 @@ func (m CommitMsgModel) renderButtonBar() string {
 **File**: `internal/tui/app/app.go` (modify existing)
 
 This section wires the commit execution into the app. When the user presses `ctrl+enter`,
-the commit message component emits `CommitRequestMsg`. The app validates that staged changes
-exist, formats the commit message, runs `git commit`, and on success clears the fields and
-refreshes the status.
+the commit message component emits `CommitRequestMsg`. The app stages the selected files
+(from in-memory selection), formats the commit message, runs `git commit`, and on success
+clears the fields and refreshes the status.
 
 **New async command** — add `commitCmd` to `app.go`.
 
@@ -10262,22 +10142,40 @@ refreshes the status.
 > work, then returns a `CommitResultMsg` that the app's `Update()` will handle.
 
 ```go
-// commitCmd runs git commit asynchronously with validation.
-func commitCmd(repoPath string, summary, description string) tea.Cmd {
+// commitCmd stages the selected files and runs git commit asynchronously.
+// This is the ONLY place where leogit modifies git's staging area (index).
+// Flow: reset index → stage selected files → commit → (git status refresh on success)
+func commitCmd(repoPath string, selectedFiles []git.FileEntry, summary, description string) tea.Cmd {
 	return func() tea.Msg {
-		// Check for staged changes first
+		if len(selectedFiles) == 0 {
+			return components.CommitResultMsg{Err: fmt.Errorf("no files selected — select files first")}
+		}
+
+		// Step 1: Reset the index to HEAD (clear any external staging)
+		// This ensures only what the user selected in leogit gets committed.
+		resetCmd := exec.Command("git", "reset", "HEAD")
+		resetCmd.Dir = repoPath
+		if out, err := resetCmd.CombinedOutput(); err != nil {
+			return components.CommitResultMsg{Err: fmt.Errorf("resetting index: %s (%w)", string(out), err)}
+		}
+
+		// Step 2: Stage the selected files
+		if err := git.StageFiles(repoPath, selectedFiles); err != nil {
+			return components.CommitResultMsg{Err: fmt.Errorf("staging selected files: %w", err)}
+		}
+
+		// Step 3: Verify staging succeeded
 		hasStaged, err := git.HasStagedChanges(repoPath)
 		if err != nil {
 			return components.CommitResultMsg{Err: fmt.Errorf("checking staged changes: %w", err)}
 		}
 		if !hasStaged {
-			return components.CommitResultMsg{Err: fmt.Errorf("no staged changes — stage files first")}
+			return components.CommitResultMsg{Err: fmt.Errorf("staging produced no changes")}
 		}
 
-		// Format the commit message (no co-authors for now — the settings UI handles this)
+		// Step 4: Format and execute the commit
 		message := git.FormatCommitMessage(summary, description, nil)
 
-		// Execute the commit
 		if err := git.Commit(repoPath, message); err != nil {
 			return components.CommitResultMsg{Err: err}
 		}
@@ -10291,8 +10189,9 @@ func commitCmd(repoPath string, summary, description string) tea.Cmd {
 
 ```go
 	case components.CommitRequestMsg:
-		// User pressed ctrl+enter — validate and commit
-		return m, commitCmd(m.repoPath, msg.Summary, msg.Description)
+		// User pressed ctrl+enter — stage selected files and commit
+		selectedFiles := m.fileList.SelectedFiles()
+		return m, commitCmd(m.repoPath, selectedFiles, msg.Summary, msg.Description)
 ```
 
 **Add a new `CommitResultMsg` handler** in `Update()`:
@@ -10321,10 +10220,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// ... existing cases (WindowSizeMsg, authResultMsg, etc.) ...
 
 	case components.AIGenerateMsg:
-		// User pressed ctrl+g — run the active AI provider
+		// User pressed ctrl+g — run the active AI provider with selected files
 		if len(m.aiProviders) > 0 {
 			provider := m.aiProviders[m.aiActiveIdx]
-			return m, generateCommitMsgCmd(m.repoPath, provider)
+			selectedFiles := m.fileList.SelectedFiles()
+			return m, generateCommitMsgCmd(m.repoPath, selectedFiles, provider)
 		}
 		return m, nil
 
@@ -10347,8 +10247,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case components.CommitRequestMsg:
-		// User pressed ctrl+enter — validate and commit
-		return m, commitCmd(m.repoPath, msg.Summary, msg.Description)
+		// User pressed ctrl+enter — stage selected files and commit
+		selectedFiles := m.fileList.SelectedFiles()
+		return m, commitCmd(m.repoPath, selectedFiles, msg.Summary, msg.Description)
 
 	case components.CommitResultMsg:
 		// Commit completed (success or failure)
@@ -10368,28 +10269,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 ```
 
-**New import** — add `fmt` if not already present (used in `commitCmd`):
+**New imports** — add `fmt` and `os/exec` if not already present (used in `commitCmd`):
 
 ```go
 import (
 	// ... existing imports ...
 	"fmt"
+	"os/exec"
 )
 ```
 
 **What changed from Phase 9**:
 
 1. **New file `internal/git/commit.go`**: `Commit()` — runs `git commit -F -` with message
-   on stdin; `HasStagedChanges()` — runs `git diff --cached --quiet` to check if anything
-   is staged; `FormatCommitMessage()` — builds the full message string with summary,
+   on stdin; `HasStagedChanges()` — runs `git diff --cached --quiet` to verify staging
+   succeeded at commit time; `FormatCommitMessage()` — builds the full message string with summary,
    description, and co-author trailers
 2. **`commitmsg.go` updated**: new `CommitResultMsg` message, `commitError` and `committing`
    fields, `SetCommitError()` and `CommitSuccess()` methods, validation in `ctrl+enter`
    handler (rejects empty summary), updated `renderButtonBar()` with commit status display
-3. **`app.go` updated**: new `commitCmd()` async command (validates staged changes, formats
-   message, runs commit), `CommitRequestMsg` handler calls `commitCmd()` instead of no-op,
-   new `CommitResultMsg` handler clears fields on success or shows error on failure,
-   successful commit triggers `refreshStatusCmd()` to update the file list
+3. **`app.go` updated**: new `commitCmd()` async command (resets index, stages selected files,
+   formats message, runs commit), `CommitRequestMsg` handler calls `commitCmd()` with selected
+   files instead of no-op, new `CommitResultMsg` handler clears fields on success or shows
+   error on failure, successful commit triggers `refreshStatusCmd()` to update the file list
 
 ### 10.4 Test It
 
@@ -10400,18 +10302,18 @@ go build -o leogit ./cmd/leogit && ./leogit /path/to/any/git/repo
 # or: go run ./cmd/leogit /path/to/any/git/repo
 ```
 
-**Test 1 — Commit with summary only**:
+**Test 1 — Commit with summary only (all files selected)**:
 
-1. Make a change in the repo and stage it:
+1. Make a change in the repo:
    ```bash
    echo "test change" >> somefile.txt
-   git add somefile.txt
    ```
-2. Press `3` to focus the commit message pane
-3. Type a summary: `Add test change to somefile`
-4. Press `ctrl+enter`
-5. The button bar should briefly show "Committing..." in green
-6. On success: both fields clear, the file list refreshes (staged file disappears from
+2. All files should show `●` (selected by default)
+3. Press `3` to focus the commit message pane
+4. Type a summary: `Add test change to somefile`
+5. Press `ctrl+enter`
+6. The button bar should briefly show "Committing..." in green
+7. On success: both fields clear, the file list refreshes (committed file disappears from
    the changes list), and git log shows the new commit:
    ```bash
    git log -1 --oneline
@@ -10420,7 +10322,7 @@ go build -o leogit ./cmd/leogit && ./leogit /path/to/any/git/repo
 
 **Test 2 — Commit with summary and description**:
 
-1. Stage another change
+1. Make another change
 2. Press `3`, type a summary: `Fix typo in README`
 3. Press `Tab` to move to the description field
 4. Type: `The README had a misspelling in the installation section.`
@@ -10439,17 +10341,17 @@ go build -o leogit ./cmd/leogit && ./leogit /path/to/any/git/repo
 4. The button bar should show "summary is required" in red
 5. No commit should be created (verify with `git log -1`)
 
-**Test 4 — Validation: no staged changes**:
+**Test 4 — Validation: no files selected**:
 
-1. Make sure nothing is staged: `git reset HEAD`
+1. Deselect all files with `a` (all should show `○`)
 2. Press `3`, type a summary: `This should fail`
 3. Press `ctrl+enter`
-4. The button bar should show "no staged changes — stage files first" in red
+4. The button bar should show "no files selected — select files first" in red
 5. No commit should be created
 
 **Test 5 — Double-commit prevention**:
 
-1. Stage some changes
+1. Make some changes (files will be selected by default)
 2. Press `3`, type a summary
 3. Press `ctrl+enter` rapidly multiple times
 4. Only one commit should be created (the `committing` flag prevents re-entry)
@@ -10457,26 +10359,27 @@ go build -o leogit ./cmd/leogit && ./leogit /path/to/any/git/repo
 
 **Test 6 — Error clears on next attempt**:
 
-1. Trigger a "no staged changes" error (Test 4)
+1. Trigger a "no files selected" error (Test 4)
 2. The button bar shows the error in red
-3. Stage a file: `git add somefile.txt`
+3. Select files with `a`
 4. Type a summary and press `ctrl+enter`
 5. The error should clear and the commit should succeed
 
-**Test 7 — Post-commit file list refresh**:
+**Test 7 — Partial commit (some files deselected)**:
 
-1. Have 3 changed files, stage 2 of them
-2. Press `3`, type a summary, press `ctrl+enter`
-3. After the commit succeeds:
-   - The 2 staged files should disappear from the Changed Files list
-   - The 1 unstaged file should remain
+1. Have 3 changed files (all show `●` by default)
+2. Deselect 1 file with `space` (it shows `○`)
+3. Press `3`, type a summary, press `ctrl+enter`
+4. After the commit succeeds:
+   - The 2 selected files should disappear from the Changed Files list
+   - The 1 deselected file should remain (still showing `●` as it's now the only file)
    - The file count in the pane title should update (e.g., "Changed Files (1)")
 
 **Test 8 — Post-commit diff viewer reset**:
 
-1. Select a staged file in the file list (Pane 1) and view its diff (Pane 2)
+1. Select a file in the file list (Pane 1) and view its diff (Pane 2)
 2. Press `3`, type a summary, press `ctrl+enter`
-3. After the commit: the file list updates, the previously selected file may be gone.
+3. After the commit: the file list updates, the previously viewed file may be gone.
    If the cursor was on a file that was committed, the diff pane should either show the
    diff of the new cursor position or be empty if no files remain.
 
@@ -10509,13 +10412,14 @@ go build -o leogit ./cmd/leogit && ./leogit /path/to/any/git/repo
    ```
    Note the blank line between summary and description.
 
-**Phase 10 is complete when**: pressing `ctrl+enter` with a non-empty summary and staged
-files creates a r eal git commit; the commit message is properly formatted with summary,
-blank line, and description; empty summary shows "summary is required" error; no staged
-changes shows "no staged changes" error; the button bar shows "Committing..." during
-execution; on success the fields clear and git status refreshes (committed files disappear
-from the changes list); double-commits are prevented by the `committing` guard; and the
-full AI-generate-then-commit flow works end-to-end.
+**Phase 10 is complete when**: pressing `ctrl+enter` with a non-empty summary and selected
+files creates a real git commit; the commit message is properly formatted with summary,
+blank line, and description; empty summary shows "summary is required" error; no files
+selected shows "no files selected" error; the app stages only selected files at commit time
+(resets index first, then stages); the button bar shows "Committing..." during execution;
+on success the fields clear and git status refreshes (committed files disappear from the
+changes list); deselected files remain after commit; double-commits are prevented by the
+`committing` guard; and the full AI-generate-then-commit flow works end-to-end.
 
 ## Phase 11 — Push
 
@@ -10919,8 +10823,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// ... existing cases (AIGenerateMsg, AICycleProviderMsg, AIResultMsg) ...
 
 	case components.CommitRequestMsg:
-		// User pressed ctrl+enter — validate and commit
-		return m, commitCmd(m.repoPath, msg.Summary, msg.Description)
+		// User pressed ctrl+enter — stage selected files and commit
+		selectedFiles := m.fileList.SelectedFiles()
+		return m, commitCmd(m.repoPath, selectedFiles, msg.Summary, msg.Description)
 
 	case components.CommitResultMsg:
 		// Commit completed (success or failure)
@@ -16379,8 +16284,7 @@ func splitParents(raw string) []string {
 
 // GetCommitFiles returns the list of files changed in a specific commit.
 // Uses git diff-tree to produce a name-status listing. The returned FileEntry
-// structs reuse the same types (StatusModified, StatusNew, etc.)
-// with Staged always false (commits don't have a staging concept).
+// structs reuse the same types (StatusModified, StatusNew, etc.).
 func GetCommitFiles(repoPath, sha string) ([]FileEntry, error) {
 	cmd := exec.Command("git",
 		"diff-tree",
