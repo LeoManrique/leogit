@@ -2254,8 +2254,15 @@ import (
 	"github.com/LeoManrique/leogit/internal/core"
 )
 
+// HeaderData holds the information needed to render the header bar.
+type HeaderData struct {
+	RepoName   string
+	BranchName string
+}
+
 // RenderHeader renders the top header bar with repo, branch, and action.
-func RenderHeader(repoName, branchName string, width int) string {
+func RenderHeader(data HeaderData, width int) string {
+	branchName := data.BranchName
 	if branchName == "" {
 		branchName = "(loading...)"
 	}
@@ -2283,7 +2290,7 @@ func RenderHeader(repoName, branchName string, width int) string {
 		Background(bg).
 		Render(" │ ")
 
-	left := repoStyle.Render("⎇ "+repoName) +
+	left := repoStyle.Render("⎇ "+data.RepoName) +
 		sep +
 		branchStyle.Render("ᚠ "+branchName) +
 		sep +
@@ -3013,7 +3020,10 @@ func (m Model) viewMain() string {
 	dim := layout.Calculate(m.width, m.height, m.terminalOpen, m.terminalHeight)
 
 	// ── Header + Tab bar ──
-	header := views.RenderHeader(git.RepoName(m.repoPath), "", dim.Width)
+	header := views.RenderHeader(views.HeaderData{
+		RepoName:   git.RepoName(m.repoPath),
+		BranchName: "",
+	}, dim.Width)
 	tabBar := views.RenderTabBar(m.activeTab, dim.Width)
 
 	// ── Sidebar column: pane 1 (top) + pane 3 (bottom) ──
@@ -3269,9 +3279,9 @@ func GetStatus(repoPath string) (RepoStatus, error) {
 	output := string(out)
 	result := RepoStatus{RawOutput: output}
 
-	// Header lines are always newline-terminated, even with -z.
-	// File entries after the headers are NUL-terminated.
-	for _, line := range strings.Split(output, "\n") {
+	// With -z, all records (headers and file entries) are NUL-terminated.
+	// Split on NUL to parse each record.
+	for _, line := range strings.Split(output, "\x00") {
 		// switch{} with no expression acts like if/else-if: each case is
 		// evaluated top-to-bottom, and the first true case runs.
 		switch {
@@ -4134,8 +4144,8 @@ func renderPane(title, placeholder string, width, height int, focused bool) stri
 10. **`View()` now sets `ReportFocus = true`**: enables `tea.FocusMsg` / `tea.BlurMsg`
     events when the terminal gains/loses focus. `AltScreen` and `MouseMode` were already
     set in prior phases
-11. **`viewMain()` updated**: builds a `views.HeaderData` struct and passes it to the
-    updated `RenderHeader()` function, which now shows real branch/ahead/behind data
+11. **`viewMain()` updated**: the `HeaderData` struct now includes real `BranchName`,
+    `Ahead`, `Behind`, and `HasUpstream` fields from model state
 
 **How the polling loop works**:
 
@@ -14089,19 +14099,7 @@ func formatDuration(d time.Duration) string {
 	}, dim.Width)
 ```
 
-**How the `viewMain()` header call changed from Phase 5**:
-
-In Phase 5, the header was rendered with positional arguments:
-```go
-header := views.RenderHeader(git.RepoName(m.repoPath), "", dim.Width)
-```
-
-Phase 5 later changed this to use `HeaderData`:
-```go
-header := views.RenderHeader(views.HeaderData{...}, dim.Width)
-```
-
-Now we add three new fields: `Fetching`, `Pulling`, `LastFetchTime`. The header shows a
+Now we add three new fields to `HeaderData`: `Fetching`, `Pulling`, `LastFetchTime`. The header shows a
 spinning indicator (`⟳ Fetching...` or `⟳ Pulling...`) when operations are in progress,
 and appends the time since last fetch (e.g., `↻ Fetch (28m)`) when idle.
 

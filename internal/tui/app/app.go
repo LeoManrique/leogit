@@ -2,6 +2,7 @@ package app
 
 import (
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -19,6 +20,15 @@ import (
 type authResultMsg struct{ authenticated bool }
 type repoResolvedMsg struct{ path string }
 type reposDiscoveredMsg struct{ repos []string }
+
+// statusTickMsg is sent every 2 seconds by the polling timer.
+type statusTickMsg struct{}
+
+// statusResultMsg carries the result of a git status command back to Update.
+type statusResultMsg struct {
+	status git.RepoStatus
+	err    error
+}
 
 // ── Commands ────────────────────────────────────────────
 
@@ -55,6 +65,25 @@ func discoverReposCmd(cfg *config.Config) tea.Cmd {
 		}
 		return reposDiscoveredMsg{repos: repos}
 	}
+}
+
+// refreshStatusCmd runs git status asynchronously and returns the result.
+func refreshStatusCmd(repoPath string) tea.Cmd {
+	return func() tea.Msg {
+		status, err := git.GetStatus(repoPath)
+		return statusResultMsg{status: status, err: err}
+	}
+}
+
+// startTickCmd starts the 2-second polling timer. When it fires, it sends a
+// statusTickMsg which triggers a status refresh. The timer is restarted after
+// each refresh completes, creating a continuous polling loop.
+func startTickCmd() tea.Cmd {
+	// tea.Tick waits for the given duration, then calls the callback.
+	// The callback receives the current time (t) and must return a tea.Msg.
+	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+		return statusTickMsg{}
+	})
 }
 
 // ── App State ───────────────────────────────────────────
@@ -94,6 +123,12 @@ type Model struct {
 	terminalHeight int
 	showHelp       bool
 	errorModal     views.ErrorModalModel
+
+	// Branch & status
+	branchName  string // current branch from git status
+	ahead       int    // commits ahead of upstream
+	behind      int    // commits behind upstream
+	hasUpstream bool   // whether an upstream tracking branch is configured
 }
 
 // New creates the root model with the loaded config and optional repo path.
@@ -149,7 +184,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.repoPath = msg.path
 			m.state = stateMain
 			m.saveRepoState()
-			return m, nil
+			// Start polling: fetch initial status + start the 2s tick timer
+			return m, tea.Batch(
+				refreshStatusCmd(m.repoPath),
+				startTickCmd(),
+			)
 		}
 		m.state = stateDiscoveringRepos
 		return m, discoverReposCmd(m.config)
@@ -166,10 +205,52 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.repoPath = msg.Path
 		m.state = stateMain
 		m.saveRepoState()
-		return m, nil
+		// Start polling: fetch initial status + start the 2s tick timer
+		return m, tea.Batch(
+			refreshStatusCmd(m.repoPath),
+			startTickCmd(),
+		)
 
 	case views.ErrorDismissedMsg:
-		// Modal already hidden by the modal's own Update — nothing to do
+		return m, nil
+
+	case statusTickMsg:
+		// Timer fired — refresh status and restart the timer.
+		// Only poll when in the main state (don't poll during auth/picker).
+		if m.state == stateMain {
+			return m, tea.Batch(
+				refreshStatusCmd(m.repoPath),
+				startTickCmd(),
+			)
+		}
+		return m, nil
+
+	case statusResultMsg:
+		if msg.err != nil {
+			// Status command failed — show error but keep polling.
+			// This can happen if the repo is deleted or git is broken.
+			m.errorModal = views.ShowError(
+				"Git Status Error",
+				"Failed to read repository status: "+msg.err.Error(),
+				true,
+				refreshStatusCmd(m.repoPath),
+				m.width, m.height,
+			)
+			return m, nil
+		}
+		// Update model with fresh status data
+		m.branchName = msg.status.Branch
+		m.ahead = msg.status.Ahead
+		m.behind = msg.status.Behind
+		m.hasUpstream = msg.status.HasUpstream
+		return m, nil
+
+	case tea.FocusMsg:
+		// Terminal gained focus (user switched back to this window).
+		// Trigger an immediate status refresh for instant feedback.
+		if m.state == stateMain {
+			return m, refreshStatusCmd(m.repoPath)
+		}
 		return m, nil
 
 	case tea.KeyPressMsg:
@@ -306,15 +387,20 @@ func (m *Model) saveRepoState() {
 
 // View renders the current state to the terminal.
 //
-// Returns tea.View (Bubbletea v2 API). The View struct lets us
-// declaratively set terminal features like AltScreen and MouseMode.
+// Returns tea.View (not string) — this is the proper Bubbletea v2 API.
+// The View struct lets us declaratively set terminal features:
+// - AltScreen: use the alternate screen buffer (fullscreen mode)
+// - MouseMode: enable mouse tracking for click/scroll events
+// - ReportFocus: receive tea.FocusMsg / tea.BlurMsg when the terminal gains/loses focus
 func (m Model) View() tea.View {
 	var content string
 
-	if !m.quitting {
+	if m.quitting {
+		content = ""
+	} else {
 		switch m.state {
 		case stateAuthChecking, stateResolvingRepo, stateDiscoveringRepos:
-			// brief blank screen during async operations
+			content = "" // brief blank screen during async operations
 		case stateAuthBlocked:
 			content = m.viewAuthBlocker()
 		case stateRepoPicker:
@@ -334,6 +420,7 @@ func (m Model) View() tea.View {
 	v := tea.NewView(content)
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
+	v.ReportFocus = true // enables tea.FocusMsg / tea.BlurMsg
 	return v
 }
 
@@ -385,7 +472,14 @@ func (m Model) viewMain() string {
 	dim := layout.Calculate(m.width, m.height, m.terminalOpen, m.terminalHeight)
 
 	// ── Header + Tab bar ──
-	header := views.RenderHeader(git.RepoName(m.repoPath), "", dim.Width)
+	headerData := views.HeaderData{
+		RepoName:    git.RepoName(m.repoPath),
+		BranchName:  m.branchName,
+		Ahead:       m.ahead,
+		Behind:      m.behind,
+		HasUpstream: m.hasUpstream,
+	}
+	header := views.RenderHeader(headerData, dim.Width)
 	tabBar := views.RenderTabBar(m.activeTab, dim.Width)
 
 	// ── Sidebar column: pane 1 (top) + pane 3 (bottom) ──
