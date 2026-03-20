@@ -1276,6 +1276,7 @@ package views
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -1488,7 +1489,7 @@ func (m RepoPickerModel) View() string {
 		// Show scroll indicator if list is truncated
 		if len(m.filtered) > maxVisible {
 			indicator := pathStyle.Render(
-				"  (" + strings.Itoa(m.cursor+1) + "/" + strings.Itoa(len(m.filtered)) + ")",
+				"  (" + strconv.Itoa(m.cursor+1) + "/" + strconv.Itoa(len(m.filtered)) + ")",
 			)
 			listLines = append(listLines, indicator)
 		}
@@ -1648,7 +1649,6 @@ type Model struct {
 	width    int
 	height   int
 	quitting bool
-
 	state        appState
 	authChecking bool // prevents spamming concurrent auth checks
 
@@ -14862,6 +14862,7 @@ already the active branch).
 package views
 
 import (
+	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -15309,7 +15310,7 @@ func (m BranchDropdownModel) View() string {
 		// Scroll indicator
 		if len(m.filtered) > maxVisible {
 			indicator := hintStyle.Render(
-				"  (" + strings.Itoa(m.cursor+1) + "/" + strings.Itoa(len(m.filtered)) + ")",
+				"  (" + strconv.Itoa(m.cursor+1) + "/" + strconv.Itoa(len(m.filtered)) + ")",
 			)
 			listLines = append(listLines, indicator)
 		}

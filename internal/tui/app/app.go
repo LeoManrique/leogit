@@ -9,40 +9,110 @@ import (
 
 	"github.com/LeoManrique/leogit/internal/config"
 	"github.com/LeoManrique/leogit/internal/gh"
+	"github.com/LeoManrique/leogit/internal/git"
+	"github.com/LeoManrique/leogit/internal/tui/views"
 )
+
+// ── Messages ────────────────────────────────────────────
 
 // authResultMsg carries the result of an auth check back to the Update loop.
 type authResultMsg struct {
 	authenticated bool
 }
 
-// checkAuthCmd runs the auth check in a goroutine and returns the result as a message.
-// This is a Bubbletea Cmd — it runs asynchronously so it doesn't block the UI.
-//
-// Note: a tea.Cmd is defined as `func() tea.Msg`. This function has exactly that
-// signature (no parameters, returns tea.Msg), so it can be used anywhere a tea.Cmd
-// is expected — for example, returned from Init() or Update().
+// repoResolvedMsg is sent when the startup flow has determined which repo to open.
+// If path is empty, no repo could be resolved (need to show picker).
+type repoResolvedMsg struct {
+	path string
+}
+
+// reposDiscoveredMsg carries the list of discovered repos for the picker.
+type reposDiscoveredMsg struct {
+	repos []string
+}
+
+// ── Commands ────────────────────────────────────────────
+
+// checkAuthCmd runs the auth check asynchronously.
 func checkAuthCmd() tea.Msg {
 	return authResultMsg{authenticated: gh.CheckAuth()}
 }
 
+// resolveRepoCmd tries CLI arg → last opened → gives up (empty string).
+func resolveRepoCmd(cliPath string) tea.Cmd {
+	return func() tea.Msg {
+		// 1. CLI argument
+		if cliPath != "" && git.IsGitRepo(cliPath) {
+			return repoResolvedMsg{path: cliPath}
+		}
+
+		// 2. Last opened from state file
+		state, err := config.LoadState()
+		if err == nil && state.LastOpened != "" && git.IsGitRepo(state.LastOpened) {
+			return repoResolvedMsg{path: state.LastOpened}
+		}
+
+		// 3. No repo found — the picker will be shown
+		return repoResolvedMsg{path: ""}
+	}
+}
+
+// discoverReposCmd scans for repos based on the config.
+func discoverReposCmd(cfg *config.Config) tea.Cmd {
+	return func() tea.Msg {
+		var repos []string
+
+		switch cfg.Repos.Mode {
+		case "manual":
+			// Use manually listed paths, validate each one
+			for _, p := range cfg.Repos.ManualPaths {
+				expanded := git.ExpandTilde(p)
+				if git.IsGitRepo(expanded) {
+					repos = append(repos, expanded)
+				}
+			}
+		default: // "folders" or any unrecognized mode
+			repos = git.DiscoverRepos(cfg.Repos.ScanPaths, cfg.Repos.ScanDepth)
+		}
+
+		return reposDiscoveredMsg{repos: repos}
+	}
+}
+
+// ── App State ───────────────────────────────────────────
+
+// appState tracks which screen the app is on.
+type appState int
+
+const (
+	stateAuthChecking     appState = iota // waiting for first auth check
+	stateAuthBlocked                      // auth failed, showing blocker
+	stateResolvingRepo                    // trying CLI arg / last opened
+	stateDiscoveringRepos                 // scanning for repos
+	stateRepoPicker                       // showing the repo picker
+	stateMain                             // repo is open, normal UI
+)
+
 // Model is the root Bubbletea model for the entire application.
 type Model struct {
-	config        *config.Config
-	repoPath      string // from CLI arg, may be empty
-	width         int    // terminal width (updated by WindowSizeMsg)
-	height        int    // terminal height (updated by WindowSizeMsg)
-	quitting      bool
-	authenticated bool // true once gh auth check passes
-	authChecking  bool // true while an auth check is in progress (prevents spamming)
-	authChecked   bool // true after the first auth check completes (hides loading flicker)
+	config       *config.Config
+	cliPath      string // original CLI arg (may be empty)
+	repoPath     string // resolved repo path (set once a repo is chosen)
+	width        int
+	height       int
+	quitting     bool
+	state        appState
+	authChecking bool // prevents spamming concurrent auth checks
+
+	repoPicker views.RepoPickerModel
 }
 
 // New creates the root model with the loaded config and optional repo path.
 func New(cfg *config.Config, repoPath string) Model {
 	return Model{
 		config:       cfg,
-		repoPath:     repoPath,
+		cliPath:      repoPath,
+		state:        stateAuthChecking,
 		authChecking: true,
 	}
 }
@@ -52,44 +122,88 @@ func (m Model) Init() tea.Cmd {
 	return checkAuthCmd
 }
 
-// Update handles all incoming messages (key presses, window resize, etc).
+// Update handles all incoming messages.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Type switch: `msg := msg.(type)` tests what concrete type the msg is.
-	// The outer `msg` is the interface (tea.Msg); the inner `msg` becomes the
-	// concrete type (e.g. tea.KeyPressMsg) — Go lets you shadow the variable.
 	switch msg := msg.(type) {
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		// Forward to picker if active
+		if m.state == stateRepoPicker {
+			var cmd tea.Cmd
+			m.repoPicker, cmd = m.repoPicker.Update(msg)
+			return m, cmd
+		}
 		return m, nil
 
 	case authResultMsg:
-		m.authenticated = msg.authenticated
 		m.authChecking = false
-		m.authChecked = true
+		if msg.authenticated {
+			// Auth passed → resolve repo
+			m.state = stateResolvingRepo
+			return m, resolveRepoCmd(m.cliPath)
+		}
+		m.state = stateAuthBlocked
+		return m, nil
+
+	case repoResolvedMsg:
+		if msg.path != "" {
+			// We have a repo — open it
+			m.repoPath = msg.path
+			m.state = stateMain
+			m.saveRepoState()
+			return m, nil
+		}
+		// No repo found — discover repos for the picker
+		m.state = stateDiscoveringRepos
+		return m, discoverReposCmd(m.config)
+
+	case reposDiscoveredMsg:
+		m.repoPicker = views.NewRepoPicker(msg.repos)
+		// Forward the current window size to the picker
+		m.repoPicker, _ = m.repoPicker.Update(tea.WindowSizeMsg{
+			Width: m.width, Height: m.height,
+		})
+		m.state = stateRepoPicker
+		return m, nil
+
+	case views.RepoSelectedMsg:
+		m.repoPath = msg.Path
+		m.state = stateMain
+		m.saveRepoState()
 		return m, nil
 
 	case tea.KeyPressMsg:
-		// If not authenticated, any keypress triggers a re-check
-		if !m.authenticated && m.authChecked {
-			// Always allow quitting, even from the blocker
-			if msg.String() == "ctrl+c" {
-				m.quitting = true
-				return m, tea.Quit
-			}
+		return m.handleKey(msg)
+	}
 
-			// Don't spam auth checks — without this guard, every rapid keypress
-			// would spawn a new goroutine running `gh auth status`. authChecking
-			// acts as a lock: set true here, reset to false when authResultMsg arrives.
-			if !m.authChecking {
-				m.authChecking = true
-				return m, checkAuthCmd
-			}
-			return m, nil
+	return m, nil
+}
+
+// handleKey processes key messages based on current state.
+// Returns (Model, tea.Cmd) not (tea.Model, tea.Cmd) — Go auto-converts because Model satisfies tea.Model.
+func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
+	switch m.state {
+
+	case stateAuthBlocked:
+		if msg.String() == "ctrl+c" {
+			m.quitting = true
+			return m, tea.Quit
 		}
+		// Any other key → re-check auth
+		if !m.authChecking {
+			m.authChecking = true
+			return m, checkAuthCmd
+		}
+		return m, nil
 
-		// Normal key handling (only reached when authenticated)
+	case stateRepoPicker:
+		var cmd tea.Cmd
+		m.repoPicker, cmd = m.repoPicker.Update(msg)
+		return m, cmd
+
+	case stateMain:
 		switch msg.String() {
 		case "q", "ctrl+c":
 			m.quitting = true
@@ -100,6 +214,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// saveRepoState records the opened repo in repos-state.json.
+func (m *Model) saveRepoState() {
+	state, err := config.LoadState()
+	if err != nil {
+		return // silently ignore — state persistence is best-effort
+	}
+	state.SetLastOpened(m.repoPath)
+	_ = config.SaveState(state) // best-effort
+}
+
 // View renders the current state to the terminal.
 //
 // Returns tea.View (Bubbletea v2 API). The View struct lets us
@@ -107,14 +231,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) View() tea.View {
 	var content string
 
-	if m.quitting {
-		// empty content
-	} else if !m.authChecked {
-		// While waiting for the first auth check, show nothing (avoids flicker)
-	} else if !m.authenticated {
-		content = m.viewAuthBlocker()
-	} else {
-		content = m.viewMain()
+	if !m.quitting {
+		switch m.state {
+		case stateAuthChecking, stateResolvingRepo, stateDiscoveringRepos:
+			// brief blank screen during async operations
+		case stateAuthBlocked:
+			content = m.viewAuthBlocker()
+		case stateRepoPicker:
+			content = m.repoPicker.View()
+		case stateMain:
+			content = m.viewMain()
+		}
 	}
 
 	v := tea.NewView(content)
@@ -125,7 +252,6 @@ func (m Model) View() tea.View {
 
 // viewAuthBlocker renders a fullscreen centered message telling the user to log in.
 func (m Model) viewAuthBlocker() string {
-	// ── Styles ──────────────────────────────────────────
 	titleStyle := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(lipgloss.Color("#FF0000")).
@@ -143,7 +269,6 @@ func (m Model) viewAuthBlocker() string {
 		Foreground(lipgloss.Color("#666666")).
 		Align(lipgloss.Center)
 
-	// ── Content ─────────────────────────────────────────
 	title := titleStyle.Render("Authentication Required")
 
 	message := messageStyle.Render(
@@ -154,7 +279,6 @@ func (m Model) viewAuthBlocker() string {
 
 	hint := hintStyle.Render("Press any key to retry • Ctrl+C to quit")
 
-	// ── Box ─────────────────────────────────────────────
 	boxContent := strings.Join([]string{
 		title,
 		"",
@@ -173,7 +297,6 @@ func (m Model) viewAuthBlocker() string {
 
 	box := boxStyle.Render(boxContent)
 
-	// ── Center on screen ────────────────────────────────
 	fullscreen := lipgloss.NewStyle().
 		Width(m.width).
 		Height(m.height).
@@ -182,7 +305,7 @@ func (m Model) viewAuthBlocker() string {
 	return fullscreen.Render(box)
 }
 
-// viewMain renders the normal app content (expanded later).
+// viewMain renders the normal app content (expanded in later phases).
 func (m Model) viewMain() string {
 	repoDisplay := m.repoPath
 	if repoDisplay == "" {
@@ -193,7 +316,7 @@ func (m Model) viewMain() string {
 		"leogit",
 		"",
 		fmt.Sprintf("Config loaded: %s", m.config.Appearance.Theme),
-		fmt.Sprintf("Repo path: %s", repoDisplay),
+		fmt.Sprintf("Repo: %s (%s)", git.RepoName(m.repoPath), m.repoPath),
 		fmt.Sprintf("Terminal: %dx%d", m.width, m.height),
 		"",
 		"Press q to quit",
