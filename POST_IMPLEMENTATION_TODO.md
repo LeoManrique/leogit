@@ -2,3 +2,4 @@
 2. Diff viewer should be updated when the file is selected / highlighted, no need to press enter. Lets check how not to use too much memory for this.
 3. Word wrapper in diff viewer should not affect line number side column.
 4. Mouse support for selecting files.
+5. Line selector is too dimm

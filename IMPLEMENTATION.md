@@ -4785,7 +4785,7 @@ func (m FileListModel) Update(msg tea.Msg) (FileListModel, tea.Cmd) {
 		// Handling them here as no-ops prevents them from bubbling up
 		// to the global key handler (where 'a' might conflict with
 		// future shortcuts).
-		case " ":
+		case "space":
 			// toggle selection for the selected file (Phase 8)
 			return m, nil
 
@@ -7703,7 +7703,7 @@ func (m FileListModel) AnyDeselected() bool {
 **Replace the `space` and `a` cases** in the `Update()` method:
 
 ```go
-		case " ":
+		case "space":
 			// Toggle selection for the current file (in-memory only, no git commands)
 			if len(m.Files) > 0 && m.cursor < len(m.Files) {
 				path := m.Files[m.cursor].Path
@@ -7723,7 +7723,15 @@ func (m FileListModel) AnyDeselected() bool {
 			return m, nil
 ```
 
-**Update the rendering** in `View()` — use `m.IsSelected()` instead of `file.Staged`:
+**Update the rendering** in `View()` — add a new style and replace the indicator logic:
+
+First, add `deselectedStyle` next to the existing `selectedStyle` in the styles section:
+
+```go
+	deselectedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#484F58"))
+```
+
+Then, in the render loop, replace the Phase 6 indicator line with:
 
 ```go
 		// Selection indicator: ● selected (will be committed), ○ excluded
@@ -7890,7 +7898,7 @@ func (m DiffViewModel) Update(msg tea.Msg) (DiffViewModel, tea.Cmd) {
 			}
 			m.clampOffset()
 
-		case " ":
+		case "space":
 			// Toggle selection on the current line
 			if m.totalLines > 0 && m.selection.IsSelectable(m.cursor) {
 				m.selection = m.selection.WithToggle(m.cursor)
@@ -12565,7 +12573,7 @@ func (m SettingsModel) handleNavigateKey(msg tea.KeyPressMsg) (SettingsModel, te
 		m.moveUp()
 		return m, nil
 
-	case " ":
+	case "space":
 		// Toggle or cycle the current item
 		item := &m.items[m.cursor]
 		switch item.Type {
