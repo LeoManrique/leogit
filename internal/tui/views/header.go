@@ -15,6 +15,7 @@ type HeaderData struct {
 	Ahead       int
 	Behind      int
 	HasUpstream bool
+	Pushing     bool // true while a push is in progress
 }
 
 // RenderHeader renders the top header bar with repo name, branch, ahead/behind
@@ -88,8 +89,12 @@ func RenderHeader(data HeaderData, width int) string {
 
 // actionLabel returns the quick action text based on ahead/behind state.
 func actionLabel(data HeaderData) string {
+	if data.Pushing {
+		return "↑ Pushing..."
+	}
+
 	if !data.HasUpstream {
-		return "↻ Fetch"
+		return "↑ Publish branch"
 	}
 
 	switch {

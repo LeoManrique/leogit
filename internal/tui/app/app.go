@@ -35,6 +35,11 @@ type statusResultMsg struct {
 	err    error
 }
 
+// pushResultMsg is sent when the async git push completes (success or error).
+type pushResultMsg struct {
+	err error
+}
+
 // ── Commands ────────────────────────────────────────────
 
 func checkAuthCmd() tea.Msg {
@@ -140,6 +145,10 @@ type Model struct {
 	commitMsg   components.CommitMsgModel
 	aiProviders []ai.CommitMessageProvider // available providers
 	aiActiveIdx int                        // index into aiProviders
+
+	// Push state
+	pushing  bool   // true while push is in progress (prevents double-push)
+	upstream string // upstream tracking ref (e.g., "origin/main"), empty if none
 }
 
 // New creates the root model with the loaded config and optional repo path.
@@ -274,6 +283,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ahead = msg.status.Ahead
 		m.behind = msg.status.Behind
 		m.hasUpstream = msg.status.HasUpstream
+		m.upstream = msg.status.Upstream //save upstream for push
 		// Parse and update changed files
 		files := git.ParseFiles(msg.status.RawOutput)
 		m.fileList.SetFiles(files)
@@ -340,6 +350,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Commit succeeded — clear fields and refresh status.
 		// asynchronously and sends a statusResultMsg to update the file list.
 		m.commitMsg.CommitSuccess()
+		return m, refreshStatusCmd(m.repoPath)
+
+	case pushResultMsg:
+		m.pushing = false
+		if msg.err != nil {
+			m.errorModal = views.ShowError(
+				"Push Failed",
+				msg.err.Error(),
+				false, // not retryable — user should inspect the error
+				nil,
+				m.width, m.height,
+			)
+			return m, nil
+		}
+		// Push succeeded — refresh status to update ahead/behind counts.
+		// refreshStatusCmd triggers a new `git status --porcelain=2` call, which will
+		// report `# branch.ab +0 -0` after a successful push, so the statusResultMsg
+		// handler sets ahead=0 and the header label switches from "↑ Push" to "↻ Fetch".
 		return m, refreshStatusCmd(m.repoPath)
 
 	case tea.KeyPressMsg:
@@ -479,6 +507,22 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		// Recalculate file list size since terminal toggle changes available height
 		m.updateFileListSize()
 		return m, nil
+
+	case "p":
+		// Push to remote
+		if m.pushing {
+			return m, nil // already pushing
+		}
+		if m.branchName == "" {
+			// Detached HEAD — can't push.
+			// When HEAD is detached, `git status --porcelain=2` reports `# branch.oid <sha>`
+			// but the `# branch.head` line contains `(detached)` instead of a branch name.
+			// The status parser sets `Branch` to "" in that case, so an empty
+			// branchName here means we're in detached HEAD state and there's no branch to push.
+			return m, nil
+		}
+		m.pushing = true
+		return m, pushCmd(m.repoPath, m.branchName, m.upstream, m.hasUpstream)
 
 	case "esc":
 		// Already navigable — Esc is a no-op
@@ -629,12 +673,14 @@ func (m Model) viewMain() string {
 	dim := layout.Calculate(m.width, m.height, m.terminalOpen, m.terminalHeight)
 
 	// ── Header + Tab bar ──
+	// ── Header + Tab bar ──
 	headerData := views.HeaderData{
 		RepoName:    git.RepoName(m.repoPath),
 		BranchName:  m.branchName,
 		Ahead:       m.ahead,
 		Behind:      m.behind,
 		HasUpstream: m.hasUpstream,
+		Pushing:     m.pushing, // show pushing state in header
 	}
 	header := views.RenderHeader(headerData, dim.Width)
 	tabBar := views.RenderTabBar(m.activeTab, dim.Width)
@@ -846,5 +892,45 @@ func commitCmd(repoPath string, selectedFiles []git.FileEntry, summary, descript
 		}
 
 		return components.CommitResultMsg{Err: nil}
+	}
+}
+
+// pushCmd runs git push asynchronously.
+// It determines the remote from the upstream ref (if set) or falls back to the default
+// remote. If there's no upstream, --set-upstream is added to create one.
+func pushCmd(repoPath, branchName, upstream string, hasUpstream bool) tea.Cmd {
+	// Bubbletea runs tea.Cmd functions in a background goroutine so the push
+	// doesn't block the UI thread (the TUI stays responsive and can render
+	// "Pushing..." in the header). The returned closure captures the outer
+	// function's parameters (repoPath, branchName, etc.) so they're available
+	// when the goroutine executes. When the closure returns a tea.Msg, bubbletea
+	// delivers it back to Update() on the main thread.
+	return func() tea.Msg {
+		// Determine the remote to push to
+		var remote string
+		if hasUpstream && upstream != "" {
+			remote = git.RemoteFromUpstream(upstream)
+		} else {
+			// No upstream — discover the default remote
+			var err error
+			remote, err = git.GetDefaultRemote(repoPath)
+			if err != nil {
+				return pushResultMsg{err: fmt.Errorf("cannot push: %s", err)}
+			}
+		}
+
+		// Build push options
+		opts := git.PushOptions{
+			Remote:      remote,
+			Branch:      branchName,
+			SetUpstream: !hasUpstream, // auto-set upstream on first push
+		}
+
+		// Execute the push
+		if err := git.Push(repoPath, opts); err != nil {
+			return pushResultMsg{err: err}
+		}
+
+		return pushResultMsg{err: nil}
 	}
 }
