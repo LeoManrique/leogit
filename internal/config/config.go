@@ -116,37 +116,64 @@ func configDir() (string, error) {
 	return filepath.Join(base, "leogit"), nil
 }
 
-// Load reads the config file and merges it into defaults.
-// If the file does not exist, it creates the config directory and writes
-// a default config file so the user can find and edit it later.
+// Path returns the config file path using the OS-appropriate directory
+// (via configDir() defined in config.go — same package).
+func Path() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "config.toml"), nil
+}
+
+// Save writes the current config to the TOML file.
+// Creates the parent directory if it doesn't exist.
+func Save(cfg *Config) error {
+	path, err := Path()
+	if err != nil {
+		return err
+	}
+
+	// Ensure the directory exists
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	encoder := toml.NewEncoder(f)
+	return encoder.Encode(cfg)
+}
+
 func Load() (*Config, error) {
 	cfg := newDefaultConfig()
 
-	dir, err := configDir()
+	path, err := Path()
 	if err != nil {
 		return nil, err
 	}
 
-	path := filepath.Join(dir, "config.toml")
-
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			// Create the config directory and write a default config file
-			// so the user knows where to find it and can edit it.
+			// Create directory and default config
+			dir := filepath.Dir(path)
 			if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
-				return cfg, nil // silently use defaults if we can't create the dir
+				return cfg, nil
 			}
 			if writeErr := writeDefaultConfig(path, cfg); writeErr != nil {
-				return cfg, nil // silently use defaults if we can't write
+				return cfg, nil
 			}
 			return cfg, nil
 		}
 		return nil, err
 	}
 
-	// Unmarshal decodes the TOML data into `cfg`. Because `cfg` already has
-	// defaults, only the fields present in the file get overwritten.
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return nil, err
 	}

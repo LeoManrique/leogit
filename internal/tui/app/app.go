@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/LeoManrique/leogit/internal/tui/render"
 
 	"github.com/LeoManrique/leogit/internal/ai"
 	"github.com/LeoManrique/leogit/internal/config"
@@ -152,6 +153,11 @@ type Model struct {
 
 	// Embedded terminal
 	terminal components.TerminalModel // PTY + bubbleterm component
+
+	// Settings & theme
+	showSettings bool                // true when the settings overlay is visible
+	settings     views.SettingsModel // settings overlay state
+	theme        render.Theme        // active color palette
 }
 
 // New creates the root model with the loaded config and optional repo path.
@@ -185,6 +191,8 @@ func New(cfg *config.Config, repoPath string) Model {
 		aiActiveIdx:  0,
 		// Terminal
 		terminal: components.NewTerminal(""), // repoPath set later when repo is resolved
+		// Theme
+		theme: render.CurrentTheme(cfg.Appearance.Theme),
 	}
 }
 
@@ -212,10 +220,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.errorModal.Visible {
 			m.errorModal, _ = m.errorModal.Update(msg)
 		}
-		// Update file list dimensions and resize terminal when in main state
+		// Keep settings dimensions in sync
+		if m.showSettings {
+			m.settings, _ = m.settings.Update(msg)
+		}
+		// Update layout and resize terminal when in main state
 		if m.state == stateMain {
 			m.updateFileListSize()
-			// Resize terminal if it's open and started
 			if m.terminalOpen && m.terminal.Started() {
 				dim := layout.Calculate(m.width, m.height, m.terminalOpen, m.terminalHeight)
 				innerW := dim.MainWidth - 2
@@ -389,6 +400,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 	// Forward bubbleterm internal messages (PTY output, ticks)
 	// These must reach the terminal even when it's not focused.
+	case views.SettingsClosedMsg:
+		m.showSettings = false
+		return m, nil
+
+	case views.SettingsChangedMsg:
+		// React to specific setting changes
+		switch msg.Key {
+		case "appearance.theme":
+			m.theme = render.CurrentTheme(m.config.Appearance.Theme)
+		case "git.fetch_interval":
+			// The next tick will pick up the new interval automatically
+			// because startTickCmd reads from m.config.Git.FetchInterval.
+			// No action needed here — the timer restarts on its own.
+		}
+		return m, nil
 	default:
 		if m.terminalOpen && m.terminal.Started() {
 			var cmd tea.Cmd
@@ -428,8 +454,14 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 
-	switch m.state {
+	// Settings overlay intercepts all keys when visible
+	if m.showSettings {
+		var cmd tea.Cmd
+		m.settings, cmd = m.settings.Update(msg)
+		return m, cmd
+	}
 
+	switch m.state {
 	case stateAuthBlocked:
 		// Any key → re-check auth
 		if !m.authChecking {
@@ -632,6 +664,12 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		m.pushing = true
 		return m, pushCmd(m.repoPath, m.branchName, m.upstream, m.hasUpstream)
 
+	case "S":
+		// Open settings overlay
+		m.showSettings = true
+		m.settings = views.NewSettings(m.config, m.width, m.height)
+		return m, nil
+
 	case "esc":
 		// Already navigable — Esc is a no-op
 		return m, nil
@@ -717,8 +755,9 @@ func (m Model) View() tea.View {
 		case stateRepoPicker:
 			content = m.repoPicker.View()
 		case stateMain:
-			// Overlays take over the full screen when active
-			if m.errorModal.Visible {
+			if m.showSettings {
+				content = m.settings.View()
+			} else if m.errorModal.Visible {
 				content = m.errorModal.View()
 			} else if m.showHelp {
 				content = views.RenderHelpOverlay(m.width, m.height)
@@ -878,6 +917,35 @@ func renderPane(title, content string, width, height int, focused bool) string {
 	}
 
 	// Border adds 2 to width and 2 to height, so subtract to hit target outer size
+	innerW := width - 2
+	innerH := height - 2
+	if innerW < 1 {
+		innerW = 1
+	}
+	if innerH < 1 {
+		innerH = 1
+	}
+
+	titleLine := lipgloss.NewStyle().Bold(true).Foreground(titleColor).Render(title)
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(borderColor).
+		Width(innerW).
+		Height(innerH).
+		Render(titleLine + "\n" + content)
+}
+
+// renderPaneThemed draws a bordered box using theme colors.
+// This replaces the hardcoded colors in renderPane().
+func renderPaneThemed(title, content string, width, height int, focused bool, theme render.Theme) string {
+	borderColor := theme.BorderInactive
+	titleColor := theme.TextSecondary
+	if focused {
+		borderColor = theme.BorderActive
+		titleColor = theme.BorderActive
+	}
+
 	innerW := width - 2
 	innerH := height - 2
 	if innerW < 1 {

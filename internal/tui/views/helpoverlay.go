@@ -41,6 +41,8 @@ func RenderHelpOverlay(width, height int) string {
 		row("Tab", "Switch Changes / History tab"),
 		row("q", "Quit"),
 		row("?", "Toggle this help"),
+		// Settings section (add to the help rows)
+		row("S", "Open settings"),
 		row("Esc", "Unfocus pane / dismiss modal"),
 		row("Ctrl+C", "Quit (always works)"),
 		"",
