@@ -22,4 +22,6 @@ be a thing section to suggest the user to expand it.
 11. Fix when refocusing the terminal, the borders go blue but I cant type anything.
 12. Fix terminal resizing doesnt work
 13. Cant press space on terminal nor control X or some shortcuts in general
-14. 
+14. Check if that when not selecting a file that is internally stashed, it is still not considered for commit.
+15. Fix - Settings are not scrollable
+16. Fix - q should also exit settings, so double q closes the app from settings

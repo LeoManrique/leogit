@@ -12925,6 +12925,7 @@ and a `CurrentTheme()` function returns the active palette based on the config v
 package render
 
 import (
+	"image/color"
 	"os"
 
 	"charm.land/lipgloss/v2"
@@ -12932,36 +12933,39 @@ import (
 
 // Theme holds all colors used across the application.
 // Components read from this struct instead of hardcoding colors.
+// Note: In lipgloss v2, lipgloss.Color() is a function that returns color.Color,
+// not a type. So struct fields use color.Color while the initializers use
+// lipgloss.Color("...") to create the values.
 type Theme struct {
 	// Backgrounds
-	HeaderBg  lipgloss.Color
-	TabBarBg  lipgloss.Color
-	PaneBg    lipgloss.Color
+	HeaderBg  color.Color
+	TabBarBg  color.Color
+	PaneBg    color.Color
 
 	// Borders
-	BorderActive   lipgloss.Color
-	BorderInactive lipgloss.Color
+	BorderActive   color.Color
+	BorderInactive color.Color
 
 	// Text
-	TextPrimary   lipgloss.Color
-	TextSecondary lipgloss.Color
-	TextMuted     lipgloss.Color
+	TextPrimary   color.Color
+	TextSecondary color.Color
+	TextMuted     color.Color
 
 	// Status colors (shared across themes)
-	StatusGreen  lipgloss.Color
-	StatusRed    lipgloss.Color
-	StatusYellow lipgloss.Color
-	StatusBlue   lipgloss.Color
+	StatusGreen  color.Color
+	StatusRed    color.Color
+	StatusYellow color.Color
+	StatusBlue   color.Color
 
 	// Cursor / selection
-	CursorBg lipgloss.Color
-	CursorFg lipgloss.Color
+	CursorBg color.Color
+	CursorFg color.Color
 
 	// Diff colors
-	DiffAddBg    lipgloss.Color
-	DiffRemoveBg lipgloss.Color
-	DiffAddFg    lipgloss.Color
-	DiffRemoveFg lipgloss.Color
+	DiffAddBg    color.Color
+	DiffRemoveBg color.Color
+	DiffAddFg    color.Color
+	DiffRemoveFg color.Color
 }
 
 // DarkTheme returns the default dark color palette (GitHub Dark-inspired).
