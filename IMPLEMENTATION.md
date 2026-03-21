@@ -8241,7 +8241,7 @@ import (
 
 // ── Messages ────────────────────────────────────────────
 
-// CommitRequestMsg is sent when the user presses ctrl+enter to commit.
+// CommitRequestMsg is sent when the user presses ctrl+x (or ctrl+enter) to commit.
 // The app handles the actual git commit.
 type CommitRequestMsg struct {
 	Summary     string
@@ -8430,7 +8430,7 @@ func (m CommitMsgModel) Update(msg tea.Msg) (CommitMsgModel, tea.Cmd) {
 			// Cycle AI provider
 			return m, func() tea.Msg { return AICycleProviderMsg{} }
 
-		case "ctrl+enter":
+		case "ctrl+x", "ctrl+enter":
 			// Request commit (handled by app)
 			summary := m.Summary()
 			if summary != "" {
@@ -8473,7 +8473,7 @@ func (m CommitMsgModel) View() string {
 	// Description field
 	sections = append(sections, m.description.View())
 
-	// Button bar: [AI: Provider] [ctrl+g Generate] [ctrl+enter Commit]
+	// Button bar: [AI: Provider] [ctrl+g Generate] [ctrl+x Commit]
 	buttonBar := m.renderButtonBar()
 	sections = append(sections, buttonBar)
 
@@ -8520,7 +8520,7 @@ func (m CommitMsgModel) renderButtonBar() string {
   user leaves the pane.
 - **AI shortcuts**: `ctrl+g` emits `AIGenerateMsg` (the app catches this and runs the active
   provider). `ctrl+p` emits `AICycleProviderMsg` (the app cycles the provider list).
-  `ctrl+enter` emits `CommitRequestMsg` (handled in Phase 10).
+  `ctrl+x` (or `ctrl+enter`) emits `CommitRequestMsg` (handled in Phase 10).
 - **Loading state**: `aiLoading` is set to `true` when generation starts, and the button bar
   shows a spinner. When `AIResultMsg` arrives, `SetAIResult()` fills both fields and clears
   the loading state.
@@ -9261,7 +9261,7 @@ func generateCommitMsgCmd(repoPath string, selectedFiles []git.FileEntry, provid
 		return m, nil
 
 	case components.CommitRequestMsg:
-		// User pressed ctrl+enter — commit
+		// User pressed ctrl+x / ctrl+enter — commit
 		// For now, just acknowledge the request
 		return m, nil
 ```
@@ -9480,8 +9480,9 @@ tavernari/git-commit-message:latest`), some files selected.
 
 **Test 10 — Commit request (Phase 10 no-op)**:
 
-With text in the summary field, press `ctrl+enter`. Nothing should happen yet (the commit
-execution is Phase 10), but no crash should occur. The `CommitRequestMsg` is silently handled.
+With text in the summary field, press `ctrl+x` (or `ctrl+enter` if your terminal supports it).
+Nothing should happen yet (the commit execution is Phase 10), but no crash should occur.
+The `CommitRequestMsg` is silently handled.
 
 **Test 11 — Resize handling**:
 
@@ -9498,14 +9499,21 @@ text input and description textarea; `Tab` switches between summary and descript
 exits focused mode; `ctrl+p` cycles between Claude and Ollama providers; `ctrl+g` generates
 a commit message from the selected files' diff using the active provider; the button bar shows the
 active provider, loading spinner during generation, and error messages on failure; generated
-messages fill both fields; and `ctrl+enter` emits a commit request (handled in Phase 10).
+messages fill both fields; and `ctrl+x` (or `ctrl+enter`) emits a commit request (handled in Phase 10).
 
 ## Phase 10 — Commit
 
-**Goal**: Execute `git commit` when the user presses `ctrl+enter` in the commit message pane,
+**Goal**: Execute `git commit` when the user presses `ctrl+x` (or `ctrl+enter`) in the commit message pane,
 with proper validation (non-empty summary, selected files present), message formatting with
 optional co-author trailers, and a full post-commit refresh that clears the fields, reloads
 git status, and resets the diff viewer.
+
+> **Terminal compatibility note**: Most terminal emulators do not pass `ctrl+enter` through to
+> TUI applications. macOS Terminal.app intercepts it to open the "New Tab with Profile" menu,
+> iTerm2 requires custom key mapping configuration, and many other terminals either swallow
+> the keystroke or send the same escape sequence as plain `enter`. To ensure leogit works
+> out-of-the-box, `ctrl+x` is the primary commit shortcut. `ctrl+enter` is also supported
+> as an alias for terminals that do pass it through.
 
 This is where leogit's in-memory selection meets git's staging area. At commit time, the
 app first **resets the index** (to clear any external staging), then **stages only the
@@ -9521,7 +9529,7 @@ This phase introduces:
 4. **App integration** — handles `CommitRequestMsg` with validation, async commit execution,
    success/error feedback, field clearing, and status refresh
 
-After this phase, pressing `ctrl+enter` with a non-empty summary and selected files creates a
+After this phase, pressing `ctrl+x` (or `ctrl+enter`) with a non-empty summary and selected files creates a
 real git commit. If validation fails (no summary or no files selected), the commit message pane
 shows an error in the button bar. On success, the summary and description fields are cleared,
 the git status refreshes (showing the committed files are gone from the changes list), and the
@@ -9697,10 +9705,10 @@ type CommitResultMsg struct {
 }
 ```
 
-**Update `ctrl+enter` handler** in `Update()` — add a committing guard and clear commit error:
+**Update `ctrl+x`/`ctrl+enter` handler** in `Update()` — add a committing guard and clear commit error:
 
 ```go
-		case "ctrl+enter":
+		case "ctrl+x", "ctrl+enter":
 			// Request commit (handled by app)
 			if m.committing {
 				return m, nil // already committing
@@ -9812,7 +9820,7 @@ import (
 
 // ── Messages ────────────────────────────────────────────
 
-// CommitRequestMsg is sent when the user presses ctrl+enter to commit.
+// CommitRequestMsg is sent when the user presses ctrl+x (or ctrl+enter) to commit.
 // The app handles the actual git commit.
 type CommitRequestMsg struct {
 	Summary     string
@@ -10025,7 +10033,7 @@ func (m CommitMsgModel) Update(msg tea.Msg) (CommitMsgModel, tea.Cmd) {
 			// Cycle AI provider
 			return m, func() tea.Msg { return AICycleProviderMsg{} }
 
-		case "ctrl+enter":
+		case "ctrl+x", "ctrl+enter":
 			// Request commit (handled by app)
 			if m.committing {
 				return m, nil // already committing
@@ -10124,9 +10132,9 @@ func (m CommitMsgModel) renderButtonBar() string {
 1. **New `CommitResultMsg`**: message sent when the git commit completes (success or error)
 2. **New `commitError` field**: stores commit validation/execution errors, displayed in the
    button bar with higher priority than AI errors
-3. **New `committing` field**: prevents double-commits by ignoring `ctrl+enter` while a
+3. **New `committing` field**: prevents double-commits by ignoring `ctrl+x`/`ctrl+enter` while a
    commit is in progress
-4. **`ctrl+enter` updated**: now validates that summary is non-empty before emitting
+4. **`ctrl+x`/`ctrl+enter` handler**: now validates that summary is non-empty before emitting
    `CommitRequestMsg`. If empty, sets `commitError` directly without sending a message
 5. **New `SetCommitError()` method**: sets the error and clears the `committing` flag
 6. **New `CommitSuccess()` method**: clears all fields and resets state after a successful commit
@@ -10138,7 +10146,7 @@ func (m CommitMsgModel) renderButtonBar() string {
 
 **File**: `internal/tui/app/app.go` (modify existing)
 
-This section wires the commit execution into the app. When the user presses `ctrl+enter`,
+This section wires the commit execution into the app. When the user presses `ctrl+x` (or `ctrl+enter`),
 the commit message component emits `CommitRequestMsg`. The app stages the selected files
 (from in-memory selection), formats the commit message, runs `git commit`, and on success
 clears the fields and refreshes the status.
@@ -10199,7 +10207,7 @@ func commitCmd(repoPath string, selectedFiles []git.FileEntry, summary, descript
 
 ```go
 	case components.CommitRequestMsg:
-		// User pressed ctrl+enter — stage selected files and commit
+		// User pressed ctrl+x / ctrl+enter — stage selected files and commit
 		selectedFiles := m.fileList.SelectedFiles()
 		return m, commitCmd(m.repoPath, selectedFiles, msg.Summary, msg.Description)
 ```
@@ -10257,7 +10265,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case components.CommitRequestMsg:
-		// User pressed ctrl+enter — stage selected files and commit
+		// User pressed ctrl+x / ctrl+enter — stage selected files and commit
 		selectedFiles := m.fileList.SelectedFiles()
 		return m, commitCmd(m.repoPath, selectedFiles, msg.Summary, msg.Description)
 
@@ -10296,7 +10304,7 @@ import (
    succeeded at commit time; `FormatCommitMessage()` — builds the full message string with summary,
    description, and co-author trailers
 2. **`commitmsg.go` updated**: new `CommitResultMsg` message, `commitError` and `committing`
-   fields, `SetCommitError()` and `CommitSuccess()` methods, validation in `ctrl+enter`
+   fields, `SetCommitError()` and `CommitSuccess()` methods, validation in `ctrl+x`/`ctrl+enter`
    handler (rejects empty summary), updated `renderButtonBar()` with commit status display
 3. **`app.go` updated**: new `commitCmd()` async command (resets index, stages selected files,
    formats message, runs commit), `CommitRequestMsg` handler calls `commitCmd()` with selected
@@ -10321,7 +10329,7 @@ go build -o leogit ./cmd/leogit && ./leogit /path/to/any/git/repo
 2. All files should show `●` (selected by default)
 3. Press `3` to focus the commit message pane
 4. Type a summary: `Add test change to somefile`
-5. Press `ctrl+enter`
+5. Press `ctrl+x`
 6. The button bar should briefly show "Committing..." in green
 7. On success: both fields clear, the file list refreshes (committed file disappears from
    the changes list), and git log shows the new commit:
@@ -10336,7 +10344,7 @@ go build -o leogit ./cmd/leogit && ./leogit /path/to/any/git/repo
 2. Press `3`, type a summary: `Fix typo in README`
 3. Press `Tab` to move to the description field
 4. Type: `The README had a misspelling in the installation section.`
-5. Press `ctrl+enter`
+5. Press `ctrl+x`
 6. Verify with:
    ```bash
    git log -1 --format="%s%n%n%b"
@@ -10347,7 +10355,7 @@ go build -o leogit ./cmd/leogit && ./leogit /path/to/any/git/repo
 
 1. Press `3` to focus the commit message pane
 2. Leave the summary empty
-3. Press `ctrl+enter`
+3. Press `ctrl+x`
 4. The button bar should show "summary is required" in red
 5. No commit should be created (verify with `git log -1`)
 
@@ -10355,7 +10363,7 @@ go build -o leogit ./cmd/leogit && ./leogit /path/to/any/git/repo
 
 1. Deselect all files with `a` (all should show `○`)
 2. Press `3`, type a summary: `This should fail`
-3. Press `ctrl+enter`
+3. Press `ctrl+x`
 4. The button bar should show "no files selected — select files first" in red
 5. No commit should be created
 
@@ -10363,7 +10371,7 @@ go build -o leogit ./cmd/leogit && ./leogit /path/to/any/git/repo
 
 1. Make some changes (files will be selected by default)
 2. Press `3`, type a summary
-3. Press `ctrl+enter` rapidly multiple times
+3. Press `ctrl+x` rapidly multiple times
 4. Only one commit should be created (the `committing` flag prevents re-entry)
 5. Check with `git log --oneline -5` — only one new commit
 
@@ -10372,14 +10380,14 @@ go build -o leogit ./cmd/leogit && ./leogit /path/to/any/git/repo
 1. Trigger a "no files selected" error (Test 4)
 2. The button bar shows the error in red
 3. Select files with `a`
-4. Type a summary and press `ctrl+enter`
+4. Type a summary and press `ctrl+x`
 5. The error should clear and the commit should succeed
 
 **Test 7 — Partial commit (some files deselected)**:
 
 1. Have 3 changed files (all show `●` by default)
 2. Deselect 1 file with `space` (it shows `○`)
-3. Press `3`, type a summary, press `ctrl+enter`
+3. Press `3`, type a summary, press `ctrl+x`
 4. After the commit succeeds:
    - The 2 selected files should disappear from the Changed Files list
    - The 1 deselected file should remain (still showing `●` as it's now the only file)
@@ -10388,7 +10396,7 @@ go build -o leogit ./cmd/leogit && ./leogit /path/to/any/git/repo
 **Test 8 — Post-commit diff viewer reset**:
 
 1. Select a file in the file list (Pane 1) and view its diff (Pane 2)
-2. Press `3`, type a summary, press `ctrl+enter`
+2. Press `3`, type a summary, press `ctrl+x`
 3. After the commit: the file list updates, the previously viewed file may be gone.
    If the cursor was on a file that was committed, the diff pane should either show the
    diff of the new cursor position or be empty if no files remain.
@@ -10400,7 +10408,7 @@ go build -o leogit ./cmd/leogit && ./leogit /path/to/any/git/repo
 3. Press `ctrl+g` to generate an AI commit message
 4. Wait for the AI to fill the fields
 5. Optionally edit the generated summary or description
-6. Press `ctrl+enter` to commit
+6. Press `ctrl+x` to commit
 7. The commit should succeed with the (possibly edited) AI-generated message
 8. Fields clear, file list refreshes
 
@@ -10422,8 +10430,8 @@ go build -o leogit ./cmd/leogit && ./leogit /path/to/any/git/repo
    ```
    Note the blank line between summary and description.
 
-**Phase 10 is complete when**: pressing `ctrl+enter` with a non-empty summary and selected
-files creates a real git commit; the commit message is properly formatted with summary,
+**Phase 10 is complete when**: pressing `ctrl+x` (or `ctrl+enter`) with a non-empty summary and
+selected files creates a real git commit; the commit message is properly formatted with summary,
 blank line, and description; empty summary shows "summary is required" error; no files
 selected shows "no files selected" error; the app stages only selected files at commit time
 (resets index first, then stages); the button bar shows "Committing..." during execution;
@@ -10833,7 +10841,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// ... existing cases (AIGenerateMsg, AICycleProviderMsg, AIResultMsg) ...
 
 	case components.CommitRequestMsg:
-		// User pressed ctrl+enter — stage selected files and commit
+		// User pressed ctrl+x / ctrl+enter — stage selected files and commit
 		selectedFiles := m.fileList.SelectedFiles()
 		return m, commitCmd(m.repoPath, selectedFiles, msg.Summary, msg.Description)
 
