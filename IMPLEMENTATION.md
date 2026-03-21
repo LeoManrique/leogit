@@ -10693,7 +10693,7 @@ type Model struct {
 		m.ahead = msg.status.Ahead
 		m.behind = msg.status.Behind
 		m.hasUpstream = msg.status.HasUpstream
-		m.upstream = msg.status.Upstream save upstream for push
+		m.upstream = msg.status.Upstream // save upstream for push
 		// Parse and update changed files
 		files := git.ParseFiles(msg.status.RawOutput)
 		m.fileList.SetFiles(files)
@@ -10799,7 +10799,7 @@ handler and before the `tea.KeyPressMsg` handler:
 		Ahead:       m.ahead,
 		Behind:      m.behind,
 		HasUpstream: m.hasUpstream,
-		Pushing: m.pushing, // show pushing state in header
+		Pushing: 		 m.pushing, // show pushing state in header
 	}
 	header := views.RenderHeader(headerData, dim.Width)
 	tabBar := views.RenderTabBar(m.activeTab, dim.Width)

@@ -6,3 +6,4 @@
 6. AI commit message generation should respect line-level selection. Currently it sends full file diffs for selected files. It should use `GeneratePatch()` with the stored `DiffSelection` per file so the AI only sees the lines the user actually selected. Requires storing per-file selections (e.g. `map[string]diff.DiffSelection` in FileListModel) and propagating selection changes from diffview → app → filelist.
 7. When focusing the commit message section maybe we can increse its size a little bit so the message and description are visible.
 8. When we generate the messages, we only the the last part of it if its long, we should see the beginning. Maybe a subtle scroll bar would be nice or "...".
+9. There should also be a Create Github Project as action.
