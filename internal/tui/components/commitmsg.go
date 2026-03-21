@@ -11,7 +11,7 @@ import (
 
 // ── Messages ────────────────────────────────────────────
 
-// CommitRequestMsg is sent when the user presses ctrl+enter to commit.
+// CommitRequestMsg is sent when the user presses ctrl+enter or ctrl+x to commit.
 // The app handles the actual git commit.
 type CommitRequestMsg struct {
 	Summary     string
@@ -54,9 +54,18 @@ type CommitMsgModel struct {
 	aiProvider string // display name of active provider (e.g., "Claude", "Ollama")
 	aiError    string // last AI error message (cleared on next attempt)
 
+	// Commit state
+	commitError string // last commit error message (cleared on next attempt)
+	committing  bool   // true while commit is in progress
+
 	width   int
 	height  int
 	focused bool
+}
+
+// CommitResultMsg is sent when the git commit completes (success or error).
+type CommitResultMsg struct {
+	Err error
 }
 
 // NewCommitMsg creates a new commit message component with default settings.
@@ -134,16 +143,31 @@ func (m CommitMsgModel) IsEmpty() bool {
 	return m.Summary() == "" && m.Description() == ""
 }
 
-// Clear resets both fields to empty (after a successful commit).
+// Clear resets both fields to empty and commit state
 func (m *CommitMsgModel) Clear() {
 	m.summary.SetValue("")
 	m.description.SetValue("")
 	m.activeField = fieldSummary
 	m.aiError = ""
+	m.commitError = ""
+	m.committing = false
 	if m.focused {
 		m.summary.Focus()
 		m.description.Blur()
 	}
+}
+
+// SetCommitError records a commit error (validation or git error).
+func (m *CommitMsgModel) SetCommitError(errMsg string) {
+	m.committing = false
+	m.commitError = errMsg
+}
+
+// CommitSuccess clears the fields and resets state after a successful commit.
+func (m *CommitMsgModel) CommitSuccess() {
+	m.committing = false
+	m.commitError = ""
+	m.Clear()
 }
 
 // SetAIResult fills the fields with the AI-generated commit message.
@@ -200,18 +224,24 @@ func (m CommitMsgModel) Update(msg tea.Msg) (CommitMsgModel, tea.Cmd) {
 			// Cycle AI provider
 			return m, func() tea.Msg { return AICycleProviderMsg{} }
 
-		case "ctrl+enter":
+		case "ctrl+x", "ctrl+enter":
 			// Request commit (handled by app)
+			if m.committing {
+				return m, nil // already committing
+			}
 			summary := m.Summary()
-			if summary != "" {
-				return m, func() tea.Msg {
-					return CommitRequestMsg{
-						Summary:     summary,
-						Description: m.Description(),
-					}
+			if summary == "" {
+				m.commitError = "summary is required"
+				return m, nil
+			}
+			m.commitError = ""
+			m.committing = true
+			return m, func() tea.Msg {
+				return CommitRequestMsg{
+					Summary:     summary,
+					Description: m.Description(),
 				}
 			}
-			return m, nil
 		}
 	}
 
@@ -243,7 +273,7 @@ func (m CommitMsgModel) View() string {
 	// Description field
 	sections = append(sections, m.description.View())
 
-	// Button bar: [AI: Provider] [ctrl+g Generate] [ctrl+enter Commit]
+	// Button bar: [AI: Provider] [ctrl+g Generate] [ctrl+x or ctrl+enter Commit]
 	buttonBar := m.renderButtonBar()
 	sections = append(sections, buttonBar)
 
@@ -255,6 +285,7 @@ func (m CommitMsgModel) renderButtonBar() string {
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#8B949E"))
 	activeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#58A6FF"))
 	errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F85149"))
+	successStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#3FB950"))
 
 	var parts []string
 
@@ -262,11 +293,18 @@ func (m CommitMsgModel) renderButtonBar() string {
 	providerLabel := dimStyle.Render("AI:") + " " + activeStyle.Render(m.aiProvider)
 	parts = append(parts, providerLabel)
 
-	// Loading or error state
-	if m.aiLoading {
+	// Status: commit error > committing > AI loading > AI error > hints
+	if m.commitError != "" {
+		errText := m.commitError
+		if len(errText) > 30 {
+			errText = errText[:27] + "..."
+		}
+		parts = append(parts, errorStyle.Render(errText))
+	} else if m.committing {
+		parts = append(parts, successStyle.Render("Committing..."))
+	} else if m.aiLoading {
 		parts = append(parts, activeStyle.Render("⟳ Generating..."))
 	} else if m.aiError != "" {
-		// Truncate error to fit
 		errText := m.aiError
 		if len(errText) > 30 {
 			errText = errText[:27] + "..."

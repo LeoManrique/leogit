@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -299,9 +300,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case tea.KeyPressMsg:
-		return m.handleKey(msg)
-
 	case components.AIGenerateMsg:
 		// User pressed ctrl+g — run the active AI provider with selected files
 		if len(m.aiProviders) > 0 {
@@ -330,11 +328,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case components.CommitRequestMsg:
-		// User pressed ctrl+enter — commit
-		// For now, just acknowledge the request
-		return m, nil
-	}
+		// User pressed ctrl+x or ctrl+enter — stage selected files and commit
+		selectedFiles := m.fileList.SelectedFiles()
+		return m, commitCmd(m.repoPath, selectedFiles, msg.Summary, msg.Description)
 
+	case components.CommitResultMsg:
+		if msg.Err != nil {
+			m.commitMsg.SetCommitError(msg.Err.Error())
+			return m, nil
+		}
+		// Commit succeeded — clear fields and refresh status.
+		// asynchronously and sends a statusResultMsg to update the file list.
+		m.commitMsg.CommitSuccess()
+		return m, refreshStatusCmd(m.repoPath)
+
+	case tea.KeyPressMsg:
+		return m.handleKey(msg)
+	}
 	return m, nil
 }
 
@@ -794,5 +804,47 @@ func generateCommitMsgCmd(repoPath string, selectedFiles []git.FileEntry, provid
 			Title:       msg.Title,
 			Description: msg.Description,
 		}
+	}
+}
+
+// commitCmd stages the selected files and runs git commit asynchronously.
+// This is the ONLY place where leogit modifies git's staging area (index).
+// Flow: reset index → stage selected files → commit → (git status refresh on success)
+func commitCmd(repoPath string, selectedFiles []git.FileEntry, summary, description string) tea.Cmd {
+	return func() tea.Msg {
+		if len(selectedFiles) == 0 {
+			return components.CommitResultMsg{Err: fmt.Errorf("no files selected — select files first")}
+		}
+
+		// Step 1: Reset the index to HEAD (clear any external staging)
+		// This ensures only what the user selected in leogit gets committed.
+		resetCmd := exec.Command("git", "reset", "HEAD")
+		resetCmd.Dir = repoPath
+		if out, err := resetCmd.CombinedOutput(); err != nil {
+			return components.CommitResultMsg{Err: fmt.Errorf("resetting index: %s (%w)", string(out), err)}
+		}
+
+		// Step 2: Stage the selected files
+		if err := git.StageFiles(repoPath, selectedFiles); err != nil {
+			return components.CommitResultMsg{Err: fmt.Errorf("staging selected files: %w", err)}
+		}
+
+		// Step 3: Verify staging succeeded
+		hasStaged, err := git.HasStagedChanges(repoPath)
+		if err != nil {
+			return components.CommitResultMsg{Err: fmt.Errorf("checking staged changes: %w", err)}
+		}
+		if !hasStaged {
+			return components.CommitResultMsg{Err: fmt.Errorf("staging produced no changes")}
+		}
+
+		// Step 4: Format and execute the commit
+		message := git.FormatCommitMessage(summary, description, nil)
+
+		if err := git.Commit(repoPath, message); err != nil {
+			return components.CommitResultMsg{Err: err}
+		}
+
+		return components.CommitResultMsg{Err: nil}
 	}
 }
