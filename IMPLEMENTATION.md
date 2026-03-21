@@ -1495,7 +1495,7 @@ func (m RepoPickerModel) View() string {
 		}
 	}
 
-	// ── Hint ────────────────────────────────────────────
+	// ── Hint ────────────────────────────────��───────────
 	hint := hintStyle.Render("Type to filter • ↑/↓ or j/k to navigate • Enter to open • Esc to quit")
 
 	// ── Assemble ────────────────────────────────────────
@@ -11410,11 +11410,13 @@ func (m TerminalModel) Update(msg tea.Msg) (TerminalModel, tea.Cmd) {
 
 // View renders the terminal screen buffer as a string.
 // Returns empty string if the terminal hasn't been started.
+// Note: bubbleterm's View() returns tea.View (Bubbletea v2), so we extract
+// the .Content field to get the raw string for embedding in our own layout.
 func (m TerminalModel) View() string {
 	if !m.started || m.term == nil {
 		return ""
 	}
-	return m.term.View()
+	return m.term.View().Content
 }
 
 // Focus tells bubbleterm to start capturing key events.
@@ -11530,19 +11532,48 @@ func New(cfg *config.Config, cliPath string) Model {
 ```
 
 The terminal is created with an empty repo path because the repo isn't known yet at app
-creation time. The repo path is set when the app enters `stateMain`.
+creation time. The repo path is set later when the app enters `stateMain`.
 
-**Update the repo resolution handler** — when the repo path is resolved and the app enters
-`stateMain`, set the terminal's repo path. Find the place in `Update()` where `m.repoPath`
-is set and `m.state = stateMain`:
+**Update the repo resolution handlers** — there are **two places** in `Update()` where the
+app transitions to `stateMain` with a resolved repo path. You need to re-create the terminal
+in both so the shell's working directory matches the opened repo.
+
+**Place 1: the `repoResolvedMsg` handler** — this fires when the repo is auto-resolved
+(from the CLI argument or the last-opened state file). Add the line right after `m.repoPath`
+is set:
 
 ```go
-	// After m.repoPath is set and m.state = stateMain:
-	m.terminal = components.NewTerminal(m.repoPath)
+	case repoResolvedMsg:
+		if msg.path != "" {
+			m.repoPath = msg.path
+			m.state = stateMain
+			m.terminal = components.NewTerminal(m.repoPath)
+			m.saveRepoState()
+			return m, tea.Batch(
+				refreshStatusCmd(m.repoPath),
+				startTickCmd(),
+			)
+		}
 ```
 
-This ensures the terminal's working directory matches the resolved repo. The PTY is not
-started yet — it starts lazily on first `` ` `` press.
+**Place 2: the `RepoSelectedMsg` handler** — this fires when the user picks a repo from
+the repo picker screen. Add the same line here:
+
+```go
+	case views.RepoSelectedMsg:
+		m.repoPath = msg.Path
+		m.state = stateMain
+		m.terminal = components.NewTerminal(m.repoPath)
+		m.saveRepoState()
+		return m, tea.Batch(
+			refreshStatusCmd(m.repoPath),
+			startTickCmd(),
+		)
+```
+
+Both places do the same thing: replace the empty-path terminal (from `New()`) with one
+that knows the actual repo path. The PTY is not started yet — it starts lazily on first
+`` ` `` press.
 
 **Update the `` ` `` keybinding** in `handleMainKey()` — start the PTY on first open and
 enter focused mode:
@@ -11703,21 +11734,35 @@ PTY output and tick events) are forwarded to the terminal component.
 	}
 ```
 
-**Update the `WindowSizeMsg` handler** — resize the terminal when the window changes:
+**Update the `WindowSizeMsg` handler** — add terminal resize logic to the existing handler.
+Keep all the existing code (repo picker forwarding, error modal sync, etc.) and add the
+terminal resize at the end, inside the `stateMain` block. Here is the full updated handler:
 
 ```go
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.updateFileListSize()
-
-		// Resize terminal if it's open and started
-		if m.terminalOpen && m.terminal.Started() {
-			dim := layout.Calculate(m.width, m.height, m.terminalOpen, m.terminalHeight)
-			innerW := dim.MainWidth - 2
-			innerH := dim.TerminalHeight - 2
-			cmd := m.terminal.Resize(innerW, innerH)
+		// Forward to picker if active
+		if m.state == stateRepoPicker {
+			var cmd tea.Cmd
+			m.repoPicker, cmd = m.repoPicker.Update(msg)
 			return m, cmd
+		}
+		// Keep error modal dimensions in sync
+		if m.errorModal.Visible {
+			m.errorModal, _ = m.errorModal.Update(msg)
+		}
+		// Update file list dimensions and resize terminal when in main state
+		if m.state == stateMain {
+			m.updateFileListSize()
+			// Resize terminal if it's open and started
+			if m.terminalOpen && m.terminal.Started() {
+				dim := layout.Calculate(m.width, m.height, m.terminalOpen, m.terminalHeight)
+				innerW := dim.MainWidth - 2
+				innerH := dim.TerminalHeight - 2
+				cmd := m.terminal.Resize(innerW, innerH)
+				return m, cmd
+			}
 		}
 		return m, nil
 ```
@@ -13178,16 +13223,40 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		}
 ```
 
-**Forward `WindowSizeMsg` to settings** when visible:
+**Forward `WindowSizeMsg` to settings** — add settings forwarding to the existing handler.
+Add the `m.showSettings` block right after the error modal block. Here is the full updated
+handler (builds on the Phase 12 version):
 
 ```go
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		// Forward to picker if active
+		if m.state == stateRepoPicker {
+			var cmd tea.Cmd
+			m.repoPicker, cmd = m.repoPicker.Update(msg)
+			return m, cmd
+		}
+		// Keep error modal dimensions in sync
+		if m.errorModal.Visible {
+			m.errorModal, _ = m.errorModal.Update(msg)
+		}
+		// Keep settings dimensions in sync
 		if m.showSettings {
 			m.settings, _ = m.settings.Update(msg)
 		}
-		// ... existing window size handling ...
+		// Update layout and resize terminal when in main state
+		if m.state == stateMain {
+			m.updateFileListSize()
+			if m.terminalOpen && m.terminal.Started() {
+				dim := layout.Calculate(m.width, m.height, m.terminalOpen, m.terminalHeight)
+				innerW := dim.MainWidth - 2
+				innerH := dim.TerminalHeight - 2
+				cmd := m.terminal.Resize(innerW, innerH)
+				return m, cmd
+			}
+		}
+		return m, nil
 ```
 
 **Update the help overlay** — add the settings keybinding to the help text. Find the help
@@ -15852,23 +15921,42 @@ Add a new section to the help rows:
 	row("r", "Rename selected branch (in dropdown)"),
 ```
 
-**Forward `WindowSizeMsg` to the branch dropdown** — update the `WindowSizeMsg` handler in
-`Update()`:
+**Forward `WindowSizeMsg` to the branch dropdown** — add branch dropdown forwarding to the
+existing handler. Add the `m.branchDropdown.Visible` block after the settings block. Here is
+the full updated handler (builds on the Phase 13 version):
 
 ```go
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		// Forward to picker if active
 		if m.state == stateRepoPicker {
 			var cmd tea.Cmd
 			m.repoPicker, cmd = m.repoPicker.Update(msg)
 			return m, cmd
 		}
+		// Keep error modal dimensions in sync
 		if m.errorModal.Visible {
 			m.errorModal, _ = m.errorModal.Update(msg)
 		}
+		// Keep settings dimensions in sync
+		if m.showSettings {
+			m.settings, _ = m.settings.Update(msg)
+		}
+		// Keep branch dropdown dimensions in sync
 		if m.branchDropdown.Visible {
 			m.branchDropdown, _ = m.branchDropdown.Update(msg)
+		}
+		// Update layout and resize terminal when in main state
+		if m.state == stateMain {
+			m.updateFileListSize()
+			if m.terminalOpen && m.terminal.Started() {
+				dim := layout.Calculate(m.width, m.height, m.terminalOpen, m.terminalHeight)
+				innerW := dim.MainWidth - 2
+				innerH := dim.TerminalHeight - 2
+				cmd := m.terminal.Resize(innerW, innerH)
+				return m, cmd
+			}
 		}
 		return m, nil
 ```
@@ -17149,18 +17237,48 @@ This also handles the case where the user switches branches via the branch dropd
 (Phase 15) — `branchSwitchCompleteMsg` triggers a status refresh, which detects the
 branch name change and clears the history.
 
-**Changes to `WindowSizeMsg` handler** — update History tab component sizes:
+**Changes to `WindowSizeMsg` handler** — replace the `m.updateFileListSize()` call in the
+`stateMain` block with a tab-aware check that sizes either the History components or the
+Changes components. Here is the full updated handler (builds on the Phase 15 version):
 
 ```go
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		// ... existing resize handling ...
-		// Update component sizes for the active tab
-		if m.activeTab == core.HistoryTab {
-			m.updateHistoryComponentSizes()
-		} else {
-			m.updateFileListSize()
+		// Forward to picker if active
+		if m.state == stateRepoPicker {
+			var cmd tea.Cmd
+			m.repoPicker, cmd = m.repoPicker.Update(msg)
+			return m, cmd
+		}
+		// Keep error modal dimensions in sync
+		if m.errorModal.Visible {
+			m.errorModal, _ = m.errorModal.Update(msg)
+		}
+		// Keep settings dimensions in sync
+		if m.showSettings {
+			m.settings, _ = m.settings.Update(msg)
+		}
+		// Keep branch dropdown dimensions in sync
+		if m.branchDropdown.Visible {
+			m.branchDropdown, _ = m.branchDropdown.Update(msg)
+		}
+		// Update layout when in main state
+		if m.state == stateMain {
+			// Size the correct tab's components
+			if m.activeTab == core.HistoryTab {
+				m.updateHistoryComponentSizes()
+			} else {
+				m.updateFileListSize()
+			}
+			// Resize terminal if it's open and started
+			if m.terminalOpen && m.terminal.Started() {
+				dim := layout.Calculate(m.width, m.height, m.terminalOpen, m.terminalHeight)
+				innerW := dim.MainWidth - 2
+				innerH := dim.TerminalHeight - 2
+				cmd := m.terminal.Resize(innerW, innerH)
+				return m, cmd
+			}
 		}
 		return m, nil
 ```
