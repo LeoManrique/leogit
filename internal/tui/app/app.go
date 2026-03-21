@@ -149,6 +149,9 @@ type Model struct {
 	// Push state
 	pushing  bool   // true while push is in progress (prevents double-push)
 	upstream string // upstream tracking ref (e.g., "origin/main"), empty if none
+
+	// Embedded terminal
+	terminal components.TerminalModel // PTY + bubbleterm component
 }
 
 // New creates the root model with the loaded config and optional repo path.
@@ -180,6 +183,8 @@ func New(cfg *config.Config, repoPath string) Model {
 		commitMsg:    components.NewCommitMsg(),
 		aiProviders:  providers,
 		aiActiveIdx:  0,
+		// Terminal
+		terminal: components.NewTerminal(""), // repoPath set later when repo is resolved
 	}
 }
 
@@ -207,9 +212,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.errorModal.Visible {
 			m.errorModal, _ = m.errorModal.Update(msg)
 		}
-		// Update file list dimensions when in main state
+		// Update file list dimensions and resize terminal when in main state
 		if m.state == stateMain {
 			m.updateFileListSize()
+			// Resize terminal if it's open and started
+			if m.terminalOpen && m.terminal.Started() {
+				dim := layout.Calculate(m.width, m.height, m.terminalOpen, m.terminalHeight)
+				innerW := dim.MainWidth - 2
+				innerH := dim.TerminalHeight - 2
+				cmd := m.terminal.Resize(innerW, innerH)
+				return m, cmd
+			}
 		}
 		return m, nil
 
@@ -226,6 +239,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.path != "" {
 			m.repoPath = msg.path
 			m.state = stateMain
+			m.terminal = components.NewTerminal(m.repoPath)
 			m.saveRepoState()
 			// Start polling: fetch initial status + start the 2s tick timer
 			return m, tea.Batch(
@@ -247,6 +261,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case views.RepoSelectedMsg:
 		m.repoPath = msg.Path
 		m.state = stateMain
+		m.terminal = components.NewTerminal(m.repoPath)
 		m.saveRepoState()
 		// Start polling: fetch initial status + start the 2s tick timer
 		return m, tea.Batch(
@@ -372,6 +387,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
+	// Forward bubbleterm internal messages (PTY output, ticks)
+	// These must reach the terminal even when it's not focused.
+	default:
+		if m.terminalOpen && m.terminal.Started() {
+			var cmd tea.Cmd
+			m.terminal, cmd = m.terminal.Update(msg)
+			if cmd != nil {
+				return m, cmd
+			}
+		}
 	}
 	return m, nil
 }
@@ -398,6 +423,7 @@ func (m *Model) updateFileListSize() {
 func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	// Ctrl+C always quits, regardless of state or focus mode
 	if msg.String() == "ctrl+c" {
+		m.terminal.Close() // clean up PTY subprocess
 		m.quitting = true
 		return m, tea.Quit
 	}
@@ -446,22 +472,80 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	if m.focusMode == core.Focused {
 		if msg.String() == "esc" {
 			m.focusMode = core.Navigable
-			m.commitMsg.Blur()
+			if m.activePane == core.PaneTerminal {
+				m.terminal.Blur()
+			} else {
+				m.commitMsg.Blur()
+			}
 			return m, nil
 		}
-		// Forward to active pane component
+
+		// Terminal resize: Ctrl+Shift+Up/Down
+		if m.activePane == core.PaneTerminal {
+			switch msg.String() {
+			case "ctrl+shift+up":
+				// Grow terminal by 1 row. We ask layout.Calculate to try +1,
+				// then check if it actually increased — because Calculate clamps
+				// to the 80% max defined earlier. If clamped, the requested
+				// height equals the current height and no resize happens.
+				dim := layout.Calculate(m.width, m.height, m.terminalOpen, m.terminalHeight+1)
+				if dim.TerminalHeight > m.terminalHeight {
+					m.terminalHeight = dim.TerminalHeight
+					m.updateFileListSize()
+					innerW := dim.MainWidth - 2
+					innerH := dim.TerminalHeight - 2
+					cmd := m.terminal.Resize(innerW, innerH)
+					return m, cmd
+				}
+				return m, nil
+
+			case "ctrl+shift+down":
+				// Shrink terminal by 1 row
+				if m.terminalHeight <= 3 { // minTermRows
+					return m, nil
+				}
+				m.terminalHeight--
+				dim := layout.Calculate(m.width, m.height, m.terminalOpen, m.terminalHeight)
+				m.updateFileListSize()
+				innerW := dim.MainWidth - 2
+				innerH := dim.TerminalHeight - 2
+				cmd := m.terminal.Resize(innerW, innerH)
+				return m, cmd
+			}
+		}
+
+		// Esc always unfocuses
+		if msg.String() == "esc" {
+			m.focusMode = core.Navigable
+			if m.activePane == core.PaneTerminal {
+				m.terminal.Blur()
+			} else {
+				m.commitMsg.Blur()
+			}
+			return m, nil
+		}
+
+		// Terminal pane: ALL keys go to PTY
+		if m.activePane == core.PaneTerminal {
+			var cmd tea.Cmd
+			m.terminal, cmd = m.terminal.Update(msg)
+			return m, cmd
+		}
+
+		// Commit message pane
 		if m.activePane == core.Pane3 && m.activeTab == core.ChangesTab {
 			var cmd tea.Cmd
 			m.commitMsg, cmd = m.commitMsg.Update(msg)
 			return m, cmd
 		}
-		// TODO: forward to other panes (terminal)
+
 		return m, nil
 	}
 
 	// ── Navigable mode keybindings ──
 	switch msg.String() {
 	case "q":
+		m.terminal.Close() // clean up PTY subprocess
 		m.quitting = true
 		return m, tea.Quit
 
@@ -501,10 +585,34 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 				m.terminalHeight = layout.DefaultTerminalRows()
 			}
 			m.activePane = core.PaneTerminal
-		} else if m.activePane == core.PaneTerminal {
-			m.activePane = core.Pane1
+			m.focusMode = core.Focused
+
+			// Calculate the terminal pane's inner dimensions
+			dim := layout.Calculate(m.width, m.height, m.terminalOpen, m.terminalHeight)
+			innerW := dim.MainWidth - 2      // subtract border: 1 left + 1 right = 2
+			innerH := dim.TerminalHeight - 2 // same: 1 top + 1 bottom = 2
+
+			// Lazy start: spawn the PTY on first open
+			if !m.terminal.Started() {
+				cmd := m.terminal.Start(innerW, innerH)
+				m.terminal.Focus()
+				m.updateFileListSize()
+				return m, cmd
+			}
+
+			// Already started — just focus and resize to current dimensions
+			m.terminal.Focus()
+			cmd := m.terminal.Resize(innerW, innerH)
+			m.updateFileListSize()
+			return m, cmd
+		} else {
+			// Closing the terminal pane
+			m.terminal.Blur()
+			m.focusMode = core.Navigable
+			if m.activePane == core.PaneTerminal {
+				m.activePane = core.Pane1
+			}
 		}
-		// Recalculate file list size since terminal toggle changes available height
 		m.updateFileListSize()
 		return m, nil
 
@@ -571,8 +679,10 @@ func (m Model) handlePaneKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m, nil
 
 	case core.PaneTerminal:
-		// Terminal pane
-		return m, nil
+		// Terminal pane: forward keys to bubbleterm
+		var cmd tea.Cmd
+		m.terminal, cmd = m.terminal.Update(msg)
+		return m, cmd
 	}
 
 	return m, nil
@@ -735,9 +845,15 @@ func (m Model) viewMain() string {
 	)
 	mainCol := pane2
 	if m.terminalOpen {
-		termPane := renderPane(
+		var termContent string
+		if m.terminal.Started() {
+			termContent = m.terminal.View()
+		} else {
+			termContent = "Press ` to start terminal"
+		}
+		termPane := renderPaneWithContent(
 			"Terminal",
-			"(terminal)",
+			termContent,
 			dim.MainWidth, dim.TerminalHeight,
 			m.activePane == core.PaneTerminal,
 		)
