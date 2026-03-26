@@ -81,3 +81,24 @@ func GetStatus(repoPath string) (RepoStatus, error) {
 
 	return result, nil
 }
+
+// HasConflicts returns true if any of the given file entries have a conflicted status.
+func HasConflicts(entries []FileEntry) bool {
+	for _, e := range entries {
+		if e.Status == StatusConflicted {
+			return true
+		}
+	}
+	return false
+}
+
+// ConflictedFiles returns the paths of all conflicted files in the given entries.
+func ConflictedFiles(entries []FileEntry) []string {
+	var paths []string
+	for _, e := range entries {
+		if e.Status == StatusConflicted {
+			paths = append(paths, e.Path)
+		}
+	}
+	return paths
+}

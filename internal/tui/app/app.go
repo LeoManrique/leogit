@@ -27,18 +27,96 @@ type authResultMsg struct{ authenticated bool }
 type repoResolvedMsg struct{ path string }
 type reposDiscoveredMsg struct{ repos []string }
 
-// statusTickMsg is sent every 2 seconds by the polling timer.
 type statusTickMsg struct{}
-
-// statusResultMsg carries the result of a git status command back to Update.
 type statusResultMsg struct {
 	status git.RepoStatus
 	err    error
 }
 
-// pushResultMsg is sent when the async git push completes (success or error).
-type pushResultMsg struct {
+type pushResultMsg struct{ err error }
+
+// Fetch & Pull messages
+type fetchTickMsg struct{}
+
+// FetchCompleteMsg carries the result of a background or manual fetch.
+type FetchCompleteMsg struct {
+	Err          error
+	OldAhead     int
+	OldBehind    int
+	NewAhead     int
+	NewBehind    int
+	AheadChanged bool
+	Manual       bool
+}
+
+// PullCompleteMsg carries the result of a pull operation.
+type PullCompleteMsg struct{ Err error }
+
+// Branch messages
+type branchListResultMsg struct {
+	branches []git.BranchInfo
+	err      error
+}
+
+type branchActionResultMsg struct {
+	action string // "switch", "create", "delete", "rename"
+	err    error
+}
+
+// History messages
+type logResultMsg struct {
+	commits []git.CommitInfo
+	err     error
+	append  bool // true for pagination (append to existing)
+}
+
+type commitFilesResultMsg struct {
+	files []git.FileEntry
+	err   error
+}
+
+type commitDiffResultMsg struct {
+	file     git.FileEntry
+	fileDiff *diff.FileDiff
+	err      error
+}
+
+// Merge messages
+type mergeCountResultMsg struct {
+	branch string
+	count  int
+	err    error
+}
+
+type mergeResultMsg struct {
+	result git.MergeResult
+	squash bool
+	branch string
+}
+
+type mergeAbortResultMsg struct{ err error }
+
+// PR messages
+type prListResultMsg struct {
+	prs []gh.PullRequest
 	err error
+}
+
+type prChecksResultMsg struct {
+	number int
+	checks []gh.PRCheck
+	err    error
+}
+
+type prCheckoutResultMsg struct{ err error }
+
+type prCreateResultMsg struct {
+	url string
+	err error
+}
+
+type prCurrentBranchResultMsg struct {
+	pr *gh.PullRequest
 }
 
 // ── Commands ────────────────────────────────────────────
@@ -78,7 +156,6 @@ func discoverReposCmd(cfg *config.Config) tea.Cmd {
 	}
 }
 
-// refreshStatusCmd runs git status asynchronously and returns the result.
 func refreshStatusCmd(repoPath string) tea.Cmd {
 	return func() tea.Msg {
 		status, err := git.GetStatus(repoPath)
@@ -86,11 +163,204 @@ func refreshStatusCmd(repoPath string) tea.Cmd {
 	}
 }
 
-// startTickCmd starts the 2-second polling timer.
 func startTickCmd() tea.Cmd {
 	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
 		return statusTickMsg{}
 	})
+}
+
+func backgroundFetchCmd(repoPath string, oldAhead, oldBehind int, upstream string, manual bool) tea.Cmd {
+	return func() tea.Msg {
+		remote := git.GetRemote(repoPath)
+		if remote == "" {
+			return FetchCompleteMsg{
+				Err: fmt.Errorf("no remote configured"), Manual: manual,
+				OldAhead: oldAhead, OldBehind: oldBehind,
+				NewAhead: oldAhead, NewBehind: oldBehind,
+			}
+		}
+
+		err := git.Fetch(repoPath, remote)
+		if err != nil {
+			return FetchCompleteMsg{
+				Err: err, Manual: manual,
+				OldAhead: oldAhead, OldBehind: oldBehind,
+				NewAhead: oldAhead, NewBehind: oldBehind,
+			}
+		}
+
+		newAhead, newBehind, _ := git.GetAheadBehind(repoPath, upstream)
+		return FetchCompleteMsg{
+			OldAhead: oldAhead, OldBehind: oldBehind,
+			NewAhead: newAhead, NewBehind: newBehind,
+			AheadChanged: newAhead != oldAhead || newBehind != oldBehind,
+			Manual:       manual,
+		}
+	}
+}
+
+func pullCmd(repoPath string) tea.Cmd {
+	return func() tea.Msg {
+		remote := git.GetRemote(repoPath)
+		if remote == "" {
+			return PullCompleteMsg{Err: fmt.Errorf("no remote configured")}
+		}
+		return PullCompleteMsg{Err: git.Pull(repoPath, remote)}
+	}
+}
+
+func startFetchTickCmd(intervalSecs int) tea.Cmd {
+	if intervalSecs <= 0 {
+		return nil
+	}
+	if intervalSecs < 30 {
+		intervalSecs = 30
+	}
+	return tea.Tick(time.Duration(intervalSecs)*time.Second, func(t time.Time) tea.Msg {
+		return fetchTickMsg{}
+	})
+}
+
+func loadBranchesCmd(repoPath string) tea.Cmd {
+	return func() tea.Msg {
+		branches, err := git.ListBranches(repoPath)
+		return branchListResultMsg{branches: branches, err: err}
+	}
+}
+
+func switchBranchCmd(repoPath, name string) tea.Cmd {
+	return func() tea.Msg {
+		err := git.SwitchBranch(repoPath, name)
+		return branchActionResultMsg{action: "switch", err: err}
+	}
+}
+
+func createBranchCmd(repoPath, name string) tea.Cmd {
+	return func() tea.Msg {
+		err := git.CreateBranch(repoPath, name, "")
+		if err != nil {
+			return branchActionResultMsg{action: "create", err: err}
+		}
+		// Auto-switch to the new branch
+		err = git.SwitchBranch(repoPath, name)
+		return branchActionResultMsg{action: "create", err: err}
+	}
+}
+
+func deleteBranchCmd(repoPath, name string, isRemote bool) tea.Cmd {
+	return func() tea.Msg {
+		if isRemote {
+			parts := strings.SplitN(name, "/", 2)
+			if len(parts) == 2 {
+				err := git.DeleteRemoteBranch(repoPath, parts[0], parts[1])
+				return branchActionResultMsg{action: "delete", err: err}
+			}
+		}
+		err := git.DeleteBranch(repoPath, name)
+		return branchActionResultMsg{action: "delete", err: err}
+	}
+}
+
+func renameBranchCmd(repoPath, oldName, newName string) tea.Cmd {
+	return func() tea.Msg {
+		err := git.RenameBranch(repoPath, oldName, newName)
+		return branchActionResultMsg{action: "rename", err: err}
+	}
+}
+
+func loadLogCmd(repoPath string, skip int, appendMode bool) tea.Cmd {
+	return func() tea.Msg {
+		commits, err := git.GetLog(repoPath, git.LogOptions{MaxCount: 50, Skip: skip})
+		return logResultMsg{commits: commits, err: err, append: appendMode}
+	}
+}
+
+func loadCommitFilesCmd(repoPath, sha string) tea.Cmd {
+	return func() tea.Msg {
+		files, err := git.GetCommitFiles(repoPath, sha)
+		return commitFilesResultMsg{files: files, err: err}
+	}
+}
+
+func loadCommitDiffCmd(repoPath, sha string, file git.FileEntry) tea.Cmd {
+	return func() tea.Msg {
+		raw, err := git.GetCommitDiff(repoPath, sha, file.Path)
+		if err != nil {
+			return commitDiffResultMsg{file: file, err: err}
+		}
+		parsed := diff.Parse(raw)
+		return commitDiffResultMsg{file: file, fileDiff: parsed}
+	}
+}
+
+func mergeCountCmd(repoPath, branch string) tea.Cmd {
+	return func() tea.Msg {
+		count, err := git.CountCommitsToMerge(repoPath, branch)
+		return mergeCountResultMsg{branch: branch, count: count, err: err}
+	}
+}
+
+func mergeBranchCmd(repoPath, branch string, squash bool) tea.Cmd {
+	return func() tea.Msg {
+		if squash {
+			result := git.MergeSquash(repoPath, branch)
+			if result.Success {
+				// Finalize the squash merge
+				if err := git.CommitSquashMerge(repoPath); err != nil {
+					return mergeResultMsg{result: git.MergeResult{Success: false, ErrorMessage: err.Error()}, squash: true, branch: branch}
+				}
+			}
+			return mergeResultMsg{result: result, squash: true, branch: branch}
+		}
+		result := git.MergeBranch(repoPath, branch)
+		return mergeResultMsg{result: result, squash: false, branch: branch}
+	}
+}
+
+func mergeAbortCmd(repoPath string) tea.Cmd {
+	return func() tea.Msg {
+		return mergeAbortResultMsg{err: git.MergeAbort(repoPath)}
+	}
+}
+
+func loadPRsCmd(repoPath, state string) tea.Cmd {
+	return func() tea.Msg {
+		prs, err := gh.ListPRs(repoPath, state)
+		return prListResultMsg{prs: prs, err: err}
+	}
+}
+
+func loadPRChecksCmd(repoPath string, number int) tea.Cmd {
+	return func() tea.Msg {
+		checks, err := gh.GetPRChecks(repoPath, number)
+		return prChecksResultMsg{number: number, checks: checks, err: err}
+	}
+}
+
+func checkoutPRCmd(repoPath string, number int) tea.Cmd {
+	return func() tea.Msg {
+		return prCheckoutResultMsg{err: gh.CheckoutPR(repoPath, number)}
+	}
+}
+
+func createPRCmd(repoPath, title, body, base string, draft, fill bool) tea.Cmd {
+	return func() tea.Msg {
+		var url string
+		var err error
+		if fill {
+			url, err = gh.CreatePRFill(repoPath, base, draft)
+		} else {
+			url, err = gh.CreatePR(repoPath, title, body, base, draft)
+		}
+		return prCreateResultMsg{url: url, err: err}
+	}
+}
+
+func loadCurrentBranchPRCmd(repoPath, branch string) tea.Cmd {
+	return func() tea.Msg {
+		pr, _ := gh.GetCurrentBranchPR(repoPath, branch)
+		return prCurrentBranchResultMsg{pr: pr}
+	}
 }
 
 // ── App State ───────────────────────────────────────────
@@ -118,7 +388,7 @@ type Model struct {
 	quitting bool
 
 	state        appState
-	authChecking bool // prevents spamming concurrent auth checks
+	authChecking bool
 
 	repoPicker views.RepoPickerModel
 
@@ -132,10 +402,10 @@ type Model struct {
 	errorModal     views.ErrorModalModel
 
 	// Branch & status
-	branchName  string // current branch from git status
-	ahead       int    // commits ahead of upstream
-	behind      int    // commits behind upstream
-	hasUpstream bool   // whether an upstream tracking branch is configured
+	branchName  string
+	ahead       int
+	behind      int
+	hasUpstream bool
 
 	// Changed files
 	fileList components.FileListModel
@@ -144,25 +414,50 @@ type Model struct {
 
 	// Commit message
 	commitMsg   components.CommitMsgModel
-	aiProviders []ai.CommitMessageProvider // available providers
-	aiActiveIdx int                        // index into aiProviders
+	aiProviders []ai.CommitMessageProvider
+	aiActiveIdx int
 
 	// Push state
-	pushing  bool   // true while push is in progress (prevents double-push)
-	upstream string // upstream tracking ref (e.g., "origin/main"), empty if none
+	pushing  bool
+	upstream string
+
+	// Fetch & Pull
+	fetching      bool
+	pulling       bool
+	lastFetchTime time.Time
+	remote        string
+	postPullCheck bool
 
 	// Embedded terminal
-	terminal components.TerminalModel // PTY + bubbleterm component
+	terminal components.TerminalModel
 
 	// Settings & theme
-	showSettings bool                // true when the settings overlay is visible
-	settings     views.SettingsModel // settings overlay state
-	theme        render.Theme        // active color palette
+	showSettings bool
+	settings     views.SettingsModel
+	theme        render.Theme
+
+	// Branch dropdown (Phase 15)
+	branchDropdown views.BranchDropdownModel
+
+	// History tab (Phase 16)
+	commitList      components.CommitListModel
+	historyFiles    components.FileListModel
+	historyDiff     components.DiffViewModel
+	selectedCommit  *git.CommitInfo
+	historyLoaded   bool
+	loadingMoreLogs bool
+
+	// Merge overlay (Phase 17)
+	mergeOverlay views.MergeOverlayModel
+
+	// PR overlays (Phase 18)
+	prOverlay       views.PROverlayModel
+	prCreateOverlay views.PRCreateOverlayModel
+	currentPR       *gh.PullRequest
 }
 
 // New creates the root model with the loaded config and optional repo path.
 func New(cfg *config.Config, repoPath string) Model {
-	// Build the AI provider list from config
 	claudeProvider := ai.NewClaudeProvider(
 		cfg.AI.Claude.Model,
 		cfg.AI.Claude.Timeout,
@@ -189,10 +484,19 @@ func New(cfg *config.Config, repoPath string) Model {
 		commitMsg:    components.NewCommitMsg(),
 		aiProviders:  providers,
 		aiActiveIdx:  0,
-		// Terminal
-		terminal: components.NewTerminal(""), // repoPath set later when repo is resolved
-		// Theme
-		theme: render.CurrentTheme(cfg.Appearance.Theme),
+		terminal:     components.NewTerminal(""),
+		theme:        render.CurrentTheme(cfg.Appearance.Theme),
+		// Phase 15
+		branchDropdown: views.NewBranchDropdown(),
+		// Phase 16
+		commitList:   components.NewCommitList(),
+		historyFiles: components.NewFileList(),
+		historyDiff:  components.NewDiffView(),
+		// Phase 17
+		mergeOverlay: views.NewMergeOverlay(),
+		// Phase 18
+		prOverlay:       views.NewPROverlay(),
+		prCreateOverlay: views.NewPRCreateOverlay(),
 	}
 }
 
@@ -203,28 +507,23 @@ func (m Model) Init() tea.Cmd {
 
 // ── Update ──────────────────────────────────────────────
 
-// Update handles all incoming messages.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		// Forward to picker if active
 		if m.state == stateRepoPicker {
 			var cmd tea.Cmd
 			m.repoPicker, cmd = m.repoPicker.Update(msg)
 			return m, cmd
 		}
-		// Keep error modal dimensions in sync
 		if m.errorModal.Visible {
 			m.errorModal, _ = m.errorModal.Update(msg)
 		}
-		// Keep settings dimensions in sync
 		if m.showSettings {
 			m.settings, _ = m.settings.Update(msg)
 		}
-		// Update layout and resize terminal when in main state
 		if m.state == stateMain {
 			m.updateFileListSize()
 			if m.terminalOpen && m.terminal.Started() {
@@ -252,10 +551,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.state = stateMain
 			m.terminal = components.NewTerminal(m.repoPath)
 			m.saveRepoState()
-			// Start polling: fetch initial status + start the 2s tick timer
+			m.remote = git.GetRemote(m.repoPath)
 			return m, tea.Batch(
 				refreshStatusCmd(m.repoPath),
 				startTickCmd(),
+				startFetchTickCmd(m.config.Git.FetchInterval),
+				loadCurrentBranchPRCmd(m.repoPath, ""),
 			)
 		}
 		m.state = stateDiscoveringRepos
@@ -274,17 +575,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = stateMain
 		m.terminal = components.NewTerminal(m.repoPath)
 		m.saveRepoState()
-		// Start polling: fetch initial status + start the 2s tick timer
+		m.remote = git.GetRemote(m.repoPath)
 		return m, tea.Batch(
 			refreshStatusCmd(m.repoPath),
 			startTickCmd(),
+			startFetchTickCmd(m.config.Git.FetchInterval),
 		)
 
 	case views.ErrorDismissedMsg:
 		return m, nil
 
 	case statusTickMsg:
-		// Timer fired — refresh status and restart the timer.
 		if m.state == stateMain {
 			return m, tea.Batch(
 				refreshStatusCmd(m.repoPath),
@@ -304,29 +605,67 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			)
 			return m, nil
 		}
-		// Update branch info
+		oldBranch := m.branchName
 		m.branchName = msg.status.Branch
 		m.ahead = msg.status.Ahead
 		m.behind = msg.status.Behind
 		m.hasUpstream = msg.status.HasUpstream
-		m.upstream = msg.status.Upstream //save upstream for push
-		// Parse and update changed files
+		m.upstream = msg.status.Upstream
 		files := git.ParseFiles(msg.status.RawOutput)
 		m.fileList.SetFiles(files)
 		m.updateFileListSize()
+
+		var cmds []tea.Cmd
+
+		// Load current branch PR when branch changes
+		if oldBranch != m.branchName && m.branchName != "" {
+			cmds = append(cmds, loadCurrentBranchPRCmd(m.repoPath, m.branchName))
+		}
+
+		// Post-pull conflict detection
+		if m.postPullCheck {
+			m.postPullCheck = false
+			conflicted := git.ConflictedFiles(files)
+			if len(conflicted) > 0 && !m.errorModal.Visible {
+				fileList := strings.Join(conflicted, "\n  ")
+				m.errorModal = views.ShowError(
+					"Merge Conflicts Detected",
+					fmt.Sprintf(
+						"The following files have conflicts:\n\n  %s\n\n"+
+							"Resolve conflicts in the terminal (`):\n"+
+							"  git mergetool\n"+
+							"  # or edit files, then:\n"+
+							"  git add <file>\n"+
+							"  git commit",
+						fileList,
+					),
+					false, nil, m.width, m.height,
+				)
+			}
+		}
+
+		if len(cmds) > 0 {
+			return m, tea.Batch(cmds...)
+		}
 		return m, nil
 
 	case tea.FocusMsg:
-		// Terminal gained focus — trigger immediate refresh
 		if m.state == stateMain {
 			return m, refreshStatusCmd(m.repoPath)
 		}
 		return m, nil
 
 	case components.FileSelectedMsg:
-		// A file was selected from the list — load its diff.
-		m.diffView.SetLoading()
-		return m, loadDiffCmd(m.repoPath, msg.File)
+		if m.activeTab == core.ChangesTab {
+			m.diffView.SetLoading()
+			return m, loadDiffCmd(m.repoPath, msg.File)
+		}
+		// History tab — load diff for the selected file in the selected commit
+		if m.activeTab == core.HistoryTab && m.selectedCommit != nil {
+			m.historyDiff.SetLoading()
+			return m, loadCommitDiffCmd(m.repoPath, m.selectedCommit.SHA, msg.File)
+		}
+		return m, nil
 
 	case components.DiffLoadedMsg:
 		if msg.Err != nil {
@@ -337,7 +676,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case components.AIGenerateMsg:
-		// User pressed ctrl+g — run the active AI provider with selected files
 		if len(m.aiProviders) > 0 {
 			provider := m.aiProviders[m.aiActiveIdx]
 			selectedFiles := m.fileList.SelectedFiles()
@@ -346,7 +684,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case components.AICycleProviderMsg:
-		// User pressed ctrl+p — cycle to the next AI provider
 		if len(m.aiProviders) > 0 {
 			m.aiActiveIdx = (m.aiActiveIdx + 1) % len(m.aiProviders)
 			provider := m.aiProviders[m.aiActiveIdx]
@@ -355,7 +692,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case components.AIResultMsg:
-		// AI generation completed
 		if msg.Err != nil {
 			m.commitMsg.SetAIError(msg.Err.Error())
 			return m, nil
@@ -364,7 +700,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case components.CommitRequestMsg:
-		// User pressed ctrl+x or ctrl+enter — stage selected files and commit
 		selectedFiles := m.fileList.SelectedFiles()
 		return m, commitCmd(m.repoPath, selectedFiles, msg.Summary, msg.Description)
 
@@ -373,48 +708,274 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.commitMsg.SetCommitError(msg.Err.Error())
 			return m, nil
 		}
-		// Commit succeeded — clear fields and refresh status.
-		// asynchronously and sends a statusResultMsg to update the file list.
 		m.commitMsg.CommitSuccess()
 		return m, refreshStatusCmd(m.repoPath)
 
 	case pushResultMsg:
 		m.pushing = false
 		if msg.err != nil {
-			m.errorModal = views.ShowError(
-				"Push Failed",
-				msg.err.Error(),
-				false, // not retryable — user should inspect the error
-				nil,
-				m.width, m.height,
-			)
+			m.errorModal = views.ShowError("Push Failed", msg.err.Error(), false, nil, m.width, m.height)
 			return m, nil
 		}
-		// Push succeeded — refresh status to update ahead/behind counts.
-		// refreshStatusCmd triggers a new `git status --porcelain=2` call, which will
-		// report `# branch.ab +0 -0` after a successful push, so the statusResultMsg
-		// handler sets ahead=0 and the header label switches from "↑ Push" to "↻ Fetch".
 		return m, refreshStatusCmd(m.repoPath)
 
+	// ── Fetch & Pull ──
+	case fetchTickMsg:
+		if m.state == stateMain && !m.fetching && m.remote != "" {
+			m.fetching = true
+			return m, backgroundFetchCmd(m.repoPath, m.ahead, m.behind, m.branchName+"@{upstream}", false)
+		}
+		return m, startFetchTickCmd(m.config.Git.FetchInterval)
+
+	case FetchCompleteMsg:
+		m.fetching = false
+		m.lastFetchTime = time.Now()
+		var cmds []tea.Cmd
+		cmds = append(cmds, refreshStatusCmd(m.repoPath))
+		cmds = append(cmds, startFetchTickCmd(m.config.Git.FetchInterval))
+		if msg.Err != nil {
+			if msg.Manual {
+				m.errorModal = views.ShowError("Fetch Error", msg.Err.Error(), true,
+					backgroundFetchCmd(m.repoPath, m.ahead, m.behind, m.branchName+"@{upstream}", true),
+					m.width, m.height)
+			}
+			return m, tea.Batch(cmds...)
+		}
+		if msg.AheadChanged {
+			m.errorModal = views.ShowError("Remote Updated", formatAheadBehindChange(msg), false, nil, m.width, m.height)
+		}
+		return m, tea.Batch(cmds...)
+
+	case PullCompleteMsg:
+		m.pulling = false
+		m.postPullCheck = true
+		cmd := refreshStatusCmd(m.repoPath)
+		if msg.Err != nil {
+			errMsg := msg.Err.Error()
+			if strings.Contains(errMsg, "CONFLICT") || strings.Contains(errMsg, "conflict") {
+				m.errorModal = views.ShowError("Merge Conflicts",
+					"Pull completed with merge conflicts.\n\n"+
+						"Conflicted files are marked with [!] in the file list.\n"+
+						"Use the terminal (`) to resolve conflicts:\n\n"+
+						"  git mergetool\n"+
+						"  # or edit files manually, then:\n"+
+						"  git add <resolved-file>\n"+
+						"  git commit",
+					false, nil, m.width, m.height)
+			} else {
+				m.errorModal = views.ShowError("Pull Error", errMsg, true, pullCmd(m.repoPath), m.width, m.height)
+			}
+			return m, cmd
+		}
+		return m, cmd
+
+	// ── Branch actions ──
+	case branchListResultMsg:
+		if msg.err != nil {
+			m.errorModal = views.ShowError("Branch Error", msg.err.Error(), false, nil, m.width, m.height)
+			return m, nil
+		}
+		m.branchDropdown.SetBranches(msg.branches)
+		return m, nil
+
+	case branchActionResultMsg:
+		if msg.err != nil {
+			m.errorModal = views.ShowError("Branch Error", msg.err.Error(), false, nil, m.width, m.height)
+			return m, nil
+		}
+		// Refresh status after any branch action
+		var cmds []tea.Cmd
+		cmds = append(cmds, refreshStatusCmd(m.repoPath))
+		// Invalidate history cache
+		m.historyLoaded = false
+		return m, tea.Batch(cmds...)
+
+	case views.BranchSwitchMsg:
+		return m, switchBranchCmd(m.repoPath, msg.Name)
+
+	case views.BranchCreateMsg:
+		return m, createBranchCmd(m.repoPath, msg.Name)
+
+	case views.BranchDeleteMsg:
+		return m, deleteBranchCmd(m.repoPath, msg.Name, msg.IsRemote)
+
+	case views.BranchRenameMsg:
+		return m, renameBranchCmd(m.repoPath, msg.OldName, msg.NewName)
+
+	case views.BranchDropdownClosedMsg:
+		return m, nil
+
+	// ── Merge ──
+	case views.BranchMergeMsg:
+		return m, mergeCountCmd(m.repoPath, msg.Name)
+
+	case mergeCountResultMsg:
+		if msg.err != nil {
+			m.errorModal = views.ShowError("Merge Error", msg.err.Error(), false, nil, m.width, m.height)
+			return m, nil
+		}
+		m.mergeOverlay.Show(msg.branch, m.branchName, msg.count, m.width, m.height)
+		return m, nil
+
+	case views.MergeConfirmMsg:
+		return m, mergeBranchCmd(m.repoPath, msg.Branch, msg.Squash)
+
+	case views.MergeCancelMsg:
+		return m, nil
+
+	case mergeResultMsg:
+		if !msg.result.Success {
+			if len(msg.result.Conflicts) > 0 {
+				fileList := strings.Join(msg.result.Conflicts, "\n  ")
+				m.errorModal = views.ShowError("Merge Conflicts",
+					fmt.Sprintf("Merge produced conflicts:\n\n  %s\n\n"+
+						"Resolve in the terminal (`) then commit.", fileList),
+					false, nil, m.width, m.height)
+			} else {
+				m.errorModal = views.ShowError("Merge Failed", msg.result.ErrorMessage, false, nil, m.width, m.height)
+			}
+			return m, refreshStatusCmd(m.repoPath)
+		}
+		m.historyLoaded = false
+		return m, refreshStatusCmd(m.repoPath)
+
+	case mergeAbortResultMsg:
+		if msg.err != nil {
+			m.errorModal = views.ShowError("Abort Failed", msg.err.Error(), false, nil, m.width, m.height)
+		}
+		return m, refreshStatusCmd(m.repoPath)
+
+	// ── History ──
+	case logResultMsg:
+		if msg.err != nil {
+			m.errorModal = views.ShowError("Log Error", msg.err.Error(), false, nil, m.width, m.height)
+			return m, nil
+		}
+		m.loadingMoreLogs = false
+		if msg.append {
+			m.commitList.AppendCommits(msg.commits)
+		} else {
+			m.commitList.SetCommits(msg.commits)
+			m.historyLoaded = true
+			// Auto-select first commit
+			if c := m.commitList.SelectedCommit(); c != nil {
+				m.selectedCommit = c
+				return m, loadCommitFilesCmd(m.repoPath, c.SHA)
+			}
+		}
+		return m, nil
+
+	case commitFilesResultMsg:
+		if msg.err != nil {
+			return m, nil
+		}
+		m.historyFiles.SetFiles(msg.files)
+		m.updateHistorySize()
+		// Auto-select first file
+		if len(msg.files) > 0 && m.selectedCommit != nil {
+			m.historyDiff.SetLoading()
+			return m, loadCommitDiffCmd(m.repoPath, m.selectedCommit.SHA, msg.files[0])
+		}
+		return m, nil
+
+	case commitDiffResultMsg:
+		if msg.err != nil {
+			m.historyDiff.SetError(msg.err.Error())
+		} else {
+			m.historyDiff.SetDiff(msg.file, msg.fileDiff)
+		}
+		return m, nil
+
+	case components.CommitSelectedMsg:
+		m.selectedCommit = &msg.Commit
+		m.historyDiff.Clear()
+		return m, loadCommitFilesCmd(m.repoPath, msg.Commit.SHA)
+
+	case components.LoadMoreCommitsMsg:
+		if !m.loadingMoreLogs {
+			m.loadingMoreLogs = true
+			return m, loadLogCmd(m.repoPath, len(m.commitList.Commits), true)
+		}
+		return m, nil
+
+	// ── PR ──
+	case prListResultMsg:
+		if msg.err != nil {
+			m.errorModal = views.ShowError("PR Error", msg.err.Error(), false, nil, m.width, m.height)
+			m.prOverlay.Visible = false
+			return m, nil
+		}
+		m.prOverlay.SetPRs(msg.prs)
+		// Load checks for first PR
+		if pr := m.prOverlay.SelectedPR(); pr != nil {
+			return m, loadPRChecksCmd(m.repoPath, pr.Number)
+		}
+		return m, nil
+
+	case prChecksResultMsg:
+		if msg.err == nil {
+			m.prOverlay.SetChecks(msg.number, msg.checks)
+		}
+		return m, nil
+
+	case views.PRCheckoutMsg:
+		return m, checkoutPRCmd(m.repoPath, msg.Number)
+
+	case prCheckoutResultMsg:
+		if msg.err != nil {
+			m.errorModal = views.ShowError("PR Checkout Failed", msg.err.Error(), false, nil, m.width, m.height)
+			return m, nil
+		}
+		m.historyLoaded = false
+		return m, refreshStatusCmd(m.repoPath)
+
+	case views.PRCreateRequestMsg:
+		m.prCreateOverlay.Show(msg.BaseBranch, m.width, m.height)
+		return m, nil
+
+	case views.PRCreateMsg:
+		return m, createPRCmd(m.repoPath, msg.Title, msg.Body, msg.Base, msg.Draft, msg.UseFill)
+
+	case views.PRCreateCancelMsg:
+		m.prOverlay.Reshow()
+		return m, nil
+
+	case prCreateResultMsg:
+		if msg.err != nil {
+			m.errorModal = views.ShowError("PR Create Failed", msg.err.Error(), false, nil, m.width, m.height)
+			return m, nil
+		}
+		m.errorModal = views.ShowError("PR Created", msg.url, false, nil, m.width, m.height)
+		return m, loadCurrentBranchPRCmd(m.repoPath, m.branchName)
+
+	case views.PROverlayCloseMsg:
+		return m, nil
+
+	case views.PRNeedChecksMsg:
+		return m, loadPRChecksCmd(m.repoPath, msg.Number)
+
+	case views.PRFilterChangeMsg:
+		return m, loadPRsCmd(m.repoPath, msg.State)
+
+	case prCurrentBranchResultMsg:
+		m.currentPR = msg.pr
+		return m, nil
+
+	// ── Settings & Terminal ──
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
-	// Forward bubbleterm internal messages (PTY output, ticks)
-	// These must reach the terminal even when it's not focused.
+
 	case views.SettingsClosedMsg:
 		m.showSettings = false
 		return m, nil
 
 	case views.SettingsChangedMsg:
-		// React to specific setting changes
 		switch msg.Key {
 		case "appearance.theme":
 			m.theme = render.CurrentTheme(m.config.Appearance.Theme)
-		case "git.fetch_interval":
-			// The next tick will pick up the new interval automatically
-			// because startTickCmd reads from m.config.Git.FetchInterval.
-			// No action needed here — the timer restarts on its own.
 		}
 		return m, nil
+
 	default:
 		if m.terminalOpen && m.terminal.Started() {
 			var cmd tea.Cmd
@@ -427,29 +988,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// updateFileListSize recalculates and sets the file list dimensions from the current layout.
-// Inner dimensions = pane dimensions minus borders (2) and title line (1).
-//
-// Why -2 for width? The border draws 1 character on the left and 1 on the right,
-// so the usable inner width is SidebarWidth minus 2.
-//
-// Why -3 for height? The border takes 2 rows (top + bottom) and the pane title
-// takes 1 row, leaving FileListHeight minus 3 rows for actual file entries.
+// updateFileListSize recalculates file list and diff dimensions from layout.
 func (m *Model) updateFileListSize() {
 	dim := layout.Calculate(m.width, m.height, m.terminalOpen, m.terminalHeight)
 	m.fileList.SetSize(dim.SidebarWidth-2, dim.FileListHeight-3)
-	// Diff viewer: subtract border (2) and title line (1) from pane dimensions
 	m.diffView.SetSize(dim.MainWidth-2, dim.DiffHeight-3)
-	m.commitMsg.SetSize(dim.SidebarWidth-2, dim.CommitMsgHeight-3) // -3 for border + title
+	m.commitMsg.SetSize(dim.SidebarWidth-2, dim.CommitMsgHeight-3)
+}
+
+// updateHistorySize recalculates history tab component dimensions.
+func (m *Model) updateHistorySize() {
+	dim := layout.Calculate(m.width, m.height, m.terminalOpen, m.terminalHeight)
+	// History tab: sidebar = commit list (full height), main = detail + files + diff
+	m.commitList.SetSize(dim.SidebarWidth-2, dim.FileListHeight+dim.CommitMsgHeight-3)
+	m.historyFiles.SetSize((dim.MainWidth/2)-2, dim.DiffHeight-6)
+	m.historyDiff.SetSize((dim.MainWidth/2)-2, dim.DiffHeight-6)
 }
 
 // ── Key Handling ────────────────────────────────────────
 
-// handleKey processes key messages based on current state.
 func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
-	// Ctrl+C always quits, regardless of state or focus mode
 	if msg.String() == "ctrl+c" {
-		m.terminal.Close() // clean up PTY subprocess
+		m.terminal.Close()
 		m.quitting = true
 		return m, tea.Quit
 	}
@@ -463,7 +1023,6 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 	switch m.state {
 	case stateAuthBlocked:
-		// Any key → re-check auth
 		if !m.authChecking {
 			m.authChecking = true
 			return m, checkAuthCmd
@@ -482,17 +1041,38 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleMainKey processes keys when the app is in the main layout state.
-// Priority: error modal → help overlay → focused mode → navigable keybindings → pane keys.
 func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
-	// ── Error modal takes priority over everything ──
+	// ── Overlays take priority ──
 	if m.errorModal.Visible {
 		var cmd tea.Cmd
 		m.errorModal, cmd = m.errorModal.Update(msg)
 		return m, cmd
 	}
 
-	// ── Help overlay ──
+	if m.branchDropdown.Visible {
+		var cmd tea.Cmd
+		m.branchDropdown, cmd = m.branchDropdown.Update(msg)
+		return m, cmd
+	}
+
+	if m.mergeOverlay.Visible {
+		var cmd tea.Cmd
+		m.mergeOverlay, cmd = m.mergeOverlay.Update(msg)
+		return m, cmd
+	}
+
+	if m.prOverlay.Visible {
+		var cmd tea.Cmd
+		m.prOverlay, cmd = m.prOverlay.Update(msg)
+		return m, cmd
+	}
+
+	if m.prCreateOverlay.Visible {
+		var cmd tea.Cmd
+		m.prCreateOverlay, cmd = m.prCreateOverlay.Update(msg)
+		return m, cmd
+	}
+
 	if m.showHelp {
 		if msg.String() == "?" || msg.String() == "esc" {
 			m.showHelp = false
@@ -500,7 +1080,7 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// ── Focused mode — only Esc escapes ──
+	// ── Focused mode ──
 	if m.focusMode == core.Focused {
 		if msg.String() == "esc" {
 			m.focusMode = core.Navigable
@@ -512,49 +1092,29 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// Terminal resize: Ctrl+Shift+Up/Down
+		// Terminal resize
 		if m.activePane == core.PaneTerminal {
 			switch msg.String() {
 			case "ctrl+shift+up":
-				// Grow terminal by 1 row. We ask layout.Calculate to try +1,
-				// then check if it actually increased — because Calculate clamps
-				// to the 80% max defined earlier. If clamped, the requested
-				// height equals the current height and no resize happens.
 				dim := layout.Calculate(m.width, m.height, m.terminalOpen, m.terminalHeight+1)
 				if dim.TerminalHeight > m.terminalHeight {
 					m.terminalHeight = dim.TerminalHeight
 					m.updateFileListSize()
-					innerW := dim.MainWidth - 2
-					innerH := dim.TerminalHeight - 2
-					cmd := m.terminal.Resize(innerW, innerH)
+					cmd := m.terminal.Resize(dim.MainWidth-2, dim.TerminalHeight-2)
 					return m, cmd
 				}
 				return m, nil
 
 			case "ctrl+shift+down":
-				// Shrink terminal by 1 row
-				if m.terminalHeight <= 3 { // minTermRows
+				if m.terminalHeight <= 3 {
 					return m, nil
 				}
 				m.terminalHeight--
 				dim := layout.Calculate(m.width, m.height, m.terminalOpen, m.terminalHeight)
 				m.updateFileListSize()
-				innerW := dim.MainWidth - 2
-				innerH := dim.TerminalHeight - 2
-				cmd := m.terminal.Resize(innerW, innerH)
+				cmd := m.terminal.Resize(dim.MainWidth-2, dim.TerminalHeight-2)
 				return m, cmd
 			}
-		}
-
-		// Esc always unfocuses
-		if msg.String() == "esc" {
-			m.focusMode = core.Navigable
-			if m.activePane == core.PaneTerminal {
-				m.terminal.Blur()
-			} else {
-				m.commitMsg.Blur()
-			}
-			return m, nil
 		}
 
 		// Terminal pane: ALL keys go to PTY
@@ -574,10 +1134,10 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// ── Navigable mode keybindings ──
+	// ── Navigable mode ──
 	switch msg.String() {
 	case "q":
-		m.terminal.Close() // clean up PTY subprocess
+		m.terminal.Close()
 		m.quitting = true
 		return m, tea.Quit
 
@@ -588,10 +1148,15 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	case "tab":
 		if m.activeTab == core.ChangesTab {
 			m.activeTab = core.HistoryTab
+			// Load history if not loaded yet
+			if !m.historyLoaded {
+				m.updateHistorySize()
+				return m, loadLogCmd(m.repoPath, 0, false)
+			}
 		} else {
 			m.activeTab = core.ChangesTab
 		}
-		m.activePane = core.Pane1 // reset to first pane on tab switch
+		m.activePane = core.Pane1
 		return m, nil
 
 	case "1":
@@ -619,12 +1184,10 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			m.activePane = core.PaneTerminal
 			m.focusMode = core.Focused
 
-			// Calculate the terminal pane's inner dimensions
 			dim := layout.Calculate(m.width, m.height, m.terminalOpen, m.terminalHeight)
-			innerW := dim.MainWidth - 2      // subtract border: 1 left + 1 right = 2
-			innerH := dim.TerminalHeight - 2 // same: 1 top + 1 bottom = 2
+			innerW := dim.MainWidth - 2
+			innerH := dim.TerminalHeight - 2
 
-			// Lazy start: spawn the PTY on first open
 			if !m.terminal.Started() {
 				cmd := m.terminal.Start(innerW, innerH)
 				m.terminal.Focus()
@@ -632,13 +1195,11 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 				return m, cmd
 			}
 
-			// Already started — just focus and resize to current dimensions
 			m.terminal.Focus()
 			cmd := m.terminal.Resize(innerW, innerH)
 			m.updateFileListSize()
 			return m, cmd
 		} else {
-			// Closing the terminal pane
 			m.terminal.Blur()
 			m.focusMode = core.Navigable
 			if m.activePane == core.PaneTerminal {
@@ -651,73 +1212,97 @@ func (m Model) handleMainKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	case "p":
 		// Push to remote
 		if m.pushing {
-			return m, nil // already pushing
+			return m, nil
 		}
 		if m.branchName == "" {
-			// Detached HEAD — can't push.
-			// When HEAD is detached, `git status --porcelain=2` reports `# branch.oid <sha>`
-			// but the `# branch.head` line contains `(detached)` instead of a branch name.
-			// The status parser sets `Branch` to "" in that case, so an empty
-			// branchName here means we're in detached HEAD state and there's no branch to push.
 			return m, nil
 		}
 		m.pushing = true
 		return m, pushCmd(m.repoPath, m.branchName, m.upstream, m.hasUpstream)
 
+	case "F":
+		if !m.fetching && !m.pulling && m.remote != "" {
+			m.fetching = true
+			return m, backgroundFetchCmd(m.repoPath, m.ahead, m.behind, m.branchName+"@{upstream}", true)
+		}
+		return m, nil
+
+	case "P":
+		if !m.pulling && !m.fetching && m.remote != "" {
+			m.pulling = true
+			return m, pullCmd(m.repoPath)
+		}
+		return m, nil
+
+	case "B":
+		m.branchDropdown.Open(m.width, m.height)
+		return m, loadBranchesCmd(m.repoPath)
+
+	case "R":
+		m.prOverlay.Show(m.branchName, m.width, m.height)
+		return m, loadPRsCmd(m.repoPath, "open")
+
+	case "A":
+		// Abort merge (only when merging)
+		if git.IsMerging(m.repoPath) {
+			return m, mergeAbortCmd(m.repoPath)
+		}
+		return m, nil
+
 	case "S":
-		// Open settings overlay
 		m.showSettings = true
 		m.settings = views.NewSettings(m.config, m.width, m.height)
 		return m, nil
 
 	case "esc":
-		// Already navigable — Esc is a no-op
 		return m, nil
 	}
 
-	// ── Forward unhandled keys to the active pane ──
-	// This routes j/k/enter/space/a/g/G to the correct pane component.
-	// Keys the pane doesn't handle are silently dropped (no-op).
+	// Forward to active pane
 	return m.handlePaneKey(msg)
 }
 
-// handlePaneKey forwards key events to the component that owns the active pane.
-// Each pane's component handles its own navigation and selection keys.
 func (m Model) handlePaneKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	switch m.activePane {
 
 	case core.Pane1:
 		if m.activeTab == core.ChangesTab {
-			// Changes tab → Pane 1 = Changed Files list
 			var cmd tea.Cmd
 			m.fileList, cmd = m.fileList.Update(msg)
 			return m, cmd
 		}
-		// History tab → Pane 1 = Commit List
-		return m, nil
+		// History tab → Commit List
+		var cmd tea.Cmd
+		m.commitList, cmd = m.commitList.Update(msg)
+		return m, cmd
 
 	case core.Pane2:
 		if m.activeTab == core.ChangesTab {
-			// Changes tab → Pane 2 = Diff Viewer
 			var cmd tea.Cmd
 			m.diffView, cmd = m.diffView.Update(msg)
 			return m, cmd
 		}
 		// History tab → Changed Files in commit
+		var cmd tea.Cmd
+		m.historyFiles, cmd = m.historyFiles.Update(msg)
+		if cmd != nil {
+			// File selected in history → load its diff
+			return m, cmd
+		}
 		return m, nil
 
 	case core.Pane3:
 		if m.activeTab == core.ChangesTab {
-			// Changes tab → Pane 3 = Commit Message
 			var cmd tea.Cmd
 			m.commitMsg, cmd = m.commitMsg.Update(msg)
 			return m, cmd
 		}
 		// History tab → Diff Viewer
-		return m, nil
+		var cmd tea.Cmd
+		m.historyDiff, cmd = m.historyDiff.Update(msg)
+		return m, cmd
 
 	case core.PaneTerminal:
-		// Terminal pane: forward keys to bubbleterm
 		var cmd tea.Cmd
 		m.terminal, cmd = m.terminal.Update(msg)
 		return m, cmd
@@ -728,7 +1313,6 @@ func (m Model) handlePaneKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 // ── State Persistence ───────────────────────────────────
 
-// saveRepoState records the opened repo in repos-state.json (best-effort).
 func (m *Model) saveRepoState() {
 	state, err := config.LoadState()
 	if err != nil {
@@ -740,7 +1324,6 @@ func (m *Model) saveRepoState() {
 
 // ── View ────────────────────────────────────────────────
 
-// View renders the current state to the terminal.
 func (m Model) View() tea.View {
 	var content string
 
@@ -749,7 +1332,7 @@ func (m Model) View() tea.View {
 	} else {
 		switch m.state {
 		case stateAuthChecking, stateResolvingRepo, stateDiscoveringRepos:
-			content = "" // brief blank screen during async operations
+			content = ""
 		case stateAuthBlocked:
 			content = m.viewAuthBlocker()
 		case stateRepoPicker:
@@ -757,6 +1340,14 @@ func (m Model) View() tea.View {
 		case stateMain:
 			if m.showSettings {
 				content = m.settings.View()
+			} else if m.prCreateOverlay.Visible {
+				content = m.prCreateOverlay.View()
+			} else if m.prOverlay.Visible {
+				content = m.prOverlay.View()
+			} else if m.mergeOverlay.Visible {
+				content = m.mergeOverlay.View()
+			} else if m.branchDropdown.Visible {
+				content = m.branchDropdown.View()
 			} else if m.errorModal.Visible {
 				content = m.errorModal.View()
 			} else if m.showHelp {
@@ -770,11 +1361,10 @@ func (m Model) View() tea.View {
 	v := tea.NewView(content)
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
-	v.ReportFocus = true // enables tea.FocusMsg / tea.BlurMsg
+	v.ReportFocus = true
 	return v
 }
 
-// viewAuthBlocker renders the fullscreen auth message
 func (m Model) viewAuthBlocker() string {
 	titleStyle := lipgloss.NewStyle().
 		Bold(true).
@@ -817,47 +1407,49 @@ func (m Model) viewAuthBlocker() string {
 		Render(box)
 }
 
-// viewMain renders the full layout with header, tab bar, and panes.
 func (m Model) viewMain() string {
 	dim := layout.Calculate(m.width, m.height, m.terminalOpen, m.terminalHeight)
 
 	// ── Header + Tab bar ──
-	// ── Header + Tab bar ──
+	prNumber := 0
+	prReview := ""
+	if m.currentPR != nil {
+		prNumber = m.currentPR.Number
+		prReview = m.currentPR.ReviewDecision
+	}
+
 	headerData := views.HeaderData{
-		RepoName:    git.RepoName(m.repoPath),
-		BranchName:  m.branchName,
-		Ahead:       m.ahead,
-		Behind:      m.behind,
-		HasUpstream: m.hasUpstream,
-		Pushing:     m.pushing, // show pushing state in header
+		RepoName:      git.RepoName(m.repoPath),
+		BranchName:    m.branchName,
+		Ahead:         m.ahead,
+		Behind:        m.behind,
+		HasUpstream:   m.hasUpstream,
+		Pushing:       m.pushing,
+		Fetching:      m.fetching,
+		Pulling:       m.pulling,
+		LastFetchTime: m.lastFetchTime,
+		IsMerging:     git.IsMerging(m.repoPath),
+		PRNumber:      prNumber,
+		PRReview:      prReview,
 	}
 	header := views.RenderHeader(headerData, dim.Width)
 	tabBar := views.RenderTabBar(m.activeTab, dim.Width)
 
-	// ── Sidebar column: pane 1 (top) + pane 3 (bottom) ──
-	var pane1Content string
-	var pane1Title string
-	if m.activeTab == core.ChangesTab {
-		// Changes tab → Pane 1 = Changed Files list with file count in title
-		fileCount := len(m.fileList.Files)
-		if fileCount > 0 {
-			pane1Title = fmt.Sprintf("Changed Files (%d)", fileCount)
-		} else {
-			pane1Title = "Changed Files"
-		}
-		pane1Content = m.fileList.View()
-	} else {
-		// History tab → Pane 1 = Commit List
-		pane1Title = core.PaneName(core.Pane1, m.activeTab)
-		pane1Content = "(commit list)"
+	if m.activeTab == core.HistoryTab {
+		return m.viewHistoryTab(header, tabBar, dim)
 	}
 
-	pane1 := renderPane(
-		pane1Title,
-		pane1Content,
-		dim.SidebarWidth, dim.FileListHeight,
-		m.activePane == core.Pane1,
-	)
+	return m.viewChangesTab(header, tabBar, dim)
+}
+
+func (m Model) viewChangesTab(header, tabBar string, dim layout.Dimensions) string {
+	// ── Sidebar column: pane 1 (top) + pane 3 (bottom) ──
+	fileCount := len(m.fileList.Files)
+	pane1Title := "Changed Files"
+	if fileCount > 0 {
+		pane1Title = fmt.Sprintf("Changed Files (%d)", fileCount)
+	}
+	pane1 := renderPane(pane1Title, m.fileList.View(), dim.SidebarWidth, dim.FileListHeight, m.activePane == core.Pane1)
 	pane3 := renderPaneWithContent(
 		core.PaneName(core.Pane3, m.activeTab),
 		m.commitMsg.View(),
@@ -866,22 +1458,8 @@ func (m Model) viewMain() string {
 	)
 	sidebar := lipgloss.JoinVertical(lipgloss.Left, pane1, pane3)
 
-	// ── Main column: pane 2 (top) + terminal (bottom, if open) ──
-	var pane2Content string
-	var pane2Title string
-	if m.activeTab == core.ChangesTab {
-		pane2Title = "Diff"
-		pane2Content = m.diffView.View()
-	} else {
-		pane2Title = core.PaneName(core.Pane2, m.activeTab)
-		pane2Content = "(commit list)"
-	}
-	pane2 := renderPane(
-		pane2Title,
-		pane2Content,
-		dim.MainWidth, dim.DiffHeight,
-		m.activePane == core.Pane2,
-	)
+	// ── Main column ──
+	pane2 := renderPane("Diff", m.diffView.View(), dim.MainWidth, dim.DiffHeight, m.activePane == core.Pane2)
 	mainCol := pane2
 	if m.terminalOpen {
 		var termContent string
@@ -890,24 +1468,53 @@ func (m Model) viewMain() string {
 		} else {
 			termContent = "Press ` to start terminal"
 		}
-		termPane := renderPaneWithContent(
-			"Terminal",
-			termContent,
-			dim.MainWidth, dim.TerminalHeight,
-			m.activePane == core.PaneTerminal,
-		)
+		termPane := renderPaneWithContent("Terminal", termContent, dim.MainWidth, dim.TerminalHeight, m.activePane == core.PaneTerminal)
 		mainCol = lipgloss.JoinVertical(lipgloss.Left, pane2, termPane)
 	}
 
-	// ── Compose ──
 	content := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, mainCol)
 	return lipgloss.JoinVertical(lipgloss.Left, header, tabBar, content)
 }
 
-// renderPane draws a bordered box with a title and content.
-// Active panes get a blue border; inactive panes get a gray border.
-// The content string manages its own styling — renderPane does NOT
-// apply any foreground color to it (unlike the earlier version which grayed out placeholders).
+func (m Model) viewHistoryTab(header, tabBar string, dim layout.Dimensions) string {
+	// Sidebar = Commit List (full height)
+	sidebarHeight := dim.FileListHeight + dim.CommitMsgHeight
+	commitListPane := renderPane("Commit List", m.commitList.View(), dim.SidebarWidth, sidebarHeight, m.activePane == core.Pane1)
+
+	// Main column: detail (top) + files + diff (bottom)
+	detailHeight := 8
+	remainingHeight := dim.DiffHeight - detailHeight
+	if remainingHeight < 4 {
+		remainingHeight = 4
+	}
+
+	detailContent := views.RenderCommitDetail(m.selectedCommit, dim.MainWidth-2)
+	detailPane := renderPane("Commit Details", detailContent, dim.MainWidth, detailHeight, false)
+
+	halfWidth := dim.MainWidth / 2
+	filesPane := renderPane("Changed Files", m.historyFiles.View(), halfWidth, remainingHeight, m.activePane == core.Pane2)
+	diffPane := renderPane("Diff", m.historyDiff.View(), dim.MainWidth-halfWidth, remainingHeight, m.activePane == core.Pane3)
+	bottomRow := lipgloss.JoinHorizontal(lipgloss.Top, filesPane, diffPane)
+
+	mainCol := lipgloss.JoinVertical(lipgloss.Left, detailPane, bottomRow)
+
+	if m.terminalOpen {
+		var termContent string
+		if m.terminal.Started() {
+			termContent = m.terminal.View()
+		} else {
+			termContent = "Press ` to start terminal"
+		}
+		termPane := renderPaneWithContent("Terminal", termContent, dim.MainWidth, dim.TerminalHeight, m.activePane == core.PaneTerminal)
+		mainCol = lipgloss.JoinVertical(lipgloss.Left, detailPane, bottomRow, termPane)
+	}
+
+	content := lipgloss.JoinHorizontal(lipgloss.Top, commitListPane, mainCol)
+	return lipgloss.JoinVertical(lipgloss.Left, header, tabBar, content)
+}
+
+// ── Pane Rendering ──────────────────────────────────────
+
 func renderPane(title, content string, width, height int, focused bool) string {
 	borderColor := lipgloss.Color("#484F58")
 	titleColor := lipgloss.Color("#8B949E")
@@ -916,7 +1523,6 @@ func renderPane(title, content string, width, height int, focused bool) string {
 		titleColor = lipgloss.Color("#58A6FF")
 	}
 
-	// Border adds 2 to width and 2 to height, so subtract to hit target outer size
 	innerW := width - 2
 	innerH := height - 2
 	if innerW < 1 {
@@ -936,8 +1542,6 @@ func renderPane(title, content string, width, height int, focused bool) string {
 		Render(titleLine + "\n" + content)
 }
 
-// renderPaneThemed draws a bordered box using theme colors.
-// This replaces the hardcoded colors in renderPane().
 func renderPaneThemed(title, content string, width, height int, focused bool, theme render.Theme) string {
 	borderColor := theme.BorderInactive
 	titleColor := theme.TextSecondary
@@ -992,10 +1596,8 @@ func renderPaneWithContent(title, content string, width, height int, focused boo
 		Render(titleLine + "\n" + content)
 }
 
-// loadDiffCmd runs git diff for a file and returns the parsed result.
-// It returns a tea.Cmd, which is a function that Bubbletea runs on a separate
-// goroutine. When the function finishes, its return value (a tea.Msg) is sent
-// back to Update(). This keeps the UI responsive while git runs.
+// ── Async Commands ──────────────────────────────────────
+
 func loadDiffCmd(repoPath string, file git.FileEntry) tea.Cmd {
 	return func() tea.Msg {
 		raw, err := git.GetDiff(repoPath, file)
@@ -1007,12 +1609,8 @@ func loadDiffCmd(repoPath string, file git.FileEntry) tea.Cmd {
 	}
 }
 
-// generateCommitMsgCmd runs the active AI provider asynchronously.
-// It builds the diff from the currently selected files (in-memory selection),
-// not from git's staging area.
 func generateCommitMsgCmd(repoPath string, selectedFiles []git.FileEntry, provider ai.CommitMessageProvider) tea.Cmd {
 	return func() tea.Msg {
-		// Get the combined diff of selected files
 		diff, err := git.GetSelectedDiff(repoPath, selectedFiles)
 		if err != nil {
 			return components.AIResultMsg{Err: err}
@@ -1024,7 +1622,6 @@ func generateCommitMsgCmd(repoPath string, selectedFiles []git.FileEntry, provid
 			}
 		}
 
-		// Generate the commit message
 		msg, err := provider.GenerateCommitMessage(diff)
 		if err != nil {
 			return components.AIResultMsg{Err: err}
@@ -1037,29 +1634,22 @@ func generateCommitMsgCmd(repoPath string, selectedFiles []git.FileEntry, provid
 	}
 }
 
-// commitCmd stages the selected files and runs git commit asynchronously.
-// This is the ONLY place where leogit modifies git's staging area (index).
-// Flow: reset index → stage selected files → commit → (git status refresh on success)
 func commitCmd(repoPath string, selectedFiles []git.FileEntry, summary, description string) tea.Cmd {
 	return func() tea.Msg {
 		if len(selectedFiles) == 0 {
 			return components.CommitResultMsg{Err: fmt.Errorf("no files selected — select files first")}
 		}
 
-		// Step 1: Reset the index to HEAD (clear any external staging)
-		// This ensures only what the user selected in leogit gets committed.
 		resetCmd := exec.Command("git", "reset", "HEAD")
 		resetCmd.Dir = repoPath
 		if out, err := resetCmd.CombinedOutput(); err != nil {
 			return components.CommitResultMsg{Err: fmt.Errorf("resetting index: %s (%w)", string(out), err)}
 		}
 
-		// Step 2: Stage the selected files
 		if err := git.StageFiles(repoPath, selectedFiles); err != nil {
 			return components.CommitResultMsg{Err: fmt.Errorf("staging selected files: %w", err)}
 		}
 
-		// Step 3: Verify staging succeeded
 		hasStaged, err := git.HasStagedChanges(repoPath)
 		if err != nil {
 			return components.CommitResultMsg{Err: fmt.Errorf("checking staged changes: %w", err)}
@@ -1068,9 +1658,7 @@ func commitCmd(repoPath string, selectedFiles []git.FileEntry, summary, descript
 			return components.CommitResultMsg{Err: fmt.Errorf("staging produced no changes")}
 		}
 
-		// Step 4: Format and execute the commit
 		message := git.FormatCommitMessage(summary, description, nil)
-
 		if err := git.Commit(repoPath, message); err != nil {
 			return components.CommitResultMsg{Err: err}
 		}
@@ -1079,23 +1667,12 @@ func commitCmd(repoPath string, selectedFiles []git.FileEntry, summary, descript
 	}
 }
 
-// pushCmd runs git push asynchronously.
-// It determines the remote from the upstream ref (if set) or falls back to the default
-// remote. If there's no upstream, --set-upstream is added to create one.
 func pushCmd(repoPath, branchName, upstream string, hasUpstream bool) tea.Cmd {
-	// Bubbletea runs tea.Cmd functions in a background goroutine so the push
-	// doesn't block the UI thread (the TUI stays responsive and can render
-	// "Pushing..." in the header). The returned closure captures the outer
-	// function's parameters (repoPath, branchName, etc.) so they're available
-	// when the goroutine executes. When the closure returns a tea.Msg, bubbletea
-	// delivers it back to Update() on the main thread.
 	return func() tea.Msg {
-		// Determine the remote to push to
 		var remote string
 		if hasUpstream && upstream != "" {
 			remote = git.RemoteFromUpstream(upstream)
 		} else {
-			// No upstream — discover the default remote
 			var err error
 			remote, err = git.GetDefaultRemote(repoPath)
 			if err != nil {
@@ -1103,18 +1680,48 @@ func pushCmd(repoPath, branchName, upstream string, hasUpstream bool) tea.Cmd {
 			}
 		}
 
-		// Build push options
 		opts := git.PushOptions{
 			Remote:      remote,
 			Branch:      branchName,
-			SetUpstream: !hasUpstream, // auto-set upstream on first push
+			SetUpstream: !hasUpstream,
 		}
 
-		// Execute the push
 		if err := git.Push(repoPath, opts); err != nil {
 			return pushResultMsg{err: err}
 		}
 
 		return pushResultMsg{err: nil}
 	}
+}
+
+// ── Helpers ─────────────────────────────────────────────
+
+func formatAheadBehindChange(msg FetchCompleteMsg) string {
+	var parts []string
+
+	if msg.NewBehind > msg.OldBehind {
+		d := msg.NewBehind - msg.OldBehind
+		parts = append(parts, fmt.Sprintf(
+			"%d new commit(s) available to pull (now %d behind)",
+			d, msg.NewBehind,
+		))
+	} else if msg.NewBehind < msg.OldBehind {
+		parts = append(parts, fmt.Sprintf(
+			"Now %d commit(s) behind (was %d)",
+			msg.NewBehind, msg.OldBehind,
+		))
+	}
+
+	if msg.NewAhead != msg.OldAhead {
+		parts = append(parts, fmt.Sprintf(
+			"Ahead count changed: %d → %d",
+			msg.OldAhead, msg.NewAhead,
+		))
+	}
+
+	if len(parts) == 0 {
+		return "Remote tracking refs updated."
+	}
+
+	return strings.Join(parts, "\n")
 }

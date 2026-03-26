@@ -2,6 +2,7 @@ package views
 
 import (
 	"fmt"
+	"time"
 
 	"charm.land/lipgloss/v2"
 
@@ -10,16 +11,22 @@ import (
 
 // HeaderData holds the information needed to render the header bar.
 type HeaderData struct {
-	RepoName    string
-	BranchName  string
-	Ahead       int
-	Behind      int
-	HasUpstream bool
-	Pushing     bool // true while a push is in progress
+	RepoName      string
+	BranchName    string
+	Ahead         int
+	Behind        int
+	HasUpstream   bool
+	Pushing       bool      // true while a push is in progress
+	Fetching      bool      // true when a fetch is in progress
+	Pulling       bool      // true when a pull is in progress
+	LastFetchTime time.Time // when the last fetch completed (zero = never)
+	IsMerging     bool      // true when repo is in a merge state
+	PRNumber      int       // open PR number for current branch (0 = none)
+	PRReview      string    // review decision: APPROVED, CHANGES_REQUESTED, etc.
 }
 
 // RenderHeader renders the top header bar with repo name, branch, ahead/behind
-// indicators, and a context-aware action button.
+// indicators, and a context-aware action button with fetch timing.
 func RenderHeader(data HeaderData, width int) string {
 	branchDisplay := data.BranchName
 	if branchDisplay == "" {
@@ -44,6 +51,11 @@ func RenderHeader(data HeaderData, width int) string {
 		Background(bg).
 		Padding(0, 1)
 
+	activeStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#D29922")).
+		Background(bg).
+		Padding(0, 1)
+
 	sep := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#484F58")).
 		Background(bg).
@@ -55,19 +67,16 @@ func RenderHeader(data HeaderData, width int) string {
 	if data.HasUpstream && (data.Ahead > 0 || data.Behind > 0) {
 		branchText += " "
 		if data.Ahead > 0 && data.Behind > 0 {
-			// Both ahead and behind — yellow indicator
 			branchText += lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#D29922")).
 				Background(bg).
 				Render(fmt.Sprintf("↑%d ↓%d", data.Ahead, data.Behind))
 		} else if data.Ahead > 0 {
-			// Ahead only — green indicator
 			branchText += lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#3FB950")).
 				Background(bg).
 				Render(fmt.Sprintf("↑%d", data.Ahead))
 		} else {
-			// Behind only — red indicator
 			branchText += lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#F85149")).
 				Background(bg).
@@ -75,14 +84,50 @@ func RenderHeader(data HeaderData, width int) string {
 		}
 	}
 
-	// ── Action button (context-aware) ──
-	action := actionLabel(data)
+	// ── Merge indicator ──
+	if data.IsMerging {
+		branchText += " " + lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#F85149")).
+			Background(bg).
+			Bold(true).
+			Render("MERGING")
+	}
+
+	// ── Action button (context-aware) with status ──
+	var actionText string
+	if data.Pulling {
+		actionText = activeStyle.Render("⟳ Pulling...")
+	} else if data.Fetching {
+		actionText = activeStyle.Render("⟳ Fetching...")
+	} else {
+		action := actionLabel(data)
+
+		// Append time since last fetch
+		if !data.LastFetchTime.IsZero() {
+			elapsed := time.Since(data.LastFetchTime)
+			action += " (" + formatDuration(elapsed) + ")"
+		}
+
+		actionText = actionStyle.Render(action)
+	}
+
+	// ── PR indicator ──
+	prText := ""
+	if data.PRNumber > 0 {
+		prIcon := prReviewIcon(data.PRReview)
+		prText = sep + lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#A371F7")).
+			Background(bg).
+			Padding(0, 1).
+			Render(fmt.Sprintf("%s #%d", prIcon, data.PRNumber))
+	}
 
 	left := repoStyle.Render("⎇ "+data.RepoName) +
 		sep +
 		branchStyle.Render(branchText) +
 		sep +
-		actionStyle.Render(action)
+		actionText +
+		prText
 
 	return lipgloss.NewStyle().Width(width).Background(bg).Render(left)
 }
@@ -106,6 +151,31 @@ func actionLabel(data HeaderData) string {
 		return "↑ Push"
 	default:
 		return "↻ Fetch"
+	}
+}
+
+// formatDuration returns a human-readable short duration string.
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	return fmt.Sprintf("%dh", int(d.Hours()))
+}
+
+// prReviewIcon returns an icon for the PR review decision.
+func prReviewIcon(decision string) string {
+	switch decision {
+	case "APPROVED":
+		return "✓"
+	case "CHANGES_REQUESTED":
+		return "✗"
+	case "REVIEW_REQUIRED":
+		return "○"
+	default:
+		return "◌"
 	}
 }
 

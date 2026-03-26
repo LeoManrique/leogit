@@ -80,6 +80,21 @@ func (m *DiffViewModel) SetLoading() {
 	m.errMsg = ""
 }
 
+// Clear resets all display state to zero values.
+// Used when switching tabs or clearing the current diff context.
+func (m *DiffViewModel) Clear() {
+	m.file = git.FileEntry{}
+	m.fileDiff = nil
+	m.loading = false
+	m.hasContent = false
+	m.errMsg = ""
+	m.offset = 0
+	m.totalLines = 0
+	m.cursor = 0
+	m.selection = diff.DiffSelection{}
+	m.allLines = nil
+}
+
 // SetSize updates the available rendering dimensions.
 func (m *DiffViewModel) SetSize(width, height int) {
 	m.width = width
