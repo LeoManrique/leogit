@@ -20,7 +20,8 @@
   import HelpOverlay from '$lib/views/HelpOverlay.svelte'
   import ErrorModal from '$lib/components/ErrorModal.svelte'
 
-  let terminalVisible = $state(false)
+  let terminalExpanded = $state(false)
+  let terminalSessionId = $state(0) // 0 = no active PTY; >0 = key for the mounted Terminal
   let showBranches = $state(false)
   let showSettings = $state(false)
   let showHelp = $state(false)
@@ -456,8 +457,21 @@
     repoState.update((s) => ({ ...s, error: undefined }))
   }
 
-  function toggleTerminal() {
-    terminalVisible = !terminalVisible
+  function toggleTerminalMinimize() {
+    if (!terminalExpanded && terminalSessionId === 0) {
+      terminalSessionId = 1
+    }
+    terminalExpanded = !terminalExpanded
+  }
+
+  function newTerminalSession() {
+    terminalSessionId += 1
+    terminalExpanded = true
+  }
+
+  function killTerminalSession() {
+    terminalSessionId = 0
+    terminalExpanded = false
   }
 
   function handleKeyDown(e: KeyboardEvent) {
@@ -477,7 +491,7 @@
 
     if (e.key === '`' && !meta) {
       e.preventDefault()
-      toggleTerminal()
+      toggleTerminalMinimize()
     } else if (e.key === 'b' && !meta) {
       e.preventDefault()
       showBranches = !showBranches
@@ -523,6 +537,21 @@
     if (cfg.hide_whitespace !== lastHideWhitespace) {
       lastHideWhitespace = cfg.hide_whitespace
       if ($repoState.activeFile) loadDiffForFile($repoState.activeFile)
+    }
+  })
+
+  // Kill terminal PTY on project change so we don't leak shells from prior repos.
+  let lastTerminalRepoPath = $state<string | undefined>(undefined)
+  $effect(() => {
+    const path = $appState.repoPath
+    if (lastTerminalRepoPath === undefined) {
+      lastTerminalRepoPath = path
+      return
+    }
+    if (path !== lastTerminalRepoPath) {
+      lastTerminalRepoPath = path
+      terminalSessionId = 0
+      terminalExpanded = false
     }
   })
 
@@ -667,13 +696,70 @@
       {/if}
     </div>
 
-    {#if terminalVisible && $appState.repoPath}
-      <div class="terminal-pane">
+    {#if $appState.repoPath}
+      <div class="terminal-section" class:collapsed={!terminalExpanded}>
         <div class="terminal-header">
-          <span>Terminal — {$appState.repoPath}</span>
-          <button class="close-btn" onclick={toggleTerminal} title="Close (`)">✕</button>
+          <button
+            class="terminal-label"
+            onclick={toggleTerminalMinimize}
+            title={terminalExpanded ? 'Minimize terminal (`)' : 'Expand terminal (`)'}
+            aria-label={terminalExpanded ? 'Minimize terminal' : 'Expand terminal'}
+          >
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="4,6 7,8 4,10" />
+              <line x1="8.5" y1="11" x2="12" y2="11" />
+            </svg>
+            <span>Terminal</span>
+          </button>
+          <div class="terminal-controls">
+            <button
+              class="terminal-control-button"
+              onclick={newTerminalSession}
+              title="New terminal session"
+              aria-label="New terminal session"
+            >
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+                <line x1="8" y1="3" x2="8" y2="13" />
+                <line x1="3" y1="8" x2="13" y2="8" />
+              </svg>
+            </button>
+            <button
+              class="terminal-control-button"
+              onclick={toggleTerminalMinimize}
+              title={terminalExpanded ? 'Minimize terminal (`)' : 'Expand terminal (`)'}
+              aria-label={terminalExpanded ? 'Minimize terminal' : 'Expand terminal'}
+            >
+              {#if terminalExpanded}
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+                  <line x1="3" y1="8" x2="13" y2="8" />
+                </svg>
+              {:else}
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <polyline points="3,10 8,5 13,10" />
+                </svg>
+              {/if}
+            </button>
+            <button
+              class="terminal-control-button close-button"
+              onclick={killTerminalSession}
+              title="Close terminal"
+              aria-label="Close terminal"
+              disabled={terminalSessionId === 0}
+            >
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+                <line x1="4" y1="4" x2="12" y2="12" />
+                <line x1="12" y1="4" x2="4" y2="12" />
+              </svg>
+            </button>
+          </div>
         </div>
-        <Terminal repoPath={$appState.repoPath} />
+        {#if terminalSessionId > 0}
+          <div class="terminal-container">
+            {#key `${$appState.repoPath}:${terminalSessionId}`}
+              <Terminal repoPath={$appState.repoPath} />
+            {/key}
+          </div>
+        {/if}
       </div>
     {/if}
   </div>
@@ -876,39 +962,97 @@
     font-size: 12px;
   }
 
-  .terminal-pane {
+  .terminal-section {
     display: flex;
     flex-direction: column;
+    flex-shrink: 0;
     height: 280px;
     border-top: 1px solid var(--border-inactive);
     background: #000000;
+  }
+
+  .terminal-section.collapsed {
+    height: auto;
+    background: var(--bg-secondary);
   }
 
   .terminal-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 0 12px;
-    height: 28px;
+    height: 26px;
+    padding: 0 6px;
     background: var(--bg-secondary);
     border-bottom: 1px solid var(--border-inactive);
-    font-size: 11px;
-    color: var(--text-muted);
+    flex-shrink: 0;
   }
 
-  .close-btn {
-    background: transparent;
+  .terminal-section.collapsed .terminal-header {
+    border-bottom: none;
+  }
+
+  .terminal-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 20px;
+    padding: 0 6px;
     border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 100ms ease, color 100ms ease;
+  }
+
+  .terminal-label:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .terminal-controls {
+    display: flex;
+    gap: 1px;
+  }
+
+  .terminal-control-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
     color: var(--text-muted);
     cursor: pointer;
-    padding: 2px 6px;
-    font-size: 12px;
-    border-radius: 4px;
+    line-height: 0;
+    transition: background 100ms ease, color 100ms ease;
   }
 
-  .close-btn:hover {
-    color: var(--text-primary);
+  .terminal-control-button:hover:not(:disabled) {
     background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .terminal-control-button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .terminal-control-button.close-button:hover:not(:disabled) {
+    background: var(--status-red);
+    color: #ffffff;
+  }
+
+  .terminal-container {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    background: #000000;
   }
 
   .overlay-backdrop {
