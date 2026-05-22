@@ -991,6 +991,10 @@
     border-bottom: none;
   }
 
+  .terminal-section.collapsed .terminal-container {
+    display: none;
+  }
+
   .terminal-label {
     display: inline-flex;
     align-items: center;
