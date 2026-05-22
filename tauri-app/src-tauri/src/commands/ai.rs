@@ -270,10 +270,7 @@ fn parse_commit_message_text(text: &str) -> Result<CommitMessage, String> {
             .map(|s| s.to_string())
             .unwrap_or_default();
 
-        if let Some(mut t) = title {
-            if t.chars().count() > 50 {
-                t = t.chars().take(50).collect();
-            }
+        if let Some(t) = title {
             return Ok(CommitMessage {
                 title: t,
                 description,
@@ -290,11 +287,8 @@ fn parse_commit_message_text(text: &str) -> Result<CommitMessage, String> {
         return Err("Could not extract commit message from AI response".to_string());
     }
 
-    let title = if title_raw.chars().count() > 50 {
-        title_raw.chars().take(50).collect()
-    } else {
-        title_raw
-    };
-
-    Ok(CommitMessage { title, description })
+    Ok(CommitMessage {
+        title: title_raw,
+        description,
+    })
 }
