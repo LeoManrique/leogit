@@ -31,6 +31,7 @@
   let statusInterval: ReturnType<typeof setInterval> | null = null
   let fetchInterval: ReturnType<typeof setInterval> | null = null
   let userTyping = $state(false)
+  let lastHeadSha: string | null = null
 
   const PAGE_SIZE = 50
 
@@ -186,6 +187,42 @@
     }
   }
 
+  // Refresh the commit log, keeping as many already-loaded commits as possible
+  // so the user doesn't lose their scroll position on every external git op.
+  async function refreshLog(): Promise<void> {
+    const repoPath = $appState.repoPath
+    if (!repoPath) return
+    const current = get(repoState)
+    const loadedCount = Math.max(current.log.commits.length, PAGE_SIZE)
+    try {
+      const commits = await gitApi.getLog(repoPath, loadedCount, 0)
+      repoState.update((s) => ({
+        ...s,
+        log: {
+          commits,
+          hasMore: commits.length === loadedCount,
+          loaded: true,
+        },
+      }))
+    } catch {}
+  }
+
+  async function pollHeadSha(): Promise<void> {
+    const repoPath = $appState.repoPath
+    if (!repoPath) return
+    try {
+      const sha = await gitApi.getHeadSha(repoPath)
+      if (lastHeadSha === null) {
+        lastHeadSha = sha
+        return
+      }
+      if (sha !== lastHeadSha) {
+        lastHeadSha = sha
+        await refreshLog()
+      }
+    } catch {}
+  }
+
   async function loadMoreCommits(): Promise<void> {
     const repoPath = $appState.repoPath
     if (!repoPath) return
@@ -285,6 +322,7 @@
     statusInterval = setInterval(() => {
       if ($appState.phase !== 'main') return
       refreshStatus({ silent: true })
+      pollHeadSha()
     }, 2000)
   }
 
@@ -300,6 +338,7 @@
   function handleVisibilityChange(): void {
     if (!document.hidden && $appState.phase === 'main') {
       refreshStatus({ silent: true })
+      pollHeadSha()
     }
   }
 
@@ -312,6 +351,16 @@
 
   function handleFileActivate(file: FileEntry) {
     loadDiffForFile(file)
+  }
+
+  async function handleCommitted(): Promise<void> {
+    await Promise.all([refreshStatus({ silent: true }), refreshLog()])
+    const repoPath = $appState.repoPath
+    if (repoPath) {
+      try {
+        lastHeadSha = await gitApi.getHeadSha(repoPath)
+      } catch {}
+    }
   }
 
   function handleFileToggle(file: FileEntry) {
@@ -337,6 +386,7 @@
       showBranches = false
       await refreshStatus()
       await refreshBranches()
+      await handleCommitted()
     } catch (error) {
       repoState.update((s) => ({ ...s, error: String(error) }))
     }
@@ -351,6 +401,7 @@
       showBranches = false
       await refreshStatus()
       await refreshBranches()
+      await handleCommitted()
     } catch (error) {
       repoState.update((s) => ({ ...s, error: String(error) }))
     }
@@ -377,6 +428,7 @@
       }
       showMerge = false
       await refreshStatus()
+      await handleCommitted()
     } catch (error) {
       repoState.update((s) => ({ ...s, error: String(error) }))
     }
@@ -394,6 +446,7 @@
       }
       showMerge = false
       await refreshStatus()
+      await handleCommitted()
     } catch (error) {
       repoState.update((s) => ({ ...s, error: String(error) }))
     }
@@ -512,7 +565,7 @@
           aria-orientation="horizontal"
           aria-label="Resize commit section"
         ></div>
-        <CommitMessage />
+        <CommitMessage onCommitted={handleCommitted} />
       </div>
     {:else}
       <div class="commit-list-container">

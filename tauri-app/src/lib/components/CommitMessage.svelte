@@ -4,6 +4,12 @@
   import { appState } from '$lib/stores/app'
   import { gitApi, aiApi, configApi, type AiProviderConfig } from '$lib/api/commands'
 
+  interface Props {
+    onCommitted?: () => void
+  }
+
+  let { onCommitted }: Props = $props()
+
   let summary = $state('')
   let description = $state('')
   let provider = $state<'claude' | 'ollama'>('claude')
@@ -84,6 +90,7 @@
       summary = ''
       description = ''
       repoState.update((s) => ({ ...s, selectedFiles: new Set(), userDeselected: new Set() }))
+      onCommitted?.()
     } catch (err) {
       error = `Commit failed: ${String(err)}`
     } finally {

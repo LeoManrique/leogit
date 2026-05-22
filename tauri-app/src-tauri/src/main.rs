@@ -10,6 +10,7 @@ fn main() {
             config::load_state,
             config::save_state,
             git::get_status,
+            git::get_head_sha,
             git::get_diff,
             git::get_diff_whitespace_ignored,
             git::get_commit_diff,

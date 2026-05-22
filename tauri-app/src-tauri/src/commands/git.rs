@@ -449,6 +449,16 @@ fn run_diff(repo_path: &str, file: &FileEntry, ignore_ws: bool) -> Result<String
 }
 
 #[tauri::command]
+pub fn get_head_sha(repo_path: String) -> Result<String, String> {
+    match run_git(&repo_path, &["rev-parse", "HEAD"]) {
+        Ok(sha) => Ok(sha),
+        // Empty repo (no commits yet) — return empty string instead of error so
+        // callers can use this as a cheap change-detection signal.
+        Err(_) => Ok(String::new()),
+    }
+}
+
+#[tauri::command]
 pub fn get_diff(repo_path: String, file: FileEntry) -> Result<String, String> {
     run_diff(&repo_path, &file, false)
 }

@@ -141,6 +141,7 @@ export const configApi = {
 
 export const gitApi = {
   getStatus: (repoPath: string) => invoke<RepoStatus>('get_status', { repoPath }),
+  getHeadSha: (repoPath: string) => invoke<string>('get_head_sha', { repoPath }),
   getDiff: (repoPath: string, file: FileEntry) => invoke<string>('get_diff', { repoPath, file }),
   getDiffWhitespaceIgnored: (repoPath: string, file: FileEntry) =>
     invoke<string>('get_diff_whitespace_ignored', { repoPath, file }),
