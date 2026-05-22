@@ -62,7 +62,7 @@
   .overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.5);
+    background: rgba(0, 0, 0, 0.4);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -70,15 +70,16 @@
   }
 
   .modal {
-    background: var(--bg-primary);
+    background: var(--bg-elevated);
     border: 1px solid var(--border-inactive);
-    border-radius: 6px;
+    border-radius: 10px;
     width: 90%;
-    max-width: 560px;
+    max-width: 480px;
     max-height: 80vh;
     display: flex;
     flex-direction: column;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    box-shadow: var(--shadow-popover);
+    overflow: hidden;
   }
 
   .modal-header {
@@ -91,28 +92,29 @@
 
   .modal-header h2 {
     margin: 0;
-    font-size: 15px;
+    font-size: 13px;
     font-weight: 600;
     color: var(--text-primary);
   }
 
   .close-btn {
-    padding: 4px 8px;
+    padding: 2px 6px;
     background: transparent;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     border: none;
     cursor: pointer;
-    border-radius: 3px;
+    border-radius: 4px;
+    font-size: 12px;
   }
 
   .close-btn:hover {
     color: var(--text-primary);
-    background: var(--bg-secondary);
+    background: var(--surface-hover);
   }
 
   .modal-body {
     flex: 1;
-    padding: 16px;
+    padding: 8px 16px 16px;
     overflow-y: auto;
   }
 
@@ -124,23 +126,24 @@
 
   th {
     text-align: left;
-    padding: 8px;
-    font-weight: 600;
-    color: var(--text-secondary);
+    padding: 6px 8px;
+    font-weight: 500;
+    font-size: 11px;
+    color: var(--text-muted);
     border-bottom: 1px solid var(--border-inactive);
-    background: var(--bg-secondary);
+    background: transparent;
   }
 
   td {
-    padding: 8px;
-    border-bottom: 1px solid var(--border-inactive);
+    padding: 6px 8px;
     color: var(--text-primary);
   }
 
   td.key {
-    font-family: 'Monaco', 'Menlo', monospace;
-    color: var(--status-blue);
-    width: 35%;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-secondary);
+    width: 38%;
   }
 
   .modal-footer {
@@ -152,12 +155,16 @@
   }
 
   .btn-secondary {
-    padding: 6px 14px;
+    padding: 3px 14px;
     font-size: 12px;
-    background: var(--bg-secondary);
+    background: var(--bg-elevated);
     color: var(--text-primary);
-    border: 1px solid var(--border-inactive);
-    border-radius: 4px;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
     cursor: pointer;
+  }
+
+  .btn-secondary:hover {
+    background: var(--surface-hover);
   }
 </style>

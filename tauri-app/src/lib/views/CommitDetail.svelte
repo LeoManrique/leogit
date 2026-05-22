@@ -129,7 +129,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    color: var(--text-secondary);
+    color: var(--text-faint);
   }
 
   .detail-content {
@@ -141,51 +141,49 @@
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 16px;
-    margin-bottom: 20px;
-    padding: 12px;
+    margin-bottom: 16px;
+    padding: 10px 12px;
     background: var(--bg-secondary);
-    border-radius: 4px;
+    border-radius: 6px;
   }
 
   .sha-row,
   .short-sha-row {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 2px;
   }
 
   .label {
     font-size: 11px;
-    color: var(--text-secondary);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
+    color: var(--text-muted);
   }
 
   .sha-value,
   .short-sha-value {
-    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Courier New', monospace;
+    font-family: var(--font-mono);
     font-size: 12px;
-    color: var(--status-blue);
+    color: var(--text-primary);
     word-break: break-all;
     background: transparent;
   }
 
   .summary-section {
-    margin-bottom: 20px;
+    margin-bottom: 16px;
   }
 
   .summary-title {
-    font-size: 18px;
+    font-size: 15px;
     font-weight: 600;
     color: var(--text-primary);
     margin: 0;
   }
 
   .metadata-section {
-    margin-bottom: 20px;
-    padding: 12px;
+    margin-bottom: 16px;
+    padding: 10px 12px;
     background: var(--bg-secondary);
-    border-radius: 4px;
+    border-radius: 6px;
   }
 
   .metadata-row {
@@ -212,38 +210,37 @@
   .author-name {
     color: var(--text-primary);
     font-weight: 500;
+    font-size: 13px;
   }
 
   .author-email {
-    font-size: 12px;
-    color: var(--text-secondary);
-    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Courier New', monospace;
+    font-size: 11px;
+    color: var(--text-muted);
   }
 
   .date-info {
-    color: var(--text-secondary);
-    font-size: 12px;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
   }
 
   .body-section {
-    margin-bottom: 20px;
+    margin-bottom: 16px;
   }
 
   .section-title {
-    font-size: 12px;
-    color: var(--text-secondary);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    margin: 0 0 8px 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0 0 6px 0;
   }
 
   .body-text {
-    padding: 12px;
+    padding: 10px 12px;
     background: var(--bg-secondary);
-    border-radius: 4px;
-    border: 1px solid var(--border-inactive);
-    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Courier New', monospace;
-    font-size: 12px;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 13px;
     color: var(--text-primary);
     white-space: pre-wrap;
     word-wrap: break-word;
@@ -253,59 +250,57 @@
   }
 
   .trailers-section {
-    margin-bottom: 20px;
+    margin-bottom: 16px;
   }
 
   .trailers-list {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 2px;
   }
 
   .trailer-line {
-    padding: 6px 12px;
+    padding: 4px 12px;
     background: var(--bg-secondary);
-    border-radius: 4px;
+    border-radius: 6px;
     font-size: 12px;
   }
 
   .trailer-line code {
-    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Courier New', monospace;
-    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    color: var(--text-muted);
     background: transparent;
   }
 
   .files-section {
-    margin-bottom: 20px;
+    margin-bottom: 16px;
   }
 
   .files-list {
     display: flex;
     flex-direction: column;
-    gap: 1px;
-    border: 1px solid var(--border-inactive);
-    border-radius: 4px;
-    overflow: hidden;
   }
 
   .file-entry {
     display: grid;
     grid-template-columns: auto 1fr auto;
     align-items: center;
-    gap: 12px;
-    padding: 8px 12px;
-    background: var(--bg-secondary);
-    border-bottom: 1px solid var(--border-inactive);
-    font-size: 12px;
+    gap: 10px;
+    padding: 3px 8px;
+    min-height: 24px;
+    border-radius: 6px;
+    font-size: 13px;
   }
 
-  .file-entry:last-child {
-    border-bottom: none;
+  .file-entry:hover {
+    background: var(--surface-hover);
   }
 
   .file-status {
+    font-family: var(--font-mono);
     font-weight: 600;
-    width: 20px;
+    font-size: 11px;
+    width: 14px;
     text-align: center;
   }
 
@@ -314,12 +309,11 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--text-primary);
-    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Courier New', monospace;
   }
 
   .file-dir {
-    color: var(--text-secondary);
-    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Courier New', monospace;
+    color: var(--text-muted);
+    font-size: 11px;
     white-space: nowrap;
   }
 </style>

@@ -82,15 +82,16 @@
     justify-content: center;
     width: 100%;
     height: 100vh;
-    gap: 16px;
-    color: var(--text-primary);
+    gap: 14px;
+    color: var(--text-secondary);
     background: var(--bg-primary);
+    font-size: 13px;
   }
 
   .spinner {
-    width: 40px;
-    height: 40px;
-    border: 3px solid var(--border-inactive);
+    width: 28px;
+    height: 28px;
+    border: 2px solid var(--border-inactive);
     border-top-color: var(--border-active);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
@@ -103,30 +104,36 @@
   }
 
   .error-screen h1 {
-    font-size: 24px;
+    font-size: 17px;
+    font-weight: 600;
+    color: var(--text-primary);
     margin: 0;
   }
 
   .error-screen pre {
     background: var(--bg-secondary);
-    padding: 12px;
-    border-radius: 4px;
+    padding: 10px 12px;
+    border-radius: 6px;
     max-width: 720px;
     overflow: auto;
     white-space: pre-wrap;
     color: var(--status-red);
+    font-family: var(--font-mono);
+    font-size: 12px;
   }
 
   .error-screen button {
-    padding: 8px 16px;
-    background: var(--bg-secondary);
+    padding: 3px 14px;
+    background: var(--bg-elevated);
     color: var(--text-primary);
-    border: 1px solid var(--border-inactive);
-    border-radius: 4px;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
     cursor: pointer;
+    font-size: 12px;
+    font-weight: 500;
   }
 
   .error-screen button:hover {
-    border-color: var(--border-active);
+    background: var(--surface-hover);
   }
 </style>

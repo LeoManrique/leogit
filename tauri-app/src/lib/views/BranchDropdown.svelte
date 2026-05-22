@@ -147,14 +147,15 @@
 
 <style>
   .branch-dropdown {
-    background: var(--bg-secondary);
+    background: var(--bg-elevated);
     border: 1px solid var(--border-inactive);
-    border-radius: 4px;
-    min-width: 250px;
-    max-height: 400px;
+    border-radius: 10px;
+    min-width: 280px;
+    max-height: 420px;
     display: flex;
     flex-direction: column;
-    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+    box-shadow: var(--shadow-popover);
+    overflow: hidden;
   }
 
   .branch-list {
@@ -164,7 +165,7 @@
   }
 
   .section {
-    padding: 8px 0;
+    padding: 6px 4px;
   }
 
   .section:not(:last-child) {
@@ -172,12 +173,10 @@
   }
 
   .section-title {
-    padding: 4px 12px;
+    padding: 4px 12px 6px;
     font-size: 11px;
-    font-weight: 600;
-    color: var(--text-secondary);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
+    font-weight: 500;
+    color: var(--text-muted);
     margin: 0;
   }
 
@@ -190,6 +189,7 @@
     display: flex;
     align-items: center;
     gap: 0;
+    padding: 0 4px;
   }
 
   .branch-item {
@@ -197,53 +197,55 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 8px 12px;
+    padding: 4px 10px;
+    min-height: 24px;
     background: transparent;
     border: none;
     color: var(--text-primary);
     cursor: pointer;
     font-size: 13px;
     text-align: left;
-    transition: background 150ms ease;
+    border-radius: 6px;
+    transition: background 100ms ease;
   }
 
   .branch-item:hover {
-    background: var(--bg-tertiary);
+    background: var(--surface-hover);
   }
 
   .branch-item.current {
-    background: var(--cursor-bg);
+    background: var(--bg-tertiary);
     font-weight: 500;
   }
 
   .branch-item.remote {
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .branch-name {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Courier New', monospace;
+    font-family: var(--font-mono);
     font-size: 12px;
   }
 
   .current-badge {
-    color: var(--status-green);
+    color: var(--border-active);
     margin-left: 8px;
-    font-size: 10px;
+    font-size: 8px;
   }
 
   .delete-btn {
-    padding: 4px 8px;
+    padding: 2px 6px;
     margin-right: 4px;
     background: transparent;
-    border: 1px solid var(--border-inactive);
-    color: var(--text-secondary);
-    border-radius: 3px;
+    border: none;
+    color: var(--text-muted);
+    border-radius: 4px;
     cursor: pointer;
-    font-size: 12px;
-    transition: all 150ms ease;
+    font-size: 11px;
+    transition: background 100ms ease, color 100ms ease;
     opacity: 0;
   }
 
@@ -252,44 +254,46 @@
   }
 
   .delete-btn:hover {
-    background: var(--status-red);
-    border-color: var(--status-red);
-    color: white;
+    background: var(--surface-hover);
+    color: var(--status-red);
   }
 
   .section-footer {
-    padding: 8px 12px;
+    padding: 6px 8px 8px;
     border-top: 1px solid var(--border-inactive);
   }
 
   .create-btn {
     width: 100%;
-    padding: 8px 12px;
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border-inactive);
-    color: var(--text-primary);
-    border-radius: 4px;
+    padding: 4px 10px;
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    border-radius: 6px;
     cursor: pointer;
     font-size: 13px;
-    transition: all 150ms ease;
+    text-align: left;
+    transition: background 100ms ease, color 100ms ease;
   }
 
   .create-btn:hover {
-    background: var(--border-inactive);
+    background: var(--surface-hover);
+    color: var(--text-primary);
   }
 
   .create-form,
   .delete-confirm {
-    padding: 16px;
+    padding: 14px 16px;
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 10px;
   }
 
   .create-form h3,
   .delete-confirm h3 {
     margin: 0;
-    font-size: 14px;
+    font-size: 13px;
+    font-weight: 600;
     color: var(--text-primary);
   }
 
@@ -301,15 +305,17 @@
 
   .delete-confirm code {
     background: transparent;
-    color: var(--status-blue);
-    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Courier New', monospace;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 500;
   }
 
   .branch-input {
-    padding: 8px;
+    padding: 4px 8px;
     background: var(--bg-primary);
-    border: 1px solid var(--border-inactive);
-    border-radius: 4px;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
     color: var(--text-primary);
     font-size: 13px;
   }
@@ -317,52 +323,53 @@
   .branch-input:focus {
     outline: none;
     border-color: var(--border-active);
-    box-shadow: 0 0 0 3px var(--cursor-bg);
+    box-shadow: 0 0 0 2px var(--cursor-bg);
   }
 
   .form-buttons {
     display: flex;
     gap: 8px;
+    justify-content: flex-end;
   }
 
   .btn-primary,
   .btn-secondary,
   .btn-danger {
-    flex: 1;
-    padding: 8px;
-    border: none;
-    border-radius: 4px;
+    padding: 3px 14px;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
     cursor: pointer;
     font-size: 12px;
     font-weight: 500;
-    transition: all 150ms ease;
+    transition: background 120ms ease, border-color 120ms ease;
   }
 
   .btn-primary {
-    background: var(--status-green);
-    color: white;
+    background: var(--border-active);
+    color: #ffffff;
+    border-color: var(--border-active);
   }
 
   .btn-primary:hover {
-    opacity: 0.9;
+    background: var(--accent-secondary);
+    border-color: var(--accent-secondary);
   }
 
   .btn-secondary {
-    background: var(--bg-tertiary);
+    background: var(--bg-elevated);
     color: var(--text-primary);
-    border: 1px solid var(--border-inactive);
   }
 
   .btn-secondary:hover {
-    background: var(--border-inactive);
+    background: var(--surface-hover);
   }
 
   .btn-danger {
-    background: var(--status-red);
-    color: white;
+    background: var(--bg-elevated);
+    color: var(--status-red);
   }
 
   .btn-danger:hover {
-    opacity: 0.9;
+    background: var(--surface-hover);
   }
 </style>

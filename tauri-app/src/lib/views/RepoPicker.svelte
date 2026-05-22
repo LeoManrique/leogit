@@ -80,7 +80,7 @@
     left: 0;
     right: 0;
     bottom: 0;
-    background: rgba(0, 0, 0, 0.6);
+    background: rgba(0, 0, 0, 0.4);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -88,20 +88,21 @@
   }
 
   .repo-picker-modal {
-    background: var(--bg-primary);
+    background: var(--bg-elevated);
     border: 1px solid var(--border-inactive);
-    border-radius: 8px;
+    border-radius: 10px;
     width: 90%;
-    max-width: 600px;
+    max-width: 520px;
     max-height: 80vh;
     display: flex;
     flex-direction: column;
-    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+    box-shadow: var(--shadow-popover);
+    overflow: hidden;
   }
 
   .modal-header {
-    padding: 16px 20px;
-    font-size: 16px;
+    padding: 14px 16px 12px;
+    font-size: 13px;
     font-weight: 600;
     color: var(--text-primary);
     border-bottom: 1px solid var(--border-inactive);
@@ -109,20 +110,15 @@
   }
 
   .search-section {
-    padding: 12px 16px;
+    padding: 10px 12px;
     border-bottom: 1px solid var(--border-inactive);
   }
 
   .search-input {
     width: 100%;
-    padding: 8px 12px;
+    padding: 4px 8px;
     font-size: 13px;
-  }
-
-  .search-input:focus {
-    outline: none;
-    border-color: var(--border-active);
-    box-shadow: 0 0 0 3px var(--cursor-bg);
+    border-radius: 6px;
   }
 
   .repos-list {
@@ -130,6 +126,7 @@
     overflow-y: auto;
     display: flex;
     flex-direction: column;
+    padding: 4px;
   }
 
   .empty-repos {
@@ -137,7 +134,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    color: var(--text-secondary);
+    color: var(--text-faint);
     padding: 40px 20px;
     text-align: center;
   }
@@ -145,32 +142,27 @@
   .repo-item {
     display: flex;
     align-items: center;
-    padding: 12px 16px;
-    background: var(--bg-primary);
+    padding: 6px 10px;
+    background: transparent;
     border: none;
-    border-bottom: 1px solid var(--border-inactive);
+    border-radius: 6px;
     cursor: pointer;
-    transition: background 150ms ease;
+    transition: background 100ms ease;
     text-align: left;
     font-size: 13px;
   }
 
-  .repo-item:last-child {
-    border-bottom: none;
-  }
-
   .repo-item:hover {
-    background: var(--bg-secondary);
+    background: var(--surface-hover);
   }
 
   .repo-item:active {
-    background: var(--cursor-bg);
+    background: var(--bg-tertiary);
   }
 
   .repo-path {
     color: var(--text-primary);
-    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Courier New', monospace;
-    font-size: 12px;
+    font-size: 13px;
     word-break: break-all;
   }
 </style>

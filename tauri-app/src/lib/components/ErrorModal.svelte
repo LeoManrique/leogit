@@ -35,7 +35,7 @@
   .overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.6);
+    background: rgba(0, 0, 0, 0.4);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -43,15 +43,15 @@
   }
 
   .modal {
-    background: var(--bg-primary);
-    border: 1px solid var(--status-red);
-    border-radius: 6px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-inactive);
+    border-radius: 10px;
     width: 90%;
-    max-width: 560px;
+    max-width: 420px;
     max-height: 60vh;
     display: flex;
     flex-direction: column;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    box-shadow: var(--shadow-popover);
   }
 
   .modal-header {
@@ -64,18 +64,24 @@
 
   .modal-header h2 {
     margin: 0;
-    font-size: 15px;
+    font-size: 13px;
     font-weight: 600;
     color: var(--status-red);
   }
 
   .close-btn {
-    padding: 4px 8px;
+    padding: 2px 6px;
     background: transparent;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     border: none;
     cursor: pointer;
-    border-radius: 3px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+
+  .close-btn:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
   }
 
   .modal-body {
@@ -86,11 +92,11 @@
 
   .message {
     margin: 0;
-    padding: 12px;
+    padding: 10px 12px;
     background: var(--bg-secondary);
-    border-radius: 4px;
+    border-radius: 6px;
     color: var(--text-primary);
-    font-family: 'Monaco', 'Menlo', monospace;
+    font-family: var(--font-mono);
     font-size: 12px;
     white-space: pre-wrap;
     word-wrap: break-word;
@@ -106,21 +112,31 @@
 
   .btn-secondary,
   .btn-primary {
-    padding: 6px 14px;
+    padding: 3px 14px;
     font-size: 12px;
-    border-radius: 4px;
+    border-radius: 6px;
     cursor: pointer;
+    font-weight: 500;
   }
 
   .btn-secondary {
-    background: var(--bg-secondary);
+    background: var(--bg-elevated);
     color: var(--text-primary);
-    border: 1px solid var(--border-inactive);
+    border: 1px solid var(--border-strong);
+  }
+
+  .btn-secondary:hover {
+    background: var(--surface-hover);
   }
 
   .btn-primary {
-    background: var(--status-red);
-    color: white;
-    border: 1px solid var(--status-red);
+    background: var(--border-active);
+    color: #ffffff;
+    border: 1px solid var(--border-active);
+  }
+
+  .btn-primary:hover {
+    background: var(--accent-secondary);
+    border-color: var(--accent-secondary);
   }
 </style>

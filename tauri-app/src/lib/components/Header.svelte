@@ -124,7 +124,7 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    height: 48px;
+    height: 40px;
     padding: 0 12px;
     border-bottom: 1px solid var(--border-inactive);
     background: var(--bg-secondary);
@@ -143,23 +143,23 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 6px 10px;
-    background: var(--bg-primary);
+    padding: 3px 10px;
+    background: var(--bg-elevated);
     color: var(--text-primary);
-    border: 1px solid var(--border-inactive);
-    border-radius: 4px;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
     cursor: pointer;
     font-size: 13px;
     font-weight: 500;
-    transition: border-color 150ms;
+    transition: background 120ms ease;
   }
 
   .branch-button:hover {
-    border-color: var(--border-active);
+    background: var(--surface-hover);
   }
 
   .branch-icon {
-    color: var(--status-blue);
+    color: var(--text-muted);
   }
 
   .branch-name {
@@ -171,49 +171,45 @@
 
   .status-info {
     display: flex;
-    gap: 8px;
-    font-size: 12px;
+    gap: 10px;
+    align-items: center;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
   }
 
   .ahead-behind {
-    color: var(--status-blue);
-    padding: 2px 8px;
-    background: rgba(88, 166, 255, 0.1);
-    border-radius: 3px;
+    color: var(--text-muted);
   }
 
   .upstream-ok {
     color: var(--status-green);
-    font-size: 11px;
   }
 
   .merging {
     color: var(--status-yellow);
-    padding: 2px 8px;
-    background: rgba(210, 153, 34, 0.1);
-    border-radius: 3px;
-    font-weight: 600;
+    font-weight: 500;
+    letter-spacing: 0.02em;
   }
 
   .right {
     display: flex;
-    gap: 6px;
+    gap: 4px;
   }
 
   button {
-    padding: 6px 10px;
+    padding: 3px 10px;
     font-size: 12px;
     cursor: pointer;
-    background: var(--bg-primary);
-    color: var(--text-primary);
-    border: 1px solid var(--border-inactive);
-    border-radius: 4px;
-    transition: border-color 150ms, background 150ms;
+    background: transparent;
+    color: var(--text-secondary);
+    border: 1px solid transparent;
+    border-radius: 6px;
+    transition: background 120ms ease, color 120ms ease;
   }
 
   button:hover:not(:disabled) {
-    border-color: var(--border-active);
-    background: var(--bg-secondary);
+    background: var(--surface-hover);
+    color: var(--text-primary);
   }
 
   button:disabled {

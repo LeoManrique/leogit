@@ -99,27 +99,23 @@
 
 <div class="commit-message-container" onkeydown={handleKeyDown} role="form">
   <div class="summary-section">
-    <div class="summary-header">
-      <label for="summary-input">Summary</label>
-      <span class="char-count" class:warning={charCount > 72}>{charCount}/72</span>
-    </div>
     <input
       id="summary-input"
       type="text"
       class="summary-input"
-      placeholder="Commit summary"
+      placeholder="Summary"
       bind:value={summary}
       maxlength="200"
       disabled={isGenerating || isCommitting}
     />
+    <span class="char-count" class:warning={charCount > 72}>{charCount}/72</span>
   </div>
 
   <div class="description-section">
-    <label for="description-input">Description</label>
     <textarea
       id="description-input"
       class="description-input"
-      placeholder="Detailed description (optional)"
+      placeholder="Description"
       bind:value={description}
       disabled={isGenerating || isCommitting}
     ></textarea>
@@ -166,45 +162,40 @@
     border-top: 1px solid var(--border-inactive);
   }
 
-  label {
-    display: block;
-    font-size: 11px;
-    font-weight: 500;
-    color: var(--text-secondary);
-    margin-bottom: 4px;
+  .summary-section {
+    position: relative;
+    display: flex;
+    flex-direction: column;
   }
 
-  .summary-section,
   .description-section {
     display: flex;
     flex-direction: column;
-    gap: 4px;
-  }
-
-  .summary-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
   }
 
   .char-count {
-    font-size: 11px;
-    color: var(--text-muted);
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 10px;
+    color: var(--text-faint);
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
   }
 
   .char-count.warning {
     color: var(--status-yellow);
-    font-weight: 500;
   }
 
   .summary-input {
-    height: 32px;
+    height: 28px;
     font-size: 13px;
-    padding: 6px 8px;
+    padding: 4px 48px 4px 8px;
     background: var(--bg-primary);
     color: var(--text-primary);
-    border: 1px solid var(--border-inactive);
-    border-radius: 4px;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
     font-family: inherit;
   }
 
@@ -213,7 +204,7 @@
   .provider-select:focus {
     outline: none;
     border-color: var(--border-active);
-    box-shadow: 0 0 0 3px var(--cursor-bg);
+    box-shadow: 0 0 0 2px var(--cursor-bg);
   }
 
   .summary-input:disabled,
@@ -229,25 +220,22 @@
     padding: 8px;
     background: var(--bg-primary);
     color: var(--text-primary);
-    border: 1px solid var(--border-inactive);
-    border-radius: 4px;
-    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Courier New', monospace;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    font-family: inherit;
     resize: none;
     overflow-y: auto;
   }
 
   .error-message {
-    padding: 8px;
-    background: rgba(248, 81, 73, 0.1);
+    padding: 6px 8px;
     color: var(--status-red);
-    border: 1px solid rgba(248, 81, 73, 0.3);
-    border-radius: 4px;
     font-size: 11px;
   }
 
   .button-bar {
     display: flex;
-    gap: 8px;
+    gap: 6px;
     align-items: center;
     justify-content: space-between;
   }
@@ -260,33 +248,33 @@
 
   .provider-select {
     font-size: 12px;
-    padding: 6px 8px;
-    background: var(--bg-primary);
+    padding: 3px 8px;
+    background: var(--bg-elevated);
     color: var(--text-primary);
-    border: 1px solid var(--border-inactive);
-    border-radius: 4px;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
     font-family: inherit;
     cursor: pointer;
   }
 
   .action-button,
   .commit-button {
-    padding: 6px 12px;
-    border-radius: 4px;
+    padding: 3px 12px;
+    border-radius: 6px;
     font-size: 12px;
     font-weight: 500;
     cursor: pointer;
-    transition: all 150ms ease;
-    border: 1px solid var(--border-inactive);
+    transition: background 120ms ease, border-color 120ms ease;
+    border: 1px solid var(--border-strong);
   }
 
   .action-button {
-    background: var(--bg-primary);
+    background: var(--bg-elevated);
     color: var(--text-primary);
   }
 
   .action-button:hover:not(:disabled) {
-    border-color: var(--border-active);
+    background: var(--surface-hover);
   }
 
   .action-button:disabled,
@@ -296,14 +284,15 @@
   }
 
   .commit-button {
-    background: var(--status-green);
-    color: white;
-    border-color: var(--status-green);
-    padding: 6px 16px;
-    font-weight: 600;
+    background: var(--border-active);
+    color: #ffffff;
+    border-color: var(--border-active);
+    padding: 3px 16px;
+    font-weight: 500;
   }
 
   .commit-button:hover:not(:disabled) {
-    opacity: 0.9;
+    background: var(--accent-secondary);
+    border-color: var(--accent-secondary);
   }
 </style>

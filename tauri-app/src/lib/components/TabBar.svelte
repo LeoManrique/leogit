@@ -29,31 +29,35 @@
 <style>
   .tab-bar {
     display: flex;
-    height: 36px;
+    height: 34px;
     border-bottom: 1px solid var(--border-inactive);
-    background: var(--bg-primary);
+    background: var(--bg-secondary);
     gap: 0;
+    padding: 0 8px;
   }
 
   .tab {
     flex: 0 0 auto;
-    padding: 8px 16px;
+    padding: 8px 14px;
     font-size: 13px;
-    font-weight: 500;
+    font-weight: 400;
     cursor: pointer;
     background: transparent;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     border: none;
+    border-radius: 0;
     border-bottom: 2px solid transparent;
-    transition: color 150ms, border-color 150ms;
+    margin-bottom: -1px;
+    transition: color 120ms;
   }
 
   .tab:hover {
-    color: var(--text-primary);
+    color: var(--text-secondary);
   }
 
   .tab.active {
     color: var(--text-primary);
+    font-weight: 600;
     border-bottom-color: var(--border-active);
   }
 </style>

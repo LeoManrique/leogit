@@ -20,11 +20,11 @@
     if (!container) return
 
     term = new Terminal({
-      fontFamily: "'Monaco', 'Menlo', 'Ubuntu Mono', 'Courier New', monospace",
+      fontFamily: "ui-monospace, 'SF Mono', Menlo, Monaco, monospace",
       fontSize: 12,
       theme: {
-        background: '#0d1117',
-        foreground: '#c9d1d9',
+        background: '#000000',
+        foreground: '#e5e5e5',
       },
       cursorBlink: true,
     })
@@ -110,18 +110,18 @@
   .terminal {
     width: 100%;
     height: 100%;
-    background: #0d1117;
+    background: #000000;
     padding: 4px;
     box-sizing: border-box;
     overflow: hidden;
   }
 
   :global(.xterm) {
-    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Courier New', monospace;
+    font-family: ui-monospace, 'SF Mono', Menlo, Monaco, monospace;
     height: 100%;
   }
 
   :global(.xterm-viewport) {
-    background-color: #0d1117 !important;
+    background-color: #000000 !important;
   }
 </style>

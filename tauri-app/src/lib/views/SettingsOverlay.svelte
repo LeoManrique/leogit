@@ -162,7 +162,7 @@
   .overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.5);
+    background: rgba(0, 0, 0, 0.4);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -170,15 +170,16 @@
   }
 
   .modal {
-    background: var(--bg-primary);
+    background: var(--bg-elevated);
     border: 1px solid var(--border-inactive);
-    border-radius: 6px;
+    border-radius: 10px;
     width: 90%;
-    max-width: 560px;
+    max-width: 520px;
     max-height: 85vh;
     display: flex;
     flex-direction: column;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    box-shadow: var(--shadow-popover);
+    overflow: hidden;
   }
 
   .modal-header {
@@ -191,39 +192,37 @@
 
   .modal-header h2 {
     margin: 0;
-    font-size: 15px;
+    font-size: 13px;
     font-weight: 600;
     color: var(--text-primary);
   }
 
   .close-btn {
-    padding: 4px 8px;
+    padding: 2px 6px;
     background: transparent;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     border: none;
     cursor: pointer;
-    border-radius: 3px;
-    font-size: 14px;
+    border-radius: 4px;
+    font-size: 12px;
   }
 
   .close-btn:hover {
     color: var(--text-primary);
-    background: var(--bg-secondary);
+    background: var(--surface-hover);
   }
 
   .modal-body {
     flex: 1;
-    padding: 16px;
+    padding: 12px 16px 16px;
     overflow-y: auto;
   }
 
   .modal-body h3 {
     margin: 0 0 8px 0;
-    font-size: 11px;
+    font-size: 13px;
     font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    color: var(--text-secondary);
+    color: var(--text-primary);
   }
 
   .modal-body h3:not(:first-child) {
@@ -235,22 +234,22 @@
   .error {
     padding: 8px 12px;
     margin-bottom: 12px;
-    background: rgba(248, 81, 73, 0.1);
     color: var(--status-red);
-    border-radius: 4px;
     font-size: 12px;
   }
 
   .setting-group {
-    margin-bottom: 10px;
+    margin-bottom: 8px;
     display: flex;
-    flex-direction: column;
-    gap: 4px;
+    align-items: center;
+    gap: 12px;
   }
 
-  .setting-group label {
+  .setting-group label:not(.checkbox-label) {
+    flex: 0 0 140px;
     font-size: 12px;
     color: var(--text-secondary);
+    text-align: right;
   }
 
   .checkbox-label {
@@ -260,34 +259,38 @@
     cursor: pointer;
     color: var(--text-primary) !important;
     font-size: 13px !important;
+    margin-left: 152px;
   }
 
   .checkbox-label input[type='checkbox'] {
-    width: 16px;
-    height: 16px;
+    width: 14px;
+    height: 14px;
     cursor: pointer;
+    accent-color: var(--border-active);
   }
 
   .setting-group select,
   .setting-group input[type='number'],
   .setting-group input[type='text'] {
-    padding: 6px 8px;
-    font-size: 12px;
-    background: var(--bg-secondary);
+    flex: 1;
+    padding: 4px 8px;
+    font-size: 13px;
+    background: var(--bg-primary);
     color: var(--text-primary);
-    border: 1px solid var(--border-inactive);
-    border-radius: 4px;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
     font-family: inherit;
   }
 
   .paths-input {
+    flex: 1;
     padding: 6px 8px;
     font-size: 12px;
-    background: var(--bg-secondary);
+    background: var(--bg-primary);
     color: var(--text-primary);
-    border: 1px solid var(--border-inactive);
-    border-radius: 4px;
-    font-family: 'Monaco', 'Menlo', monospace;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    font-family: var(--font-mono);
     resize: vertical;
   }
 
@@ -301,23 +304,32 @@
 
   .btn-secondary,
   .btn-primary {
-    padding: 6px 14px;
+    padding: 3px 14px;
     font-size: 12px;
     font-weight: 500;
-    border-radius: 4px;
-    border: 1px solid var(--border-inactive);
+    border-radius: 6px;
+    border: 1px solid var(--border-strong);
     cursor: pointer;
   }
 
   .btn-secondary {
-    background: var(--bg-secondary);
+    background: var(--bg-elevated);
     color: var(--text-primary);
   }
 
+  .btn-secondary:hover {
+    background: var(--surface-hover);
+  }
+
   .btn-primary {
-    background: var(--status-green);
-    color: white;
-    border-color: var(--status-green);
+    background: var(--border-active);
+    color: #ffffff;
+    border-color: var(--border-active);
+  }
+
+  .btn-primary:hover:not(:disabled) {
+    background: var(--accent-secondary);
+    border-color: var(--accent-secondary);
   }
 
   .btn-primary:disabled {

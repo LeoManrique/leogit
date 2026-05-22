@@ -497,7 +497,7 @@
   .sidebar {
     display: flex;
     flex-direction: column;
-    background: var(--bg-primary);
+    background: var(--bg-secondary);
     border-right: 1px solid var(--border-inactive);
     overflow: hidden;
     min-height: 0;
@@ -514,6 +514,7 @@
     flex-direction: column;
     overflow: hidden;
     min-width: 0;
+    background: var(--bg-primary);
   }
 
   .content-area {
@@ -538,13 +539,14 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 8px;
+    gap: 6px;
     color: var(--text-secondary);
     background: var(--bg-primary);
+    font-size: 13px;
   }
 
   .diff-empty .muted {
-    color: var(--text-muted);
+    color: var(--text-faint);
     font-size: 12px;
   }
 
@@ -553,34 +555,34 @@
     flex-direction: column;
     height: 280px;
     border-top: 1px solid var(--border-inactive);
-    background: #0d1117;
+    background: #000000;
   }
 
   .terminal-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 4px 12px;
+    padding: 0 12px;
     height: 28px;
     background: var(--bg-secondary);
     border-bottom: 1px solid var(--border-inactive);
     font-size: 11px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .close-btn {
     background: transparent;
     border: none;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     cursor: pointer;
     padding: 2px 6px;
     font-size: 12px;
-    border-radius: 3px;
+    border-radius: 4px;
   }
 
   .close-btn:hover {
     color: var(--text-primary);
-    background: var(--bg-primary);
+    background: var(--surface-hover);
   }
 
   .overlay-backdrop {
@@ -589,11 +591,11 @@
     left: 0;
     right: 0;
     bottom: 0;
-    background: rgba(0, 0, 0, 0.5);
+    background: rgba(0, 0, 0, 0.4);
     display: flex;
     align-items: flex-start;
     justify-content: center;
-    padding-top: 80px;
+    padding-top: 60px;
     z-index: 1000;
   }
 

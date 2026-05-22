@@ -104,6 +104,7 @@
     overflow-x: hidden;
     background: var(--bg-primary);
     border-right: 1px solid var(--border-inactive);
+    padding: 4px 6px;
   }
 
   .virtual-scroll {
@@ -120,21 +121,21 @@
     grid-template-rows: auto auto;
     align-items: center;
     gap: 8px 12px;
-    height: 32px;
-    padding: 0 12px;
-    border-bottom: 1px solid var(--border-inactive);
-    background: var(--bg-primary);
+    height: 24px;
+    padding: 0 8px;
+    border-radius: 6px;
+    background: transparent;
     cursor: pointer;
-    transition: background 150ms ease;
+    transition: background 100ms ease;
     user-select: none;
   }
 
   .commit-row:hover {
-    background: var(--bg-secondary);
+    background: var(--surface-hover);
   }
 
   .commit-row.selected {
-    background: var(--cursor-bg);
+    background: var(--bg-tertiary);
   }
 
   .commit-sha {
@@ -143,10 +144,11 @@
   }
 
   .sha-text {
-    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Courier New', monospace;
-    font-size: 12px;
-    color: var(--status-blue);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-muted);
     background: transparent;
+    font-variant-numeric: tabular-nums;
   }
 
   .commit-summary {
@@ -163,26 +165,25 @@
     grid-row: 1;
     grid-column: 3;
     display: flex;
-    gap: 4px;
+    gap: 6px;
     flex-wrap: wrap;
   }
 
   .ref-tag {
     display: inline-block;
-    padding: 2px 6px;
     background: transparent;
-    border: 1px solid var(--status-green);
     color: var(--status-green);
-    border-radius: 3px;
     font-size: 11px;
+    font-weight: 500;
     white-space: nowrap;
   }
 
   .commit-date {
     grid-row: 1;
     grid-column: 4;
-    color: var(--text-secondary);
-    font-size: 12px;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
     white-space: nowrap;
     text-align: right;
   }

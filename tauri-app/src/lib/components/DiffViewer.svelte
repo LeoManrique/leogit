@@ -331,8 +331,9 @@
     height: 100%;
     background: var(--bg-primary);
     color: var(--text-primary);
-    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Courier New', monospace;
+    font-family: var(--font-mono);
     font-size: 12px;
+    font-variant-numeric: tabular-nums;
     tab-size: var(--tab-size, 4);
     -moz-tab-size: var(--tab-size, 4);
   }
@@ -342,7 +343,8 @@
     align-items: center;
     justify-content: center;
     flex: 1;
-    color: var(--text-secondary);
+    color: var(--text-faint);
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
   }
 
   .file-header {
@@ -352,13 +354,14 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 8px 12px;
+    padding: 6px 12px;
     background: var(--bg-secondary);
     border-bottom: 1px solid var(--border-inactive);
-    font-weight: 500;
+    font-family: var(--font-mono);
+    font-size: 12px;
   }
 
-  .old-path { color: var(--text-secondary); }
+  .old-path { color: var(--text-muted); }
   .arrow { color: var(--text-muted); }
   .new-path { color: var(--text-primary); }
 
@@ -374,7 +377,7 @@
     justify-content: space-between;
     padding: 4px 12px;
     background: var(--bg-secondary);
-    color: var(--text-secondary);
+    color: var(--text-muted);
     border-top: 1px solid var(--border-inactive);
     border-bottom: 1px solid var(--border-inactive);
     cursor: pointer;
@@ -382,13 +385,12 @@
   }
 
   .hunk-text {
-    font-weight: 500;
-    color: var(--status-blue);
+    color: var(--text-muted);
   }
 
   .hunk-hint {
     font-size: 10px;
-    color: var(--text-muted);
+    color: var(--text-faint);
   }
 
   .diff-line {
@@ -400,12 +402,12 @@
 
   .diff-line.diff-add,
   .sbs-side.diff-add {
-    background: rgba(63, 185, 80, 0.12);
+    background: var(--diff-add-bg);
   }
 
   .diff-line.diff-remove,
   .sbs-side.diff-remove {
-    background: rgba(248, 81, 73, 0.12);
+    background: var(--diff-remove-bg);
   }
 
   .diff-line.diff-context,
@@ -420,6 +422,7 @@
     width: 3em;
     padding: 0 6px;
     color: var(--text-muted);
+    font-size: 11px;
     user-select: none;
     flex-shrink: 0;
     border-right: 1px solid var(--border-inactive);
@@ -436,10 +439,10 @@
   }
 
   .diff-add .line-prefix,
-  .sbs-side.diff-add .line-prefix { color: var(--status-green); }
+  .sbs-side.diff-add .line-prefix { color: var(--diff-add-fg); }
 
   .diff-remove .line-prefix,
-  .sbs-side.diff-remove .line-prefix { color: var(--status-red); }
+  .sbs-side.diff-remove .line-prefix { color: var(--diff-remove-fg); }
 
   .line-content {
     flex: 1;
@@ -467,20 +470,23 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 14px;
-    height: 14px;
+    width: 12px;
+    height: 12px;
     padding: 0;
-    margin: 2px 8px;
-    background: var(--border-inactive);
-    border: none;
+    margin: 3px 8px;
+    background: transparent;
+    border: 1px solid var(--border-strong);
     border-radius: 50%;
     cursor: pointer;
     flex-shrink: 0;
-    transition: background 100ms;
+    transition: background 100ms, border-color 100ms;
   }
 
-  .selection-dot:hover { background: var(--border-active); }
-  .selection-dot.selected { background: var(--border-active); }
+  .selection-dot:hover { border-color: var(--border-active); }
+  .selection-dot.selected {
+    background: var(--border-active);
+    border-color: var(--border-active);
+  }
 
   /* Side-by-side */
   .sbs-hunk-header {
@@ -505,7 +511,6 @@
   }
 
   .sbs-side.sbs-empty {
-    background: var(--bg-secondary);
-    opacity: 0.3;
+    background: var(--surface-hover);
   }
 </style>

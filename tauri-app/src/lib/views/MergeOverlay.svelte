@@ -28,9 +28,9 @@
     </div>
 
     <div class="modal-footer">
-      <button class="btn-merge" onclick={onMerge}>Merge</button>
-      <button class="btn-squash" onclick={onSquashMerge}>Squash & Merge</button>
       <button class="btn-cancel" onclick={onAbort}>Cancel</button>
+      <button class="btn-squash" onclick={onSquashMerge}>Squash & Merge</button>
+      <button class="btn-merge" onclick={onMerge}>Merge</button>
     </div>
   </div>
 </div>
@@ -42,7 +42,7 @@
     left: 0;
     right: 0;
     bottom: 0;
-    background: rgba(0, 0, 0, 0.6);
+    background: rgba(0, 0, 0, 0.4);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -50,19 +50,20 @@
   }
 
   .merge-modal {
-    background: var(--bg-primary);
+    background: var(--bg-elevated);
     border: 1px solid var(--border-inactive);
-    border-radius: 8px;
+    border-radius: 10px;
     width: 90%;
-    max-width: 500px;
-    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+    max-width: 420px;
+    box-shadow: var(--shadow-popover);
     display: flex;
     flex-direction: column;
+    overflow: hidden;
   }
 
   .modal-header {
-    padding: 16px 20px;
-    font-size: 16px;
+    padding: 14px 16px 12px;
+    font-size: 13px;
     font-weight: 600;
     color: var(--text-primary);
     border-bottom: 1px solid var(--border-inactive);
@@ -70,27 +71,28 @@
   }
 
   .merge-content {
-    padding: 20px;
+    padding: 16px;
   }
 
   .merge-description {
-    margin: 0 0 16px 0;
-    font-size: 14px;
+    margin: 0 0 12px 0;
+    font-size: 13px;
     color: var(--text-primary);
   }
 
   .branch-name {
     background: transparent;
-    color: var(--status-blue);
-    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Courier New', monospace;
-    padding: 2px 4px;
-    border-radius: 3px;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 0;
+    font-weight: 500;
   }
 
   .merge-options {
-    padding: 12px;
+    padding: 10px 12px;
     background: var(--bg-secondary);
-    border-radius: 4px;
+    border-radius: 6px;
   }
 
   .option-info {
@@ -99,15 +101,14 @@
 
   .option-title {
     margin: 0;
-    font-size: 13px;
+    font-size: 12px;
     color: var(--text-secondary);
-    font-weight: 500;
   }
 
   .modal-footer {
     display: flex;
     gap: 8px;
-    padding: 16px 20px;
+    padding: 12px 16px;
     border-top: 1px solid var(--border-inactive);
     justify-content: flex-end;
   }
@@ -115,40 +116,41 @@
   .btn-merge,
   .btn-squash,
   .btn-cancel {
-    padding: 8px 16px;
-    border: none;
-    border-radius: 4px;
+    padding: 3px 14px;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
     cursor: pointer;
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 500;
-    transition: all 150ms ease;
+    transition: background 120ms ease, border-color 120ms ease;
   }
 
   .btn-merge {
-    background: var(--status-green);
-    color: white;
+    background: var(--border-active);
+    color: #ffffff;
+    border-color: var(--border-active);
   }
 
   .btn-merge:hover {
-    opacity: 0.9;
+    background: var(--accent-secondary);
+    border-color: var(--accent-secondary);
   }
 
   .btn-squash {
-    background: var(--status-blue);
-    color: white;
+    background: var(--bg-elevated);
+    color: var(--text-primary);
   }
 
   .btn-squash:hover {
-    opacity: 0.9;
+    background: var(--surface-hover);
   }
 
   .btn-cancel {
-    background: var(--bg-secondary);
+    background: var(--bg-elevated);
     color: var(--text-primary);
-    border: 1px solid var(--border-inactive);
   }
 
   .btn-cancel:hover {
-    background: var(--bg-tertiary);
+    background: var(--surface-hover);
   }
 </style>

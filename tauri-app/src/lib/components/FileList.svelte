@@ -82,7 +82,7 @@
         onkeydown={(e) => e.stopPropagation()}
       />
 
-      <div class="status-badge" style="background: {getStatusColor(file.status)}">
+      <div class="status-badge" style="color: {getStatusColor(file.status)}">
         {getStatusLabel(file.status)}
       </div>
 
@@ -114,7 +114,8 @@
     flex-direction: column;
     height: 100%;
     overflow-y: auto;
-    background: var(--bg-primary);
+    background: var(--bg-secondary);
+    padding: 4px 6px;
   }
 
   .empty-state {
@@ -122,7 +123,7 @@
     align-items: center;
     justify-content: center;
     flex: 1;
-    color: var(--text-secondary);
+    color: var(--text-faint);
     font-size: 13px;
   }
 
@@ -130,18 +131,19 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 6px 8px;
-    border-bottom: 1px solid var(--border-inactive);
+    padding: 4px 8px;
+    min-height: 24px;
+    border-radius: 6px;
     cursor: pointer;
     transition: background 100ms ease;
   }
 
   .file-row:hover {
-    background: var(--bg-secondary);
+    background: var(--surface-hover);
   }
 
   .file-row.active {
-    background: var(--cursor-bg);
+    background: var(--bg-tertiary);
   }
 
   .file-checkbox {
@@ -149,7 +151,7 @@
     height: 14px;
     flex-shrink: 0;
     cursor: pointer;
-    accent-color: var(--status-green);
+    accent-color: var(--border-active);
     margin: 0;
   }
 
@@ -159,15 +161,13 @@
   }
 
   .status-badge {
-    width: 20px;
-    height: 20px;
+    width: 14px;
     display: flex;
     align-items: center;
     justify-content: center;
-    border-radius: 3px;
+    font-family: var(--font-mono);
     font-size: 11px;
-    font-weight: 700;
-    color: var(--bg-primary);
+    font-weight: 600;
     flex-shrink: 0;
   }
 
@@ -187,7 +187,7 @@
   }
 
   .file-row.selected .file-name {
-    font-weight: 600;
+    font-weight: 500;
   }
 
   .orig {
@@ -202,7 +202,7 @@
   }
 
   .file-dir {
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-size: 11px;
     overflow: hidden;
     text-overflow: ellipsis;
