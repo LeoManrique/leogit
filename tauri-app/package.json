@@ -1,0 +1,35 @@
+{
+  "name": "leogit",
+  "version": "0.0.1",
+  "description": "Visual Git client built with Tauri and Svelte",
+  "type": "module",
+  "scripts": {
+    "dev:vite": "vite",
+    "dev": "tauri dev",
+    "build:frontend": "vite build",
+    "build": "tauri build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "check:tsgo": "tsgo --noEmit -p ./tsconfig.json",
+    "lint": "prettier --check src",
+    "format": "prettier --write src"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.1.2",
+    "@tauri-apps/cli": "^2.11.2",
+    "@typescript/native-preview": "7.0.0-dev.20260521.1",
+    "prettier": "^3.8.3",
+    "svelte": "^5.55.9",
+    "svelte-check": "^4.4.8",
+    "terser": "^5.48.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.0.14"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-web-links": "^0.12.0",
+    "@xterm/xterm": "^6.0.0",
+    "shiki": "^4.1.0"
+  }
+}

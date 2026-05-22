@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capabilities for the leogit main window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:path:default",
+    "core:event:default",
+    "core:window:default",
+    "core:app:default"
+  ]
+}

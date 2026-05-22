@@ -1,0 +1,26 @@
+# Rust build artifacts
+src-tauri/target/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Node
+node_modules/
+pnpm-lock.yaml
+dist/
+.svelte-kit/
+
+# Tauri build output
+src-tauri/WixUI_en-us.wxl
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

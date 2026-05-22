@@ -1,0 +1,61 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use leogit_lib::commands::*;
+
+fn main() {
+    tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![
+            config::load_config,
+            config::save_config,
+            config::load_state,
+            config::save_state,
+            git::get_status,
+            git::get_diff,
+            git::get_diff_whitespace_ignored,
+            git::get_commit_diff,
+            git::get_selected_diff,
+            git::get_log,
+            git::get_commit_files,
+            git::list_branches,
+            git::create_branch,
+            git::switch_branch,
+            git::delete_branch,
+            git::delete_remote_branch,
+            git::rename_branch,
+            git::commit,
+            git::has_staged_changes,
+            git::format_commit_message,
+            git::fetch,
+            git::pull,
+            git::push,
+            git::get_ahead_behind,
+            git::get_remote,
+            git::merge_branch,
+            git::merge_squash,
+            git::commit_squash_merge,
+            git::merge_abort,
+            git::is_merging,
+            git::count_commits_to_merge,
+            git::discover_repos,
+            git::is_git_repo,
+            git::get_repo_name,
+            diff::parse_diff,
+            diff::generate_patch,
+            diff::generate_inverse_patch,
+            gh::check_auth,
+            gh::list_prs,
+            gh::get_pr_checks,
+            gh::create_pr,
+            gh::create_pr_fill,
+            gh::checkout_pr,
+            gh::get_current_branch_pr,
+            ai::generate_commit_message,
+            ai::check_provider_available,
+            terminal::start_terminal,
+            terminal::write_terminal,
+            terminal::resize_terminal,
+            terminal::close_terminal,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
