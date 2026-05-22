@@ -38,6 +38,8 @@
   const SIDEBAR_MAX = 640
   const COMMIT_MIN = 140
   const COMMIT_MAX = 600
+  const COMMIT_FILES_MIN = 180
+  const COMMIT_FILES_MAX = 600
 
   function loadStoredNumber(key: string, fallback: number, min: number, max: number): number {
     if (typeof window === 'undefined') return fallback
@@ -48,6 +50,9 @@
 
   let sidebarWidth = $state(loadStoredNumber('leogit:sidebarWidth', 320, SIDEBAR_MIN, SIDEBAR_MAX))
   let commitHeight = $state(loadStoredNumber('leogit:commitHeight', 200, COMMIT_MIN, COMMIT_MAX))
+  let commitFilesWidth = $state(
+    loadStoredNumber('leogit:commitFilesWidth', 280, COMMIT_FILES_MIN, COMMIT_FILES_MAX),
+  )
 
   function startSidebarResize(e: MouseEvent) {
     e.preventDefault()
@@ -63,6 +68,30 @@
       document.body.style.cursor = ''
       document.body.style.userSelect = ''
       window.localStorage.setItem('leogit:sidebarWidth', String(sidebarWidth))
+    }
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }
+
+  function startCommitFilesResize(e: MouseEvent) {
+    e.preventDefault()
+    const startX = e.clientX
+    const startWidth = commitFilesWidth
+    function onMove(ev: MouseEvent) {
+      const delta = ev.clientX - startX
+      commitFilesWidth = Math.max(
+        COMMIT_FILES_MIN,
+        Math.min(COMMIT_FILES_MAX, startWidth + delta),
+      )
+    }
+    function onUp() {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+      window.localStorage.setItem('leogit:commitFilesWidth', String(commitFilesWidth))
     }
     document.body.style.cursor = 'col-resize'
     document.body.style.userSelect = 'none'
@@ -542,7 +571,7 @@
           commit={$repoState.activeCommit}
           fileCount={$repoState.activeCommitFiles.length}
         />
-        <div class="commit-body">
+        <div class="commit-body" style="--commit-files-width: {commitFilesWidth}px;">
           <div class="commit-files-pane">
             <FileList
               files={$repoState.activeCommitFiles}
@@ -551,6 +580,13 @@
               onActivate={loadCommitFileDiff}
             />
           </div>
+          <div
+            class="commit-files-resize-handle"
+            onmousedown={startCommitFilesResize}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize commit files pane"
+          ></div>
           <div class="commit-diff-pane">
             {#if $repoState.isCommitDiffLoading}
               <div class="diff-empty">Loading diff…</div>
@@ -729,7 +765,7 @@
   .commit-body {
     flex: 1;
     display: grid;
-    grid-template-columns: 280px 1fr;
+    grid-template-columns: var(--commit-files-width, 280px) 1px 1fr;
     min-height: 0;
     overflow: hidden;
   }
@@ -739,8 +775,28 @@
     flex-direction: column;
     min-height: 0;
     overflow: hidden;
-    border-right: 1px solid var(--border-inactive);
     background: var(--bg-primary);
+  }
+
+  .commit-files-resize-handle {
+    position: relative;
+    background: var(--border-inactive);
+    cursor: col-resize;
+    z-index: 5;
+  }
+
+  .commit-files-resize-handle::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: -3px;
+    right: -3px;
+  }
+
+  .commit-files-resize-handle:hover,
+  .commit-files-resize-handle:active {
+    background: var(--border-active);
   }
 
   .commit-diff-pane {

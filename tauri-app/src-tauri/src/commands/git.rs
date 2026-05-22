@@ -701,7 +701,14 @@ fn civil_from_unix(unix: i64) -> (i64, u32, u32, u32, u32, u32) {
 pub fn get_commit_files(repo_path: String, sha: String) -> Result<Vec<FileEntry>, String> {
     let output = run_git(
         &repo_path,
-        &["diff-tree", "--no-commit-id", "-r", "--name-status", &sha],
+        &[
+            "diff-tree",
+            "--no-commit-id",
+            "-r",
+            "--name-status",
+            "--root",
+            &sha,
+        ],
     )?;
 
     let mut files = Vec::new();

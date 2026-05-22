@@ -80,9 +80,7 @@
           tabindex="0"
         >
           <code class="sha-text">{commit.short_sha}</code>
-          <div class="commit-summary">
-            {#each commit.refs as ref}<span class="ref-tag">{ref}</span>{/each}{commit.summary}
-          </div>
+          <div class="commit-summary">{commit.summary}</div>
           <div class="commit-date">{formatDate(commit.author_date)}</div>
         </div>
       {/each}
@@ -148,14 +146,7 @@
     min-width: 0;
   }
 
-  .ref-tag {
-    color: var(--status-green);
-    font-size: 12px;
-    font-weight: 500;
-    margin-right: 6px;
-  }
-
-  .commit-date {
+.commit-date {
     color: var(--text-muted);
     font-size: 11px;
     font-variant-numeric: tabular-nums;
