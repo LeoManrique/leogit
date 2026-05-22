@@ -1,15 +1,24 @@
 <script lang="ts">
   import type { FileEntry } from '$lib/api/commands'
+  import PathText from './PathText.svelte'
 
   interface Props {
     files: FileEntry[]
-    selectedFiles: Set<string>
+    selectedFiles?: Set<string>
     activeFile?: FileEntry | null
+    showCheckbox?: boolean
     onActivate: (file: FileEntry) => void
-    onToggle: (file: FileEntry) => void
+    onToggle?: (file: FileEntry) => void
   }
 
-  let { files = [], selectedFiles = new Set(), activeFile = null, onActivate, onToggle }: Props = $props()
+  let {
+    files = [],
+    selectedFiles = new Set(),
+    activeFile = null,
+    showCheckbox = true,
+    onActivate,
+    onToggle = () => {},
+  }: Props = $props()
 
   function getStatusColor(status: string): string {
     switch (status) {
@@ -66,38 +75,37 @@
         if (e.key === 'Enter') {
           e.preventDefault()
           onActivate(file)
-        } else if (e.key === ' ') {
+        } else if (e.key === ' ' && showCheckbox) {
           e.preventDefault()
           onToggle(file)
         }
       }}
     >
-      <input
-        type="checkbox"
-        class="file-checkbox"
-        checked={isSelected}
-        aria-label={isSelected ? `Exclude ${file.path} from commit` : `Include ${file.path} in commit`}
-        onclick={(e) => e.stopPropagation()}
-        onchange={(e) => handleCheckboxChange(e, file)}
-        onkeydown={(e) => e.stopPropagation()}
-      />
+      {#if showCheckbox}
+        <input
+          type="checkbox"
+          class="file-checkbox"
+          checked={isSelected}
+          aria-label={isSelected ? `Exclude ${file.path} from commit` : `Include ${file.path} in commit`}
+          onclick={(e) => e.stopPropagation()}
+          onchange={(e) => handleCheckboxChange(e, file)}
+          onkeydown={(e) => e.stopPropagation()}
+        />
+      {/if}
 
       <div class="status-badge" style="color: {getStatusColor(file.status)}">
         {getStatusLabel(file.status)}
       </div>
 
-      <div class="file-info">
-        <div class="file-name">
-          {#if file.orig_path}
-            <span class="orig">{file.orig_path}</span>
-            <span class="arrow">→</span>
-          {/if}
-          {file.display_name}
+      {#if file.orig_path}
+        <div class="file-info" title={file.path}>
+          <span class="orig">{file.orig_path}</span>
+          <span class="arrow">→</span>
+          <PathText path={file.path} />
         </div>
-        {#if file.display_dir}
-          <div class="file-dir">{file.display_dir}</div>
-        {/if}
-      </div>
+      {:else}
+        <PathText path={file.path} />
+      {/if}
     </div>
   {/each}
 
@@ -114,6 +122,8 @@
     flex-direction: column;
     height: 100%;
     overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-gutter: stable;
     background: var(--bg-secondary);
     padding: 4px 6px;
   }
@@ -131,8 +141,8 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 4px 8px;
-    min-height: 24px;
+    padding: 0 8px;
+    height: 24px;
     border-radius: 6px;
     cursor: pointer;
     transition: background 100ms ease;
@@ -173,39 +183,30 @@
 
   .file-info {
     display: flex;
-    flex-direction: column;
-    flex: 1;
+    align-items: baseline;
+    flex: 1 1 0;
     min-width: 0;
-  }
-
-  .file-name {
-    color: var(--text-primary);
-    font-size: 13px;
     overflow: hidden;
-    text-overflow: ellipsis;
+    font-size: 13px;
     white-space: nowrap;
-  }
-
-  .file-row.selected .file-name {
-    font-weight: 500;
+    gap: 4px;
   }
 
   .orig {
     color: var(--text-muted);
     text-decoration: line-through;
-    margin-right: 4px;
+    flex-shrink: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
   }
 
   .arrow {
     color: var(--text-muted);
-    margin-right: 4px;
+    flex-shrink: 0;
   }
 
-  .file-dir {
-    color: var(--text-muted);
-    font-size: 11px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  .file-row.selected :global(.filename) {
+    font-weight: 500;
   }
 </style>

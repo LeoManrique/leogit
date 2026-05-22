@@ -24,16 +24,20 @@ const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
 fn build_prompt(diff: &str) -> String {
     format!(
-        "You are a Git commit message generator. Analyze the provided git diff\n\
-         and generate a commit message.\n\n\
+        "You are a Git commit message generator. Analyze the provided git diff and generate a commit message.\n\n\
          Return ONLY valid JSON in this exact format:\n\
-         {{\"title\": \"<=50 char summary in imperative mood\", \"description\": \"what changed and why\"}}\n\n\
+         {{\n\
+           \"title\": \"A 50 character or less summary in imperative mood\",\n\
+           \"description\": \"A detailed description of what changed and why\"\n\
+         }}\n\n\
          Rules:\n\
-         - Title MUST be <=50 characters, imperative mood (\"Add\", \"Fix\", \"Update\")\n\
-         - Description explains what and why, not how\n\
-         - Return ONLY the JSON object\n\n\
+         - The title MUST be 50 characters or less and use the imperative mood (e.g. \"Add\", \"Fix\", \"Update\")\n\
+         - The description should explain what changed and why, not how\n\
+         - Write the description in third person and omit articles (\"a\", \"an\", \"the\")\n\
+         - Return ONLY the JSON object, no markdown fences, no extra text\n\n\
          Git diff:\n\
-         ```diff\n{}\n```",
+         ```diff\n{}\n```\n\n\
+         Generate the commit message as JSON:",
         diff
     )
 }

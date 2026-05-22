@@ -36,6 +36,9 @@ export interface RepoState {
   activeTab: ActiveTab
   activeCommit: CommitInfo | null
   activeCommitFiles: FileEntry[]
+  activeCommitFile: FileEntry | null
+  activeCommitFileDiff: FileDiff | null
+  isCommitDiffLoading: boolean
   isLoading: boolean
   error?: string
 }
@@ -67,6 +70,9 @@ const defaultState: RepoState = {
   activeTab: 'changes',
   activeCommit: null,
   activeCommitFiles: [],
+  activeCommitFile: null,
+  activeCommitFileDiff: null,
+  isCommitDiffLoading: false,
   isLoading: false,
 }
 

@@ -368,7 +368,8 @@
   .hunks-container,
   .sbs-container {
     flex: 1;
-    overflow: auto;
+    overflow-y: auto;
+    overflow-x: hidden;
   }
 
   .hunk-header {
@@ -446,9 +447,11 @@
 
   .line-content {
     flex: 1;
+    min-width: 0;
     padding: 0 8px;
-    white-space: pre;
-    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
   }
 
   .line-content :global(.shiki) {

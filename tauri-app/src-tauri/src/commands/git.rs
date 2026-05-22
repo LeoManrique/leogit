@@ -854,8 +854,101 @@ pub fn rename_branch(repo_path: String, old_name: String, new_name: String) -> R
 // Commit
 // ---------------------------------------------------------------------------
 
+fn update_index(repo_path: &str, paths: &[String], force_remove: bool) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let mut args: Vec<&str> = vec!["update-index", "--add", "--remove"];
+    if force_remove {
+        args.push("--force-remove");
+    }
+    args.extend(["--replace", "-z", "--stdin"]);
+
+    let mut child = git_cmd(repo_path, &args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("git update-index: {}", e))?;
+
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| "failed to open stdin".to_string())?;
+        let mut buf = Vec::new();
+        for p in paths {
+            buf.extend_from_slice(p.as_bytes());
+            buf.push(0);
+        }
+        stdin
+            .write_all(&buf)
+            .map_err(|e| format!("write stdin: {}", e))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("git update-index wait: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git update-index failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+fn stage_files(repo_path: &str, files: &[FileEntry]) -> Result<(), String> {
+    let mut renamed_old: Vec<String> = Vec::new();
+    let mut normal: Vec<String> = Vec::new();
+    let mut deleted: Vec<String> = Vec::new();
+
+    for f in files {
+        match f.status {
+            FileStatus::Renamed => {
+                if let Some(orig) = &f.orig_path {
+                    renamed_old.push(orig.clone());
+                }
+                normal.push(f.path.clone());
+            }
+            FileStatus::Deleted => deleted.push(f.path.clone()),
+            _ => normal.push(f.path.clone()),
+        }
+    }
+
+    update_index(repo_path, &renamed_old, true)?;
+    update_index(repo_path, &normal, false)?;
+    update_index(repo_path, &deleted, true)?;
+    Ok(())
+}
+
 #[tauri::command]
-pub fn commit(repo_path: String, message: String) -> Result<(), String> {
+pub fn commit(
+    repo_path: String,
+    message: String,
+    files: Vec<FileEntry>,
+) -> Result<(), String> {
+    if files.is_empty() {
+        return Err("no files selected — select files first".to_string());
+    }
+
+    // Reset the index to HEAD so only what the user selected gets committed.
+    let reset = git_cmd(&repo_path, &["reset", "HEAD"])
+        .output()
+        .map_err(|e| format!("git reset: {}", e))?;
+    if !reset.status.success() {
+        return Err(format!(
+            "git reset HEAD failed: {}",
+            String::from_utf8_lossy(&reset.stderr).trim()
+        ));
+    }
+
+    stage_files(&repo_path, &files)?;
+
+    if !has_staged_changes(repo_path.clone())? {
+        return Err("staging produced no changes".to_string());
+    }
+
     // Pipe the message via stdin to avoid arg-length and shell-quoting issues.
     let mut child = git_cmd(&repo_path, &["commit", "-F", "-"])
         .stdin(Stdio::piped())

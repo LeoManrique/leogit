@@ -1,319 +1,165 @@
 <script lang="ts">
-  import type { CommitInfo, FileEntry } from '$lib/api/commands'
+  import type { CommitInfo } from '$lib/api/commands'
 
   interface Props {
     commit: CommitInfo | null
-    files?: FileEntry[]
+    fileCount?: number
   }
 
-  let { commit = null, files = [] }: Props = $props()
+  let { commit = null, fileCount = 0 }: Props = $props()
+
+  let copied = $state(false)
 
   function formatDate(dateStr: string): string {
     const date = new Date(dateStr)
     return date.toLocaleString()
   }
 
-  function getFileStatusColor(status: string): string {
-    switch (status) {
-      case 'New':
-        return 'var(--status-green)'
-      case 'Modified':
-        return 'var(--status-yellow)'
-      case 'Deleted':
-        return 'var(--status-red)'
-      case 'Renamed':
-        return 'var(--status-blue)'
-      case 'Conflicted':
-        return 'var(--status-red)'
-      default:
-        return 'var(--text-secondary)'
-    }
+  async function copySha() {
+    if (!commit) return
+    try {
+      await navigator.clipboard.writeText(commit.sha)
+      copied = true
+      setTimeout(() => (copied = false), 1200)
+    } catch {}
   }
 </script>
 
-<div class="commit-detail">
-  {#if commit === null}
-    <div class="empty-state">
-      <p>Select a commit to view details</p>
+{#if commit}
+  <div class="commit-card">
+    <h2 class="title">{commit.summary}</h2>
+
+    {#if commit.body}
+      <pre class="body">{commit.body}</pre>
+    {/if}
+
+    <div class="meta-row">
+      <span class="author">{commit.author_name}</span>
+      <span class="dot">·</span>
+      <span class="email">{commit.author_email}</span>
+      <span class="date">{formatDate(commit.author_date)}</span>
     </div>
-  {:else}
-    <div class="detail-content">
-      <!-- SHA Section -->
-      <div class="sha-section">
-        <div class="sha-row">
-          <span class="label">SHA</span>
-          <code class="sha-value">{commit.sha}</code>
-        </div>
-        <div class="short-sha-row">
-          <span class="label">Short</span>
-          <code class="short-sha-value">{commit.short_sha}</code>
-        </div>
-      </div>
 
-      <!-- Summary Section -->
-      <div class="summary-section">
-        <h2 class="summary-title">{commit.summary}</h2>
-      </div>
-
-      <!-- Metadata Section -->
-      <div class="metadata-section">
-        <div class="metadata-row">
-          <div class="metadata-left">
-            <div class="author-info">
-              <div class="author-name">{commit.author_name}</div>
-              <div class="author-email">{commit.author_email}</div>
-            </div>
-          </div>
-          <div class="metadata-right">
-            <div class="date-info">{formatDate(commit.author_date)}</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Body Section -->
-      {#if commit.body}
-        <div class="body-section">
-          <h3 class="section-title">Message</h3>
-          <pre class="body-text">{commit.body}</pre>
-        </div>
-      {/if}
-
-      <!-- Trailers Section -->
-      {#if commit.trailers.length > 0}
-        <div class="trailers-section">
-          <h3 class="section-title">Trailers</h3>
-          <div class="trailers-list">
-            {#each commit.trailers as trailer}
-              <div class="trailer-line">
-                <code>{trailer}</code>
-              </div>
-            {/each}
-          </div>
-        </div>
-      {/if}
-
-      <!-- Files Section -->
-      {#if files.length > 0}
-        <div class="files-section">
-          <h3 class="section-title">Files Changed ({files.length})</h3>
-          <div class="files-list">
-            {#each files as file}
-              <div class="file-entry">
-                <span class="file-status" style="color: {getFileStatusColor(file.status)}">
-                  {file.status.charAt(0)}
-                </span>
-                <span class="file-path">{file.display_name}</span>
-                {#if file.display_dir}
-                  <span class="file-dir">{file.display_dir}</span>
-                {/if}
-              </div>
-            {/each}
-          </div>
-        </div>
+    <div class="meta-row">
+      <code class="sha">{commit.sha}</code>
+      <button class="copy-btn" onclick={copySha} title="Copy SHA" aria-label="Copy SHA">
+        {copied ? '✓' : '⎘'}
+      </button>
+      {#if fileCount > 0}
+        <span class="files-count">{fileCount} {fileCount === 1 ? 'file' : 'files'} changed</span>
       {/if}
     </div>
-  {/if}
-</div>
+
+    {#if commit.trailers.length > 0}
+      <div class="trailers">
+        {#each commit.trailers as trailer}
+          <code class="trailer">{trailer}</code>
+        {/each}
+      </div>
+    {/if}
+  </div>
+{/if}
 
 <style>
-  .commit-detail {
-    flex: 1;
-    overflow-y: auto;
+  .commit-card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border-inactive);
     background: var(--bg-primary);
-    display: flex;
-    flex-direction: column;
   }
 
-  .empty-state {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--text-faint);
-  }
-
-  .detail-content {
-    padding: 20px;
-    max-width: 100%;
-  }
-
-  .sha-section {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 16px;
-    margin-bottom: 16px;
-    padding: 10px 12px;
-    background: var(--bg-secondary);
-    border-radius: 6px;
-  }
-
-  .sha-row,
-  .short-sha-row {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .label {
-    font-size: 11px;
-    color: var(--text-muted);
-  }
-
-  .sha-value,
-  .short-sha-value {
-    font-family: var(--font-mono);
-    font-size: 12px;
-    color: var(--text-primary);
-    word-break: break-all;
-    background: transparent;
-  }
-
-  .summary-section {
-    margin-bottom: 16px;
-  }
-
-  .summary-title {
+  .title {
     font-size: 15px;
     font-weight: 600;
     color: var(--text-primary);
     margin: 0;
   }
 
-  .metadata-section {
-    margin-bottom: 16px;
-    padding: 10px 12px;
+  .body {
+    margin: 0;
+    padding: 8px 10px;
     background: var(--bg-secondary);
     border-radius: 6px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-primary);
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    max-height: 140px;
+    overflow-y: auto;
   }
 
-  .metadata-row {
+  .meta-row {
     display: flex;
-    justify-content: space-between;
-    gap: 16px;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-muted);
+    flex-wrap: wrap;
   }
 
-  .metadata-left {
-    flex: 1;
-  }
-
-  .metadata-right {
-    flex: 0 0 auto;
-    text-align: right;
-  }
-
-  .author-info {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .author-name {
+  .author {
     color: var(--text-primary);
     font-weight: 500;
-    font-size: 13px;
   }
 
-  .author-email {
-    font-size: 11px;
+  .email {
     color: var(--text-muted);
   }
 
-  .date-info {
+  .dot {
+    color: var(--text-faint);
+  }
+
+  .date {
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    margin-left: auto;
+  }
+
+  .sha {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-muted);
+    background: transparent;
+    word-break: break-all;
+  }
+
+  .copy-btn {
+    padding: 1px 6px;
+    background: transparent;
+    color: var(--text-muted);
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 11px;
+    line-height: 1;
+  }
+
+  .copy-btn:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .files-count {
+    margin-left: auto;
     color: var(--text-muted);
     font-size: 11px;
     font-variant-numeric: tabular-nums;
   }
 
-  .body-section {
-    margin-bottom: 16px;
-  }
-
-  .section-title {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text-primary);
-    margin: 0 0 6px 0;
-  }
-
-  .body-text {
-    padding: 10px 12px;
-    background: var(--bg-secondary);
-    border-radius: 6px;
-    font-family: inherit;
-    font-size: 13px;
-    color: var(--text-primary);
-    white-space: pre-wrap;
-    word-wrap: break-word;
-    margin: 0;
-    max-height: 300px;
-    overflow-y: auto;
-  }
-
-  .trailers-section {
-    margin-bottom: 16px;
-  }
-
-  .trailers-list {
+  .trailers {
     display: flex;
     flex-direction: column;
     gap: 2px;
   }
 
-  .trailer-line {
-    padding: 4px 12px;
-    background: var(--bg-secondary);
-    border-radius: 6px;
-    font-size: 12px;
-  }
-
-  .trailer-line code {
+  .trailer {
     font-family: var(--font-mono);
+    font-size: 11px;
     color: var(--text-muted);
     background: transparent;
-  }
-
-  .files-section {
-    margin-bottom: 16px;
-  }
-
-  .files-list {
-    display: flex;
-    flex-direction: column;
-  }
-
-  .file-entry {
-    display: grid;
-    grid-template-columns: auto 1fr auto;
-    align-items: center;
-    gap: 10px;
-    padding: 3px 8px;
-    min-height: 24px;
-    border-radius: 6px;
-    font-size: 13px;
-  }
-
-  .file-entry:hover {
-    background: var(--surface-hover);
-  }
-
-  .file-status {
-    font-family: var(--font-mono);
-    font-weight: 600;
-    font-size: 11px;
-    width: 14px;
-    text-align: center;
-  }
-
-  .file-path {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--text-primary);
-  }
-
-  .file-dir {
-    color: var(--text-muted);
-    font-size: 11px;
-    white-space: nowrap;
   }
 </style>

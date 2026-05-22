@@ -10,8 +10,8 @@
 
   let { commits = [], selectedSha = null, onSelect, onLoadMore }: Props = $props()
 
-  const ROW_HEIGHT = 32
-  const VISIBLE_ROWS = 20
+  const ROW_HEIGHT = 24
+  const VISIBLE_ROWS = 24
   const LOAD_MORE_OFFSET = 200
 
   let containerHeight = ROW_HEIGHT * VISIBLE_ROWS
@@ -79,17 +79,10 @@
           role="button"
           tabindex="0"
         >
-          <div class="commit-sha">
-            <code class="sha-text">{commit.short_sha}</code>
+          <code class="sha-text">{commit.short_sha}</code>
+          <div class="commit-summary">
+            {#each commit.refs as ref}<span class="ref-tag">{ref}</span>{/each}{commit.summary}
           </div>
-          <div class="commit-summary">{commit.summary}</div>
-          {#if commit.refs.length > 0}
-            <div class="commit-refs">
-              {#each commit.refs as ref}
-                <span class="ref-tag">{ref}</span>
-              {/each}
-            </div>
-          {/if}
           <div class="commit-date">{formatDate(commit.author_date)}</div>
         </div>
       {/each}
@@ -117,10 +110,9 @@
 
   .commit-row {
     display: grid;
-    grid-template-columns: auto 1fr auto auto;
-    grid-template-rows: auto auto;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
-    gap: 8px 12px;
+    gap: 10px;
     height: 24px;
     padding: 0 8px;
     border-radius: 6px;
@@ -128,6 +120,7 @@
     cursor: pointer;
     transition: background 100ms ease;
     user-select: none;
+    overflow: hidden;
   }
 
   .commit-row:hover {
@@ -136,11 +129,6 @@
 
   .commit-row.selected {
     background: var(--bg-tertiary);
-  }
-
-  .commit-sha {
-    grid-row: 1 / 3;
-    grid-column: 1;
   }
 
   .sha-text {
@@ -152,35 +140,22 @@
   }
 
   .commit-summary {
-    grid-row: 1;
-    grid-column: 2;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--text-primary);
     font-size: 13px;
-  }
-
-  .commit-refs {
-    grid-row: 1;
-    grid-column: 3;
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
+    min-width: 0;
   }
 
   .ref-tag {
-    display: inline-block;
-    background: transparent;
     color: var(--status-green);
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 500;
-    white-space: nowrap;
+    margin-right: 6px;
   }
 
   .commit-date {
-    grid-row: 1;
-    grid-column: 4;
     color: var(--text-muted);
     font-size: 11px;
     font-variant-numeric: tabular-nums;

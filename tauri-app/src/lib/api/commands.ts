@@ -163,7 +163,8 @@ export const gitApi = {
     invoke<void>('delete_remote_branch', { repoPath, remote, branch }),
   renameBranch: (repoPath: string, oldName: string, newName: string) =>
     invoke<void>('rename_branch', { repoPath, oldName, newName }),
-  commit: (repoPath: string, message: string) => invoke<void>('commit', { repoPath, message }),
+  commit: (repoPath: string, message: string, files: FileEntry[]) =>
+    invoke<void>('commit', { repoPath, message, files }),
   hasStagedChanges: (repoPath: string) => invoke<boolean>('has_staged_changes', { repoPath }),
   formatCommitMessage: (summary: string, description: string, coAuthors: string[] = []) =>
     invoke<string>('format_commit_message', { summary, description, coAuthors }),

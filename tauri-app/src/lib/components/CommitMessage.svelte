@@ -66,12 +66,21 @@
     const repoPath = $appState.repoPath
     if (!repoPath) return
 
+    const state = get(repoState)
+    const files = Array.from(state.selectedFiles)
+      .map((path) => state.status.files.find((f) => f.path === path))
+      .filter((f): f is NonNullable<typeof f> => Boolean(f))
+    if (files.length === 0) {
+      error = 'No files selected'
+      return
+    }
+
     isCommitting = true
     error = null
 
     try {
       const fullMessage = await gitApi.formatCommitMessage(summary, description)
-      await gitApi.commit(repoPath, fullMessage)
+      await gitApi.commit(repoPath, fullMessage, files)
       summary = ''
       description = ''
       repoState.update((s) => ({ ...s, selectedFiles: new Set(), userDeselected: new Set() }))
@@ -160,17 +169,23 @@
     padding: 12px;
     background: var(--bg-secondary);
     border-top: 1px solid var(--border-inactive);
+    height: 100%;
+    min-height: 0;
+    box-sizing: border-box;
   }
 
   .summary-section {
     position: relative;
     display: flex;
     flex-direction: column;
+    flex-shrink: 0;
   }
 
   .description-section {
     display: flex;
     flex-direction: column;
+    flex: 1;
+    min-height: 0;
   }
 
   .char-count {
@@ -215,7 +230,8 @@
   }
 
   .description-input {
-    height: 96px;
+    flex: 1;
+    min-height: 60px;
     font-size: 13px;
     padding: 8px;
     background: var(--bg-primary);
