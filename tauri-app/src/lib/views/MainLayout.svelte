@@ -709,7 +709,6 @@
               <polyline points="4,6 7,8 4,10" />
               <line x1="8.5" y1="11" x2="12" y2="11" />
             </svg>
-            <span>Terminal</span>
           </button>
           <div class="terminal-controls">
             <button
