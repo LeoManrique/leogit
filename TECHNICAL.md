@@ -1,0 +1,270 @@
+# leogit — Technical Architecture
+
+Functional behavior lives in [DESIGN.md](DESIGN.md). Visual design language lives in [FRONTEND.md](FRONTEND.md). This document covers **how the code is organized** and the decisions that pin it together.
+
+## Stack
+
+| Layer | Choice | Notes |
+|---|---|---|
+| Shell | Tauri 2.11 | Native window, IPC, no Node runtime in production |
+| Backend language | Rust 2021 | Async via tokio (`features = ["full"]`) |
+| Frontend framework | Svelte 5 (runes) | `$state`, `$derived`, `$effect`, `$props` |
+| Frontend bundler | Vite 8 | `terser` for minified release builds |
+| Type system | TypeScript 5.9 strict | `$lib/*` alias points at `src/lib/*` |
+| Diff syntax | Shiki 4 (`bundle/web`) | Themes `github-dark` / `github-light`, ~25 languages preloaded |
+| Terminal UI | xterm.js 6 + FitAddon + WebLinksAddon | Black background, 12 px monospace |
+| PTY | `portable-pty` 0.9 | Spawns user `$SHELL`, falls back to `/bin/zsh` / `cmd.exe` |
+| HTTP | `reqwest` 0.13 | Used only for Ollama |
+| Config | `toml` 1.1 + `directories` 6 + `serde_json` | `~/.config/leogit/{config.toml,repos-state.json}` |
+| Build tool | `just` | Wraps `pnpm tauri …` |
+
+## Repository layout
+
+```
+leogit/
+├── tauri-app/
+│   ├── src/                         # Svelte 5 frontend
+│   │   ├── App.svelte               # Startup phases (loading → picker / main / error)
+│   │   ├── main.ts                  # Mounts App
+│   │   ├── app.css                  # Theme tokens + base element styles
+│   │   └── lib/
+│   │       ├── api/commands.ts      # Typed wrappers over every Tauri command
+│   │       ├── stores/              # appState, repoState, config (Svelte writables)
+│   │       ├── components/          # Header, TabBar, FileList, CommitList,
+│   │       │                        # CommitMessage, DiffViewer, Terminal,
+│   │       │                        # ErrorModal, PathText
+│   │       └── views/               # MainLayout (orchestrator), RepoPicker,
+│   │                                # BranchDropdown, SettingsOverlay,
+│   │                                # HelpOverlay, MergeOverlay, CommitDetail
+│   ├── src-tauri/
+│   │   ├── src/
+│   │   │   ├── main.rs              # PATH fix + invoke_handler registry
+│   │   │   ├── lib.rs               # Re-exports commands::*
+│   │   │   └── commands/
+│   │   │       ├── config.rs        # load/save Config + ReposState
+│   │   │       ├── git.rs           # 27 git operations (status, log, branch, …)
+│   │   │       ├── diff.rs          # parse_diff + build/apply patches
+│   │   │       ├── gh.rs            # GitHub CLI bridge (PRs, checks)
+│   │   │       ├── ai.rs            # Claude CLI + Ollama HTTP
+│   │   │       └── terminal.rs      # portable-pty session pool
+│   │   ├── capabilities/default.json
+│   │   ├── tauri.conf.json
+│   │   └── Cargo.toml
+│   ├── package.json                 # pnpm scripts (dev, build, check, lint)
+│   ├── vite.config.ts               # $lib alias, port 5173
+│   └── tsconfig.json
+├── justfile                         # install / dev / build / build-release / check / format
+└── DESIGN.md / TECHNICAL.md / ROADMAP.md / FRONTEND.md / README.md
+```
+
+## Process model
+
+There are two processes at runtime:
+
+1. **Tauri host (Rust)** — owns the window, runs the invoke handler, owns the PTY session pool, shells out to `git` / `gh` / `claude`.
+2. **WebView (Svelte)** — renders the UI, dispatches commands via `invoke(...)`, subscribes to terminal output via Tauri events.
+
+All work flows through Tauri's IPC. There are no HTTP servers, no sidecars, and no Node runtime in production.
+
+### Startup PATH fix
+
+`main.rs::fix_path_env` runs once before the Tauri builder. On macOS/Linux it spawns `$SHELL -ilc 'echo -n "$PATH"'` and replaces the process PATH with the result. Without this, apps launched from Finder or a `.desktop` entry inherit a minimal PATH (e.g. `/usr/bin:/bin:/usr/sbin:/sbin`) and miss user-installed tools like `claude`, `gh`, or Homebrew binaries. No-op on Windows.
+
+## IPC contract
+
+The frontend never touches Tauri's raw `invoke` API directly; every backend call goes through a typed wrapper in [src/lib/api/commands.ts](tauri-app/src/lib/api/commands.ts). The wrappers are grouped into namespaces matching the backend modules:
+
+| Namespace | Commands | Backend file |
+|---|---|---|
+| `configApi` | `loadConfig`, `saveConfig`, `loadState`, `saveState` | `commands/config.rs` |
+| `gitApi` | `getStatus`, `getHeadSha`, `getDiff`, `getDiffWhitespaceIgnored`, `getCommitDiff`, `getSelectedDiff`, `getLog`, `getCommitFiles`, `listBranches`, `createBranch`, `switchBranch`, `deleteBranch`, `deleteRemoteBranch`, `renameBranch`, `commit`, `hasStagedChanges`, `formatCommitMessage`, `fetch`, `pull`, `push`, `getAheadBehind`, `getRemote`, `mergeBranch`, `mergeSquash`, `commitSquashMerge`, `mergeAbort`, `isMerging`, `countCommitsToMerge`, `discoverRepos`, `isGitRepo`, `getRepoName` | `commands/git.rs` |
+| `diffApi` | `parseDiff`, `generatePatch`, `generateInversePatch` | `commands/diff.rs` |
+| `ghApi` | `checkAuth`, `listPRs`, `getPRChecks`, `createPR`, `createPRFill`, `checkoutPR`, `getCurrentBranchPR` | `commands/gh.rs` |
+| `aiApi` | `generateCommitMessage`, `checkProviderAvailable` | `commands/ai.rs` |
+| Terminal | `start_terminal`, `write_terminal`, `resize_terminal`, `close_terminal` (called via `invoke` directly from `Terminal.svelte`) | `commands/terminal.rs` |
+
+Every command is registered in [src-tauri/src/main.rs](tauri-app/src-tauri/src/main.rs) via `tauri::generate_handler![…]`. **Adding a new command requires three edits**: implement it in `commands/<module>.rs`, register it in `main.rs`, wrap it in `api/commands.ts`.
+
+## State management (frontend)
+
+Three writable Svelte stores, all in [src/lib/stores](tauri-app/src/lib/stores):
+
+- **`appState`** — top-level phase machine (`loading` / `repo-picker` / `main` / `error`), the discovered repo list, the chosen repo path, and whether `gh` is authenticated.
+- **`repoState`** — everything tied to the currently open repo: status (branch, upstream, ahead/behind, files, isMerging), log pagination, branches, the user's selection sets (`selectedFiles`, `userDeselected`), per-file diff selection (`Map<path, DiffSelection>`), active file/diff, active commit/files/diff, loading flags, last error.
+- **`config`** — the live Config object. `refreshConfig()` reloads from disk and also calls `applyTheme()` which flips `document.documentElement.dataset.theme`.
+
+`MainLayout.svelte` is the orchestrator: it owns the polling intervals, focus listeners, and most of the cross-cutting handlers (commit, switch branch, merge, etc.). Components stay dumb — they receive props and emit callbacks; they don't read or write the stores directly when avoidable.
+
+### Selection bookkeeping
+
+The file checkbox state is **opt-out**: every change reported by `git status` is staged unless the user explicitly deselected it. `repoState.userDeselected` is the source of truth for "things the user un-checked." On every status refresh:
+
+1. Build `presentPaths` from the new status.
+2. Rebuild `selectedFiles` as `present − userDeselected`.
+3. Prune `userDeselected` of paths that no longer exist (so a deselected file that gets reverted then re-modified comes back checked).
+
+This is what keeps polling unobtrusive: a 2 s status refresh never silently re-selects something the user just un-checked.
+
+### Polling and lifecycle
+
+Two intervals live in `MainLayout.svelte`:
+
+- **Status poll** — every 2000 ms. Runs `get_status` silently + `get_head_sha`. If the HEAD SHA changed, the commit log is refreshed in place keeping the same loaded count so the user doesn't lose scroll position.
+- **Auto-fetch** — every `fetch_interval_ms` (default 30 000). Skipped if the user is currently typing in an input/textarea or the window is hidden. Runs `git fetch --prune --recurse-submodules=on-demand` against the first remote.
+
+Both also fire on `visibilitychange` (regaining visibility) and global focus events. Both clear on unmount.
+
+## Git layer
+
+All git operations go through `std::process::Command::new("git")` with these defaults set in `git_cmd`:
+
+- `current_dir(repo_path)` — never relies on the cwd of the host process.
+- `TERM=dumb` — suppresses pagers and color codes.
+- `GIT_TERMINAL_PROMPT=0` — prevents a credential prompt from blocking the process indefinitely.
+
+Three helpers shape the output:
+
+- `run_git_raw` — returns the raw bytes (used for NUL-delimited or binary-ish output, e.g. `status --porcelain=v2 -z`).
+- `run_git` — returns trimmed UTF-8 (most line-oriented commands).
+- `run_git_combined` — returns `(success, stdout+stderr)` regardless of exit code (used for `fetch`/`pull`/`push`/`merge` where the error message is the value).
+
+### Status parsing
+
+`get_status` uses `status --untracked-files=all --branch --porcelain=v2 -z`. Because porcelain v2 interleaves line-terminated `# branch.*` headers with NUL-terminated file entries, the parser strips headers off the front byte-by-byte, then splits the remainder on NUL. Type-2 (rename) entries occupy two NUL segments — the second holds the original path — so the loop manually advances `i` when it sees `2 `.
+
+Branch fallback: if `# branch.head` is absent (empty repo) the code calls `git rev-parse --abbrev-ref HEAD` to fill in.
+
+### Diff parsing
+
+`parse_diff` is a hand-rolled unified-diff parser (no `regex` crate). It captures the full file header (`diff --git`, `index ...`, `--- a/...`, `+++ b/...`) into `file_header` because `git apply` requires it for new/deleted/renamed files. Each hunk stores its own `@@` header line as the first entry in `lines` so flat/global line indexing stays consistent across the frontend and backend.
+
+### Patch generation
+
+`build_patch` rebuilds a unified diff from a `FileDiff` plus a per-line `DiffSelection`:
+
+- Unselected ADDs are dropped (they don't exist in the old file).
+- Unselected DELETEs become context lines (` `-prefixed) so the hunk still describes a contiguous slice of the old file.
+- The `@@` header is regenerated with recomputed counts.
+- `\ No newline at end of file` markers are echoed back.
+
+`apply_patch` pipes the patch via stdin to `git apply --unidiff-zero --whitespace=nowarn` with optional `--cached` (stage) and `--reverse` (discard / inverse). `--reject` is deliberately NOT passed; it silently writes `.rej` files and would mask failures.
+
+### Commit pipeline
+
+`commit` is the safest path through a partial-stage commit:
+
+1. `git reset HEAD` to clear the index (only the user's selection should make it into the commit).
+2. `stage_files` splits the selection into renamed (needs `--force-remove` on the old path), deleted, and normal, then calls `git update-index --add --remove [--force-remove] --replace -z --stdin`.
+3. `has_staged_changes` validates the index isn't empty (`git diff --cached --quiet` returns 1 when there are staged changes).
+4. The commit message is piped to `git commit -F -` via stdin (avoids arg-length and shell-quoting issues).
+
+### Log parsing
+
+`get_log` uses a custom format with `%x01` field separators and `%x00` record separators:
+
+```
+%H%x01%h%x01%s%x01%b%x01%an%x01%ae%x01%ad%x01%cn%x01%ce%x01%cd%x01%P%x01%(trailers:unfold,only)%x01%D%x00
+```
+
+Dates come back in `--date=raw` form (`<unix> <tz>`). To avoid pulling in `chrono`, the code implements `civil_from_unix` using Howard Hinnant's proleptic Gregorian algorithm and emits ISO-8601 strings manually.
+
+### Discovery
+
+`discover_repos` expands `~`, canonicalizes each scan root, and recursively walks up to `max_depth` levels. A directory is a repo if it contains a `.git` file or directory (handles worktrees). Hidden directories are skipped, and the scan does not descend into a discovered repo.
+
+## AI layer
+
+Both providers share `build_prompt` — a strict JSON-only instruction with rules for imperative-mood, 50-char-or-less titles. Responses are parsed by `parse_commit_message_text` which:
+
+1. Strips markdown code fences (```json … ```).
+2. Tries `serde_json::from_str` and accepts any of `title`/`summary`/`subject`/`message` and `description`/`body`/`details`.
+3. Falls back to "first line = title, rest = description" if JSON parsing fails entirely.
+
+**Claude** spawns `claude --print --output-format json --model <model>` and pipes the prompt to stdin. The CLI wraps the actual model output in `{"type":"result","result":"<inner json>"}`, so the parser tries the wrapper first and falls back to direct parsing.
+
+**Ollama** posts to `<base_url>/api/generate` with `{model, prompt, stream: false, format: "json"}`. A 404 is translated to a friendly `ollama pull <model>` hint.
+
+Both providers run with a 120 s timeout (`DEFAULT_TIMEOUT_SECS`). Diff caps: 20 MB (Claude) / 50 MB (Ollama).
+
+`check_provider_available` lets the UI gate features without surfacing raw errors: `claude --version` for Claude, `GET /api/tags` for Ollama with a 5 s timeout.
+
+## Terminal layer
+
+`PtySession` holds the master PTY, the writer half, and the child process. Sessions are stored in a global `Mutex<HashMap<u32, Arc<Mutex<PtySession>>>>` keyed by a monotonic `AtomicU32`.
+
+`start_terminal`:
+1. Opens a PTY at 24×80 via `portable-pty`.
+2. Picks `$SHELL`, falling back to `/bin/zsh` (Unix) or `cmd.exe` (Windows).
+3. Forwards the parent env plus `TERM=xterm-256color`.
+4. Spawns the shell with cwd = repo path.
+5. Stores the session, then spawns a reader thread that loops on `read()` and emits `terminal-output-<pid>` events with the UTF-8 lossy payload. On EOF the session is removed and `terminal-closed-<pid>` is emitted.
+
+`write_terminal` / `resize_terminal` / `close_terminal` lock the session map, clone the `Arc`, drop the map lock, then operate on the session. `close_terminal` calls `child.kill()` and removes the entry.
+
+The frontend mounts `<Terminal>` keyed by `${repoPath}:${terminalSessionId}` so swapping repos or hitting "New session" forces a fresh component, which in turn dispatches a new `start_terminal`. The previous component's cleanup invokes `close_terminal` on its tracked pid.
+
+## GitHub layer
+
+Everything in `gh.rs` shells out to the `gh` CLI:
+
+- `check_auth` → `gh auth status` (exit code only).
+- `list_prs` → `gh pr list --json <fields> --state <s> --limit 30`.
+- `get_pr_checks` → `gh pr checks <n> --json name,state,bucket,link,workflow`. Special-cased: `gh` exits non-zero when any check is pending/failing but still writes valid JSON; we parse stdout first and only treat it as a hard error if parsing also fails.
+- `create_pr` / `create_pr_fill` → `gh pr create [--title --body | --fill] [--base] [--draft]`. Returns the PR URL.
+- `checkout_pr` → `gh pr checkout <n>`.
+- `get_current_branch_pr` → `gh pr list --head <branch> --state open` (returns the first match or `None`).
+
+## Config & persistence
+
+Defined in [src-tauri/src/commands/config.rs](tauri-app/src-tauri/src/commands/config.rs).
+
+- Config dir is resolved via `directories::BaseDirs::config_dir().join("leogit")` (`~/.config/leogit` on Linux, `~/Library/Application Support/leogit` on macOS, `%APPDATA%\leogit` on Windows). It's created if missing.
+- `config.toml` — every field on the `Config` struct. New fields carry `#[serde(default = "…")]` so users on older configs keep working. Defaults are written to disk on first run so the file is discoverable.
+- `repos-state.json` — only `last_opened_repo` for now. JSON instead of TOML to keep it cheap to extend.
+- All save commands write atomically via `fs::write`.
+
+## Tauri capabilities
+
+[capabilities/default.json](tauri-app/src-tauri/capabilities/default.json) is intentionally minimal:
+
+```json
+"permissions": [
+  "core:default",
+  "core:path:default",
+  "core:event:default",
+  "core:window:default",
+  "core:app:default"
+]
+```
+
+No filesystem, shell, or HTTP plugins are exposed to the WebView. All side effects route through our explicit `#[tauri::command]` functions, which is a deliberate security boundary.
+
+## Build / dev
+
+```bash
+# From the project root
+just install         # pnpm install inside tauri-app
+just dev             # pnpm tauri dev   (Vite on :5173 + Tauri host)
+just build           # pnpm tauri build (debug bundle)
+just build-release   # pnpm tauri build --release with RUST_BACKTRACE=1
+just check           # pnpm svelte-check + cargo check
+just format          # prettier + cargo fmt
+just clean           # nuke dist/, target/, node_modules
+```
+
+The Tauri dev command uses `beforeDevCommand: pnpm run dev:vite` (per `tauri.conf.json`) so the Vite dev server starts in-process. Release builds use `beforeBuildCommand: pnpm run build:frontend` which writes static assets to `tauri-app/dist`, then `frontendDist: "../dist"` points the bundle at them.
+
+Bundle targets: `app` + `dmg` (macOS), `deb` (Linux), `msi` (Windows).
+
+Frontend bundle size warning is raised to 2 MB (`chunkSizeWarningLimit: 2000`) because Shiki's WASM theme/grammar payload is intentionally hefty.
+
+## Notable invariants
+
+These are easy to break and hard to debug; respect them when touching the relevant area.
+
+- **Hunk lines include the `@@` header.** `hunks[i].lines[0]` is the hunk header itself. The flat line index used by `DiffSelection.diverging_lines` is `sum(prev_hunk.lines.length) + line_idx_in_current`, and this sum *includes* every header line. Both the Rust patch builder and the Svelte diff viewer rely on this.
+- **`selectedFiles` is derived from status, not stored.** It's recomputed on every status refresh from `present − userDeselected`. Never persist `selectedFiles` directly — persist `userDeselected` (and we don't even do that across sessions today).
+- **`git status` uses porcelain v2 `-z` (NUL-delimited).** Plain `--porcelain` will silently corrupt paths with spaces or unicode. If you change the args, make sure the parser stays NUL-aware.
+- **The remote name is the NAME, not the URL.** `get_remote` returns the first line of `git remote` (typically `origin`), not the fetch URL. The Pull/Push/Fetch commands feed this directly to `git`.
+- **Terminal sessions die with the repo.** When `appState.repoPath` changes, `MainLayout`'s effect resets `terminalSessionId = 0`, which keys the `<Terminal>` component to unmount and call `close_terminal`. Don't try to "carry" a session across repos.
+- **Diff content `\n` round-trip.** Empty diff lines come through as `""` from `String::split('\n')` but in real unified diff format are ` ` (a single space). `parse_diff` reconstructs the leading space so the patch builder generates valid unified diffs.

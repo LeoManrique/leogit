@@ -1,40 +1,48 @@
 # leogit
 
-A desktop Git client with a clean visual interface, built with Tauri v2, Rust, and Svelte 5.
+A calm desktop Git client built with Tauri 2, Rust, and Svelte 5. Designed to feel like the macOS apps it sits next to: dense, tabular, quick, no marketing pills.
 
-## Features
+## What it does
 
-- **Changes view**: Stage/unstage lines of code with visual diff viewer
-- **History view**: Browse commits with full details and commit file lists
-- **Branch management**: Create, switch, delete, rename branches with merge options
-- **Pull requests**: List, create, view CI checks, checkout PR branches via GitHub CLI
-- **AI commit messages**: Generate commit title + description from staged diff (Claude or Ollama)
-- **Embedded terminal**: Shell access in repo directory via backtick key
-- **Auto-fetch**: Configurable background fetch with ahead/behind indicators
-- **Syntax highlighting**: Colored diffs with language detection
-- **Settings**: Theme (light/dark), AI provider, fetch interval, per-repo state
+- **Stage and commit** via a checkbox file list with live unified diffs (Shiki syntax highlighting, optional side-by-side, optional whitespace-hidden).
+- **AI commit messages** generated from the selected diff via the local `claude` CLI or a self-hosted Ollama instance.
+- **Browse history** with a virtualized commit list, per-commit file diffs, and trailers/SHA copy.
+- **Manage branches** (create / switch / delete) and **merge** (regular or squash) with conflict detection.
+- **Open pull requests** through the GitHub CLI: list, check CI status, create, checkout.
+- **Embedded terminal** docked at the bottom of the window, running the user's `$SHELL` in the repo directory.
+- **Auto-fetch** + 2 s status polling so the UI stays in sync with anything the user does in another terminal.
+- **Light / dark themes**, persistent layout, and a TOML config at `~/.config/leogit/config.toml`.
 
 ## Requirements
 
-- **macOS/Linux/Windows**: Tauri v2 requires OS support (10.13+, Ubuntu 20.04+, Windows 10+)
-- **Node.js 18+**: Frontend build and dev server
-- **Rust toolchain**: Backend build (cargo)
-- **git** and **gh** in `$PATH`: Version control and GitHub integration
+- `git` and (optionally) `gh` in `$PATH`.
+- macOS 10.13+, Ubuntu 20.04+, or Windows 10+.
+- Node.js 18+ and `pnpm` for development.
+- Rust 1.95+ for building from source.
 
-## Quick Start
+## Quick start
 
 ```bash
-pnpm install
-pnpm tauri dev
+just install     # pnpm install in tauri-app
+just dev         # launch dev build with hot reload
+just build       # produce a debug bundle
+just check       # type-check (svelte-check + cargo check)
 ```
 
-See `QUICKSTART.md` for detailed setup instructions.
+(Or run the underlying `pnpm tauri …` commands directly — see `justfile`.)
 
-## Architecture
+On first run the app scans the configured paths (default: `~/Dev`, `~/dev`, `~/code`, `~/Code`, `~/Projects`, `~/src`) for git repos, then either opens the previously used one or shows a picker.
 
-- **Backend** (`src-tauri/`): Rust commands for git ops, AI, config, PTY
-- **Frontend** (`src/`): Svelte 5 SPA with TypeScript, reactive stores, CSS custom properties
-- **IPC Bridge**: Tauri invoke for type-safe async command dispatch
-- **Config**: TOML at `~/.config/leogit/config.toml`
+## Repository layout
 
-See `IMPLEMENTATION.md` for detailed architecture and development guide.
+```
+tauri-app/
+├── src/           # Svelte 5 frontend (TypeScript, runes)
+└── src-tauri/     # Rust backend (Tauri commands)
+```
+
+See [DESIGN.md](DESIGN.md) for user-facing features and flows, [TECHNICAL.md](TECHNICAL.md) for architecture, [FRONTEND.md](FRONTEND.md) for the visual design language, and [ROADMAP.md](ROADMAP.md) for what's next.
+
+## License
+
+MIT (see LICENSE if present).
