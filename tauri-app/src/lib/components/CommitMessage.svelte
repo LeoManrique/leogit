@@ -6,9 +6,10 @@
 
   interface Props {
     onCommitted?: () => void
+    onStopAmending?: () => void
   }
 
-  let { onCommitted }: Props = $props()
+  let { onCommitted, onStopAmending }: Props = $props()
 
   let summary = $state('')
   let description = $state('')
@@ -17,7 +18,76 @@
   let isCommitting = $state(false)
   let error = $state<string | null>(null)
   let charCount = $derived(summary.length)
-  let canSubmit = $derived($canCommit && summary.trim().length > 0)
+
+  // Co-author trailers preserved from the commit being amended, re-applied via
+  // format_commit_message on commit. Plain trailers, e.g. "Name <email>".
+  let amendCoAuthors = $state<string[]>([])
+
+  // True while the user is editing the most recent commit instead of creating
+  // a new one. Driven by repoState.commitToAmend (set from the History context
+  // menu via MainLayout).
+  const isAmending = $derived($repoState.commitToAmend !== null)
+
+  // Relaxed submit gate when amending: git allows --amend with no staged files
+  // (message-only edit). Outside amend mode, canCommit requires file selection.
+  const canSubmit = $derived(summary.trim().length > 0 && (isAmending || $canCommit))
+
+  // Parse Co-Authored-By trailers out of `commit.trailers`. The trailers list
+  // comes from `%(trailers:unfold,only)` in git's log format, one trailer per
+  // line. We only preserve co-author trailers; anything else (Signed-off-by,
+  // Reviewed-by, etc.) is left for the user to re-add manually if they care.
+  function extractCoAuthors(trailers: string[]): string[] {
+    const out: string[] = []
+    for (const raw of trailers) {
+      const m = raw.match(/^\s*Co-Authored-By:\s*(.+?)\s*$/i)
+      if (m && m[1]) out.push(m[1])
+    }
+    return out
+  }
+
+  // Strip Co-Authored-By lines from a commit body when pre-filling the
+  // description, since the trailers will be re-applied via format_commit_message.
+  function stripCoAuthorLines(body: string): string {
+    return body
+      .split('\n')
+      .filter((line) => !/^\s*Co-Authored-By:/i.test(line))
+      .join('\n')
+      .trimEnd()
+  }
+
+  // When entering amend mode, pre-fill the composer from the target commit.
+  // When leaving (commit-to-amend → null), clear the composer back to empty so
+  // the user doesn't accidentally re-submit the amended message as a new commit.
+  let lastAmendSha = $state<string | null>(null)
+  $effect(() => {
+    const target = $repoState.commitToAmend
+    if (target !== null && target.sha !== lastAmendSha) {
+      lastAmendSha = target.sha
+      amendCoAuthors = extractCoAuthors(target.trailers)
+      summary = target.summary
+      description = stripCoAuthorLines(target.body)
+    } else if (target === null && lastAmendSha !== null) {
+      lastAmendSha = null
+      amendCoAuthors = []
+      summary = ''
+      description = ''
+    }
+  })
+
+  // One-shot prefill seed used by Undo Commit. MainLayout sets it on the store
+  // after `git reset --mixed`; we copy values into the composer and clear the
+  // seed so the effect doesn't re-fire on subsequent renders.
+  $effect(() => {
+    const seed = $repoState.restoreMessage
+    if (seed !== null) {
+      // Clear immediately — Svelte 5 re-runs the effect with seed === null,
+      // and the early return prevents an infinite loop.
+      repoState.update((s) => ({ ...s, restoreMessage: null }))
+      summary = seed.summary
+      description = seed.description
+      amendCoAuthors = seed.coAuthors
+    }
+  })
 
   async function handleGenerate() {
     const state = get(repoState)
@@ -76,7 +146,9 @@
     const files = Array.from(state.selectedFiles)
       .map((path) => state.status.files.find((f) => f.path === path))
       .filter((f): f is NonNullable<typeof f> => Boolean(f))
-    if (files.length === 0) {
+    // Amend allows a message-only commit, so an empty file list is only an
+    // error in the non-amend path.
+    if (files.length === 0 && !isAmending) {
       error = 'No files selected'
       return
     }
@@ -85,14 +157,21 @@
     error = null
 
     try {
-      const fullMessage = await gitApi.formatCommitMessage(summary, description)
-      await gitApi.commit(repoPath, fullMessage, files)
+      const fullMessage = await gitApi.formatCommitMessage(summary, description, amendCoAuthors)
+      await gitApi.commit(repoPath, fullMessage, files, isAmending)
       summary = ''
       description = ''
-      repoState.update((s) => ({ ...s, selectedFiles: new Set(), userDeselected: new Set() }))
+      amendCoAuthors = []
+      repoState.update((s) => ({
+        ...s,
+        selectedFiles: new Set(),
+        userDeselected: new Set(),
+        commitToAmend: null,
+      }))
+      lastAmendSha = null
       onCommitted?.()
     } catch (err) {
-      error = `Commit failed: ${String(err)}`
+      error = `${isAmending ? 'Amend' : 'Commit'} failed: ${String(err)}`
     } finally {
       isCommitting = false
     }
@@ -114,6 +193,22 @@
 </script>
 
 <div class="commit-message-container" onkeydown={handleKeyDown} role="form">
+  {#if isAmending}
+    <div class="amend-notice" role="status">
+      <span class="amend-notice-text">
+        Your changes will modify your <strong>most recent commit</strong>.
+      </span>
+      <button
+        type="button"
+        class="stop-amending-link"
+        onclick={() => onStopAmending?.()}
+        disabled={isCommitting}
+      >
+        Stop amending
+      </button>
+    </div>
+  {/if}
+
   <div class="summary-section">
     <input
       id="summary-input"
@@ -161,9 +256,14 @@
       class="commit-button"
       onclick={handleCommit}
       disabled={!canSubmit || isCommitting}
-      title="Commit (Ctrl+Enter)"
+      title={isAmending ? 'Amend commit (Ctrl+Enter)' : 'Commit (Ctrl+Enter)'}
+      aria-label={isAmending ? 'Amend commit' : 'Commit'}
     >
-      {isCommitting ? 'Committing…' : 'Commit'}
+      {#if isCommitting}
+        {isAmending ? 'Amending…' : 'Committing…'}
+      {:else}
+        {isAmending ? 'Amend commit' : 'Commit'}
+      {/if}
     </button>
   </div>
 </div>
@@ -179,6 +279,48 @@
     height: 100%;
     min-height: 0;
     box-sizing: border-box;
+  }
+
+  .amend-notice {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 4px 8px;
+    border-left: 2px solid var(--status-yellow);
+    background: transparent;
+    font-size: 11px;
+    color: var(--text-secondary);
+    flex-shrink: 0;
+  }
+
+  .amend-notice-text {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .amend-notice-text strong {
+    color: var(--text-primary);
+    font-weight: 500;
+  }
+
+  .stop-amending-link {
+    padding: 0;
+    background: transparent;
+    border: none;
+    color: var(--border-active);
+    font-size: 11px;
+    font-family: inherit;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .stop-amending-link:hover:not(:disabled) {
+    text-decoration: underline;
+  }
+
+  .stop-amending-link:disabled {
+    color: var(--text-faint);
+    cursor: not-allowed;
   }
 
   .summary-section {

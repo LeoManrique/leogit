@@ -17,6 +17,8 @@ export interface RepoStatus {
   behind: number
   files: FileEntry[]
   isMerging: boolean
+  /** SHAs of commits the user still needs to push, used to mark History rows. */
+  unpushedShas: Set<string>
 }
 
 export interface RepoState {
@@ -40,6 +42,14 @@ export interface RepoState {
   activeCommitFileDiff: FileDiff | null
   isCommitDiffLoading: boolean
   isLoading: boolean
+  commitToAmend: CommitInfo | null
+  /**
+   * One-shot seed for the commit composer after an Undo Commit. The composer
+   * consumes it (prefills summary / description / co-authors) and clears it.
+   * Separate from `commitToAmend` because undo is NOT amend mode — it just
+   * pre-populates the composer for a fresh commit.
+   */
+  restoreMessage: { summary: string; description: string; coAuthors: string[] } | null
   error?: string
 }
 
@@ -51,6 +61,7 @@ const defaultStatus: RepoStatus = {
   behind: 0,
   files: [],
   isMerging: false,
+  unpushedShas: new Set(),
 }
 
 const defaultState: RepoState = {
@@ -74,6 +85,8 @@ const defaultState: RepoState = {
   activeCommitFileDiff: null,
   isCommitDiffLoading: false,
   isLoading: false,
+  commitToAmend: null,
+  restoreMessage: null,
 }
 
 export const repoState = writable<RepoState>(defaultState)

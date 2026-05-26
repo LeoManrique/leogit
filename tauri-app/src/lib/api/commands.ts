@@ -16,6 +16,8 @@ export interface RepoStatus {
   ahead: number
   behind: number
   files: FileEntry[]
+  /** SHAs of commits reachable from HEAD but not on the remote. Empty when in sync or no upstream. */
+  unpushed_shas: string[]
 }
 
 export interface CommitInfo {
@@ -49,29 +51,6 @@ export interface MergeResult {
 export interface AheadBehind {
   ahead: number
   behind: number
-}
-
-export interface PullRequest {
-  number: number
-  title: string
-  state: string
-  author: string
-  created_at: string
-  updated_at: string
-  url: string
-  body: string
-  is_draft: boolean
-  base_ref_name: string
-  head_ref_name: string
-  review_decision?: string
-}
-
-export interface PRCheck {
-  name: string
-  state: string
-  bucket: string
-  link?: string
-  workflow?: string
 }
 
 export interface DiffLine {
@@ -164,8 +143,9 @@ export const gitApi = {
     invoke<void>('delete_remote_branch', { repoPath, remote, branch }),
   renameBranch: (repoPath: string, oldName: string, newName: string) =>
     invoke<void>('rename_branch', { repoPath, oldName, newName }),
-  commit: (repoPath: string, message: string, files: FileEntry[]) =>
-    invoke<void>('commit', { repoPath, message, files }),
+  commit: (repoPath: string, message: string, files: FileEntry[], amend: boolean = false) =>
+    invoke<void>('commit', { repoPath, message, files, amend }),
+  undoLastCommit: (repoPath: string) => invoke<void>('undo_last_commit', { repoPath }),
   hasStagedChanges: (repoPath: string) => invoke<boolean>('has_staged_changes', { repoPath }),
   formatCommitMessage: (summary: string, description: string, coAuthors: string[] = []) =>
     invoke<string>('format_commit_message', { summary, description, coAuthors }),
@@ -201,18 +181,6 @@ export const diffApi = {
 
 export const ghApi = {
   checkAuth: () => invoke<boolean>('check_auth'),
-  listPRs: (repoPath: string, state: string) =>
-    invoke<PullRequest[]>('list_prs', { repoPath, state }),
-  getPRChecks: (repoPath: string, number: number) =>
-    invoke<PRCheck[]>('get_pr_checks', { repoPath, number }),
-  createPR: (repoPath: string, title: string, body: string, base: string, draft: boolean) =>
-    invoke<string>('create_pr', { repoPath, title, body, base, draft }),
-  createPRFill: (repoPath: string, base: string, draft: boolean) =>
-    invoke<string>('create_pr_fill', { repoPath, base, draft }),
-  checkoutPR: (repoPath: string, number: number) =>
-    invoke<void>('checkout_pr', { repoPath, number }),
-  getCurrentBranchPR: (repoPath: string, branch: string) =>
-    invoke<PullRequest | null>('get_current_branch_pr', { repoPath, branch }),
 }
 
 export interface AiProviderConfig {

@@ -51,7 +51,12 @@
     <div class="modal" role="dialog" aria-modal="true" onclick={(e) => e.stopPropagation()}>
       <div class="modal-header">
         <h2>Settings</h2>
-        <button class="close-btn" onclick={onClose} aria-label="Close">✕</button>
+        <button class="close-btn" onclick={onClose} aria-label="Close">
+          <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+            <line x1="4" y1="4" x2="12" y2="12" />
+            <line x1="12" y1="4" x2="4" y2="12" />
+          </svg>
+        </button>
       </div>
 
       <div class="modal-body">
@@ -198,13 +203,17 @@
   }
 
   .close-btn {
-    padding: 2px 6px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
     background: transparent;
     color: var(--text-muted);
     border: none;
     cursor: pointer;
     border-radius: 4px;
-    font-size: 12px;
   }
 
   .close-btn:hover {

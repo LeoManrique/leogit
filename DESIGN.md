@@ -34,16 +34,17 @@ Two-column layout: a resizable sidebar on the left and a content area on the rig
 - *Changes tab:* diff viewer for the active file, or an empty state ("Working tree is clean" / "Select a file to view its diff").
 - *History tab:* commit detail card + a nested two-pane view (commit files on the left, per-file diff on the right). The commit files pane is independently resizable.
 
-**Header** sits on top of the main content: branch dropdown trigger, ahead/behind indicator, merge state badge, and the action cluster (Pull / Push / PRs / Refresh / Settings / Help).
+**Header** sits on top of the main content: repo switcher trigger, branch dropdown trigger, ahead/behind indicator, merge state badge, and the action cluster (Pull / Push / PRs / Refresh / Settings / Help). The repo switcher opens a popover identical in shape to the branch dropdown — a filter input plus the discovered-repos list (basename + muted path, current repo first and dotted) — and selecting one resets the in-memory repo state, persists `last_opened_repo`, and refreshes status / branches / log / auto-fetch for the new repo without restarting the app.
 
 ### 3. Staging and committing
 
-- File list shows every change reported by `git status --porcelain=v2 -z`, including untracked files. Each row carries a colored single-letter status marker (`A` / `M` / `D` / `R` / `U`) plus a checkbox.
+- File list shows every change reported by `git status --porcelain=v2 -z`, including untracked files. Each row carries a colored single-letter status marker (`A` / `M` / `D` / `R` / `U`) plus a checkbox. A header row ("N changed files" with an indeterminate-aware master checkbox) sits above the list and toggles every file's inclusion in one click.
 - Selection is opt-out: every detected change starts staged. The set of paths the user explicitly deselected is remembered so that fresh `git status` polls don't re-stage them. When a file disappears from the working tree the deselection forgets it too.
-- Clicking a row opens its diff in the right pane. Pressing **Space** on a focused row toggles its checkbox.
+- Clicking a row opens its diff in the right pane and seats the row-anchor at that file. Shift+clicking another row extends a visual multi-row highlight from the anchor through the clicked row (and still activates the clicked row's diff). Pressing **Space** on a focused row toggles that row's checkbox; when the row is part of a multi-row selection, Space bulk-toggles every selected row's inclusion (include all if any are excluded, else exclude all). Shift+clicking a *checkbox* (separate anchor) sets every checkbox in the range to whatever the clicked checkbox is about to become — Finder / Gmail semantics — so the two gestures stay independent.
 - The diff viewer renders unified diffs with line numbers in both gutters, optional Shiki syntax highlighting, and an optional side-by-side layout. The `tab_size` and `hide_whitespace` settings are honored live (changing `hide_whitespace` re-fetches the current file's diff).
 - Commit composer at the bottom of the sidebar has a single-line **Summary** input with a 72-character soft counter (turns yellow past the limit) and a multi-line **Description** textarea.
 - **Commit** runs `git reset HEAD` first to clear the index, then re-stages only the user's selected paths (`update-index` handles renames, deletes, and normal modifications differently), then pipes the formatted message to `git commit -F -`. The message is built via the backend's `format_commit_message` so co-author trailers stay consistent.
+- **Amend last commit** is reachable by right-clicking the topmost commit in History → "Amend last commit…". The composer enters amend mode: summary and description are pre-filled from the commit (Co-Authored-By trailers are extracted and re-applied via `format_commit_message`), a notice band reads "Your changes will modify your most recent commit. [Stop amending]", the primary button label swaps to "Amend commit", and the must-select-files gate is relaxed (message-only amends are allowed). On commit, the backend runs `git commit -F - --amend`. After amending a commit that was already pushed, the header naturally surfaces `↑ 1 ↓ 1` and the user can complete the workflow via the Force push (with lease) item in the push button dropdown.
 
 ### 4. AI commit message generation
 
@@ -60,6 +61,7 @@ Two-column layout: a resizable sidebar on the left and a content area on the rig
 - Each row shows the short SHA, summary, and a humanized relative date (`just now` / `Nm ago` / `Nh ago` / `Nd ago` / locale date past a week).
 - Selecting a commit loads its detail card (full message, author, committer date, trailers, SHA with copy-to-clipboard) and its file list. The first file's diff opens automatically.
 - Per-file commit diffs use `git log -1 -p --first-parent` to produce a proper unified diff (not file contents).
+- Right-clicking a commit opens a context menu. Today the only item is "Amend last commit…" (enabled on the topmost commit); the same menu primitive will host future actions (Reset / Revert / Cherry-pick / Create branch from / Copy SHA).
 
 ### 6. Branches
 
@@ -77,7 +79,8 @@ Two-column layout: a resizable sidebar on the left and a content area on the rig
 
 ### 8. Remote synchronization
 
-- **Header buttons**: Pull (`git pull --ff --recurse-submodules`), Push (`git push --progress`, auto-adds `--set-upstream` when no upstream is configured, never `--force` unless explicitly requested in code). Each button shows a spinner while busy.
+- **Header buttons**: Pull (`git pull --ff --recurse-submodules`) and Push (`git push --progress`, auto-adds `--set-upstream` when no upstream is configured). Each shows a small numeric badge with the behind/ahead count (`Pull (2)`, `Push (3)`) and a spinner while busy.
+- The Push button is a split button: the main face triggers a plain push; a chevron on the right opens a small dropdown with "Push" and "Force push (with lease)…". The force-push item is enabled whenever there's an upstream and opens a confirmation dialog explaining that `--force-with-lease` will overwrite the remote branch but will refuse the push if someone else has pushed since the last fetch. leogit never uses bare `--force`.
 - **Auto-fetch**: when `auto_fetch` is true, a background timer runs `git fetch --prune --recurse-submodules=on-demand` against the first remote every `fetch_interval_ms` (default 30 s). Fetches are skipped while the user is typing in an input or while the window is hidden.
 - **Status polling**: every 2 s the frontend re-runs `get_status` silently and polls `git rev-parse HEAD`. If the SHA changed (commit/checkout/external `git` action) the commit log refreshes automatically. Polling and re-fetch also run on `visibilitychange` and window focus.
 - Ahead/behind counts and merge state come from the porcelain v2 branch headers; the header shows `↑ N ↓ N` or "up to date", and a `MERGING` chip when `MERGE_HEAD` exists.
@@ -100,7 +103,7 @@ The full list lives in [HelpOverlay.svelte](tauri-app/src/lib/views/HelpOverlay.
 
 | Key | Action | Scope |
 |---|---|---|
-| `Ctrl/Cmd + Enter` | Commit selected files | Commit composer focused |
+| `Ctrl/Cmd + Enter` | Commit selected files (or "Amend commit" when in amend mode) | Commit composer focused |
 | `Ctrl/Cmd + G` | Generate commit message with AI | Commit composer focused |
 | `Ctrl/Cmd + P` | Cycle AI provider (Claude ↔ Ollama) | Commit composer focused |
 | `Ctrl/Cmd + R` | Refresh status | Global |

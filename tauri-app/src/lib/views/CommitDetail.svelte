@@ -42,8 +42,17 @@
 
     <div class="meta-row">
       <code class="sha">{commit.sha}</code>
-      <button class="copy-btn" onclick={copySha} title="Copy SHA" aria-label="Copy SHA">
-        {copied ? '✓' : '⎘'}
+      <button class="copy-btn" class:copied onclick={copySha} title={copied ? 'Copied' : 'Copy SHA'} aria-label="Copy SHA">
+        {#if copied}
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="3.5,8.5 6.5,11.5 12.5,5" />
+          </svg>
+        {:else}
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="5" y="5" width="8" height="8" rx="1.5" />
+            <path d="M11 5V3.5A1 1 0 0 0 10 2.5H4A1 1 0 0 0 3 3.5V10A1 1 0 0 0 4 11H5" />
+          </svg>
+        {/if}
       </button>
       {#if fileCount > 0}
         <span class="files-count">{fileCount} {fileCount === 1 ? 'file' : 'files'} changed</span>
@@ -128,19 +137,27 @@
   }
 
   .copy-btn {
-    padding: 1px 6px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
     background: transparent;
     color: var(--text-muted);
     border: none;
     border-radius: 4px;
     cursor: pointer;
-    font-size: 11px;
-    line-height: 1;
+    transition: color 120ms ease, background 120ms ease;
   }
 
   .copy-btn:hover {
     background: var(--surface-hover);
     color: var(--text-primary);
+  }
+
+  .copy-btn.copied {
+    color: var(--status-green);
   }
 
   .files-count {

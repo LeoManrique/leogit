@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { get } from 'svelte/store'
-  import { repoState } from '$lib/stores/repo'
+  import { repoState, resetRepoState } from '$lib/stores/repo'
   import { appState } from '$lib/stores/app'
   import { config, refreshConfig } from '$lib/stores/config'
-  import { gitApi, diffApi, type FileEntry, type CommitInfo } from '$lib/api/commands'
+  import { gitApi, diffApi, configApi, type FileEntry, type CommitInfo } from '$lib/api/commands'
 
   import Header from '$lib/components/Header.svelte'
   import TabBar from '$lib/components/TabBar.svelte'
@@ -15,6 +15,7 @@
   import Terminal from '$lib/components/Terminal.svelte'
   import CommitDetail from '$lib/views/CommitDetail.svelte'
   import BranchDropdown from '$lib/views/BranchDropdown.svelte'
+  import RepoDropdown from '$lib/views/RepoDropdown.svelte'
   import MergeOverlay from '$lib/views/MergeOverlay.svelte'
   import SettingsOverlay from '$lib/views/SettingsOverlay.svelte'
   import HelpOverlay from '$lib/views/HelpOverlay.svelte'
@@ -22,11 +23,11 @@
 
   let terminalExpanded = $state(false)
   let terminalSessionId = $state(0) // 0 = no active PTY; >0 = key for the mounted Terminal
+  let showRepos = $state(false)
   let showBranches = $state(false)
   let showSettings = $state(false)
   let showHelp = $state(false)
   let showMerge = $state(false)
-  let showPRs = $state(false)
   let mergeTarget = $state<string>('')
 
   let statusInterval: ReturnType<typeof setInterval> | null = null
@@ -138,6 +139,12 @@
         for (const p of s.userDeselected) {
           if (presentPaths.has(p)) nextDeselected.add(p)
         }
+        // If the file the user was viewing has just been committed (or
+        // otherwise dropped out of the working tree), drop the diff too —
+        // otherwise the pane keeps rendering a diff for a path that no
+        // longer exists in the changeset.
+        const activeFileGone =
+          s.activeFile !== null && !presentPaths.has(s.activeFile.path)
         return {
           ...s,
           status: {
@@ -148,9 +155,13 @@
             behind: status.behind,
             files: status.files,
             isMerging,
+            unpushedShas: new Set(status.unpushed_shas ?? []),
           },
           selectedFiles: nextSelected,
           userDeselected: nextDeselected,
+          activeFile: activeFileGone ? null : s.activeFile,
+          activeFileDiff: activeFileGone ? null : s.activeFileDiff,
+          isDiffLoading: activeFileGone ? false : s.isDiffLoading,
           error: opts.silent ? s.error : undefined,
         }
       })
@@ -355,6 +366,8 @@
   }
 
   async function handleCommitted(): Promise<void> {
+    // Defensive: clear amend mode if the composer somehow didn't.
+    repoState.update((s) => ({ ...s, commitToAmend: null }))
     await Promise.all([refreshStatus({ silent: true }), refreshLog()])
     const repoPath = $appState.repoPath
     if (repoPath) {
@@ -362,6 +375,99 @@
         lastHeadSha = await gitApi.getHeadSha(repoPath)
       } catch {}
     }
+  }
+
+  function handleStartAmending(commit: CommitInfo): void {
+    repoState.update((s) => ({ ...s, commitToAmend: commit, activeTab: 'changes' }))
+  }
+
+  function handleStopAmending(): void {
+    repoState.update((s) => ({ ...s, commitToAmend: null }))
+  }
+
+  // Parse the Co-Authored-By trailers off a commit and split the body.
+  // Mirrors CommitMessage.svelte's helpers — kept local to avoid coupling.
+  function splitCoAuthors(commit: CommitInfo): {
+    body: string
+    coAuthors: string[]
+  } {
+    const coAuthors: string[] = []
+    for (const raw of commit.trailers) {
+      const m = raw.match(/^\s*Co-Authored-By:\s*(.+?)\s*$/i)
+      if (m && m[1]) coAuthors.push(m[1])
+    }
+    const body = commit.body
+      .split('\n')
+      .filter((line) => !/^\s*Co-Authored-By:/i.test(line))
+      .join('\n')
+      .trimEnd()
+    return { body, coAuthors }
+  }
+
+  async function handleUndoCommit(commit: CommitInfo): Promise<void> {
+    const repoPath = $appState.repoPath
+    if (!repoPath) return
+    try {
+      await gitApi.undoLastCommit(repoPath)
+      const { body, coAuthors } = splitCoAuthors(commit)
+      // Set the seed BEFORE refresh so the composer prefills as soon as the
+      // tab switches over. Also defensively clear amend mode in case the
+      // undone commit happened to be the one the user was amending.
+      repoState.update((s) => ({
+        ...s,
+        commitToAmend: null,
+        restoreMessage: {
+          summary: commit.summary,
+          description: body,
+          coAuthors,
+        },
+        activeTab: 'changes',
+      }))
+      await handleCommitted()
+    } catch (error) {
+      repoState.update((s) => ({ ...s, error: String(error) }))
+    }
+  }
+
+  // Master select-all from the FileList header. `selectAll === true` mirrors
+  // the user explicitly opting every file in (clearing userDeselected); false
+  // mirrors opting every file out (so refreshStatus won't re-add them next
+  // poll tick).
+  function handleToggleAll(selectAll: boolean) {
+    repoState.update((s) => {
+      if (selectAll) {
+        return {
+          ...s,
+          selectedFiles: new Set(s.status.files.map((f) => f.path)),
+          userDeselected: new Set(),
+        }
+      }
+      return {
+        ...s,
+        selectedFiles: new Set(),
+        userDeselected: new Set(s.status.files.map((f) => f.path)),
+      }
+    })
+  }
+
+  // Range toggle from FileList — shift+click on a checkbox or Space on a
+  // multi-row selection. Same opt-out tracking as handleFileToggle so the 2s
+  // refreshStatus poll doesn't re-include paths the user just deselected.
+  function handleBulkToggle(paths: string[], include: boolean) {
+    repoState.update((s) => {
+      const nextSelected = new Set(s.selectedFiles)
+      const nextDeselected = new Set(s.userDeselected)
+      for (const p of paths) {
+        if (include) {
+          nextSelected.add(p)
+          nextDeselected.delete(p)
+        } else {
+          nextSelected.delete(p)
+          nextDeselected.add(p)
+        }
+      }
+      return { ...s, selectedFiles: nextSelected, userDeselected: nextDeselected }
+    })
   }
 
   function handleFileToggle(file: FileEntry) {
@@ -377,6 +483,28 @@
       }
       return { ...s, selectedFiles: nextSelected, userDeselected: nextDeselected }
     })
+  }
+
+  async function handleSwitchRepo(repo: string) {
+    if (!repo || repo === $appState.repoPath) {
+      showRepos = false
+      return
+    }
+    showRepos = false
+    lastHeadSha = null
+    resetRepoState()
+    appState.update((s) => ({ ...s, repoPath: repo }))
+    try {
+      await configApi.saveState({ last_opened_repo: repo })
+    } catch {}
+    try {
+      await Promise.all([refreshStatus(), refreshBranches(), loadInitialLog()])
+      const cfg = $config
+      const intervalMs = cfg?.auto_fetch ? cfg.fetch_interval_ms || 30000 : 0
+      startAutoFetch(intervalMs)
+    } catch (error) {
+      repoState.update((s) => ({ ...s, error: String(error) }))
+    }
   }
 
   async function handleSwitchBranch(branch: string) {
@@ -480,9 +608,9 @@
     const meta = e.ctrlKey || e.metaKey
 
     if (e.key === 'Escape') {
-      if (showBranches || showSettings || showHelp || showMerge || showPRs) {
+      if (showRepos || showBranches || showSettings || showHelp || showMerge) {
         e.preventDefault()
-        showBranches = showSettings = showHelp = showMerge = showPRs = false
+        showRepos = showBranches = showSettings = showHelp = showMerge = false
         return
       }
     }
@@ -576,7 +704,12 @@
 <div class="main-layout" style="--sidebar-width: {sidebarWidth}px;">
   <div class="sidebar">
     <TabBar />
-    {#if $repoState.activeTab === 'changes'}
+    <!--
+      Both tab panes stay mounted and toggle via CSS so CommitMessage retains
+      its in-progress draft (summary / description / co-authors) when the user
+      switches to History and back. CommitList also keeps its scroll position.
+    -->
+    <div class="tab-pane" class:active={$repoState.activeTab === 'changes'}>
       <div class="file-list-container">
         <FileList
           files={$repoState.status.files}
@@ -584,6 +717,8 @@
           activeFile={$repoState.activeFile}
           onActivate={handleFileActivate}
           onToggle={handleFileToggle}
+          onToggleAll={handleToggleAll}
+          onBulkToggle={handleBulkToggle}
         />
       </div>
       <div class="commit-section" style="height: {commitHeight}px;">
@@ -594,18 +729,23 @@
           aria-orientation="horizontal"
           aria-label="Resize commit section"
         ></div>
-        <CommitMessage onCommitted={handleCommitted} />
+        <CommitMessage onCommitted={handleCommitted} onStopAmending={handleStopAmending} />
       </div>
-    {:else}
+    </div>
+    <div class="tab-pane" class:active={$repoState.activeTab === 'history'}>
       <div class="commit-list-container">
         <CommitList
           commits={$repoState.log.commits}
           selectedSha={$repoState.activeCommit?.sha || null}
+          unpushedShas={$repoState.status.unpushedShas}
+          hasResolvedUpstream={$repoState.status.upstream !== ''}
           onSelect={loadCommitFiles}
           onLoadMore={loadMoreCommits}
+          onAmendCommit={handleStartAmending}
+          onUndoCommit={handleUndoCommit}
         />
       </div>
-    {/if}
+    </div>
   </div>
 
   <div
@@ -618,10 +758,10 @@
 
   <div class="main-content">
     <Header
+      onOpenRepos={() => (showRepos = true)}
       onOpenBranches={() => (showBranches = true)}
       onOpenSettings={() => (showSettings = true)}
       onOpenHelp={() => (showHelp = true)}
-      onOpenPRs={() => (showPRs = true)}
     />
 
     <div class="content-area">
@@ -763,6 +903,18 @@
     {/if}
   </div>
 
+  {#if showRepos}
+    <div class="overlay-backdrop" role="presentation" onclick={() => (showRepos = false)}>
+      <div class="overlay-content" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <RepoDropdown
+          repos={$appState.repos}
+          currentRepo={$appState.repoPath}
+          onSelect={handleSwitchRepo}
+        />
+      </div>
+    </div>
+  {/if}
+
   {#if showBranches}
     <div class="overlay-backdrop" role="presentation" onclick={() => (showBranches = false)}>
       <div class="overlay-content" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
@@ -882,6 +1034,22 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
+  }
+
+  /*
+    Both tab subtrees stay mounted (so CommitMessage doesn't drop its draft
+    when the user peeks at History). Only the active one renders.
+  */
+  .tab-pane {
+    display: none;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .tab-pane.active {
+    display: flex;
   }
 
   .main-content {

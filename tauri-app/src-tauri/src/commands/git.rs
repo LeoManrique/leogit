@@ -76,6 +76,11 @@ pub struct RepoStatus {
     pub ahead: i32,
     pub behind: i32,
     pub files: Vec<FileEntry>,
+    /// SHAs of commits reachable from HEAD but not from the remote tracking
+    /// branch — i.e. commits the user still needs to push. Empty when the
+    /// branch has no resolvable upstream or is in sync. Used by the History
+    /// view to mark unpushed rows.
+    pub unpushed_shas: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -271,6 +276,7 @@ pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
         ahead: 0,
         behind: 0,
         files: Vec::new(),
+        unpushed_shas: Vec::new(),
     };
 
     if bytes.is_empty() {
@@ -320,6 +326,81 @@ pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
         if let Ok(b) = run_git(&repo_path, &["rev-parse", "--abbrev-ref", "HEAD"]) {
             if b != "HEAD" {
                 result.branch = b;
+            }
+        }
+    }
+
+    // Effective upstream ref — what `rev-list HEAD ^<this>` should compare
+    // against. For tracked branches it's the `branch.upstream` value; for
+    // untracked branches it falls back to `refs/remotes/<first-remote>/<branch>`
+    // if such a ref exists. Stays `None` for detached HEAD, empty repos, or
+    // branches with no matching remote ref.
+    let mut effective_upstream: Option<String> = if result.has_upstream {
+        Some(result.upstream.clone())
+    } else {
+        None
+    };
+
+    // Ahead/behind fallback for branches WITHOUT explicit upstream tracking.
+    // git status only emits `# branch.ab` when `branch.<name>.{merge,remote}` are
+    // set, so a freshly created local branch (or a clone that never ran
+    // `push -u`) will report ahead=behind=0 even when a matching remote ref
+    // exists. Match GitHub Desktop: if there's a remote ref at
+    // `refs/remotes/<first-remote>/<branch>`, compute ahead/behind against it
+    // manually so the Push badge updates.
+    //
+    // Don't synthesise `has_upstream = true` — that flag still drives whether
+    // the next push needs `--set-upstream`, and lying about it would break
+    // first-push behaviour.
+    if !result.has_upstream && !result.branch.is_empty() {
+        if let Ok(remotes) = run_git(&repo_path, &["remote"]) {
+            if let Some(first_remote) = remotes.lines().next().map(str::trim) {
+                if !first_remote.is_empty() {
+                    let remote_ref = format!("refs/remotes/{}/{}", first_remote, result.branch);
+                    let exists = git_cmd(
+                        &repo_path,
+                        &["rev-parse", "--verify", "--quiet", &remote_ref],
+                    )
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                    if exists {
+                        let range = format!("HEAD...{}", remote_ref);
+                        if let Ok(out) = run_git(
+                            &repo_path,
+                            &["rev-list", "--left-right", "--count", &range, "--"],
+                        ) {
+                            let parts: Vec<&str> = out.split_whitespace().collect();
+                            if parts.len() == 2 {
+                                result.ahead = parts[0].parse().unwrap_or(0);
+                                result.behind = parts[1].parse().unwrap_or(0);
+                                // Surface the synthesised tracking name so the
+                                // UI / debug logs make sense; this is purely
+                                // informational and does NOT flip has_upstream.
+                                result.upstream =
+                                    format!("{}/{} (inferred)", first_remote, result.branch);
+                                effective_upstream = Some(remote_ref);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // List unpushed commit SHAs so the History view can mark them. Skipped
+    // when there's nothing to mark — avoids an extra `git rev-list` on every
+    // 2s status poll for in-sync branches.
+    if result.ahead > 0 {
+        if let Some(upstream_ref) = effective_upstream.as_deref() {
+            let exclude = format!("^{}", upstream_ref);
+            if let Ok(out) = run_git(&repo_path, &["rev-list", "HEAD", &exclude]) {
+                result.unpushed_shas = out
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_string)
+                    .collect();
             }
         }
     }
@@ -944,8 +1025,12 @@ pub fn commit(
     repo_path: String,
     message: String,
     files: Vec<FileEntry>,
+    amend: Option<bool>,
 ) -> Result<(), String> {
-    if files.is_empty() {
+    let amend = amend.unwrap_or(false);
+
+    // When amending you can change just the message; an empty file list is fine.
+    if files.is_empty() && !amend {
         return Err("no files selected — select files first".to_string());
     }
 
@@ -962,12 +1047,18 @@ pub fn commit(
 
     stage_files(&repo_path, &files)?;
 
-    if !has_staged_changes(repo_path.clone())? {
+    // For a non-amend commit, refusing an empty index is the right call.
+    // For an amend, an empty index is the "message only" path and must succeed.
+    if !amend && !has_staged_changes(repo_path.clone())? {
         return Err("staging produced no changes".to_string());
     }
 
     // Pipe the message via stdin to avoid arg-length and shell-quoting issues.
-    let mut child = git_cmd(&repo_path, &["commit", "-F", "-"])
+    let mut args: Vec<&str> = vec!["commit", "-F", "-"];
+    if amend {
+        args.push("--amend");
+    }
+    let mut child = git_cmd(&repo_path, &args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -992,6 +1083,35 @@ pub fn commit(
         let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
         combined.push_str(&String::from_utf8_lossy(&output.stderr));
         return Err(format!("git commit failed: {}", combined.trim()));
+    }
+    Ok(())
+}
+
+/// Undo the most recent commit on the current branch.
+///
+/// Uses `git reset --mixed HEAD~1`: HEAD moves back to the parent, the index
+/// is reset to match (unstaging anything that was staged), and the working
+/// tree is left untouched. The undone commit's changes therefore re-appear as
+/// unstaged modifications, ready for the user to edit and re-commit. Matches
+/// what `git commit` would have set up if the user had never committed.
+///
+/// Refuses to undo the initial commit (no parent to reset to) — that path
+/// requires `git update-ref -d HEAD` plus an index rebuild, which we don't
+/// support yet.
+#[tauri::command]
+pub fn undo_last_commit(repo_path: String) -> Result<(), String> {
+    // Verify HEAD has a parent before attempting the reset. `rev-parse HEAD~1`
+    // fails on the initial commit with a clear error message we can surface.
+    let parent = git_cmd(&repo_path, &["rev-parse", "--verify", "--quiet", "HEAD~1"])
+        .output()
+        .map_err(|e| format!("git rev-parse: {}", e))?;
+    if !parent.status.success() {
+        return Err("cannot undo the initial commit".to_string());
+    }
+
+    let (ok, combined) = run_git_combined(&repo_path, &["reset", "--mixed", "HEAD~1"])?;
+    if !ok {
+        return Err(format!("git reset --mixed HEAD~1 failed: {}", combined.trim()));
     }
     Ok(())
 }

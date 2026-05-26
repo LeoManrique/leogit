@@ -2,19 +2,37 @@
   import { repoState } from '$lib/stores/repo'
   import { appState } from '$lib/stores/app'
   import { gitApi } from '$lib/api/commands'
+  import ContextMenu, { type ContextMenuItem } from './ContextMenu.svelte'
+  import ForcePushConfirm from './ForcePushConfirm.svelte'
 
   interface Props {
+    onOpenRepos: () => void
     onOpenBranches: () => void
     onOpenSettings: () => void
     onOpenHelp: () => void
-    onOpenPRs: () => void
   }
 
-  let { onOpenBranches, onOpenSettings, onOpenHelp, onOpenPRs }: Props = $props()
+  let { onOpenRepos, onOpenBranches, onOpenSettings, onOpenHelp }: Props = $props()
+
+  const repoName = $derived.by(() => {
+    const path = $appState.repoPath
+    if (!path) return ''
+    const parts = path.split('/')
+    return parts[parts.length - 1] || path
+  })
 
   let isRefreshing = $state(false)
   let isPushing = $state(false)
   let isPulling = $state(false)
+
+  let pushMenu = $state<{ x: number; y: number } | null>(null)
+  let showForcePushConfirm = $state(false)
+  // Cache the remote name so the confirm dialog can show it without re-querying.
+  let cachedRemote = $state('origin')
+
+  const ahead = $derived($repoState.status.ahead)
+  const behind = $derived($repoState.status.behind)
+  const hasUpstream = $derived($repoState.status.hasUpstream)
 
   async function handleRefresh() {
     if (isRefreshing) return
@@ -33,6 +51,7 @@
           ahead: status.ahead,
           behind: status.behind,
           files: status.files,
+          unpushedShas: new Set(status.unpushed_shas ?? []),
         },
         error: undefined,
       }))
@@ -67,6 +86,7 @@
     isPushing = true
     try {
       const remote = await gitApi.getRemote(repoPath)
+      cachedRemote = remote
       const setUpstream = !$repoState.status.hasUpstream
       await gitApi.push(repoPath, remote, branch, setUpstream, false)
       await handleRefresh()
@@ -76,24 +96,96 @@
       isPushing = false
     }
   }
+
+  async function handleForcePush() {
+    if (isPushing) return
+    const repoPath = $appState.repoPath
+    const branch = $repoState.status.branch
+    if (!repoPath || !branch) return
+    isPushing = true
+    try {
+      const remote = await gitApi.getRemote(repoPath)
+      cachedRemote = remote
+      const setUpstream = !$repoState.status.hasUpstream
+      // 5th arg = forceWithLease. We never use bare --force.
+      await gitApi.push(repoPath, remote, branch, setUpstream, true)
+      await handleRefresh()
+      showForcePushConfirm = false
+    } catch (error) {
+      repoState.update((s) => ({ ...s, error: String(error) }))
+    } finally {
+      isPushing = false
+    }
+  }
+
+  function openPushMenu(e: MouseEvent) {
+    e.preventDefault()
+    e.stopPropagation()
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    // Anchor the menu under the chevron, aligned to its right edge.
+    pushMenu = { x: rect.right - 200, y: rect.bottom + 4 }
+  }
+
+  // Cache the remote name passively so the confirm dialog has it ready.
+  $effect(() => {
+    const repoPath = $appState.repoPath
+    if (!repoPath) return
+    gitApi.getRemote(repoPath).then((r) => (cachedRemote = r)).catch(() => {})
+  })
+
+  const pushMenuItems = $derived<ContextMenuItem[]>([
+    {
+      label: 'Push',
+      action: handlePush,
+      enabled: !isPushing,
+    },
+    {
+      label: 'Force push (with lease)…',
+      action: () => (showForcePushConfirm = true),
+      enabled: hasUpstream && !isPushing,
+      destructive: true,
+    },
+  ])
 </script>
 
 <header class="header">
   <div class="left">
-    <button class="branch-button" onclick={onOpenBranches} title="Switch branch (B)">
-      <span class="branch-icon">⎇</span>
-      <span class="branch-name">{$repoState.status.branch || '…'}</span>
+    <button class="chip-button" onclick={onOpenRepos} title="Switch repository">
+      <svg class="chip-icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M2.5 3.5a1 1 0 0 1 1-1h3l1.5 1.5h4.5a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1z" />
+      </svg>
+      <span class="chip-label">{repoName || '…'}</span>
+    </button>
+    <button class="chip-button" onclick={onOpenBranches} title="Switch branch (B)">
+      <svg class="chip-icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="4" cy="3.5" r="1.4" />
+        <circle cx="4" cy="12.5" r="1.4" />
+        <circle cx="12" cy="6" r="1.4" />
+        <path d="M4 5v6" />
+        <path d="M4 9c0-2.5 2-3 4-3h2.6" />
+      </svg>
+      <span class="chip-label">{$repoState.status.branch || '…'}</span>
     </button>
     <div class="status-info">
-      {#if $repoState.status.hasUpstream}
-        {#if $repoState.status.ahead > 0 || $repoState.status.behind > 0}
-          <span class="ahead-behind">
-            {#if $repoState.status.ahead > 0}↑ {$repoState.status.ahead}{/if}
-            {#if $repoState.status.behind > 0}↓ {$repoState.status.behind}{/if}
-          </span>
-        {:else}
-          <span class="upstream-ok">up to date</span>
-        {/if}
+      {#if ahead > 0 || behind > 0}
+        <span class="ahead-behind">
+          {#if ahead > 0}
+            <svg width="9" height="9" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="4,7 8,3 12,7" />
+              <line x1="8" y1="3" x2="8" y2="13" />
+            </svg>
+            <span>{ahead}</span>
+          {/if}
+          {#if behind > 0}
+            <svg width="9" height="9" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="8" y1="3" x2="8" y2="13" />
+              <polyline points="4,9 8,13 12,9" />
+            </svg>
+            <span>{behind}</span>
+          {/if}
+        </span>
+      {:else if hasUpstream}
+        <span class="upstream-ok"><span class="sync-dot"></span>up to date</span>
       {/if}
       {#if $repoState.status.isMerging}
         <span class="merging">MERGING</span>
@@ -102,22 +194,99 @@
   </div>
 
   <div class="right">
-    <button onclick={handlePull} disabled={isPulling} title="Pull from remote">
-      {isPulling ? '⟳' : '↓'} Pull
+    <button
+      class="count-button"
+      onclick={handlePull}
+      disabled={isPulling}
+      title={behind > 0 ? `Pull ${behind} commit${behind === 1 ? '' : 's'} from remote` : 'Pull from remote'}
+    >
+      {#if isPulling}
+        <svg class="icon spinning" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+          <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" />
+          <polyline points="13.5,2 13.5,5 10.5,5" />
+        </svg>
+      {:else}
+        <svg class="icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <line x1="8" y1="3" x2="8" y2="12" />
+          <polyline points="4,8 8,12 12,8" />
+        </svg>
+      {/if}
+      <span>Pull</span>
+      {#if behind > 0}<span class="count-badge">{behind}</span>{/if}
     </button>
-    <button onclick={handlePush} disabled={isPushing} title="Push to remote">
-      {isPushing ? '⟳' : '↑'} Push
+    <div class="split-button">
+      <button
+        class="count-button split-main"
+        onclick={handlePush}
+        disabled={isPushing}
+        title={ahead > 0 ? `Push ${ahead} commit${ahead === 1 ? '' : 's'} to remote` : 'Push to remote'}
+      >
+        {#if isPushing}
+          <svg class="icon spinning" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+            <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" />
+            <polyline points="13.5,2 13.5,5 10.5,5" />
+          </svg>
+        {:else}
+          <svg class="icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="8" y1="4" x2="8" y2="13" />
+            <polyline points="4,8 8,4 12,8" />
+          </svg>
+        {/if}
+        <span>Push</span>
+        {#if ahead > 0}<span class="count-badge">{ahead}</span>{/if}
+      </button>
+      <button
+        class="split-chevron"
+        onclick={openPushMenu}
+        disabled={isPushing}
+        aria-label="More push options"
+        title="More push options"
+      >
+        <svg width="9" height="9" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <polyline points="4,6 8,10 12,6" />
+        </svg>
+      </button>
+    </div>
+    <button class="icon-button" onclick={handleRefresh} disabled={isRefreshing} title="Refresh (Ctrl+R)" aria-label="Refresh">
+      <svg class="icon" class:spinning={isRefreshing} width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" />
+        <polyline points="13.5,2 13.5,5 10.5,5" />
+      </svg>
     </button>
-    <button onclick={onOpenPRs} disabled={!$appState.ghAuthed} title="Pull requests (P)">
-      PRs
+    <button class="icon-button" onclick={onOpenSettings} title="Settings (,)" aria-label="Settings">
+      <svg class="icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="8" cy="8" r="2.2" />
+        <path d="M13 9.5l1.2.7-1 1.7-1.3-.5a4.6 4.6 0 0 1-1.4.8L10.2 14H7.8l-.3-1.8a4.6 4.6 0 0 1-1.4-.8l-1.3.5-1-1.7L5 9.5a4.7 4.7 0 0 1 0-3L3.8 5.8l1-1.7 1.3.5a4.6 4.6 0 0 1 1.4-.8L7.8 2h2.4l.3 1.8a4.6 4.6 0 0 1 1.4.8l1.3-.5 1 1.7-1.2.7a4.7 4.7 0 0 1 0 3z" />
+      </svg>
     </button>
-    <button onclick={handleRefresh} disabled={isRefreshing} title="Refresh (Ctrl+R)">
-      {isRefreshing ? '⟳' : '↻'}
+    <button class="icon-button" onclick={onOpenHelp} title="Help (?)" aria-label="Help">
+      <svg class="icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="8" cy="8" r="6" />
+        <path d="M6.2 6.2a2 2 0 1 1 2.6 2.4c-.4.2-.8.5-.8 1.1" />
+        <circle cx="8" cy="11.6" r="0.5" fill="currentColor" stroke="none" />
+      </svg>
     </button>
-    <button onclick={onOpenSettings} title="Settings (,)">⚙</button>
-    <button onclick={onOpenHelp} title="Help (?)">?</button>
   </div>
 </header>
+
+{#if pushMenu !== null}
+  <ContextMenu
+    x={pushMenu.x}
+    y={pushMenu.y}
+    items={pushMenuItems}
+    onClose={() => (pushMenu = null)}
+  />
+{/if}
+
+{#if showForcePushConfirm}
+  <ForcePushConfirm
+    branch={$repoState.status.branch}
+    remote={cachedRemote}
+    {isPushing}
+    onConfirm={handleForcePush}
+    onCancel={() => (showForcePushConfirm = false)}
+  />
+{/if}
 
 <style>
   .header {
@@ -139,7 +308,7 @@
     min-width: 0;
   }
 
-  .branch-button {
+  .chip-button {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -152,17 +321,19 @@
     font-size: 13px;
     font-weight: 500;
     transition: background 120ms ease;
+    min-width: 0;
   }
 
-  .branch-button:hover {
+  .chip-button:hover {
     background: var(--surface-hover);
   }
 
-  .branch-icon {
+  .chip-icon {
     color: var(--text-muted);
+    flex-shrink: 0;
   }
 
-  .branch-name {
+  .chip-label {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -178,11 +349,30 @@
   }
 
   .ahead-behind {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
     color: var(--text-muted);
   }
 
+  .ahead-behind svg {
+    margin-right: -2px;
+    vertical-align: -1px;
+  }
+
   .upstream-ok {
-    color: var(--status-green);
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--text-muted);
+  }
+
+  .sync-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--status-green);
+    flex-shrink: 0;
   }
 
   .merging {
@@ -194,6 +384,7 @@
   .right {
     display: flex;
     gap: 4px;
+    align-items: center;
   }
 
   button {
@@ -205,6 +396,7 @@
     border: 1px solid transparent;
     border-radius: 6px;
     transition: background 120ms ease, color 120ms ease;
+    font-family: inherit;
   }
 
   button:hover:not(:disabled) {
@@ -215,5 +407,73 @@
   button:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+
+  .count-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .icon {
+    color: var(--text-muted);
+    flex-shrink: 0;
+    line-height: 0;
+  }
+
+  .count-button:hover:not(:disabled) .icon,
+  .icon-button:hover:not(:disabled) .icon {
+    color: var(--text-primary);
+  }
+
+  .icon-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px 6px;
+  }
+
+  .spinning {
+    animation: spin 0.9s linear infinite;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .count-badge {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    min-width: 0;
+  }
+
+  .split-button {
+    display: inline-flex;
+    align-items: stretch;
+    gap: 0;
+  }
+
+  .split-main {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+    padding-right: 8px;
+  }
+
+  .split-chevron {
+    padding: 3px 6px;
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+    border-left: 1px solid var(--border-inactive);
+    color: var(--text-muted);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .split-chevron:hover:not(:disabled) {
+    color: var(--text-primary);
   }
 </style>

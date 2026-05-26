@@ -81,14 +81,19 @@
                 class:current={branch.name === currentBranch}
                 onclick={() => handleSwitch(branch.name)}
               >
-                <span class="branch-name">{branch.name}</span>
                 {#if branch.name === currentBranch}
-                  <span class="current-badge">●</span>
+                  <span class="current-dot" aria-label="Current branch"></span>
+                {:else}
+                  <span class="current-dot-spacer" aria-hidden="true"></span>
                 {/if}
+                <span class="branch-name">{branch.name}</span>
               </button>
               {#if branch.name !== currentBranch}
-                <button class="delete-btn" onclick={() => handleDeleteClick(branch.name)} title="Delete">
-                  ✕
+                <button class="delete-btn" onclick={() => handleDeleteClick(branch.name)} aria-label="Delete branch" title="Delete">
+                  <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+                    <line x1="4" y1="4" x2="12" y2="12" />
+                    <line x1="12" y1="4" x2="4" y2="12" />
+                  </svg>
                 </button>
               {/if}
             </div>
@@ -106,6 +111,7 @@
                 class:remote={true}
                 onclick={() => handleSwitch(branch.name)}
               >
+                <span class="current-dot-spacer" aria-hidden="true"></span>
                 <span class="branch-name">{branch.name}</span>
               </button>
             {/each}
@@ -114,7 +120,7 @@
       {/if}
 
       <div class="section-footer">
-        <button class="create-btn" onclick={handleCreateClick}>+ New Branch</button>
+        <button class="create-btn" onclick={handleCreateClick}>New branch…</button>
       </div>
     </div>
   {:else if mode === 'create'}
@@ -196,9 +202,9 @@
     flex: 1;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 4px 10px;
-    min-height: 24px;
+    gap: 6px;
+    padding: 0 10px;
+    height: 24px;
     background: transparent;
     border: none;
     color: var(--text-primary);
@@ -215,6 +221,9 @@
 
   .branch-item.current {
     background: var(--bg-tertiary);
+  }
+
+  .branch-item.current .branch-name {
     font-weight: 500;
   }
 
@@ -223,28 +232,38 @@
   }
 
   .branch-name {
+    flex: 1;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-family: var(--font-mono);
-    font-size: 12px;
   }
 
-  .current-badge {
-    color: var(--border-active);
-    margin-left: 8px;
-    font-size: 8px;
+  .current-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--border-active);
+    flex-shrink: 0;
+  }
+
+  .current-dot-spacer {
+    width: 6px;
+    flex-shrink: 0;
   }
 
   .delete-btn {
-    padding: 2px 6px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
     margin-right: 4px;
     background: transparent;
     border: none;
     color: var(--text-muted);
     border-radius: 4px;
     cursor: pointer;
-    font-size: 11px;
     transition: background 100ms ease, color 100ms ease;
     opacity: 0;
   }
