@@ -62,6 +62,7 @@ fn main() {
             git::push,
             git::get_ahead_behind,
             git::get_remote,
+            git::get_repo_identifier,
             git::merge_branch,
             git::merge_squash,
             git::commit_squash_merge,

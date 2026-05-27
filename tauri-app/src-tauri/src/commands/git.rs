@@ -1258,6 +1258,84 @@ pub fn get_remote(repo_path: String) -> Result<String, String> {
     Ok("origin".to_string())
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct RepoIdentifier {
+    pub owner: String,
+    pub name: String,
+}
+
+/// Parse `owner/repo` out of a typical git remote URL. Handles SSH
+/// (`git@host:owner/repo`), HTTPS (`https://host/owner/repo`), and
+/// scheme://user@host/owner/repo forms, all with optional `.git` suffix.
+/// Strips `.git` and discards any extra path segments — we take the LAST
+/// two non-empty path parts.
+fn parse_owner_repo(url: &str) -> Option<RepoIdentifier> {
+    let u = url.trim();
+    if u.is_empty() {
+        return None;
+    }
+    let u = u.strip_suffix(".git").unwrap_or(u);
+    let u = u.strip_suffix('/').unwrap_or(u);
+
+    // SCP-style SSH: `git@github.com:owner/repo`
+    if !u.contains("://") {
+        if let Some((_user_host, path)) = u.split_once(':') {
+            let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+            if parts.len() >= 2 {
+                return Some(RepoIdentifier {
+                    owner: parts[parts.len() - 2].to_string(),
+                    name: parts[parts.len() - 1].to_string(),
+                });
+            }
+        }
+    }
+
+    // scheme://[user@]host[:port]/owner/repo
+    let after_scheme = u.split_once("://").map(|(_, r)| r).unwrap_or(u);
+    let after_user = after_scheme
+        .split_once('@')
+        .map(|(_, r)| r)
+        .unwrap_or(after_scheme);
+    let (_host, path) = after_user.split_once('/')?;
+    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.len() >= 2 {
+        return Some(RepoIdentifier {
+            owner: parts[parts.len() - 2].to_string(),
+            name: parts[parts.len() - 1].to_string(),
+        });
+    }
+    None
+}
+
+/// Returns the owner/name pair parsed from `remote.origin.url`, or null when
+/// the repo has no `origin` remote or the URL can't be parsed as `owner/repo`.
+/// Falls back through the first available remote if `origin` is missing.
+#[tauri::command]
+pub fn get_repo_identifier(repo_path: String) -> Option<RepoIdentifier> {
+    // Try origin first — that's the convention.
+    if let Ok(url) = run_git(&repo_path, &["config", "--get", "remote.origin.url"]) {
+        if let Some(id) = parse_owner_repo(&url) {
+            return Some(id);
+        }
+    }
+    // Fall back to the first remote available.
+    if let Ok(remotes) = run_git(&repo_path, &["remote"]) {
+        for r in remotes.lines() {
+            let r = r.trim();
+            if r.is_empty() {
+                continue;
+            }
+            let key = format!("remote.{}.url", r);
+            if let Ok(url) = run_git(&repo_path, &["config", "--get", &key]) {
+                if let Some(id) = parse_owner_repo(&url) {
+                    return Some(id);
+                }
+            }
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Merge
 // ---------------------------------------------------------------------------

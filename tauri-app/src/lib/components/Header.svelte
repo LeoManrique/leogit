@@ -2,8 +2,10 @@
   import { repoState } from '$lib/stores/repo'
   import { appState } from '$lib/stores/app'
   import { gitApi } from '$lib/api/commands'
+  import { ensureRepoIdentifiers, repoIdentifiers } from '$lib/stores/repoIdentifiers'
   import ContextMenu, { type ContextMenuItem } from './ContextMenu.svelte'
   import ForcePushConfirm from './ForcePushConfirm.svelte'
+  import RepoTooltip from './RepoTooltip.svelte'
 
   interface Props {
     onOpenRepos: () => void
@@ -14,12 +16,53 @@
 
   let { onOpenRepos, onOpenBranches, onOpenSettings, onOpenHelp }: Props = $props()
 
+  function basename(path: string): string {
+    const parts = path.split('/').filter(Boolean)
+    return parts[parts.length - 1] || path
+  }
+
+  // Fetch the GitHub repo identifier for the current path so the chip can
+  // show `name` (e.g. "rustlings-exercises") instead of the on-disk folder
+  // basename. Cache is module-level — repeat path changes are free.
+  $effect(() => {
+    const path = $appState.repoPath
+    if (path) ensureRepoIdentifiers([path])
+  })
+
+  const repoIdentifier = $derived($repoIdentifiers.get($appState.repoPath) ?? null)
   const repoName = $derived.by(() => {
     const path = $appState.repoPath
     if (!path) return ''
-    const parts = path.split('/')
-    return parts[parts.length - 1] || path
+    return repoIdentifier?.name ?? basename(path)
   })
+  const repoFullLabel = $derived.by(() => {
+    const path = $appState.repoPath
+    if (!path) return ''
+    return repoIdentifier ? `${repoIdentifier.owner}/${repoIdentifier.name}` : basename(path)
+  })
+
+  // Chip tooltip position. Anchored just below the chip on hover/focus.
+  // Same dwell delay as the repo dropdown so quick scans don't flash a tooltip.
+  let chipTooltip = $state<{ x: number; y: number } | null>(null)
+  const CHIP_TOOLTIP_DELAY_MS = 500
+  let chipTooltipTimer: ReturnType<typeof setTimeout> | null = null
+  function showChipTooltip(e: Event) {
+    if (!$appState.repoPath) return
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    const next = { x: rect.left, y: rect.bottom + 4 }
+    if (chipTooltipTimer) clearTimeout(chipTooltipTimer)
+    chipTooltipTimer = setTimeout(() => {
+      chipTooltip = next
+      chipTooltipTimer = null
+    }, CHIP_TOOLTIP_DELAY_MS)
+  }
+  function hideChipTooltip() {
+    if (chipTooltipTimer) {
+      clearTimeout(chipTooltipTimer)
+      chipTooltipTimer = null
+    }
+    chipTooltip = null
+  }
 
   let isRefreshing = $state(false)
   let isPushing = $state(false)
@@ -150,7 +193,15 @@
 
 <header class="header">
   <div class="left">
-    <button class="chip-button" onclick={onOpenRepos} title="Switch repository">
+    <button
+      class="chip-button"
+      onclick={() => { hideChipTooltip(); onOpenRepos() }}
+      onmouseenter={showChipTooltip}
+      onmouseleave={hideChipTooltip}
+      onfocus={showChipTooltip}
+      onblur={hideChipTooltip}
+      aria-label="Switch repository"
+    >
       <svg class="chip-icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M2.5 3.5a1 1 0 0 1 1-1h3l1.5 1.5h4.5a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1z" />
       </svg>
@@ -268,6 +319,15 @@
     </button>
   </div>
 </header>
+
+{#if chipTooltip && $appState.repoPath}
+  <RepoTooltip
+    title={repoFullLabel}
+    path={$appState.repoPath}
+    x={chipTooltip.x}
+    y={chipTooltip.y}
+  />
+{/if}
 
 {#if pushMenu !== null}
   <ContextMenu

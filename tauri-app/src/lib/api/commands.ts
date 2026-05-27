@@ -53,6 +53,11 @@ export interface AheadBehind {
   behind: number
 }
 
+export interface RepoIdentifier {
+  owner: string
+  name: string
+}
+
 export interface DiffLine {
   text: string
   content: string
@@ -156,6 +161,8 @@ export const gitApi = {
   getAheadBehind: (repoPath: string, upstream: string) =>
     invoke<AheadBehind>('get_ahead_behind', { repoPath, upstream }),
   getRemote: (repoPath: string) => invoke<string>('get_remote', { repoPath }),
+  getRepoIdentifier: (repoPath: string) =>
+    invoke<RepoIdentifier | null>('get_repo_identifier', { repoPath }),
   mergeBranch: (repoPath: string, branch: string) =>
     invoke<MergeResult>('merge_branch', { repoPath, branch }),
   mergeSquash: (repoPath: string, branch: string) =>
