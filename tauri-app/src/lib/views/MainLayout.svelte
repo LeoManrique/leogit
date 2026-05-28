@@ -259,6 +259,19 @@
   }
 
   async function loadDiffForFile(file: FileEntry | null): Promise<void> {
+    // Re-activating the same file that's already on screen is a no-op —
+    // skip the state churn that would clear activeFileDiff and re-fetch,
+    // which causes the diff pane to blink. Mirrors GitHub Desktop's
+    // list selection short-circuit (List.onRowMouseDown).
+    const current = get(repoState)
+    if (
+      file &&
+      current.activeFile?.path === file.path &&
+      current.activeFileDiff !== null &&
+      !current.isDiffLoading
+    ) {
+      return
+    }
     repoState.update((s) => ({ ...s, activeFile: file, activeFileDiff: null, isDiffLoading: file !== null }))
     if (!file) return
 
@@ -297,6 +310,17 @@
   }
 
   async function loadCommitFileDiff(file: FileEntry | null): Promise<void> {
+    // Same no-op as loadDiffForFile: re-activating the visible file
+    // shouldn't blank then re-render the commit diff pane.
+    const current = get(repoState)
+    if (
+      file &&
+      current.activeCommitFile?.path === file.path &&
+      current.activeCommitFileDiff !== null &&
+      !current.isCommitDiffLoading
+    ) {
+      return
+    }
     repoState.update((s) => ({
       ...s,
       activeCommitFile: file,

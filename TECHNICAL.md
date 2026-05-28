@@ -105,6 +105,10 @@ The file checkbox state is **opt-out**: every change reported by `git status` is
 
 This is what keeps polling unobtrusive: a 2 s status refresh never silently re-selects something the user just un-checked.
 
+### Large changesets
+
+[FileList.svelte](tauri-app/src/lib/components/FileList.svelte) virtualizes its rows: only the slice currently in the viewport (plus an 8-row buffer above and below) is mounted in the DOM. A spacer div carries the full virtual height (`files.length * 24px`) so the scrollbar represents the real list, and each rendered row is absolutely positioned at `top: index * 24px`. Without this, a 1000-file changeset would block the main thread for hundreds of milliseconds every time the Changes tab pane goes from `display: none` to `display: flex`. Arrow-key navigation updates `scrollTop` synchronously, awaits `tick()`, then focuses the now-rendered target — so Home/End/↑/↓ work even when the target row is far outside the rendered window.
+
 ### Polling and lifecycle
 
 Two intervals live in `MainLayout.svelte`:

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte'
   import type { FileEntry } from '$lib/api/commands'
   import PathText from './PathText.svelte'
 
@@ -46,6 +47,46 @@
   // gestures don't bleed into each other.
   let checkboxAnchor = $state<string | null>(null)
 
+  // ---- Virtualization --------------------------------------------------
+  // Render only the rows currently in view (plus a small buffer) instead of
+  // pushing every changed file into the DOM. Without this, switching back to
+  // the Changes tab with a 1000+ file changeset blocks the main thread for
+  // hundreds of ms while the browser lays out every row. Mirrors the
+  // approach GitHub Desktop takes via react-virtualized's Grid.
+  const ROW_HEIGHT = 24
+  const BUFFER_ROWS = 8
+
+  let viewportEl = $state<HTMLDivElement | null>(null)
+  let scrollTop = $state(0)
+  let viewportHeight = $state(0)
+
+  $effect(() => {
+    if (!viewportEl) return
+    viewportHeight = viewportEl.clientHeight
+    const ro = new ResizeObserver(() => {
+      if (viewportEl) viewportHeight = viewportEl.clientHeight
+    })
+    ro.observe(viewportEl)
+    return () => ro.disconnect()
+  })
+
+  function onViewportScroll() {
+    if (!viewportEl) return
+    scrollTop = viewportEl.scrollTop
+  }
+
+  const startIdx = $derived(
+    Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - BUFFER_ROWS),
+  )
+  const endIdx = $derived(
+    Math.min(
+      files.length,
+      Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + BUFFER_ROWS,
+    ),
+  )
+  const visibleFiles = $derived(files.slice(startIdx, endIdx))
+  const totalHeight = $derived(files.length * ROW_HEIGHT)
+
   /** Files between `anchorPath` and `clickedPath` inclusive, ordered as displayed. */
   function rangeBetween(anchorPath: string | null, clickedPath: string): FileEntry[] {
     const fallback = files.find((f) => f.path === clickedPath)
@@ -68,6 +109,48 @@
     rowAnchor = file.path
     rowSelection = new Set([file.path])
     onActivate(file)
+  }
+
+  /**
+   * Move keyboard focus + activation to another row by index. Mirrors GH
+   * Desktop's `List.moveSelection` / `scrollRowToVisible`: focus the new row
+   * (so the next arrow press continues navigating) and nudge it into view.
+   *
+   * With virtualization the target row may not be in the DOM yet, so we
+   * first compute and apply the scrollTop that would bring it into view,
+   * await Svelte's re-render via `tick()`, then focus the now-rendered row.
+   */
+  async function focusRowAt(index: number) {
+    const clamped = Math.max(0, Math.min(files.length - 1, index))
+    const next = files[clamped]
+    if (!next) return
+    rowAnchor = next.path
+    rowSelection = new Set([next.path])
+    onActivate(next)
+
+    if (viewportEl) {
+      const top = clamped * ROW_HEIGHT
+      const bottom = top + ROW_HEIGHT
+      const vh = viewportEl.clientHeight
+      let newScroll = viewportEl.scrollTop
+      if (top < newScroll) newScroll = top
+      else if (bottom > newScroll + vh) newScroll = bottom - vh
+      if (newScroll !== viewportEl.scrollTop) {
+        viewportEl.scrollTop = newScroll
+        // Sync state synchronously so derived ranges update before tick().
+        // Otherwise scroll events arrive asynchronously and we'd focus before
+        // the new row is rendered.
+        scrollTop = newScroll
+      }
+    }
+
+    await tick()
+
+    const el = viewportEl?.querySelector<HTMLDivElement>(
+      `[data-file-row-index="${clamped}"]`,
+    )
+    if (!el) return
+    el.focus({ preventScroll: true })
   }
 
   function handleCheckboxClick(e: MouseEvent, file: FileEntry) {
@@ -189,70 +272,98 @@
     </div>
   {/if}
 
-  {#each files as file (file.path)}
-    {@const isSelected = selectedFiles.has(file.path)}
-    {@const isActive = activeFile?.path === file.path}
-    {@const isRowSelected = rowSelection.has(file.path)}
-    <div
-      class="file-row"
-      class:active={isActive}
-      class:included={isSelected}
-      class:row-selected={isRowSelected}
-      onclick={(e) => handleRowClick(e, file)}
-      role="button"
-      tabindex="0"
-      onkeydown={(e) => {
-        if (e.key === 'Enter') {
-          e.preventDefault()
-          onActivate(file)
-        } else if (e.key === ' ' && showCheckbox) {
-          e.preventDefault()
-          // Bulk-toggle the visual multi-selection when one exists and the
-          // focused row is part of it; otherwise fall back to single toggle.
-          // Match the master-checkbox rule: any-excluded → include all, else
-          // exclude all.
-          if (rowSelection.size > 1 && rowSelection.has(file.path) && onBulkToggle) {
-            const paths = [...rowSelection]
-            const anyExcluded = paths.some((p) => !selectedFiles.has(p))
-            onBulkToggle(paths, anyExcluded)
-          } else {
-            onToggle(file)
-          }
-        }
-      }}
-    >
-      {#if showCheckbox}
-        <input
-          type="checkbox"
-          class="file-checkbox"
-          checked={isSelected}
-          aria-label={isSelected ? `Exclude ${file.path} from commit` : `Include ${file.path} in commit`}
-          onclick={(e) => handleCheckboxClick(e, file)}
-          onkeydown={(e) => e.stopPropagation()}
-        />
-      {/if}
-
-      <div class="status-badge" style="color: {getStatusColor(file.status)}">
-        {getStatusLabel(file.status)}
+  <div
+    class="rows-viewport"
+    bind:this={viewportEl}
+    onscroll={onViewportScroll}
+  >
+    {#if files.length === 0}
+      <div class="empty-state">
+        <p>No changes</p>
       </div>
+    {:else}
+      <div class="rows-spacer" style="height: {totalHeight}px;">
+        {#each visibleFiles as file, i (file.path)}
+          {@const fileIndex = startIdx + i}
+          {@const isSelected = selectedFiles.has(file.path)}
+          {@const isActive = activeFile?.path === file.path}
+          {@const isRowSelected = rowSelection.has(file.path)}
+          <div
+            class="file-row virtual-row"
+            class:active={isActive}
+            class:included={isSelected}
+            class:row-selected={isRowSelected}
+            data-file-row-index={fileIndex}
+            style="top: {fileIndex * ROW_HEIGHT}px;"
+            onclick={(e) => handleRowClick(e, file)}
+            role="button"
+            tabindex="0"
+            onkeydown={(e) => {
+              // Home/End first — on macOS those are Cmd+ArrowUp / Cmd+ArrowDown,
+              // so they must beat the plain Arrow branches below.
+              if (e.key === 'Home' || (e.key === 'ArrowUp' && e.metaKey)) {
+                e.preventDefault()
+                focusRowAt(0)
+              } else if (e.key === 'End' || (e.key === 'ArrowDown' && e.metaKey)) {
+                e.preventDefault()
+                focusRowAt(files.length - 1)
+              } else if (e.key === 'ArrowDown') {
+                // Navigate to next file. Default browser behavior is to scroll
+                // the container — block it so the selection moves instead, matching
+                // the desktop list pattern.
+                e.preventDefault()
+                focusRowAt(fileIndex + 1)
+              } else if (e.key === 'ArrowUp') {
+                e.preventDefault()
+                focusRowAt(fileIndex - 1)
+              } else if (e.key === 'Enter') {
+                e.preventDefault()
+                onActivate(file)
+              } else if (e.key === ' ' && showCheckbox) {
+                e.preventDefault()
+                // Bulk-toggle the visual multi-selection when one exists and the
+                // focused row is part of it; otherwise fall back to single toggle.
+                // Match the master-checkbox rule: any-excluded → include all, else
+                // exclude all.
+                if (rowSelection.size > 1 && rowSelection.has(file.path) && onBulkToggle) {
+                  const paths = [...rowSelection]
+                  const anyExcluded = paths.some((p) => !selectedFiles.has(p))
+                  onBulkToggle(paths, anyExcluded)
+                } else {
+                  onToggle(file)
+                }
+              }
+            }}
+          >
+            {#if showCheckbox}
+              <input
+                type="checkbox"
+                class="file-checkbox"
+                checked={isSelected}
+                aria-label={isSelected ? `Exclude ${file.path} from commit` : `Include ${file.path} in commit`}
+                onclick={(e) => handleCheckboxClick(e, file)}
+                onkeydown={(e) => e.stopPropagation()}
+              />
+            {/if}
 
-      {#if file.orig_path}
-        <div class="file-info" title={file.path}>
-          <span class="orig">{file.orig_path}</span>
-          <span class="arrow">→</span>
-          <PathText path={file.path} />
-        </div>
-      {:else}
-        <PathText path={file.path} />
-      {/if}
-    </div>
-  {/each}
+            <div class="status-badge" style="color: {getStatusColor(file.status)}">
+              {getStatusLabel(file.status)}
+            </div>
 
-  {#if files.length === 0}
-    <div class="empty-state">
-      <p>No changes</p>
-    </div>
-  {/if}
+            {#if file.orig_path}
+              <div class="file-info" title={file.path}>
+                <span class="orig">{file.orig_path}</span>
+                <span class="arrow">→</span>
+                <PathText path={file.path} />
+              </div>
+            {:else}
+              <PathText path={file.path} />
+            {/if}
+          </div>
+        {/each}
+      </div>
+    {/if}
+  </div>
 </div>
 
 <style>
@@ -260,11 +371,28 @@
     display: flex;
     flex-direction: column;
     height: 100%;
+    background: var(--bg-secondary);
+    padding-top: 4px;
+    min-height: 0;
+  }
+
+  /*
+    The actual scroller. Rows are absolutely positioned inside .rows-spacer,
+    which carries the full virtual height so the scrollbar tracks the true
+    document size.
+  */
+  .rows-viewport {
+    flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
     scrollbar-gutter: stable;
-    background: var(--bg-secondary);
-    padding: 4px 6px;
+    padding: 0 6px 4px 6px;
+    min-height: 0;
+  }
+
+  .rows-spacer {
+    position: relative;
+    width: 100%;
   }
 
   .empty-state {
@@ -285,6 +413,18 @@
     border-radius: 6px;
     cursor: pointer;
     transition: background 100ms ease;
+  }
+
+  /*
+    Virtualized file rows are positioned by absolute `top` based on their
+    index — that's how we keep the DOM small while preserving the scrollbar's
+    sense of total list height. The select-all-row sits above the viewport
+    in normal flow, so it keeps the default static positioning.
+  */
+  .virtual-row {
+    position: absolute;
+    left: 0;
+    right: 0;
   }
 
   .file-row:hover {
@@ -315,7 +455,7 @@
     font-weight: 500;
     border-bottom: 1px solid var(--border-inactive);
     border-radius: 0;
-    margin-bottom: 2px;
+    margin: 0 6px 2px 6px;
   }
 
   .select-all-label {

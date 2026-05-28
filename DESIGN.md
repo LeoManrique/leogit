@@ -113,6 +113,8 @@ The full list lives in [HelpOverlay.svelte](tauri-app/src/lib/views/HelpOverlay.
 | `?` | Open Help | Global, no input focused |
 | `` ` `` | Toggle terminal (collapsed ↔ expanded) | Global, no input focused |
 | `Space` | Toggle file selection on focused row | File list focused |
+| `↑` / `↓` | Move active file (loads its diff) | File list focused |
+| `Home` / `End` (or `Cmd+↑` / `Cmd+↓`) | Jump to first / last file | File list focused |
 | `Escape` | Close any open overlay / dismiss error | Global |
 
 ## Persistence model
