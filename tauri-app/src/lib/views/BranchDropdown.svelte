@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { BranchInfo } from '$lib/api/commands'
+  import { autofocus } from '$lib/actions/autofocus'
 
   interface Props {
     branches: BranchInfo[]
@@ -132,7 +133,7 @@
         placeholder="Branch name"
         bind:value={newBranchName}
         onkeydown={handleKeyDown}
-        autofocus
+        use:autofocus
       />
       <div class="form-buttons">
         <button class="btn-primary" onclick={handleCreateSubmit}>Create</button>

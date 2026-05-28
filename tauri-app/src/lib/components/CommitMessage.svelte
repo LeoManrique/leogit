@@ -206,7 +206,7 @@
   }
 </script>
 
-<div class="commit-message-container" onkeydown={handleKeyDown} role="form">
+<div class="commit-message-container" role="form" aria-label="Commit message">
   {#if isAmending}
     <div class="amend-notice" role="status">
       <span class="amend-notice-text">
@@ -233,6 +233,7 @@
       maxlength="200"
       disabled={isGenerating || isCommitting}
       onwheel={handleSummaryWheel}
+      onkeydown={handleKeyDown}
     />
     <span class="char-count" class:warning={charCount > 72}>{charCount}/72</span>
   </div>
@@ -244,6 +245,7 @@
       placeholder="Description"
       bind:value={description}
       disabled={isGenerating || isCommitting}
+      onkeydown={handleKeyDown}
     ></textarea>
   </div>
 

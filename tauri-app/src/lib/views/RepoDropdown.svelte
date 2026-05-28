@@ -2,6 +2,7 @@
   import { ensureRepoIdentifiers, repoIdentifiers } from '$lib/stores/repoIdentifiers'
   import type { RepoIdentifier } from '$lib/api/commands'
   import RepoTooltip from '$lib/components/RepoTooltip.svelte'
+  import { autofocus } from '$lib/actions/autofocus'
 
   interface Props {
     repos: string[]
@@ -142,7 +143,7 @@
       placeholder="Filter repositories…"
       bind:value={filter}
       onkeydown={handleKeyDown}
-      autofocus
+      use:autofocus
     />
   </div>
 

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { autofocus } from '$lib/actions/autofocus'
+
   interface Props {
     repos: string[]
     onSelect: (repo: string) => void
@@ -49,7 +51,7 @@
         placeholder="Search repositories... (fuzzy match)"
         bind:value={searchInput}
         onkeydown={handleKeyDown}
-        autofocus
+        use:autofocus
       />
     </div>
 

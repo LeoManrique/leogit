@@ -123,6 +123,55 @@
     window.addEventListener('mouseup', onUp)
   }
 
+  // Keyboard resizing for the splitter handles (role="separator", tabindex=0).
+  // Arrow keys nudge by RESIZE_STEP px; Home/End jump to the min/max. This is
+  // what makes the handles accessible splitters rather than mouse-only drag
+  // targets. `axis` selects which arrow keys apply: a 'horizontal' splitter
+  // (stacked panes) responds to Up/Down, a 'vertical' splitter (side-by-side
+  // panes) to Left/Right.
+  const RESIZE_STEP = 16
+
+  function splitterKey(
+    e: KeyboardEvent,
+    axis: 'horizontal' | 'vertical',
+    current: number,
+    min: number,
+    max: number,
+    apply: (value: number) => void,
+  ) {
+    const decKey = axis === 'horizontal' ? 'ArrowDown' : 'ArrowLeft'
+    const incKey = axis === 'horizontal' ? 'ArrowUp' : 'ArrowRight'
+    let next = current
+    if (e.key === decKey) next = current - RESIZE_STEP
+    else if (e.key === incKey) next = current + RESIZE_STEP
+    else if (e.key === 'Home') next = min
+    else if (e.key === 'End') next = max
+    else return
+    e.preventDefault()
+    apply(Math.max(min, Math.min(max, next)))
+  }
+
+  function handleSidebarKey(e: KeyboardEvent) {
+    splitterKey(e, 'vertical', sidebarWidth, SIDEBAR_MIN, SIDEBAR_MAX, (v) => {
+      sidebarWidth = v
+      window.localStorage.setItem('leogit:sidebarWidth', String(v))
+    })
+  }
+
+  function handleCommitKey(e: KeyboardEvent) {
+    splitterKey(e, 'horizontal', commitHeight, COMMIT_MIN, COMMIT_MAX, (v) => {
+      commitHeight = v
+      window.localStorage.setItem('leogit:commitHeight', String(v))
+    })
+  }
+
+  function handleCommitFilesKey(e: KeyboardEvent) {
+    splitterKey(e, 'vertical', commitFilesWidth, COMMIT_FILES_MIN, COMMIT_FILES_MAX, (v) => {
+      commitFilesWidth = v
+      window.localStorage.setItem('leogit:commitFilesWidth', String(v))
+    })
+  }
+
   async function refreshStatus(opts: { silent?: boolean } = {}): Promise<void> {
     const repoPath = $appState.repoPath
     if (!repoPath) return
@@ -749,9 +798,14 @@
         <div
           class="commit-resize-handle"
           onmousedown={startCommitResize}
-          role="separator"
+          onkeydown={handleCommitKey}
+          role="slider"
+          tabindex="0"
           aria-orientation="horizontal"
           aria-label="Resize commit section"
+          aria-valuenow={commitHeight}
+          aria-valuemin={COMMIT_MIN}
+          aria-valuemax={COMMIT_MAX}
         ></div>
         <CommitMessage onCommitted={handleCommitted} onStopAmending={handleStopAmending} />
       </div>
@@ -775,9 +829,14 @@
   <div
     class="sidebar-resize-handle"
     onmousedown={startSidebarResize}
-    role="separator"
+    onkeydown={handleSidebarKey}
+    role="slider"
+    tabindex="0"
     aria-orientation="vertical"
     aria-label="Resize sidebar"
+    aria-valuenow={sidebarWidth}
+    aria-valuemin={SIDEBAR_MIN}
+    aria-valuemax={SIDEBAR_MAX}
   ></div>
 
   <div class="main-content">
@@ -829,9 +888,14 @@
           <div
             class="commit-files-resize-handle"
             onmousedown={startCommitFilesResize}
-            role="separator"
+            onkeydown={handleCommitFilesKey}
+            role="slider"
+            tabindex="0"
             aria-orientation="vertical"
             aria-label="Resize commit files pane"
+            aria-valuenow={commitFilesWidth}
+            aria-valuemin={COMMIT_FILES_MIN}
+            aria-valuemax={COMMIT_FILES_MAX}
           ></div>
           <div class="commit-diff-pane">
             {#if $repoState.isCommitDiffLoading}
@@ -928,8 +992,14 @@
   </div>
 
   {#if showRepos}
-    <div class="overlay-backdrop" role="presentation" onclick={() => (showRepos = false)}>
-      <div class="overlay-content" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+    <div
+      class="overlay-backdrop"
+      role="presentation"
+      onclick={(e) => {
+        if (e.target === e.currentTarget) showRepos = false
+      }}
+    >
+      <div class="overlay-content" role="dialog" aria-modal="true" tabindex="-1">
         <RepoDropdown
           repos={$appState.repos}
           currentRepo={$appState.repoPath}
@@ -940,8 +1010,14 @@
   {/if}
 
   {#if showBranches}
-    <div class="overlay-backdrop" role="presentation" onclick={() => (showBranches = false)}>
-      <div class="overlay-content" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+    <div
+      class="overlay-backdrop"
+      role="presentation"
+      onclick={(e) => {
+        if (e.target === e.currentTarget) showBranches = false
+      }}
+    >
+      <div class="overlay-content" role="dialog" aria-modal="true" tabindex="-1">
         <BranchDropdown
           branches={$repoState.branches}
           currentBranch={$repoState.status.branch}

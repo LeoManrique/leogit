@@ -27,8 +27,15 @@
 
   let menuEl: HTMLDivElement | undefined = $state()
   let focusIdx = $state(0)
-  let posX = $state(x + CURSOR_OFFSET)
-  let posY = $state(y + CURSOR_OFFSET)
+
+  // Viewport-clamped position, applied after the menu has measurable
+  // dimensions. Null until measured (and reset whenever the anchor x/y change),
+  // so the menu first renders at the click point, then nudges in-bounds. Base
+  // position derives from the props so reusing the instance at a new anchor
+  // moves it immediately, without waiting for the measure pass.
+  let clamped = $state<{ x: number; y: number } | null>(null)
+  const posX = $derived(clamped ? clamped.x : x + CURSOR_OFFSET)
+  const posY = $derived(clamped ? clamped.y : y + CURSOR_OFFSET)
 
   const focusable = $derived(
     items.map((it, i) => ({ it, i })).filter(({ it }) => !it.separator && it.enabled !== false),
@@ -42,9 +49,13 @@
   // CommitList virtual-scroll wrapper (`transform: translateY`) is the obvious
   // trap — render the menu as a sibling of that wrapper, not a child.
   $effect(() => {
-    if (!menuEl) return
+    // Re-read the anchor so this re-runs when the menu is reused at a new
+    // position; drop any prior clamp so the base (click-point) position shows
+    // immediately before the measure pass refines it.
     const cx = x
     const cy = y
+    clamped = null
+    if (!menuEl) return
     tick().then(() => {
       if (!menuEl) return
       const rect = menuEl.getBoundingClientRect()
@@ -55,8 +66,7 @@
       let ny = cy + CURSOR_OFFSET
       if (nx + rect.width + margin > vw) nx = Math.max(margin, vw - rect.width - margin)
       if (ny + rect.height + margin > vh) ny = Math.max(margin, vh - rect.height - margin)
-      posX = nx
-      posY = ny
+      clamped = { x: nx, y: ny }
     })
   })
 

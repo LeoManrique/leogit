@@ -13,8 +13,15 @@
   }
 </script>
 
-<div class="overlay" role="presentation" onclick={onDismiss} onkeydown={handleKeyDown}>
-  <div class="modal" role="dialog" aria-modal="true" onclick={(e) => e.stopPropagation()}>
+<div
+  class="overlay"
+  role="presentation"
+  onclick={(e) => {
+    if (e.target === e.currentTarget) onDismiss()
+  }}
+  onkeydown={handleKeyDown}
+>
+  <div class="modal" role="dialog" aria-modal="true" tabindex="-1">
     <div class="modal-header">
       <h2>{title}</h2>
       <button class="close-btn" onclick={onDismiss} aria-label="Close">

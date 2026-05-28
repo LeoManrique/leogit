@@ -14,8 +14,15 @@
   }
 </script>
 
-<div class="overlay" role="presentation" onclick={onCancel} onkeydown={handleKeyDown}>
-  <div class="modal" role="dialog" aria-modal="true" onclick={(e) => e.stopPropagation()}>
+<div
+  class="overlay"
+  role="presentation"
+  onclick={(e) => {
+    if (e.target === e.currentTarget) onCancel()
+  }}
+  onkeydown={handleKeyDown}
+>
+  <div class="modal" role="dialog" aria-modal="true" tabindex="-1">
     <div class="modal-header">
       <h2>Force push with lease</h2>
     </div>

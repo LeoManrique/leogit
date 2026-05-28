@@ -29,6 +29,7 @@ leogit/
 │   │   ├── app.css                  # Theme tokens + base element styles
 │   │   └── lib/
 │   │       ├── api/commands.ts      # Typed wrappers over every Tauri command
+│   │       ├── actions/             # Svelte use: actions (autofocus)
 │   │       ├── stores/              # appState, repoState, config (Svelte writables)
 │   │       ├── components/          # Header, TabBar, FileList, CommitList,
 │   │       │                        # CommitMessage, DiffViewer, Terminal,
@@ -265,6 +266,15 @@ The Tauri dev command uses `beforeDevCommand: pnpm run dev:vite` (per `tauri.con
 Bundle targets: `app` + `dmg` (macOS), `deb` (Linux), `msi` (Windows).
 
 Frontend bundle size warning is raised to 2 MB (`chunkSizeWarningLimit: 2000`) because Shiki's WASM theme/grammar payload is intentionally hefty.
+
+## Accessibility patterns
+
+The frontend builds warning-free (`pnpm check` and `vite build` both report 0 a11y warnings). These conventions keep it that way — Svelte's compiler enforces them:
+
+- **Overlays close via backdrop target-check, not `stopPropagation`.** Every modal/dropdown backdrop is `role="presentation"` with `onclick={(e) => { if (e.target === e.currentTarget) close() }}`. The inner dialog is `role="dialog" aria-modal="true" tabindex="-1"` with **no** click handler. The old pattern (inner `onclick={e => e.stopPropagation()}`) tripped both "click handler needs a keyboard handler" and "dialog role needs a tabindex". Affects [ErrorModal](tauri-app/src/lib/components/ErrorModal.svelte), [ForcePushConfirm](tauri-app/src/lib/components/ForcePushConfirm.svelte), [SettingsOverlay](tauri-app/src/lib/views/SettingsOverlay.svelte), [HelpOverlay](tauri-app/src/lib/views/HelpOverlay.svelte), and the repo/branch overlays in [MainLayout](tauri-app/src/lib/views/MainLayout.svelte).
+- **Resize handles are `role="slider"`, not `role="separator"`.** A focusable separator (the ARIA "window splitter") is flagged by Svelte either way — the mouse listener warns on a non-interactive role, and adding `tabindex` warns again (`a11y_no_noninteractive_tabindex`). `slider` is the interactive role Svelte accepts, and it fits: each handle has `tabindex=0`, `aria-orientation`, `aria-valuenow/min/max`, and an `onkeydown` (Arrow keys nudge by `RESIZE_STEP` = 16px, Home/End jump to min/max). The keyboard handlers share one `splitterKey()` helper in MainLayout.
+- **`use:autofocus`, never the `autofocus` attribute.** The attribute is flagged (`a11y_autofocus`) and is unreliable for inputs that mount inside `{#if}` blocks. The [autofocus action](tauri-app/src/lib/actions/autofocus.ts) calls `node.focus()` on mount instead.
+- **Keyboard shortcuts attach to the interactive field, not the container.** The commit composer's Cmd+Enter / Cmd+G / Cmd+P handler lives on the summary `<input>` and description `<textarea>`, because Svelte treats `<div>` and `<form>` as non-interactive and warns on listeners attached to them. The container stays a plain `role="form"` landmark.
 
 ## Notable invariants
 

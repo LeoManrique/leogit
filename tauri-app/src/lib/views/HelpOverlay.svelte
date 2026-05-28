@@ -25,8 +25,15 @@
 </script>
 
 {#if isOpen}
-  <div class="overlay" role="presentation" onclick={onClose} onkeydown={handleOverlayKeyDown}>
-    <div class="modal" role="dialog" aria-modal="true" onclick={(e) => e.stopPropagation()}>
+  <div
+    class="overlay"
+    role="presentation"
+    onclick={(e) => {
+      if (e.target === e.currentTarget) onClose()
+    }}
+    onkeydown={handleOverlayKeyDown}
+  >
+    <div class="modal" role="dialog" aria-modal="true" tabindex="-1">
       <div class="modal-header">
         <h2>Keyboard Shortcuts</h2>
         <button class="close-btn" onclick={onClose} aria-label="Close">
