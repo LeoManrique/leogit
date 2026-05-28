@@ -395,7 +395,7 @@
 
   .description-input {
     flex: 1;
-    min-height: 60px;
+    min-height: 80px;
     font-size: 13px;
     padding: 8px;
     background: var(--bg-primary);

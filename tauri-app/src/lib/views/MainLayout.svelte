@@ -39,7 +39,7 @@
 
   const SIDEBAR_MIN = 280
   const SIDEBAR_MAX = 640
-  const COMMIT_MIN = 140
+  const COMMIT_MIN = 180
   const COMMIT_MAX = 600
   const COMMIT_FILES_MIN = 180
   const COMMIT_FILES_MAX = 600
@@ -52,7 +52,7 @@
   }
 
   let sidebarWidth = $state(loadStoredNumber('leogit:sidebarWidth', 320, SIDEBAR_MIN, SIDEBAR_MAX))
-  let commitHeight = $state(loadStoredNumber('leogit:commitHeight', 200, COMMIT_MIN, COMMIT_MAX))
+  let commitHeight = $state(loadStoredNumber('leogit:commitHeight', 220, COMMIT_MIN, COMMIT_MAX))
   let commitFilesWidth = $state(
     loadStoredNumber('leogit:commitFilesWidth', 280, COMMIT_FILES_MIN, COMMIT_FILES_MAX),
   )
