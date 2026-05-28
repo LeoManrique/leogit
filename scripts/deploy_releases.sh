@@ -29,6 +29,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 APP_DIR="$PROJECT_ROOT/tauri-app"
 TAURI_CONF="$APP_DIR/src-tauri/tauri.conf.json"
 CARGO_TOML="$APP_DIR/src-tauri/Cargo.toml"
+CARGO_LOCK="$APP_DIR/src-tauri/Cargo.lock"
 PKG_JSON="$APP_DIR/package.json"
 cd "$PROJECT_ROOT"
 
@@ -80,7 +81,12 @@ else
     # (dependency versions are `name = { version = ... }` or `name = "x"`).
     sed -i.bak "s/^version = \"$CURRENT_VERSION\"/version = \"$VERSION\"/" "$CARGO_TOML"
     rm -f "$TAURI_CONF.bak" "$PKG_JSON.bak" "$CARGO_TOML.bak"
-    git add "$TAURI_CONF" "$PKG_JSON" "$CARGO_TOML"
+    # Cargo.lock records the workspace package's own version too. Sync it now
+    # (-w touches only workspace members, not dependency pins) so the build in
+    # step 4 doesn't resync it and leave the tree dirty after the release.
+    (cd "$APP_DIR/src-tauri" && cargo update -w >/dev/null 2>&1) \
+      || warn "cargo update -w failed; Cargo.lock may be left stale"
+    git add "$TAURI_CONF" "$PKG_JSON" "$CARGO_TOML" "$CARGO_LOCK"
     git commit -m "Bump version to $VERSION"
     git push
     success "Bumped $CURRENT_VERSION → $VERSION and pushed"

@@ -34,10 +34,11 @@ echo "==> Installing dependencies"
 pnpm install --frozen-lockfile >/dev/null
 success "Dependencies installed"
 
-# beforeBuildCommand runs the Vite frontend build; tauri then bundles the .app
-# (and .dmg). deb/msi targets in tauri.conf.json are skipped on macOS.
+# beforeBuildCommand runs the Vite frontend build; tauri then bundles just the
+# .app. We pass --bundles app to skip the .dmg — the release pipeline ships a
+# zipped .app, so the disk image would only be wasted build time.
 echo "==> Building Release configuration (this takes a while)"
-pnpm tauri build >/dev/null
+pnpm tauri build --bundles app >/dev/null
 success "Built Release configuration"
 
 APP_PATH="$APP_DIR/src-tauri/target/release/bundle/macos/leogit.app"
