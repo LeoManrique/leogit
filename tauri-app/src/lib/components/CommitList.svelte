@@ -91,9 +91,9 @@
   const VISIBLE_ROWS = 14
   const LOAD_MORE_OFFSET = 200
 
-  let containerHeight = ROW_HEIGHT * VISIBLE_ROWS
+  let containerHeight = $state(ROW_HEIGHT * VISIBLE_ROWS)
   let scrollTop = $state(0)
-  let scrollContainer: HTMLElement
+  let scrollContainer = $state<HTMLElement>()
 
   function handleScroll(e: Event) {
     scrollTop = (e.target as HTMLElement).scrollTop
@@ -171,10 +171,20 @@
     } catch {}
   }
 
+  // Track the viewport height with a ResizeObserver, not a one-shot read. The
+  // History pane is display:none while the Changes tab is active, so measuring
+  // clientHeight once at mount can capture 0 and strand the virtual window at
+  // ~5 rows (ceil(0 / ROW_HEIGHT) + buffer). The observer fires when the pane
+  // gains size, keeping containerHeight (and thus the rendered range) correct.
   $effect(() => {
-    if (scrollContainer) {
-      containerHeight = scrollContainer.clientHeight
-    }
+    const el = scrollContainer
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      containerHeight = el.clientHeight
+    })
+    ro.observe(el)
+    containerHeight = el.clientHeight
+    return () => ro.disconnect()
   })
 
   const { startIndex, endIndex } = $derived.by(() => getVisibleRange())
