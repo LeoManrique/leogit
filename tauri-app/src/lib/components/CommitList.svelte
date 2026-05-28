@@ -67,11 +67,28 @@
               if (contextMenu) onUndoCommit?.(contextMenu.commit)
             },
           },
+          { separator: true, label: '', action: () => {} },
+          {
+            label: 'Copy SHA',
+            action: () => {
+              if (contextMenu) copySha(contextMenu.commit)
+            },
+          },
+          {
+            label: 'Copy Tag',
+            // Only meaningful when the commit actually carries a tag.
+            enabled: contextMenu.commit.refs.some((ref) => ref.startsWith('tag: ')),
+            action: () => {
+              if (contextMenu) copyTag(contextMenu.commit)
+            },
+          },
         ],
   )
 
-  const ROW_HEIGHT = 24
-  const VISIBLE_ROWS = 24
+  // Two-line rows (summary + indicators / author + date), so taller than the
+  // old single-line list. Must stay in sync with `.commit-row { height }`.
+  const ROW_HEIGHT = 50
+  const VISIBLE_ROWS = 14
   const LOAD_MORE_OFFSET = 200
 
   let containerHeight = ROW_HEIGHT * VISIBLE_ROWS
@@ -130,6 +147,30 @@
     }
   }
 
+  // `refs` carries every symbolic ref pointing at the commit (branches, HEAD,
+  // tags) as git's %D emits them — e.g. "tag: v0.1.0". Keep only tags and strip
+  // the "tag: " prefix so we can render them as GitHub-Desktop-style pills.
+  function tagsFor(commit: CommitInfo): string[] {
+    return commit.refs
+      .filter((ref) => ref.startsWith('tag: '))
+      .map((ref) => ref.slice(5))
+  }
+
+  async function copySha(commit: CommitInfo) {
+    try {
+      await navigator.clipboard.writeText(commit.sha)
+    } catch {}
+  }
+
+  async function copyTag(commit: CommitInfo) {
+    const tags = tagsFor(commit)
+    if (tags.length === 0) return
+    try {
+      // Space-separate when a commit carries more than one tag.
+      await navigator.clipboard.writeText(tags.join(' '))
+    } catch {}
+  }
+
   $effect(() => {
     if (scrollContainer) {
       containerHeight = scrollContainer.clientHeight
@@ -145,10 +186,11 @@
   <div class="virtual-scroll" style="height: {commits.length * ROW_HEIGHT}px">
     <div class="visible-items" style="transform: translateY({offsetPx}px)">
       {#each visibleCommits as commit, i (commit.sha)}
+        {@const tags = tagsFor(commit)}
+        {@const isUnpushed = unpushedShas.has(commit.sha)}
         <div
           class="commit-row"
           class:selected={commit.sha === selectedSha}
-          class:unpushed={unpushedShas.has(commit.sha)}
           title={formatDateFull(commit.author_date)}
           onclick={() => onSelect(commit)}
           oncontextmenu={(e) => openContextMenu(e, commit, startIndex + i)}
@@ -156,26 +198,43 @@
           role="button"
           tabindex="0"
         >
-          <code class="sha-text">{commit.short_sha}</code>
-          <div class="commit-summary">{commit.summary}</div>
-          <div class="commit-date">{formatDate(commit.author_date)}</div>
-          {#if unpushedShas.has(commit.sha)}
-            <svg
-              class="unpushed-icon"
-              width="9"
-              height="9"
-              viewBox="0 0 16 16"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.8"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-label="Not yet pushed"
-            >
-              <polyline points="4,7 8,3 12,7" />
-              <line x1="8" y1="3" x2="8" y2="13" />
-            </svg>
-          {/if}
+          <div class="commit-line summary-line">
+            <span class="commit-summary">{commit.summary}</span>
+            {#if tags.length > 0 || isUnpushed}
+              <div class="commit-indicators">
+                {#if tags.length > 0}
+                  <span class="tag-indicator" title={tags.join(', ')}>
+                    <span class="tag-name">{tags[0]}</span>
+                    {#if tags.length > 1}
+                      <span class="tag-indicator-more">+{tags.length - 1}</span>
+                    {/if}
+                  </span>
+                {/if}
+                {#if isUnpushed}
+                  <svg
+                    class="unpushed-icon"
+                    width="9"
+                    height="9"
+                    viewBox="0 0 16 16"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-label="Not yet pushed"
+                  >
+                    <polyline points="4,7 8,3 12,7" />
+                    <line x1="8" y1="3" x2="8" y2="13" />
+                  </svg>
+                {/if}
+              </div>
+            {/if}
+          </div>
+          <div class="commit-line meta-line">
+            <span class="commit-author">{commit.author_name}</span>
+            <span class="commit-meta-sep">·</span>
+            <span class="commit-date">{formatDate(commit.author_date)}</span>
+          </div>
         </div>
       {/each}
     </div>
@@ -216,29 +275,19 @@
   }
 
   .commit-row {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 10px;
-    height: 24px;
-    padding: 0 8px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 3px;
+    /* Must equal ROW_HEIGHT in the script — virtualization positions rows by it. */
+    height: 50px;
+    padding: 0 10px;
     border-radius: 6px;
     background: transparent;
     cursor: pointer;
     transition: background 100ms ease;
     user-select: none;
     overflow: hidden;
-  }
-
-  /* Reserve a trailing slot for the unpushed indicator only on rows that
-     actually have one — keeps in-sync rows flush with the right edge. */
-  .commit-row.unpushed {
-    grid-template-columns: auto minmax(0, 1fr) auto 12px;
-  }
-
-  .unpushed-icon {
-    color: var(--text-muted);
-    flex-shrink: 0;
   }
 
   .commit-row:hover {
@@ -249,15 +298,21 @@
     background: var(--bg-tertiary);
   }
 
-  .sha-text {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--text-muted);
-    background: transparent;
-    font-variant-numeric: tabular-nums;
+  .commit-line {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+  }
+
+  /* ── Line 1: summary + tag / push indicators ── */
+  .summary-line {
+    gap: 8px;
   }
 
   .commit-summary {
+    /* Grow to fill the row so indicators are pushed to the right edge, and
+       shrink with ellipsis when the message is long. */
+    flex: 1 1 auto;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -266,11 +321,75 @@
     min-width: 0;
   }
 
-.commit-date {
+  .commit-indicators {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 50%;
+  }
+
+  .tag-indicator {
+    flex: 0 1 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .tag-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    height: 16px;
+    line-height: 16px;
+    padding: 0 6px;
+    border-radius: 5px;
+    background: var(--badge-bg);
+    color: var(--badge-fg);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .tag-indicator-more {
+    flex: 0 0 auto;
+    height: 16px;
+    line-height: 16px;
+    padding: 0 5px;
+    border-radius: 5px;
+    background: var(--badge-bg);
+    color: var(--badge-fg);
+    font-size: 10px;
+  }
+
+  .unpushed-icon {
     color: var(--text-muted);
-    font-size: 11px;
+    flex-shrink: 0;
+  }
+
+  /* ── Line 2: author · relative date ── */
+  .meta-line {
+    gap: 5px;
+    color: var(--text-muted);
+    font-size: 11.5px;
+  }
+
+  .commit-author {
+    flex: 0 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+
+  .commit-meta-sep {
+    flex: 0 0 auto;
+  }
+
+  .commit-date {
+    flex: 0 0 auto;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
-    text-align: right;
   }
 </style>

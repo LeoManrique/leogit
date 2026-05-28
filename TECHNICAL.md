@@ -172,6 +172,8 @@ Branch fallback: if `# branch.head` is absent (empty repo) the code calls `git r
 
 Dates come back in `--date=raw` form (`<unix> <tz>`). To avoid pulling in `chrono`, the code implements `civil_from_unix` using Howard Hinnant's proleptic Gregorian algorithm and emits ISO-8601 strings manually.
 
+The trailing `%D` captures every symbolic ref pointing at the commit (branches, `HEAD`, tags); it's split on commas into `CommitInfo.refs`. The commit list derives tag pills from this by keeping entries prefixed `tag: ` and stripping that prefix — no extra git call needed.
+
 ### Discovery
 
 `discover_repos` expands `~`, canonicalizes each scan root, and recursively walks up to `max_depth` levels. A directory is a repo if it contains a `.git` file or directory (handles worktrees). Hidden directories are skipped, and the scan does not descend into a discovered repo.

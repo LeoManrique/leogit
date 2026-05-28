@@ -47,6 +47,9 @@
 
   --cursor-bg: rgba(10, 132, 255, 0.22);
   --shadow-popover: 0 4px 12px rgba(0, 0, 0, 0.4);
+
+  --badge-bg: rgba(255, 255, 255, 0.12);
+  --badge-fg: rgba(255, 255, 255, 0.72);
 }
 
 :root[data-theme='light'] {
@@ -79,12 +82,30 @@
 
   --cursor-bg: rgba(0, 122, 255, 0.18);
   --shadow-popover: 0 4px 12px rgba(0, 0, 0, 0.12);
+
+  --badge-bg: rgba(0, 0, 0, 0.08);
+  --badge-fg: rgba(0, 0, 0, 0.6);
+}
+
+html,
+body {
+  height: 100%;
+  /* Desktop app: the window itself never scrolls — only inner panes do. Lock
+     the document to the viewport and kill macOS's elastic overscroll so a
+     trackpad drag at an edge doesn't rubber-band the whole window. */
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
 body {
   color: var(--text-primary);
   background: var(--bg-primary);
   font-variant-numeric: tabular-nums;
+}
+
+#app {
+  height: 100%;
+  overflow: hidden;
 }
 
 button {

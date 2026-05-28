@@ -177,6 +177,20 @@
     }
   }
 
+  // A single-line <input> scrolls horizontally as the caret moves but ignores
+  // wheel / trackpad gestures, so a long summary can't be swiped through. Map a
+  // wheel delta onto scrollLeft (dominant axis, so both vertical scroll and a
+  // horizontal swipe work) — only when there's actually overflow, and only then
+  // do we preventDefault so we don't hijack the surrounding scroll otherwise.
+  function handleSummaryWheel(e: WheelEvent) {
+    const el = e.currentTarget as HTMLInputElement
+    if (el.scrollWidth <= el.clientWidth) return
+    const delta = Math.abs(e.deltaX) >= Math.abs(e.deltaY) ? e.deltaX : e.deltaY
+    if (delta === 0) return
+    el.scrollLeft += delta
+    e.preventDefault()
+  }
+
   function handleKeyDown(e: KeyboardEvent) {
     const meta = e.ctrlKey || e.metaKey
     if (meta && e.key === 'g') {
@@ -218,6 +232,7 @@
       bind:value={summary}
       maxlength="200"
       disabled={isGenerating || isCommitting}
+      onwheel={handleSummaryWheel}
     />
     <span class="char-count" class:warning={charCount > 72}>{charCount}/72</span>
   </div>

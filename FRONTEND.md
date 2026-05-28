@@ -86,8 +86,9 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 
 - **Radius scale:** 6px for inputs, buttons, file rows when selected; 8px for menu items, dropdown items, terminal pane; 10px for modals and the branch picker; 12px for the app icon. Avoid larger than 12px in chrome — corners shouldn't shout.
 - **Padding for controls:** ~4×8px (inputs), ~3×12px (buttons), ~6×10px (dropdown items). System-native controls are surprisingly tight.
-- **Row height in dense lists:** ~22–24px effective. Vertical padding of 4px with 13px text matches macOS Finder list view. This applies to the file list, the commit list, and the branch list.
+- **Row height in dense lists:** ~22–24px effective. Vertical padding of 4px with 13px text matches macOS Finder list view. This applies to the file list and the branch list. The commit list is the deliberate exception — its rows are 50px because each commit stacks a summary line and an author/date line (see Commit list).
 - **Pane gutters:** 1px borders, never wider. The sidebar/content separator and tab-bar underline are both 1px `--border-inactive`. No 2px divider, no double rule.
+- **The window never scrolls.** `html`/`body`/`#app` are locked to the viewport (`height: 100%`, `overflow: hidden`, `overscroll-behavior: none`) so only inner panes scroll and a trackpad drag at an edge can't rubber-band the whole app. New top-level layout must fit the viewport, not extend it.
 - **Focus ring:** 2px ring at accent color with low alpha (~0.2, i.e. `--cursor-bg`). No glowing shadows, no `0 0 20px` halos. Current CSS uses `box-shadow: 0 0 0 3px var(--cursor-bg)` ([app.css:95](tauri-app/src/app.css#L95)) — that's the right shape; tighten to 2px and ensure alpha stays low in both themes.
 - **Shadows:** subtle. `0 4px 12px rgba(0,0,0,0.4)` for popovers/dropdowns/modals in dark; lower-alpha (`0 4px 12px rgba(0,0,0,0.12)`) in light. Never combine shadow + gradient.
 
@@ -126,14 +127,17 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 
 ### Commit list (History)
 
-- Same 22–24px row scale as the file list. One commit per row.
-- Layout: `[summary] ········ [author] [relative date] [short-sha]` on a single line, OR `[summary] / [author · relative date · short-sha]` on two lines if width allows. Short SHA in 11px mono `--text-muted`, tabular nums on dates.
+- Two-line rows, 50px tall (taller than the 22–24px file/branch rows because each commit needs a summary line and a metadata line). One commit per row.
+- Layout, stacked:
+  - Line 1 — `[summary] ········ [tag pill] [↑ push indicator]`. The summary grows to fill the row and ellipsizes; indicators are right-aligned. Tag pill: `--badge-bg` / `--badge-fg`, 5px radius, 10.5px mono; a `+N` companion pill when a commit has multiple tags.
+  - Line 2 — `[author] · [relative date]` in 11.5px `--text-muted`, tabular nums on the date. The author ellipsizes first; the date never truncates.
+- No SHA in the row — it's copied via the right-click menu's "Copy SHA" and shown in the detail card.
 - Selected row: `--bg-tertiary`, 6px radius. Hover: `--surface-hover`.
 - The right pane (commit detail + changed files) gets its own thin 1px left border. Layout matches the changes view: file list on top, diff below. Consistent geometry across tabs.
 
 ### Commit message composer
 
-- Lives at the bottom of the sidebar. Two stacked fields: a single-line title input (50-char soft limit, shown as a 11px `--text-muted` counter that flips to `--status-yellow` past the limit) and a multi-line description textarea.
+- Lives at the bottom of the sidebar. Two stacked fields: a single-line title input (72-char soft limit, shown as a 11px `--text-muted` counter that flips to `--status-yellow` past the limit) and a multi-line description textarea. The title overflows horizontally with no scrollbar; a wheel/trackpad delta is mapped onto `scrollLeft` so a long summary can be swiped through (native single-line inputs only scroll via the caret).
 - Inputs use `--bg-primary` (recessed against the `--bg-secondary` sidebar), 1px `--border-strong`, 6px radius, 2px accent focus ring.
 - **No label above the inputs.** The placeholder ("Summary", "Description") is enough. Reserve labels for forms with mixed field types.
 - Action row at the bottom: `[Commit]` primary (accent fill, right-aligned), `[AI ✨]` ghost-icon button to its left if AI commit messages are enabled. No leading icon on Commit itself.

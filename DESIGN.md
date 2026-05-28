@@ -57,11 +57,11 @@ Two-column layout: a resizable sidebar on the left and a content area on the rig
 
 ### 5. History browsing
 
-- Commit list is virtualized (24 rows × 24 px) and pages 50 commits at a time, prefetching when the user is within 200 px of the bottom.
-- Each row shows the short SHA, summary, and a humanized relative date (`just now` / `Nm ago` / `Nh ago` / `Nd ago` / locale date past a week).
+- Commit list is virtualized (50 px rows) and pages 50 commits at a time, prefetching when the user is within 200 px of the bottom.
+- Each row is two lines. First line: the commit summary plus right-aligned indicators — a tag pill (e.g. `v0.1.0`, with a `+N` pill when a commit has multiple tags) and the "not yet pushed" arrow. Second line: the author name · a humanized relative date (`just now` / `Nm ago` / `Nh ago` / `Nd ago` / locale date past a week). The SHA is not shown in the list (it's a row away from useful and the detail card carries it); the right-click menu's "Copy SHA" covers the copy case.
 - Selecting a commit loads its detail card (full message, author, committer date, trailers, SHA with copy-to-clipboard) and its file list. The first file's diff opens automatically.
 - Per-file commit diffs use `git log -1 -p --first-parent` to produce a proper unified diff (not file contents).
-- Right-clicking a commit opens a context menu. Today the only item is "Amend last commit…" (enabled on the topmost commit); the same menu primitive will host future actions (Reset / Revert / Cherry-pick / Create branch from / Copy SHA).
+- Right-clicking a commit opens a context menu: "Amend last commit…" and "Undo last commit…" (both enabled only on the topmost commit, with Undo further gated on the commit being unpushed), then "Copy SHA" (full hash) and "Copy Tag" (enabled only when the commit is tagged; space-joins multiple tags). The same menu primitive will host future actions (Reset / Revert / Cherry-pick / Create branch from).
 
 ### 6. Branches
 
