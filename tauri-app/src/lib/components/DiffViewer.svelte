@@ -1,5 +1,9 @@
 <script lang="ts">
-  import { createHighlighter, type Highlighter } from 'shiki/bundle/web'
+  // `shiki/bundle/web` is a curated subset — it omits Go, Rust, C, and many
+  // other languages we actually want. `bundle/full` ships them all (lazy-loaded
+  // on demand by `createHighlighter`), which is what we need for a code-host
+  // app where the user can open any file type.
+  import { createHighlighter, type Highlighter } from 'shiki/bundle/full'
   import type { FileDiff, DiffSelection, DiffLine } from '$lib/api/commands'
 
   let highlighterPromise: Promise<Highlighter> | null = null
@@ -70,6 +74,119 @@
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   }
 
+  /*
+    Intra-line overlay (Relay → Metrics inside an otherwise identical line):
+    the backend annotates each paired Delete/Add line with the character range
+    that actually changed. We layer that range on top of Shiki's tokens so the
+    syntax colour stays intact and only the changed substring gets the brighter
+    backplate. When Shiki isn't running (no language match, or
+    syntax_highlighting=off), the base HTML is plain escaped text and the same
+    layering treats it as one big token.
+  */
+  type LineToken = { text: string; color?: string }
+
+  function decodeHtmlEntities(s: string): string {
+    return s
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&amp;/g, '&')
+  }
+
+  function parseShikiLineHtml(html: string, fallback: string): LineToken[] {
+    // Shiki emits each line as `<span class="line">…token spans…</span>`.
+    const lineMatch = html.match(/^<span class="line">([\s\S]*)<\/span>$/)
+    const inner = lineMatch ? lineMatch[1] : html
+    const tokens: LineToken[] = []
+    const re = /<span(?:\s+style="([^"]*)")?>([^<]*)<\/span>/g
+    let m: RegExpExecArray | null
+    while ((m = re.exec(inner)) !== null) {
+      const styleAttr = m[1] ?? ''
+      const colorMatch = styleAttr.match(/color:\s*([^;]+)/)
+      const color = colorMatch ? colorMatch[1].trim() : undefined
+      const text = decodeHtmlEntities(m[2])
+      if (text.length > 0) tokens.push({ text, color })
+    }
+    // No token spans found — treat the whole HTML as plain escaped text and
+    // rebuild from the raw content so character indices line up.
+    if (tokens.length === 0) return [{ text: fallback }]
+    return tokens
+  }
+
+  function emitSpan(text: string, color: string | undefined, cssClass: string | null): string {
+    const classAttr = cssClass ? ` class="${cssClass}"` : ''
+    const styleAttr = color ? ` style="color:${color}"` : ''
+    return `<span${classAttr}${styleAttr}>${escapeHtml(text)}</span>`
+  }
+
+  function overlayIntraLine(
+    html: string,
+    content: string,
+    range: { start: number; length: number },
+    cssClass: string,
+  ): string {
+    const tokens = parseShikiLineHtml(html, content)
+    const intraStart = range.start
+    const intraEnd = range.start + range.length
+    let result = ''
+    let pos = 0
+    for (const tok of tokens) {
+      const chars = [...tok.text] // code points so multi-byte chars don't split
+      const tokStart = pos
+      const tokEnd = pos + chars.length
+      const overlapStart = Math.max(tokStart, intraStart)
+      const overlapEnd = Math.min(tokEnd, intraEnd)
+      if (overlapStart >= overlapEnd) {
+        result += emitSpan(tok.text, tok.color, null)
+      } else {
+        const pre = chars.slice(0, overlapStart - tokStart).join('')
+        const mid = chars.slice(overlapStart - tokStart, overlapEnd - tokStart).join('')
+        const post = chars.slice(overlapEnd - tokStart).join('')
+        if (pre) result += emitSpan(pre, tok.color, null)
+        if (mid) result += emitSpan(mid, tok.color, cssClass)
+        if (post) result += emitSpan(post, tok.color, null)
+      }
+      pos = tokEnd
+    }
+    return result
+  }
+
+  async function computeBaseHtml(allLines: DiffLine[], path: string): Promise<string[]> {
+    if (!syntaxHighlighting) return allLines.map((l) => escapeHtml(l.content))
+    const lang = getLanguageFromPath(path)
+    if (lang === 'plaintext') return allLines.map((l) => escapeHtml(l.content))
+    try {
+      const hl = await getHighlighter()
+      if (!hl.getLoadedLanguages().includes(lang as any)) {
+        return allLines.map((l) => escapeHtml(l.content))
+      }
+      const text = allLines.map((l) => l.content).join('\n')
+      const html = hl.codeToHtml(text, { lang: lang as any, theme })
+      const match = html.match(/<code[^>]*>([\s\S]*?)<\/code>/)
+      if (!match) return allLines.map((l) => escapeHtml(l.content))
+      const lines = match[1].split('\n')
+      while (lines.length < allLines.length) lines.push('')
+      return lines.slice(0, allLines.length)
+    } catch {
+      return allLines.map((l) => escapeHtml(l.content))
+    }
+  }
+
+  function applyIntraLineOverlay(base: string[], lines: DiffLine[]): string[] {
+    return base.map((html, i) => {
+      const line = lines[i]
+      const intra = line?.intra_line_diff
+      if (!intra || intra.length === 0) return html
+      const cls =
+        line.line_type === 'Add' ? 'diff-intra-add'
+        : line.line_type === 'Delete' ? 'diff-intra-remove'
+        : null
+      if (!cls) return html
+      return overlayIntraLine(html, line.content, intra, cls)
+    })
+  }
+
   async function highlightAll() {
     if (!fileDiff) {
       highlightedHtml = []
@@ -77,37 +194,8 @@
     }
     const allLines: DiffLine[] = []
     for (const h of fileDiff.hunks) allLines.push(...h.lines)
-
-    if (!syntaxHighlighting) {
-      highlightedHtml = allLines.map((l) => escapeHtml(l.content))
-      return
-    }
-
-    const lang = getLanguageFromPath(fileDiff.new_path || fileDiff.old_path)
-    if (lang === 'plaintext') {
-      highlightedHtml = allLines.map((l) => escapeHtml(l.content))
-      return
-    }
-
-    try {
-      const hl = await getHighlighter()
-      if (!hl.getLoadedLanguages().includes(lang as any)) {
-        highlightedHtml = allLines.map((l) => escapeHtml(l.content))
-        return
-      }
-      const text = allLines.map((l) => l.content).join('\n')
-      const html = hl.codeToHtml(text, { lang: lang as any, theme })
-      const match = html.match(/<code[^>]*>([\s\S]*?)<\/code>/)
-      if (!match) {
-        highlightedHtml = allLines.map((l) => escapeHtml(l.content))
-        return
-      }
-      const lines = match[1].split('\n')
-      while (lines.length < allLines.length) lines.push('')
-      highlightedHtml = lines.slice(0, allLines.length)
-    } catch {
-      highlightedHtml = allLines.map((l) => escapeHtml(l.content))
-    }
+    const base = await computeBaseHtml(allLines, fileDiff.new_path || fileDiff.old_path)
+    highlightedHtml = applyIntraLineOverlay(base, allLines)
   }
 
   $effect(() => {
@@ -239,7 +327,11 @@
       <span class="new-path">{fileDiff.new_path || fileDiff.old_path}</span>
     </div>
 
-    {#if sideBySide}
+    {#if fileDiff.is_binary}
+      <div class="binary-state">
+        <p>This binary file has changed.</p>
+      </div>
+    {:else if sideBySide}
       <div class="sbs-container">
         {#each pairs as pair, pairIdx (pairIdx)}
           {#if pair.isHunkHeader && pair.left}
@@ -345,6 +437,21 @@
     flex: 1;
     color: var(--text-faint);
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+
+  /*
+    Shown in place of hunk rows when the diff is for a binary file. Git can't
+    produce a line-by-line diff for binaries, so we render a labelled stand-in
+    while still keeping the file-header above so the user can see the path.
+  */
+  .binary-state {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    color: var(--text-faint);
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
   }
 
   .file-header {
@@ -467,6 +574,22 @@
     padding: 0;
     background: none;
     font-family: inherit;
+  }
+
+  /*
+    Intra-line backplates. The span is emitted inside `.line-content` via
+    `{@html}`, so we have to reach it with `:global(...)` from the scoped style
+    block. A tiny inset keeps the inline syntax colour visible underneath the
+    backplate.
+  */
+  .line-content :global(.diff-intra-add) {
+    background: var(--diff-intra-add-bg);
+    border-radius: 2px;
+  }
+
+  .line-content :global(.diff-intra-remove) {
+    background: var(--diff-intra-remove-bg);
+    border-radius: 2px;
   }
 
   .selection-dot {

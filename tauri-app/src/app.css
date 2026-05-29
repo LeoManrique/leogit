@@ -44,6 +44,10 @@
   --diff-remove-fg: #ef4444;
   --diff-add-bg: rgba(34, 197, 94, 0.12);
   --diff-remove-bg: rgba(239, 68, 68, 0.12);
+  /* Brighter backplates layered on the full-line BG to call out the exact
+     character range that changed (Relay → Metrics inside a single line). */
+  --diff-intra-add-bg: rgba(34, 197, 94, 0.32);
+  --diff-intra-remove-bg: rgba(239, 68, 68, 0.34);
 
   --cursor-bg: rgba(10, 132, 255, 0.22);
   --shadow-popover: 0 4px 12px rgba(0, 0, 0, 0.4);
@@ -79,6 +83,8 @@
   --diff-remove-fg: #dc2626;
   --diff-add-bg: rgba(22, 163, 74, 0.1);
   --diff-remove-bg: rgba(220, 38, 38, 0.1);
+  --diff-intra-add-bg: rgba(22, 163, 74, 0.28);
+  --diff-intra-remove-bg: rgba(220, 38, 38, 0.3);
 
   --cursor-bg: rgba(0, 122, 255, 0.18);
   --shadow-popover: 0 4px 12px rgba(0, 0, 0, 0.12);

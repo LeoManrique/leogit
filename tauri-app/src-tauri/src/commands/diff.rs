@@ -19,7 +19,26 @@ pub struct DiffLine {
     pub line_type: LineType,
     pub old_line_no: Option<i32>,
     pub new_line_no: Option<i32>,
+    /// Character range within `content` that differs from its paired add/delete
+    /// counterpart. Populated after parsing for matched delete/add pairs within
+    /// a hunk so the viewer can highlight just the changed substring (e.g.
+    /// `Relay` → `Metrics` inside an otherwise identical line). `None` for
+    /// context/hunk-header lines, unpaired changes, and lines longer than
+    /// `MAX_INTRA_LINE_LEN`.
+    pub intra_line_diff: Option<IntraLineRange>,
 }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct IntraLineRange {
+    /// Zero-based character (code point) index into the line's `content`.
+    pub start: usize,
+    /// Number of characters (code points) that differ starting at `start`.
+    pub length: usize,
+}
+
+/// Match GitHub Desktop's safeguard — above this length, the prefix/suffix
+/// match degenerates into noise, so we skip the annotation entirely.
+const MAX_INTRA_LINE_LEN: usize = 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HunkHeader {
@@ -47,6 +66,11 @@ pub struct FileDiff {
     /// Required by `git apply` for new/deleted/renamed files.
     pub file_header: String,
     pub hunks: Vec<Hunk>,
+    /// `true` when the underlying file is binary. Git emits a single
+    /// `Binary files a/X and b/Y differ` line instead of `@@` hunks, so the
+    /// frontend has to render a stand-in message rather than a line-by-line
+    /// diff.
+    pub is_binary: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +100,7 @@ pub fn parse_diff(raw: String) -> Option<FileDiff> {
     let mut new_path = String::new();
     let mut hunks: Vec<Hunk> = Vec::new();
     let mut header_lines: Vec<String> = Vec::new();
+    let mut is_binary = false;
 
     let mut current_hunk: Option<Hunk> = None;
     let mut old_line_no: i32 = 0;
@@ -106,6 +131,7 @@ pub fn parse_diff(raw: String) -> Option<FileDiff> {
                         line_type: LineType::Hunk,
                         old_line_no: None,
                         new_line_no: None,
+                        intra_line_diff: None,
                     };
 
                     current_hunk = Some(Hunk {
@@ -130,6 +156,19 @@ pub fn parse_diff(raw: String) -> Option<FileDiff> {
                 old_path = strip_path_prefix(rest, "a/");
             } else if let Some(rest) = line.strip_prefix("+++ ") {
                 new_path = strip_path_prefix(rest, "b/");
+            } else if line.starts_with("Binary files ") && line.ends_with(" differ") {
+                // Git emits this single line for binary changes instead of `@@`
+                // hunks. Capture both paths so the frontend can label the file,
+                // and flag the diff so the viewer renders the binary stand-in.
+                is_binary = true;
+                if let Some((old, new)) = parse_binary_marker(line) {
+                    if !old.is_empty() {
+                        old_path = old;
+                    }
+                    if !new.is_empty() {
+                        new_path = new;
+                    }
+                }
             }
             header_lines.push(line.to_string());
             i += 1;
@@ -155,6 +194,7 @@ pub fn parse_diff(raw: String) -> Option<FileDiff> {
                 line_type: LineType::Context,
                 old_line_no: Some(old_line_no),
                 new_line_no: Some(new_line_no),
+                intra_line_diff: None,
             });
             old_line_no += 1;
             new_line_no += 1;
@@ -172,6 +212,7 @@ pub fn parse_diff(raw: String) -> Option<FileDiff> {
                     line_type: LineType::Add,
                     old_line_no: None,
                     new_line_no: Some(new_line_no),
+                    intra_line_diff: None,
                 });
                 new_line_no += 1;
             }
@@ -183,6 +224,7 @@ pub fn parse_diff(raw: String) -> Option<FileDiff> {
                     line_type: LineType::Delete,
                     old_line_no: Some(old_line_no),
                     new_line_no: None,
+                    intra_line_diff: None,
                 });
                 old_line_no += 1;
             }
@@ -195,6 +237,7 @@ pub fn parse_diff(raw: String) -> Option<FileDiff> {
                     line_type: LineType::NoNewline,
                     old_line_no: None,
                     new_line_no: None,
+                    intra_line_diff: None,
                 });
             }
             _ => {
@@ -210,6 +253,7 @@ pub fn parse_diff(raw: String) -> Option<FileDiff> {
                     line_type: LineType::Context,
                     old_line_no: Some(old_line_no),
                     new_line_no: Some(new_line_no),
+                    intra_line_diff: None,
                 });
                 old_line_no += 1;
                 new_line_no += 1;
@@ -224,9 +268,13 @@ pub fn parse_diff(raw: String) -> Option<FileDiff> {
         hunks.push(h);
     }
 
-    if hunks.is_empty() {
+    // Binary diffs legitimately have zero hunks — keep them; everything else
+    // with no hunks is an empty/no-op diff we can discard.
+    if hunks.is_empty() && !is_binary {
         return None;
     }
+
+    annotate_intra_line_changes(&mut hunks);
 
     let file_header = header_lines.join("\n");
 
@@ -235,7 +283,123 @@ pub fn parse_diff(raw: String) -> Option<FileDiff> {
         new_path,
         file_header,
         hunks,
+        is_binary,
     })
+}
+
+/// Pairs up consecutive delete/add runs within each hunk and tags each pair
+/// with the character range that actually changed, so the viewer can highlight
+/// `Relay` → `Metrics` inside an otherwise identical line. Matches GitHub
+/// Desktop's approach (`relativeChanges` in `app/src/ui/diff/changed-range.ts`):
+/// only annotate when the delete count equals the add count, then pair by
+/// index. Mismatched counts are left untouched (full-line diff still shows).
+fn annotate_intra_line_changes(hunks: &mut [Hunk]) {
+    for hunk in hunks.iter_mut() {
+        let mut i = 0;
+        while i < hunk.lines.len() {
+            // Walk to the next Delete run.
+            if hunk.lines[i].line_type != LineType::Delete {
+                i += 1;
+                continue;
+            }
+            let delete_start = i;
+            while i < hunk.lines.len() && hunk.lines[i].line_type == LineType::Delete {
+                i += 1;
+            }
+            let delete_end = i;
+
+            // The matching Add run must follow immediately — no context or
+            // other line types in between — for these to count as a paired
+            // edit.
+            let add_start = i;
+            while i < hunk.lines.len() && hunk.lines[i].line_type == LineType::Add {
+                i += 1;
+            }
+            let add_end = i;
+
+            let delete_count = delete_end - delete_start;
+            let add_count = add_end - add_start;
+            if delete_count == 0 || add_count == 0 || delete_count != add_count {
+                continue;
+            }
+
+            for j in 0..delete_count {
+                let del_idx = delete_start + j;
+                let add_idx = add_start + j;
+                let del_content = hunk.lines[del_idx].content.clone();
+                let add_content = hunk.lines[add_idx].content.clone();
+                if del_content.len() > MAX_INTRA_LINE_LEN
+                    || add_content.len() > MAX_INTRA_LINE_LEN
+                {
+                    continue;
+                }
+                let (del_range, add_range) =
+                    compute_intra_line_ranges(&del_content, &add_content);
+                hunk.lines[del_idx].intra_line_diff = del_range;
+                hunk.lines[add_idx].intra_line_diff = add_range;
+            }
+        }
+    }
+}
+
+/// Returns the changed character range on each side after stripping the longest
+/// common prefix and suffix. Character indices are code points, not bytes, so
+/// they line up with `Array.from(str).slice(...)` on the JS side. Returns
+/// `None` for a side when no characters differ.
+fn compute_intra_line_ranges(
+    a: &str,
+    b: &str,
+) -> (Option<IntraLineRange>, Option<IntraLineRange>) {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+
+    let mut prefix = 0;
+    let prefix_cap = a_chars.len().min(b_chars.len());
+    while prefix < prefix_cap && a_chars[prefix] == b_chars[prefix] {
+        prefix += 1;
+    }
+
+    let mut suffix = 0;
+    let suffix_cap = (a_chars.len() - prefix).min(b_chars.len() - prefix);
+    while suffix < suffix_cap
+        && a_chars[a_chars.len() - 1 - suffix] == b_chars[b_chars.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+
+    let a_len = a_chars.len() - prefix - suffix;
+    let b_len = b_chars.len() - prefix - suffix;
+
+    let a_range = (a_len > 0).then_some(IntraLineRange {
+        start: prefix,
+        length: a_len,
+    });
+    let b_range = (b_len > 0).then_some(IntraLineRange {
+        start: prefix,
+        length: b_len,
+    });
+    (a_range, b_range)
+}
+
+/// Parses a `Binary files a/X and b/Y differ` line into `(old_path, new_path)`.
+/// `/dev/null` on either side (add or delete) is returned as an empty string so
+/// callers can distinguish "no prior path" from "real path".
+fn parse_binary_marker(line: &str) -> Option<(String, String)> {
+    let inner = line.strip_prefix("Binary files ")?.strip_suffix(" differ")?;
+    let mid = inner.find(" and ")?;
+    let lhs = &inner[..mid];
+    let rhs = &inner[mid + 5..];
+    let old = if lhs == "/dev/null" {
+        String::new()
+    } else {
+        lhs.strip_prefix("a/").unwrap_or(lhs).to_string()
+    };
+    let new = if rhs == "/dev/null" {
+        String::new()
+    } else {
+        rhs.strip_prefix("b/").unwrap_or(rhs).to_string()
+    };
+    Some((old, new))
 }
 
 /// Strips the `--- `/`+++ ` argument down to a repo-relative path.

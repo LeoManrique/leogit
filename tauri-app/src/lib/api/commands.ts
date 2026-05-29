@@ -58,12 +58,18 @@ export interface RepoIdentifier {
   name: string
 }
 
+export interface IntraLineRange {
+  start: number
+  length: number
+}
+
 export interface DiffLine {
   text: string
   content: string
   line_type: 'Context' | 'Add' | 'Delete' | 'Hunk' | 'NoNewline'
   old_line_no?: number
   new_line_no?: number
+  intra_line_diff?: IntraLineRange | null
 }
 
 export interface HunkHeader {
@@ -83,6 +89,7 @@ export interface FileDiff {
   new_path: string
   file_header: string
   hunks: Hunk[]
+  is_binary: boolean
 }
 
 export interface DiffSelection {
