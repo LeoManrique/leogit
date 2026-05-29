@@ -35,6 +35,14 @@
   let userTyping = $state(false)
   let lastHeadSha: string | null = null
 
+  // Defer the "Loading diff…" placeholder so sub-150 ms fetches swap the
+  // diff in place with no flash. If the fetch outlives the threshold, the
+  // viewer falls back to the spinner. Mirrors GH Desktop's
+  // SeamlessDiffSwitcher.SlowDiffLoadingThreshold.
+  const SLOW_DIFF_THRESHOLD_MS = 150
+  let diffLoadingTimer: ReturnType<typeof setTimeout> | null = null
+  let commitDiffLoadingTimer: ReturnType<typeof setTimeout> | null = null
+
   const PAGE_SIZE = 50
 
   const SIDEBAR_MIN = 280
@@ -308,33 +316,80 @@
   }
 
   async function loadDiffForFile(file: FileEntry | null): Promise<void> {
-    // Re-activating the same file that's already on screen is a no-op —
-    // skip the state churn that would clear activeFileDiff and re-fetch,
-    // which causes the diff pane to blink. Mirrors GitHub Desktop's
-    // list selection short-circuit (List.onRowMouseDown).
+    // Re-activating the same file that's already on screen (or already
+    // being fetched) is a no-op — skip the refetch so arrow scrolls past
+    // and back don't churn the pane.
     const current = get(repoState)
     if (
       file &&
       current.activeFile?.path === file.path &&
-      current.activeFileDiff !== null &&
-      !current.isDiffLoading
+      (current.activeFileDiff !== null || current.isDiffLoading)
     ) {
       return
     }
-    repoState.update((s) => ({ ...s, activeFile: file, activeFileDiff: null, isDiffLoading: file !== null }))
+
+    if (diffLoadingTimer) {
+      clearTimeout(diffLoadingTimer)
+      diffLoadingTimer = null
+    }
+
+    // Clearing to null on every switch caused the "Loading diff…" flash
+    // even for sub-50 ms fetches. Now we keep the previous diff on screen
+    // and only flip isDiffLoadingSlow=true after SLOW_DIFF_THRESHOLD_MS,
+    // at which point the template falls back to the spinner.
+    repoState.update((s) => ({
+      ...s,
+      activeFile: file,
+      isDiffLoading: file !== null,
+      isDiffLoadingSlow: false,
+      // Drop the stale diff immediately when the user deselects; only keep
+      // it on screen during an actual transition between two files.
+      activeFileDiff: file === null ? null : s.activeFileDiff,
+    }))
     if (!file) return
 
     const repoPath = $appState.repoPath
     if (!repoPath) return
+
+    diffLoadingTimer = setTimeout(() => {
+      diffLoadingTimer = null
+      const s = get(repoState)
+      // Only escalate if the fetch we started is still the active one.
+      if (s.activeFile?.path === file.path && s.isDiffLoading) {
+        repoState.update((st) => ({ ...st, isDiffLoadingSlow: true, activeFileDiff: null }))
+      }
+    }, SLOW_DIFF_THRESHOLD_MS)
+
     try {
       const cfg = $config
       const raw = cfg?.hide_whitespace
         ? await gitApi.getDiffWhitespaceIgnored(repoPath, file)
         : await gitApi.getDiff(repoPath, file)
       const parsed = await diffApi.parseDiff(raw)
-      repoState.update((s) => ({ ...s, activeFileDiff: parsed, isDiffLoading: false }))
+      // Drop the result if the user moved on to a different file mid-fetch.
+      if (get(repoState).activeFile?.path !== file.path) return
+      if (diffLoadingTimer) {
+        clearTimeout(diffLoadingTimer)
+        diffLoadingTimer = null
+      }
+      repoState.update((s) => ({
+        ...s,
+        activeFileDiff: parsed,
+        isDiffLoading: false,
+        isDiffLoadingSlow: false,
+      }))
     } catch (error) {
-      repoState.update((s) => ({ ...s, isDiffLoading: false, error: String(error) }))
+      if (get(repoState).activeFile?.path !== file.path) return
+      if (diffLoadingTimer) {
+        clearTimeout(diffLoadingTimer)
+        diffLoadingTimer = null
+      }
+      repoState.update((s) => ({
+        ...s,
+        isDiffLoading: false,
+        isDiffLoadingSlow: false,
+        error: String(error),
+      }))
     }
   }
 
@@ -359,36 +414,74 @@
   }
 
   async function loadCommitFileDiff(file: FileEntry | null): Promise<void> {
-    // Same no-op as loadDiffForFile: re-activating the visible file
-    // shouldn't blank then re-render the commit diff pane.
     const current = get(repoState)
     if (
       file &&
       current.activeCommitFile?.path === file.path &&
-      current.activeCommitFileDiff !== null &&
-      !current.isCommitDiffLoading
+      (current.activeCommitFileDiff !== null || current.isCommitDiffLoading)
     ) {
       return
     }
+
+    if (commitDiffLoadingTimer) {
+      clearTimeout(commitDiffLoadingTimer)
+      commitDiffLoadingTimer = null
+    }
+
     repoState.update((s) => ({
       ...s,
       activeCommitFile: file,
-      activeCommitFileDiff: null,
       isCommitDiffLoading: file !== null,
+      isCommitDiffLoadingSlow: false,
+      activeCommitFileDiff: file === null ? null : s.activeCommitFileDiff,
     }))
     if (!file) return
+
     const repoPath = $appState.repoPath
     const commit = get(repoState).activeCommit
     if (!repoPath || !commit) {
-      repoState.update((s) => ({ ...s, isCommitDiffLoading: false }))
+      repoState.update((s) => ({ ...s, isCommitDiffLoading: false, isCommitDiffLoadingSlow: false }))
       return
     }
+
+    commitDiffLoadingTimer = setTimeout(() => {
+      commitDiffLoadingTimer = null
+      const s = get(repoState)
+      if (s.activeCommitFile?.path === file.path && s.isCommitDiffLoading) {
+        repoState.update((st) => ({
+          ...st,
+          isCommitDiffLoadingSlow: true,
+          activeCommitFileDiff: null,
+        }))
+      }
+    }, SLOW_DIFF_THRESHOLD_MS)
+
     try {
       const raw = await gitApi.getCommitDiff(repoPath, commit.sha, file.path)
       const parsed = await diffApi.parseDiff(raw)
-      repoState.update((s) => ({ ...s, activeCommitFileDiff: parsed, isCommitDiffLoading: false }))
+      if (get(repoState).activeCommitFile?.path !== file.path) return
+      if (commitDiffLoadingTimer) {
+        clearTimeout(commitDiffLoadingTimer)
+        commitDiffLoadingTimer = null
+      }
+      repoState.update((s) => ({
+        ...s,
+        activeCommitFileDiff: parsed,
+        isCommitDiffLoading: false,
+        isCommitDiffLoadingSlow: false,
+      }))
     } catch (error) {
-      repoState.update((s) => ({ ...s, isCommitDiffLoading: false, error: String(error) }))
+      if (get(repoState).activeCommitFile?.path !== file.path) return
+      if (commitDiffLoadingTimer) {
+        clearTimeout(commitDiffLoadingTimer)
+        commitDiffLoadingTimer = null
+      }
+      repoState.update((s) => ({
+        ...s,
+        isCommitDiffLoading: false,
+        isCommitDiffLoadingSlow: false,
+        error: String(error),
+      }))
     }
   }
 
@@ -849,7 +942,7 @@
 
     <div class="content-area">
       {#if $repoState.activeTab === 'changes'}
-        {#if $repoState.isDiffLoading}
+        {#if $repoState.isDiffLoadingSlow}
           <div class="diff-empty">Loading diff…</div>
         {:else if $repoState.activeFileDiff}
           <DiffViewer
@@ -898,7 +991,7 @@
             aria-valuemax={COMMIT_FILES_MAX}
           ></div>
           <div class="commit-diff-pane">
-            {#if $repoState.isCommitDiffLoading}
+            {#if $repoState.isCommitDiffLoadingSlow}
               <div class="diff-empty">Loading diff…</div>
             {:else if $repoState.activeCommitFileDiff}
               <DiffViewer

@@ -35,12 +35,20 @@ export interface RepoState {
   activeFile: FileEntry | null
   activeFileDiff: FileDiff | null
   isDiffLoading: boolean
+  /**
+   * Flips true once a diff fetch has been pending for ≥150 ms. The viewer keeps
+   * showing the previous diff while `isDiffLoading && !isDiffLoadingSlow`, so
+   * sub-150 ms fetches (the common case) swap in place with no "Loading…"
+   * flash. Mirrors GH Desktop's SeamlessDiffSwitcher.SlowDiffLoadingThreshold.
+   */
+  isDiffLoadingSlow: boolean
   activeTab: ActiveTab
   activeCommit: CommitInfo | null
   activeCommitFiles: FileEntry[]
   activeCommitFile: FileEntry | null
   activeCommitFileDiff: FileDiff | null
   isCommitDiffLoading: boolean
+  isCommitDiffLoadingSlow: boolean
   isLoading: boolean
   commitToAmend: CommitInfo | null
   /**
@@ -78,12 +86,14 @@ const defaultState: RepoState = {
   activeFile: null,
   activeFileDiff: null,
   isDiffLoading: false,
+  isDiffLoadingSlow: false,
   activeTab: 'changes',
   activeCommit: null,
   activeCommitFiles: [],
   activeCommitFile: null,
   activeCommitFileDiff: null,
   isCommitDiffLoading: false,
+  isCommitDiffLoadingSlow: false,
   isLoading: false,
   commitToAmend: null,
   restoreMessage: null,
