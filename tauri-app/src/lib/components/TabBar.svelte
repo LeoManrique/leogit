@@ -16,6 +16,9 @@
     onclick={() => switchTab('changes')}
   >
     Changes
+    {#if $repoState.status.files.length > 0}
+      <span class="count-badge">{$repoState.status.files.length}</span>
+    {/if}
   </button>
   <button
     class="tab"
@@ -37,6 +40,9 @@
   }
 
   .tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     flex: 0 0 auto;
     padding: 8px 14px;
     font-size: 13px;
@@ -59,5 +65,27 @@
     color: var(--text-primary);
     font-weight: 600;
     border-bottom-color: var(--border-active);
+  }
+
+  /*
+    Count of changed files. Sits inline next to the tab label so the user can
+    see the working-tree size even from the History tab. Mirrors the inspo
+    app's pill — neutral grey, semi-bold, tabular figures so the width is
+    stable as the count grows/shrinks.
+  */
+  .count-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 16px;
+    padding: 0 5px;
+    background: var(--badge-bg);
+    color: var(--badge-fg);
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
   }
 </style>

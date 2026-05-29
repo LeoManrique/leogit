@@ -468,6 +468,8 @@ pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
         i += 1;
     }
 
+    sort_file_entries(&mut result.files);
+
     Ok(result)
 }
 
@@ -850,7 +852,31 @@ pub fn get_commit_files(repo_path: String, sha: String) -> Result<Vec<FileEntry>
         });
     }
 
+    sort_file_entries(&mut files);
+
     Ok(files)
+}
+
+/// Shared ordering for any file-list panel (working-tree status, commit
+/// details, future selection lists). Two-key comparison:
+///   1. Root-level files (no `/` in the path) come before any nested file.
+///      Mental model: treat the repo root as `.`, which sorts before any
+///      directory name. So `README.md` lands at the top, then everything
+///      under `blackbox-e2e/`, `desktop/`, etc.
+///   2. Within each group, case-insensitive path order so the list reads
+///      like Finder / VS Code / GitHub.com instead of git's byte-sorted
+///      output (which puts uppercase names ahead of lowercase ones, and
+///      dot-prefixed dirs before everything else).
+fn sort_file_entries(files: &mut [FileEntry]) {
+    files.sort_by(|a, b| {
+        let a_root = !a.path.contains('/');
+        let b_root = !b.path.contains('/');
+        match (a_root, b_root) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.path.to_lowercase().cmp(&b.path.to_lowercase()),
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
