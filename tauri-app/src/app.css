@@ -54,6 +54,21 @@
 
   --badge-bg: rgba(255, 255, 255, 0.12);
   --badge-fg: rgba(255, 255, 255, 0.72);
+
+  /* Syntax highlighting palette — colour names ported from GitHub Dark theme.
+     Tokens come pre-classified from Rust syntect; theme swap costs zero IPC. */
+  --syn-keyword: #ff7b72;
+  --syn-string: #a5d6ff;
+  --syn-comment: #8b949e;
+  --syn-function: #d2a8ff;
+  --syn-type: #ffa657;
+  --syn-number: #79c0ff;
+  --syn-constant: #79c0ff;
+  --syn-operator: #ff7b72;
+  --syn-tag: #7ee787;
+  --syn-attribute: #d2a8ff;
+  --syn-builtin: #ffa657;
+  --syn-decorator: #d2a8ff;
 }
 
 :root[data-theme='light'] {
@@ -91,7 +106,36 @@
 
   --badge-bg: rgba(0, 0, 0, 0.08);
   --badge-fg: rgba(0, 0, 0, 0.6);
+
+  --syn-keyword: #d73a49;
+  --syn-string: #032f62;
+  --syn-comment: #6a737d;
+  --syn-function: #6f42c1;
+  --syn-type: #005cc5;
+  --syn-number: #005cc5;
+  --syn-constant: #005cc5;
+  --syn-operator: #d73a49;
+  --syn-tag: #22863a;
+  --syn-attribute: #6f42c1;
+  --syn-builtin: #e36209;
+  --syn-decorator: #6f42c1;
 }
+
+/* Syntax class selectors — applied by DiffViewer's token renderer.
+   `.syn-plain`, `.syn-variable`, `.syn-punctuation` intentionally inherit
+   --text-primary so they read against any theme background. */
+.syn-keyword     { color: var(--syn-keyword); }
+.syn-string      { color: var(--syn-string); }
+.syn-comment     { color: var(--syn-comment); font-style: italic; }
+.syn-function    { color: var(--syn-function); }
+.syn-type        { color: var(--syn-type); }
+.syn-number      { color: var(--syn-number); }
+.syn-constant    { color: var(--syn-constant); }
+.syn-operator    { color: var(--syn-operator); }
+.syn-tag         { color: var(--syn-tag); }
+.syn-attribute   { color: var(--syn-attribute); }
+.syn-builtin     { color: var(--syn-builtin); }
+.syn-decorator   { color: var(--syn-decorator); }
 
 html,
 body {

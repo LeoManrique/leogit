@@ -101,6 +101,12 @@
             </label>
           </div>
           <div class="setting-group">
+            <label class="checkbox-label">
+              <input type="checkbox" bind:checked={config.wrap_long_lines} />
+              Wrap long lines
+            </label>
+          </div>
+          <div class="setting-group">
             <label for="tab-size">Tab size</label>
             <input id="tab-size" type="number" bind:value={config.tab_size} min="1" max="16" />
           </div>

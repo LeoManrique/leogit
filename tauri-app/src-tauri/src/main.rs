@@ -75,6 +75,7 @@ fn main() {
             diff::parse_diff,
             diff::generate_patch,
             diff::generate_inverse_patch,
+            highlight::highlight_diff,
             gh::check_auth,
             ai::generate_commit_message,
             ai::check_provider_available,

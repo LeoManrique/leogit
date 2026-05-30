@@ -4,7 +4,7 @@ A calm desktop Git client built with Tauri 2, Rust, and Svelte 5. Designed to fe
 
 ## What it does
 
-- **Stage and commit** via a checkbox file list with live unified diffs (Shiki syntax highlighting, optional side-by-side, optional whitespace-hidden).
+- **Stage and commit** via a checkbox file list with live unified diffs (native syntect syntax highlighting, optional side-by-side, optional whitespace-hidden).
 - **AI commit messages** generated from the selected diff via the local `claude` CLI or a self-hosted Ollama instance.
 - **Browse history** with a virtualized commit list, per-commit file diffs, and trailers/SHA copy.
 - **Manage branches** (create / switch / delete) and **merge** (regular or squash) with conflict detection.

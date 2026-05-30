@@ -114,6 +114,7 @@ export interface Config {
   scan_depth: number
   side_by_side_diff: boolean
   hide_whitespace: boolean
+  wrap_long_lines: boolean
   tab_size: number
   claude_timeout_secs: number
   ollama_server_url: string
@@ -191,6 +192,47 @@ export const diffApi = {
     invoke<void>('generate_patch', { repoPath, fileDiff, selection }),
   generateInversePatch: (repoPath: string, fileDiff: FileDiff, selection: DiffSelection) =>
     invoke<void>('generate_inverse_patch', { repoPath, fileDiff, selection }),
+}
+
+/**
+ * Token classes emitted by the Rust syntect tokenizer (`highlight_diff`).
+ * The numeric values MUST stay in sync with `TokenClass` in
+ * `src-tauri/src/commands/highlight.rs` — Rust serialises the enum as its
+ * `#[repr(u8)]` index, so re-ordering breaks the wire format.
+ */
+export const TokenClass = {
+  Plain: 0,
+  Keyword: 1,
+  String: 2,
+  Comment: 3,
+  Function: 4,
+  Type: 5,
+  Variable: 6,
+  Number: 7,
+  Constant: 8,
+  Operator: 9,
+  Punctuation: 10,
+  Tag: 11,
+  Attribute: 12,
+  Builtin: 13,
+  Decorator: 14,
+} as const
+
+export type TokenClassValue = (typeof TokenClass)[keyof typeof TokenClass]
+
+export interface Token {
+  /** Code-point index into the line `content` (matches `IntraLineRange`). */
+  start: number
+  /** Code-point index (exclusive) into the line `content`. */
+  end: number
+  class: TokenClassValue
+}
+
+export type TokenLine = Token[]
+
+export const highlightApi = {
+  highlightDiff: (fileDiff: FileDiff) =>
+    invoke<TokenLine[]>('highlight_diff', { fileDiff }),
 }
 
 export const ghApi = {

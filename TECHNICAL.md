@@ -11,7 +11,7 @@ Functional behavior lives in [DESIGN.md](DESIGN.md). Visual design language live
 | Frontend framework | Svelte 5 (runes) | `$state`, `$derived`, `$effect`, `$props` |
 | Frontend bundler | Vite 8 | `terser` for minified release builds |
 | Type system | TypeScript 5.9 strict | `$lib/*` alias points at `src/lib/*` |
-| Diff syntax | Shiki 4 (`bundle/web`) | Themes `github-dark` / `github-light`, ~25 languages preloaded |
+| Diff syntax | syntect 5.3 + two-face 0.5 (Rust) | Class-based output; theme colours live in `--syn-*` CSS variables |
 | Terminal UI | xterm.js 6 + FitAddon + WebLinksAddon | Black background, 12 px monospace |
 | PTY | `portable-pty` 0.9 | Spawns user `$SHELL`, falls back to `/bin/zsh` / `cmd.exe` |
 | HTTP | `reqwest` 0.13 | Used only for Ollama |
@@ -265,7 +265,15 @@ The Tauri dev command uses `beforeDevCommand: pnpm run dev:vite` (per `tauri.con
 
 Bundle targets: `app` + `dmg` (macOS), `deb` (Linux), `msi` (Windows).
 
-Frontend bundle size warning is raised to 2 MB (`chunkSizeWarningLimit: 2000`) because Shiki's WASM theme/grammar payload is intentionally hefty.
+Frontend bundle is now under 1 MB (Shiki + grammars moved out). Vite's default `chunkSizeWarningLimit` is sufficient.
+
+### Diff syntax highlighting
+
+The `highlight_diff` command (in [src-tauri/src/commands/highlight.rs](tauri-app/src-tauri/src/commands/highlight.rs)) tokenises every `Context | Add | Delete` row of a `FileDiff` using `syntect::parsing::ParseState` against `two-face::syntax::extra_newlines()`. It returns `Vec<Vec<Token>>` (one inner vec per flattened diff line), where each `Token` is `{ start: u32, end: u32, class: u8 }`. Indices are **code points**, matching `IntraLineRange`. Class is a `#[repr(u8)]` enum index — the wire format is whatever serde+serde_repr produces, so reordering the `TokenClass` enum is a breaking change.
+
+The frontend ([DiffViewer.svelte:renderTokenLine](tauri-app/src/lib/components/DiffViewer.svelte)) maps each `class` to a `.syn-*` class name and emits one span per token, layering the intra-line backplate on the overlapping slice. Theme swap is pure CSS — `--syn-*` variables in [app.css](tauri-app/src/app.css) flip with `:root[data-theme]`.
+
+Long-line guard: lines over `MAX_HIGHLIGHT_LINE_LEN = 1024` chars get an empty `TokenLine` so the parser never burns time on minified blobs. Mirrors the `MAX_INTRA_LINE_LEN` guard in `commands/diff.rs`.
 
 ## Accessibility patterns
 

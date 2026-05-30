@@ -21,6 +21,11 @@ pub struct Config {
     pub side_by_side_diff: bool,
     #[serde(default)]
     pub hide_whitespace: bool,
+    /// Wrap long diff lines to fit the viewer width. Off → horizontal scroll
+    /// (the original behaviour, virtualized for huge diffs). Defaults to on
+    /// for new users so a wide line stays in view.
+    #[serde(default = "default_wrap_long_lines")]
+    pub wrap_long_lines: bool,
     #[serde(default = "default_tab_size")]
     pub tab_size: u32,
     #[serde(default = "default_claude_timeout")]
@@ -53,6 +58,10 @@ fn default_tab_size() -> u32 {
     4
 }
 
+fn default_wrap_long_lines() -> bool {
+    true
+}
+
 fn default_claude_timeout() -> u32 {
     120
 }
@@ -75,6 +84,7 @@ impl Default for Config {
             scan_depth: default_scan_depth(),
             side_by_side_diff: false,
             hide_whitespace: false,
+            wrap_long_lines: default_wrap_long_lines(),
             tab_size: default_tab_size(),
             claude_timeout_secs: default_claude_timeout(),
             ollama_server_url: default_ollama_url(),

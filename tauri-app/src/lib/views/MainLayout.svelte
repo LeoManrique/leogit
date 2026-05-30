@@ -44,6 +44,13 @@
   let commitDiffLoadingTimer: ReturnType<typeof setTimeout> | null = null
 
   const PAGE_SIZE = 50
+  // Hard cap on the in-memory commit log. The CommitList already virtualizes
+  // the DOM, but the underlying array was growing without bound: scrolling
+  // 5K commits kept all 5K CommitInfo objects in memory and made every
+  // refresh re-fetch them. The window slides forward when the user scrolls
+  // past the bottom and back when they scroll past the top, so they never
+  // lose access to history — the working set just stays bounded.
+  const MAX_COMMITS = 500
 
   const SIDEBAR_MIN = 280
   const SIDEBAR_MAX = 640
@@ -249,6 +256,7 @@
           commits,
           hasMore: commits.length === PAGE_SIZE,
           loaded: true,
+          windowStartOffset: 0,
         },
       }))
     } catch (error) {
@@ -256,21 +264,45 @@
     }
   }
 
-  // Refresh the commit log, keeping as many already-loaded commits as possible
-  // so the user doesn't lose their scroll position on every external git op.
+  // Refresh the commit log without losing the user's scroll position. We
+  // re-fetch the current window (`count` starting at `windowStartOffset`),
+  // capped at MAX_COMMITS. If HEAD has moved while the user is scrolled
+  // into the past (commits[0].sha changed for the same offset), reset to
+  // the first page so the new HEAD is visible — a small visual jump is
+  // accurate, while silently keeping the old window would mislead the user.
   async function refreshLog(): Promise<void> {
     const repoPath = $appState.repoPath
     if (!repoPath) return
     const current = get(repoState)
-    const loadedCount = Math.max(current.log.commits.length, PAGE_SIZE)
+    const count = Math.min(Math.max(current.log.commits.length, PAGE_SIZE), MAX_COMMITS)
+    const skip = current.log.windowStartOffset
     try {
-      const commits = await gitApi.getLog(repoPath, loadedCount, 0)
+      const commits = await gitApi.getLog(repoPath, count, skip)
+      const headChanged =
+        skip > 0 &&
+        commits.length > 0 &&
+        current.log.commits.length > 0 &&
+        commits[0]?.sha !== current.log.commits[0]?.sha
+      if (headChanged) {
+        const fresh = await gitApi.getLog(repoPath, PAGE_SIZE, 0)
+        repoState.update((s) => ({
+          ...s,
+          log: {
+            commits: fresh,
+            hasMore: fresh.length === PAGE_SIZE,
+            loaded: true,
+            windowStartOffset: 0,
+          },
+        }))
+        return
+      }
       repoState.update((s) => ({
         ...s,
         log: {
           commits,
-          hasMore: commits.length === loadedCount,
+          hasMore: commits.length === count,
           loaded: true,
+          windowStartOffset: skip,
         },
       }))
     } catch {}
@@ -300,16 +332,67 @@
 
     repoState.update((s) => ({ ...s, isLoading: true }))
     try {
-      const commits = await gitApi.getLog(repoPath, PAGE_SIZE, current.log.commits.length)
-      repoState.update((s) => ({
-        ...s,
-        log: {
-          commits: [...s.log.commits, ...commits],
-          hasMore: commits.length === PAGE_SIZE,
-          loaded: true,
-        },
-        isLoading: false,
-      }))
+      const skip = current.log.windowStartOffset + current.log.commits.length
+      const fetched = await gitApi.getLog(repoPath, PAGE_SIZE, skip)
+      repoState.update((s) => {
+        const combined = [...s.log.commits, ...fetched]
+        // Slide the window: drop the oldest entries past MAX_COMMITS and
+        // advance windowStartOffset by the same count. CommitList watches
+        // windowStartOffset and compensates its scrollTop so the user's
+        // visible row stays pinned across the slide.
+        if (combined.length <= MAX_COMMITS) {
+          return {
+            ...s,
+            log: { ...s.log, commits: combined, hasMore: fetched.length === PAGE_SIZE, loaded: true },
+            isLoading: false,
+          }
+        }
+        const drop = combined.length - MAX_COMMITS
+        return {
+          ...s,
+          log: {
+            commits: combined.slice(drop),
+            hasMore: fetched.length === PAGE_SIZE,
+            loaded: true,
+            windowStartOffset: s.log.windowStartOffset + drop,
+          },
+          isLoading: false,
+        }
+      })
+    } catch (error) {
+      repoState.update((s) => ({ ...s, isLoading: false, error: String(error) }))
+    }
+  }
+
+  async function loadEarlierCommits(): Promise<void> {
+    const repoPath = $appState.repoPath
+    if (!repoPath) return
+    const current = get(repoState)
+    if (current.isLoading || current.log.windowStartOffset === 0) return
+
+    repoState.update((s) => ({ ...s, isLoading: true }))
+    try {
+      const want = Math.min(PAGE_SIZE, current.log.windowStartOffset)
+      const skip = current.log.windowStartOffset - want
+      const fetched = await gitApi.getLog(repoPath, want, skip)
+      repoState.update((s) => {
+        if (fetched.length === 0) return { ...s, isLoading: false }
+        const combined = [...fetched, ...s.log.commits]
+        // Mirror of loadMoreCommits: drop from the end if we'd exceed the
+        // cap. Slide-backward never increases hasMore (we know the tail
+        // already had more if it did before).
+        const overflow = Math.max(0, combined.length - MAX_COMMITS)
+        return {
+          ...s,
+          log: {
+            commits: overflow > 0 ? combined.slice(0, combined.length - overflow) : combined,
+            hasMore: s.log.hasMore || overflow > 0,
+            loaded: true,
+            windowStartOffset: skip,
+          },
+          isLoading: false,
+        }
+      })
     } catch (error) {
       repoState.update((s) => ({ ...s, isLoading: false, error: String(error) }))
     }
@@ -910,8 +993,10 @@
           selectedSha={$repoState.activeCommit?.sha || null}
           unpushedShas={$repoState.status.unpushedShas}
           hasResolvedUpstream={$repoState.status.upstream !== ''}
+          windowStartOffset={$repoState.log.windowStartOffset}
           onSelect={loadCommitFiles}
           onLoadMore={loadMoreCommits}
+          onLoadEarlier={loadEarlierCommits}
           onAmendCommit={handleStartAmending}
           onUndoCommit={handleUndoCommit}
         />
@@ -953,6 +1038,7 @@
             syntaxHighlighting={$config?.syntax_highlighting ?? true}
             sideBySide={$config?.side_by_side_diff ?? false}
             tabSize={$config?.tab_size ?? 4}
+            wrapLongLines={$config?.wrap_long_lines ?? true}
           />
         {:else}
           <div class="diff-empty">

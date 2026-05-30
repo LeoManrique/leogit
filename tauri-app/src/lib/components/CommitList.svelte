@@ -14,8 +14,17 @@
      * prove a commit is pushed, so we allow undo unconditionally on the top.
      */
     hasResolvedUpstream?: boolean
+    /**
+     * Absolute index (0 = HEAD) of `commits[0]` in the full repo log. The
+     * parent slides this window forward/backward as the user scrolls past
+     * the cap. When it changes between renders, we compensate `scrollTop`
+     * by the same pixel amount so the visible row stays pinned across the
+     * slide (otherwise the user's cursor would jump up/down by N rows).
+     */
+    windowStartOffset?: number
     onSelect: (commit: CommitInfo) => void
     onLoadMore: () => void
+    onLoadEarlier?: () => void
     onAmendCommit?: (commit: CommitInfo) => void
     onUndoCommit?: (commit: CommitInfo) => void
   }
@@ -25,8 +34,10 @@
     selectedSha = null,
     unpushedShas = new Set<string>(),
     hasResolvedUpstream = false,
+    windowStartOffset = 0,
     onSelect,
     onLoadMore,
+    onLoadEarlier,
     onAmendCommit,
     onUndoCommit,
   }: Props = $props()
@@ -96,11 +107,18 @@
   let scrollContainer = $state<HTMLElement>()
 
   function handleScroll(e: Event) {
-    scrollTop = (e.target as HTMLElement).scrollTop
     const target = e.target as HTMLElement
+    scrollTop = target.scrollTop
     const scrollDist = target.scrollHeight - target.scrollTop - target.clientHeight
     if (scrollDist < LOAD_MORE_OFFSET) {
       onLoadMore()
+    }
+    // Slide-backward: trigger when the user scrolls toward the top AND we
+    // know there's earlier history out of the window (windowStartOffset>0).
+    // Without the offset guard we'd spam onLoadEarlier on every fresh log
+    // load where scrollTop is naturally 0.
+    if (target.scrollTop < LOAD_MORE_OFFSET && windowStartOffset > 0) {
+      onLoadEarlier?.()
     }
   }
 
@@ -190,6 +208,30 @@
   const { startIndex, endIndex } = $derived.by(() => getVisibleRange())
   const visibleCommits = $derived(commits.slice(startIndex, endIndex))
   const offsetPx = $derived(startIndex * ROW_HEIGHT)
+
+  /*
+    Compensate scrollTop when the parent slides the window. Forward slide
+    (drop from front, append to back) shifts every remaining commit `N` rows
+    upward in the new array — we subtract `N * ROW_HEIGHT` from scrollTop so
+    the user's visible row stays anchored. Slide-backward is symmetric.
+
+    Reading `windowStartOffset` inside the effect makes it the dependency;
+    we hold the previous value in $state so the diff is observable across
+    runs without infinite-looping.
+  */
+  let lastWindowStart = $state<number | null>(null)
+  $effect(() => {
+    const offset = windowStartOffset
+    if (lastWindowStart === null) {
+      lastWindowStart = offset
+      return
+    }
+    const delta = offset - lastWindowStart
+    if (delta === 0 || !scrollContainer) return
+    scrollContainer.scrollTop -= delta * ROW_HEIGHT
+    scrollTop = scrollContainer.scrollTop
+    lastWindowStart = offset
+  })
 </script>
 
 <div class="commit-list" bind:this={scrollContainer} onscroll={handleScroll}>

@@ -1,25 +1,12 @@
 <script lang="ts">
-  // `shiki/bundle/web` is a curated subset — it omits Go, Rust, C, and many
-  // other languages we actually want. `bundle/full` ships them all (lazy-loaded
-  // on demand by `createHighlighter`), which is what we need for a code-host
-  // app where the user can open any file type.
-  import { createHighlighter, type Highlighter } from 'shiki/bundle/full'
-  import type { FileDiff, DiffSelection, DiffLine } from '$lib/api/commands'
-
-  let highlighterPromise: Promise<Highlighter> | null = null
-  function getHighlighter(): Promise<Highlighter> {
-    if (!highlighterPromise) {
-      highlighterPromise = createHighlighter({
-        themes: ['github-dark', 'github-light'],
-        langs: [
-          'javascript', 'typescript', 'tsx', 'jsx', 'svelte', 'vue', 'html', 'css', 'scss',
-          'json', 'yaml', 'toml', 'markdown', 'bash', 'python', 'rust', 'go', 'java',
-          'c', 'cpp', 'csharp', 'php', 'ruby', 'sql', 'xml',
-        ],
-      })
-    }
-    return highlighterPromise
-  }
+  import type {
+    FileDiff,
+    DiffSelection,
+    DiffLine,
+    TokenLine,
+    TokenClassValue,
+  } from '$lib/api/commands'
+  import { highlightApi, TokenClass } from '$lib/api/commands'
 
   interface Props {
     fileDiff: FileDiff | null
@@ -28,6 +15,12 @@
     showSelection?: boolean
     syntaxHighlighting?: boolean
     sideBySide?: boolean
+    /** When true, long lines wrap to fit the viewer; the diff body is rendered
+     *  WITHOUT virtualization (variable row heights break the offset math).
+     *  When false, lines stay one-line tall and the body horizontal-scrolls,
+     *  keeping the cheap fixed-height virtualization that makes 10K-line
+     *  diffs cost the same as 30-line ones. */
+    wrapLongLines?: boolean
     tabSize?: number
     onLineToggle?: (lineIndex: number) => void
     onHunkToggle?: (hunkIndex: number) => void
@@ -39,172 +32,199 @@
     showSelection = false,
     syntaxHighlighting = true,
     sideBySide = false,
+    wrapLongLines = true,
     tabSize = 4,
     onLineToggle = () => {},
     onHunkToggle = () => {},
   }: Props = $props()
 
+  /*
+    `highlightedHtml[i]` is the pre-escaped HTML for the i-th flattened diff
+    line, ready to drop into `{@html}`. The renderer fills it in two phases:
+      Phase 1 (sync): plain escaped text + intra-line backplate only.
+      Phase 2 (debounced async): syntect-tokenized spans with `.syn-*`
+                                  classes laid over the same backplate.
+    Theme swap is pure CSS now (no `theme` reactive read), so toggling
+    light/dark doesn't re-fetch or re-render.
+  */
   let highlightedHtml = $state<string[]>([])
-  let theme = $state<'github-dark' | 'github-light'>('github-dark')
-
-  $effect(() => {
-    if (typeof document !== 'undefined') {
-      const t = document.documentElement.dataset.theme
-      theme = t === 'light' ? 'github-light' : 'github-dark'
-    }
-  })
-
-  function getLanguageFromPath(path: string): string {
-    if (!path) return 'plaintext'
-    const ext = path.split('.').pop()?.toLowerCase() || ''
-    const langMap: Record<string, string> = {
-      js: 'javascript', ts: 'typescript', tsx: 'tsx', jsx: 'jsx',
-      py: 'python', rs: 'rust', go: 'go', java: 'java',
-      cpp: 'cpp', c: 'c', cs: 'csharp', php: 'php',
-      rb: 'ruby', swift: 'swift', kt: 'kotlin',
-      sh: 'bash', bash: 'bash', zsh: 'bash',
-      html: 'html', htm: 'html', css: 'css', scss: 'scss',
-      json: 'json', xml: 'xml', yml: 'yaml', yaml: 'yaml',
-      toml: 'toml', sql: 'sql', md: 'markdown', svelte: 'svelte', vue: 'vue',
-    }
-    return langMap[ext] || 'plaintext'
-  }
 
   function escapeHtml(s: string): string {
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   }
 
-  /*
-    Intra-line overlay (Relay → Metrics inside an otherwise identical line):
-    the backend annotates each paired Delete/Add line with the character range
-    that actually changed. We layer that range on top of Shiki's tokens so the
-    syntax colour stays intact and only the changed substring gets the brighter
-    backplate. When Shiki isn't running (no language match, or
-    syntax_highlighting=off), the base HTML is plain escaped text and the same
-    layering treats it as one big token.
-  */
-  type LineToken = { text: string; color?: string }
-
-  function decodeHtmlEntities(s: string): string {
-    return s
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/&amp;/g, '&')
+  const TOKEN_CLASS_NAME: Record<TokenClassValue, string> = {
+    [TokenClass.Plain]: '',
+    [TokenClass.Keyword]: 'syn-keyword',
+    [TokenClass.String]: 'syn-string',
+    [TokenClass.Comment]: 'syn-comment',
+    [TokenClass.Function]: 'syn-function',
+    [TokenClass.Type]: 'syn-type',
+    [TokenClass.Variable]: '',
+    [TokenClass.Number]: 'syn-number',
+    [TokenClass.Constant]: 'syn-constant',
+    [TokenClass.Operator]: 'syn-operator',
+    [TokenClass.Punctuation]: '',
+    [TokenClass.Tag]: 'syn-tag',
+    [TokenClass.Attribute]: 'syn-attribute',
+    [TokenClass.Builtin]: 'syn-builtin',
+    [TokenClass.Decorator]: 'syn-decorator',
   }
 
-  function parseShikiLineHtml(html: string, fallback: string): LineToken[] {
-    // Shiki emits each line as `<span class="line">…token spans…</span>`.
-    const lineMatch = html.match(/^<span class="line">([\s\S]*)<\/span>$/)
-    const inner = lineMatch ? lineMatch[1] : html
-    const tokens: LineToken[] = []
-    const re = /<span(?:\s+style="([^"]*)")?>([^<]*)<\/span>/g
-    let m: RegExpExecArray | null
-    while ((m = re.exec(inner)) !== null) {
-      const styleAttr = m[1] ?? ''
-      const colorMatch = styleAttr.match(/color:\s*([^;]+)/)
-      const color = colorMatch ? colorMatch[1].trim() : undefined
-      const text = decodeHtmlEntities(m[2])
-      if (text.length > 0) tokens.push({ text, color })
-    }
-    // No token spans found — treat the whole HTML as plain escaped text and
-    // rebuild from the raw content so character indices line up.
-    if (tokens.length === 0) return [{ text: fallback }]
-    return tokens
+  function emitSpan(text: string, classes: string): string {
+    if (!text) return ''
+    if (!classes) return escapeHtml(text)
+    return `<span class="${classes}">${escapeHtml(text)}</span>`
   }
 
-  function emitSpan(text: string, color: string | undefined, cssClass: string | null): string {
-    const classAttr = cssClass ? ` class="${cssClass}"` : ''
-    const styleAttr = color ? ` style="color:${color}"` : ''
-    return `<span${classAttr}${styleAttr}>${escapeHtml(text)}</span>`
-  }
-
-  function overlayIntraLine(
-    html: string,
+  /**
+   * Walks `content`'s code points and emits class-tagged spans for each token.
+   * If `intra` is set, the overlapping slice gets the `intra-add`/`intra-remove`
+   * backplate class layered on top of the syntax class — preserving the
+   * Relay→Metrics highlight underneath the syntax colour.
+   *
+   * Indices are code points, matching the Rust tokenizer and `IntraLineRange`.
+   */
+  function renderTokenLine(
     content: string,
-    range: { start: number; length: number },
-    cssClass: string,
+    tokens: TokenLine | null,
+    intra: { start: number; length: number } | null,
+    intraClass: string | null,
   ): string {
-    const tokens = parseShikiLineHtml(html, content)
-    const intraStart = range.start
-    const intraEnd = range.start + range.length
+    const chars = [...content]
+    const intraStart = intra ? intra.start : -1
+    const intraEnd = intra ? intra.start + intra.length : -1
+
+    // No tokens (no language match, very long line, or Phase 1) — treat the
+    // whole line as one Plain "token" so the intra-line overlay still applies.
+    const tokenList: TokenLine =
+      tokens && tokens.length > 0
+        ? tokens
+        : [{ start: 0, end: chars.length, class: TokenClass.Plain }]
+
     let result = ''
-    let pos = 0
-    for (const tok of tokens) {
-      const chars = [...tok.text] // code points so multi-byte chars don't split
-      const tokStart = pos
-      const tokEnd = pos + chars.length
-      const overlapStart = Math.max(tokStart, intraStart)
-      const overlapEnd = Math.min(tokEnd, intraEnd)
-      if (overlapStart >= overlapEnd) {
-        result += emitSpan(tok.text, tok.color, null)
-      } else {
-        const pre = chars.slice(0, overlapStart - tokStart).join('')
-        const mid = chars.slice(overlapStart - tokStart, overlapEnd - tokStart).join('')
-        const post = chars.slice(overlapEnd - tokStart).join('')
-        if (pre) result += emitSpan(pre, tok.color, null)
-        if (mid) result += emitSpan(mid, tok.color, cssClass)
-        if (post) result += emitSpan(post, tok.color, null)
+    let cursor = 0
+    for (const tok of tokenList) {
+      // Defensive clamping: a malformed Rust response shouldn't ever leak
+      // past the line bounds, but pinning to `chars.length` keeps the
+      // renderer safe regardless.
+      const tokStart = Math.max(cursor, Math.min(tok.start, chars.length))
+      const tokEnd = Math.max(tokStart, Math.min(tok.end, chars.length))
+      if (tokStart > cursor) {
+        // Gap between tokens — render as plain (rarely happens; insurance).
+        result += renderSlice(chars, cursor, tokStart, '', intraStart, intraEnd, intraClass)
       }
-      pos = tokEnd
+      const baseClass = TOKEN_CLASS_NAME[tok.class] ?? ''
+      result += renderSlice(chars, tokStart, tokEnd, baseClass, intraStart, intraEnd, intraClass)
+      cursor = tokEnd
+    }
+    if (cursor < chars.length) {
+      result += renderSlice(chars, cursor, chars.length, '', intraStart, intraEnd, intraClass)
     }
     return result
   }
 
-  async function computeBaseHtml(allLines: DiffLine[], path: string): Promise<string[]> {
-    if (!syntaxHighlighting) return allLines.map((l) => escapeHtml(l.content))
-    const lang = getLanguageFromPath(path)
-    if (lang === 'plaintext') return allLines.map((l) => escapeHtml(l.content))
-    try {
-      const hl = await getHighlighter()
-      if (!hl.getLoadedLanguages().includes(lang as any)) {
-        return allLines.map((l) => escapeHtml(l.content))
+  /** Renders `chars[start..end]` split around the intra-line range so the
+   *  overlap gets `intraClass` layered on top of `baseClass`. */
+  function renderSlice(
+    chars: string[],
+    start: number,
+    end: number,
+    baseClass: string,
+    intraStart: number,
+    intraEnd: number,
+    intraClass: string | null,
+  ): string {
+    if (end <= start) return ''
+    if (!intraClass || intraStart < 0 || intraEnd <= intraStart) {
+      return emitSpan(chars.slice(start, end).join(''), baseClass)
+    }
+    const overlapStart = Math.max(start, intraStart)
+    const overlapEnd = Math.min(end, intraEnd)
+    if (overlapStart >= overlapEnd) {
+      return emitSpan(chars.slice(start, end).join(''), baseClass)
+    }
+    const merged = baseClass ? `${baseClass} ${intraClass}` : intraClass
+    let out = ''
+    if (overlapStart > start) {
+      out += emitSpan(chars.slice(start, overlapStart).join(''), baseClass)
+    }
+    out += emitSpan(chars.slice(overlapStart, overlapEnd).join(''), merged)
+    if (end > overlapEnd) {
+      out += emitSpan(chars.slice(overlapEnd, end).join(''), baseClass)
+    }
+    return out
+  }
+
+  function buildHtml(diff: FileDiff, tokensByLine: TokenLine[] | null): string[] {
+    const out: string[] = []
+    let i = 0
+    for (const h of diff.hunks) {
+      for (const line of h.lines) {
+        const tokens = tokensByLine ? tokensByLine[i] ?? null : null
+        const intra = line.intra_line_diff && line.intra_line_diff.length > 0
+          ? line.intra_line_diff
+          : null
+        const intraClass = !intra
+          ? null
+          : line.line_type === 'Add'
+            ? 'diff-intra-add'
+            : line.line_type === 'Delete'
+              ? 'diff-intra-remove'
+              : null
+        out.push(renderTokenLine(line.content, tokens, intra, intraClass))
+        i++
       }
-      const text = allLines.map((l) => l.content).join('\n')
-      const html = hl.codeToHtml(text, { lang: lang as any, theme })
-      const match = html.match(/<code[^>]*>([\s\S]*?)<\/code>/)
-      if (!match) return allLines.map((l) => escapeHtml(l.content))
-      const lines = match[1].split('\n')
-      while (lines.length < allLines.length) lines.push('')
-      return lines.slice(0, allLines.length)
-    } catch {
-      return allLines.map((l) => escapeHtml(l.content))
     }
+    return out
   }
 
-  function applyIntraLineOverlay(base: string[], lines: DiffLine[]): string[] {
-    return base.map((html, i) => {
-      const line = lines[i]
-      const intra = line?.intra_line_diff
-      if (!intra || intra.length === 0) return html
-      const cls =
-        line.line_type === 'Add' ? 'diff-intra-add'
-        : line.line_type === 'Delete' ? 'diff-intra-remove'
-        : null
-      if (!cls) return html
-      return overlayIntraLine(html, line.content, intra, cls)
-    })
-  }
+  /*
+    Two-phase render pipeline.
+      Phase 1 (sync): paint plain escaped text + intra-line backplate, same
+                      frame as the diff mount. ~5 ms for 10K lines.
+      Phase 2 (debounced async, 80 ms): invoke `highlight_diff` in Rust,
+                      then rebuild the HTML with syntax classes layered on.
+    `highlightReq` epoch counter guards against a slow tokenize stomping a
+    fresher one. Same shape as the prior Shiki pipeline minus the WebView
+    grammar cost.
+  */
+  const HIGHLIGHT_DEBOUNCE_MS = 80
+  let highlightReq = 0
+  // Re-run guard: the parent's `repoState` writable fires every 2 s on status
+  // poll, which propagates through the store chain and re-evaluates
+  // `fileDiff={$repoState.activeFileDiff}` in the template even when the
+  // reference is unchanged. Without this guard, every poll would re-tokenize
+  // and produce a visible "highlighting flash" on the static viewer.
+  let lastFileDiff: FileDiff | null = null
+  let lastSyntaxHighlighting: boolean | null = null
 
-  async function highlightAll() {
-    if (!fileDiff) {
-      highlightedHtml = []
-      return
+  async function runHighlight(diff: FileDiff, reqId: number) {
+    if (reqId !== highlightReq) return
+    try {
+      const tokens = await highlightApi.highlightDiff(diff)
+      if (reqId !== highlightReq) return
+      highlightedHtml = buildHtml(diff, tokens)
+    } catch (e) {
+      console.error('[DiffViewer] highlight_diff failed', e)
     }
-    const allLines: DiffLine[] = []
-    for (const h of fileDiff.hunks) allLines.push(...h.lines)
-    const base = await computeBaseHtml(allLines, fileDiff.new_path || fileDiff.old_path)
-    highlightedHtml = applyIntraLineOverlay(base, allLines)
   }
 
   $effect(() => {
-    // Track props that should trigger a re-highlight
-    void fileDiff
-    void syntaxHighlighting
-    void theme
-    if (fileDiff) highlightAll()
-    else highlightedHtml = []
+    const fd = fileDiff
+    const sh = syntaxHighlighting
+    if (fd === lastFileDiff && sh === lastSyntaxHighlighting) return
+    lastFileDiff = fd
+    lastSyntaxHighlighting = sh
+    const myReq = ++highlightReq
+    if (!fd) {
+      highlightedHtml = []
+      return
+    }
+    highlightedHtml = buildHtml(fd, null)
+    if (!sh) return
+    const t = setTimeout(() => runHighlight(fd, myReq), HIGHLIGHT_DEBOUNCE_MS)
+    return () => clearTimeout(t)
   })
 
   function isLineSelected(globalIdx: number): boolean {
@@ -315,6 +335,147 @@
   }
 
   let pairs = $derived(sideBySide ? buildPairs() : [])
+
+  /*
+    Virtualization. The diff body keeps only the visible window in the DOM
+    (plus an OVERSCAN buffer on either side). A 5K-line diff previously
+    mounted 30K+ spans; with virtualization, only ~30 .diff-line nodes are
+    live regardless of the diff's total size.
+
+    Uniform row heights make this cheap: `white-space: pre` on the line body
+    (no wrap) gives every diff line ROW_HEIGHT, every hunk header
+    HEADER_HEIGHT. Cumulative offsets are recomputed once per fileDiff
+    change and binary-searched to find the visible slice from scrollTop.
+  */
+  const ROW_HEIGHT = 18
+  const HEADER_HEIGHT = 24
+  const OVERSCAN = 8
+
+  let scrollContainer = $state<HTMLDivElement | null>(null)
+  let scrollTop = $state(0)
+  let containerHeight = $state(0)
+
+  type DiffRow = {
+    kind: 'header' | 'line'
+    hunkIdx: number
+    lineIdx: number
+    globalIdx: number
+    line: DiffLine
+    height: number
+    key: string
+  }
+
+  const rows = $derived.by((): DiffRow[] => {
+    if (!fileDiff || sideBySide || fileDiff.is_binary) return []
+    const out: DiffRow[] = []
+    let g = 0
+    for (let h = 0; h < fileDiff.hunks.length; h++) {
+      const hunk = fileDiff.hunks[h]
+      for (let i = 0; i < hunk.lines.length; i++) {
+        const line = hunk.lines[i]
+        const kind: 'header' | 'line' = line.line_type === 'Hunk' ? 'header' : 'line'
+        out.push({
+          kind,
+          hunkIdx: h,
+          lineIdx: i,
+          globalIdx: g,
+          line,
+          height: kind === 'header' ? HEADER_HEIGHT : ROW_HEIGHT,
+          key: kind === 'header' ? `H-${g}` : `L-${g}`,
+        })
+        g++
+      }
+    }
+    return out
+  })
+
+  const rowOffsets = $derived.by(() => {
+    const offsets = new Array<number>(rows.length + 1)
+    offsets[0] = 0
+    for (let i = 0; i < rows.length; i++) offsets[i + 1] = offsets[i] + rows[i].height
+    return offsets
+  })
+  const totalHeight = $derived(rowOffsets[rowOffsets.length - 1] ?? 0)
+
+  type SbsRow = { pair: Pair; pairIdx: number; height: number; key: string }
+
+  const sbsRows = $derived.by((): SbsRow[] => {
+    if (!sideBySide) return []
+    return pairs.map((p, i) => ({
+      pair: p,
+      pairIdx: i,
+      height: p.isHunkHeader ? HEADER_HEIGHT : ROW_HEIGHT,
+      key: `S-${i}`,
+    }))
+  })
+
+  const sbsOffsets = $derived.by(() => {
+    const offsets = new Array<number>(sbsRows.length + 1)
+    offsets[0] = 0
+    for (let i = 0; i < sbsRows.length; i++) offsets[i + 1] = offsets[i] + sbsRows[i].height
+    return offsets
+  })
+  const sbsTotal = $derived(sbsOffsets[sbsOffsets.length - 1] ?? 0)
+
+  function findIndexAt(offsets: number[], y: number, count: number): number {
+    if (count === 0) return 0
+    let lo = 0
+    let hi = count - 1
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (offsets[mid + 1] <= y) lo = mid + 1
+      else hi = mid
+    }
+    return lo
+  }
+
+  const startIndex = $derived(Math.max(0, findIndexAt(rowOffsets, scrollTop, rows.length) - OVERSCAN))
+  const endIndex = $derived(
+    Math.min(rows.length, findIndexAt(rowOffsets, scrollTop + containerHeight, rows.length) + OVERSCAN + 1),
+  )
+  const visibleRows = $derived(rows.slice(startIndex, endIndex))
+  const offsetPx = $derived(rowOffsets[startIndex] ?? 0)
+
+  const sbsStartIndex = $derived(
+    Math.max(0, findIndexAt(sbsOffsets, scrollTop, sbsRows.length) - OVERSCAN),
+  )
+  const sbsEndIndex = $derived(
+    Math.min(sbsRows.length, findIndexAt(sbsOffsets, scrollTop + containerHeight, sbsRows.length) + OVERSCAN + 1),
+  )
+  const visibleSbsRows = $derived(sbsRows.slice(sbsStartIndex, sbsEndIndex))
+  const sbsOffsetPx = $derived(sbsOffsets[sbsStartIndex] ?? 0)
+
+  // Keep containerHeight in sync with the scroll container's actual size (handles
+  // pane resizes and tab visibility toggles). Mirrors CommitList's pattern.
+  $effect(() => {
+    const el = scrollContainer
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      containerHeight = el.clientHeight
+    })
+    ro.observe(el)
+    containerHeight = el.clientHeight
+    return () => ro.disconnect()
+  })
+
+  // Reset scroll position when the user opens a different file or toggles the
+  // layout — leaving scrollTop pinned to the previous diff's offset would land
+  // them mid-file in the new diff (often past its end).
+  let lastDiffKey = $state<string | null>(null)
+  let lastSideBySide = $state<boolean | null>(null)
+  let lastWrap = $state<boolean | null>(null)
+  $effect(() => {
+    const key = fileDiff ? `${fileDiff.old_path}|${fileDiff.new_path}` : null
+    const sbs = sideBySide
+    const wrap = wrapLongLines
+    if (key !== lastDiffKey || sbs !== lastSideBySide || wrap !== lastWrap) {
+      lastDiffKey = key
+      lastSideBySide = sbs
+      lastWrap = wrap
+      scrollTop = 0
+      if (scrollContainer) scrollContainer.scrollTop = 0
+    }
+  })
 </script>
 
 {#if fileDiff}
@@ -332,81 +493,100 @@
         <p>This binary file has changed.</p>
       </div>
     {:else if sideBySide}
-      <div class="sbs-container">
-        {#each pairs as pair, pairIdx (pairIdx)}
-          {#if pair.isHunkHeader && pair.left}
-            <div class="hunk-header sbs-hunk-header">
-              <span class="hunk-text">{pair.left.text}</span>
-            </div>
-          {:else}
-            <div class="sbs-row">
-              <div class="sbs-side sbs-left {pair.left ? lineTypeClass(pair.left.line_type) : 'sbs-empty'}">
-                <span class="line-number">{pair.left?.old_line_no ?? ''}</span>
-                <span class="line-prefix">{pair.left ? linePrefix(pair.left) : ' '}</span>
-                <span class="line-content">
-                  {#if pair.left && pair.leftGlobalIdx !== null && highlightedHtml[pair.leftGlobalIdx]}
-                    {@html highlightedHtml[pair.leftGlobalIdx]}
-                  {:else if pair.left}
-                    {pair.left.content}
-                  {/if}
-                </span>
-              </div>
-              <div class="sbs-side sbs-right {pair.right ? lineTypeClass(pair.right.line_type) : 'sbs-empty'}">
-                <span class="line-number">{pair.right?.new_line_no ?? ''}</span>
-                <span class="line-prefix">{pair.right ? linePrefix(pair.right) : ' '}</span>
-                <span class="line-content">
-                  {#if pair.right && pair.rightGlobalIdx !== null && highlightedHtml[pair.rightGlobalIdx]}
-                    {@html highlightedHtml[pair.rightGlobalIdx]}
-                  {:else if pair.right}
-                    {pair.right.content}
-                  {/if}
-                </span>
-              </div>
-            </div>
-          {/if}
-        {/each}
+      {@const renderedSbsRows = wrapLongLines ? sbsRows : visibleSbsRows}
+      <div
+        class="diff-body"
+        class:wrap={wrapLongLines}
+        bind:this={scrollContainer}
+        onscroll={(e) => (scrollTop = (e.currentTarget as HTMLDivElement).scrollTop)}
+      >
+        <div class="diff-virtual" style:height={wrapLongLines ? 'auto' : `${sbsTotal}px`}>
+          <div class="diff-visible" style:transform={wrapLongLines ? 'none' : `translateY(${sbsOffsetPx}px)`}>
+            {#each renderedSbsRows as row (row.key)}
+              {#if row.pair.isHunkHeader && row.pair.left}
+                <div class="hunk-header sbs-hunk-header" style:height={wrapLongLines ? null : `${HEADER_HEIGHT}px`}>
+                  <span class="hunk-text">{row.pair.left.text}</span>
+                </div>
+              {:else}
+                <div class="sbs-row" style:height={wrapLongLines ? null : `${ROW_HEIGHT}px`}>
+                  <div class="sbs-side sbs-left {row.pair.left ? lineTypeClass(row.pair.left.line_type) : 'sbs-empty'}">
+                    <span class="line-number">{row.pair.left?.old_line_no ?? ''}</span>
+                    <span class="line-prefix">{row.pair.left ? linePrefix(row.pair.left) : ' '}</span>
+                    <span class="line-content">
+                      {#if row.pair.left && row.pair.leftGlobalIdx !== null && highlightedHtml[row.pair.leftGlobalIdx]}
+                        {@html highlightedHtml[row.pair.leftGlobalIdx]}
+                      {:else if row.pair.left}
+                        {row.pair.left.content}
+                      {/if}
+                    </span>
+                  </div>
+                  <div class="sbs-side sbs-right {row.pair.right ? lineTypeClass(row.pair.right.line_type) : 'sbs-empty'}">
+                    <span class="line-number">{row.pair.right?.new_line_no ?? ''}</span>
+                    <span class="line-prefix">{row.pair.right ? linePrefix(row.pair.right) : ' '}</span>
+                    <span class="line-content">
+                      {#if row.pair.right && row.pair.rightGlobalIdx !== null && highlightedHtml[row.pair.rightGlobalIdx]}
+                        {@html highlightedHtml[row.pair.rightGlobalIdx]}
+                      {:else if row.pair.right}
+                        {row.pair.right.content}
+                      {/if}
+                    </span>
+                  </div>
+                </div>
+              {/if}
+            {/each}
+          </div>
+        </div>
       </div>
     {:else}
-      <div class="hunks-container">
-        {#each fileDiff.hunks as hunk, hunkIndex}
-          {#each hunk.lines as line, lineIndex}
-            {@const globalIdx = flatIndex(hunkIndex, lineIndex)}
-            {#if line.line_type === 'Hunk'}
-              <div
-                class="hunk-header"
-                onclick={(e) => { if (e.shiftKey) onHunkToggle(hunkIndex) }}
-                onkeydown={(e) => { if ((e.key === 'Enter' || e.key === ' ') && e.shiftKey) { e.preventDefault(); onHunkToggle(hunkIndex) } }}
-                role="button"
-                tabindex="0"
-              >
-                <span class="hunk-text">{line.text}</span>
-                {#if showSelection}<span class="hunk-hint">Shift+click for hunk</span>{/if}
-              </div>
-            {:else}
-              <div class="diff-line {lineTypeClass(line.line_type)}">
-                <span class="line-number old">{line.old_line_no ?? ''}</span>
-                <span class="line-number new">{line.new_line_no ?? ''}</span>
-                <span class="line-prefix">{linePrefix(line)}</span>
-                <span class="line-content">
-                  {#if highlightedHtml[globalIdx]}
-                    {@html highlightedHtml[globalIdx]}
-                  {:else}
-                    {line.content}
+      {@const renderedRows = wrapLongLines ? rows : visibleRows}
+      <div
+        class="diff-body"
+        class:diff-body-scroll={!wrapLongLines}
+        class:wrap={wrapLongLines}
+        bind:this={scrollContainer}
+        onscroll={(e) => (scrollTop = (e.currentTarget as HTMLDivElement).scrollTop)}
+      >
+        <div class="diff-virtual" style:height={wrapLongLines ? 'auto' : `${totalHeight}px`}>
+          <div class="diff-visible" style:transform={wrapLongLines ? 'none' : `translateY(${offsetPx}px)`}>
+            {#each renderedRows as row (row.key)}
+              {#if row.kind === 'header'}
+                <div
+                  class="hunk-header"
+                  style:height={wrapLongLines ? null : `${HEADER_HEIGHT}px`}
+                  onclick={(e) => { if (e.shiftKey) onHunkToggle(row.hunkIdx) }}
+                  onkeydown={(e) => { if ((e.key === 'Enter' || e.key === ' ') && e.shiftKey) { e.preventDefault(); onHunkToggle(row.hunkIdx) } }}
+                  role="button"
+                  tabindex="0"
+                >
+                  <span class="hunk-text">{row.line.text}</span>
+                  {#if showSelection}<span class="hunk-hint">Shift+click for hunk</span>{/if}
+                </div>
+              {:else}
+                <div class="diff-line {lineTypeClass(row.line.line_type)}" style:height={wrapLongLines ? null : `${ROW_HEIGHT}px`}>
+                  <span class="line-number old">{row.line.old_line_no ?? ''}</span>
+                  <span class="line-number new">{row.line.new_line_no ?? ''}</span>
+                  <span class="line-prefix">{linePrefix(row.line)}</span>
+                  <span class="line-content">
+                    {#if highlightedHtml[row.globalIdx]}
+                      {@html highlightedHtml[row.globalIdx]}
+                    {:else}
+                      {row.line.content}
+                    {/if}
+                  </span>
+                  {#if showSelection && (row.line.line_type === 'Add' || row.line.line_type === 'Delete')}
+                    <button
+                      class="selection-dot"
+                      class:selected={isLineSelected(row.globalIdx)}
+                      onclick={() => onLineToggle(row.globalIdx)}
+                      title="Toggle line selection"
+                      aria-label="Toggle line selection"
+                    ></button>
                   {/if}
-                </span>
-                {#if showSelection && (line.line_type === 'Add' || line.line_type === 'Delete')}
-                  <button
-                    class="selection-dot"
-                    class:selected={isLineSelected(globalIdx)}
-                    onclick={() => onLineToggle(globalIdx)}
-                    title="Toggle line selection"
-                    aria-label="Toggle line selection"
-                  ></button>
-                {/if}
-              </div>
-            {/if}
-          {/each}
-        {/each}
+                </div>
+              {/if}
+            {/each}
+          </div>
+        </div>
       </div>
     {/if}
   </div>
@@ -472,18 +652,52 @@
   .arrow { color: var(--text-muted); }
   .new-path { color: var(--text-primary); }
 
-  .hunks-container,
-  .sbs-container {
+  /*
+    .diff-body is the scroll container for the virtualized list. The unified
+    layout adds .diff-body-scroll to allow horizontal scroll for long lines
+    (forced no-wrap below); side-by-side keeps overflow-x: hidden so the two
+    columns stay aligned and clip long lines instead of scrolling.
+
+    .diff-virtual sets the full content height so the scrollbar is sized
+    correctly even though only the visible window is mounted. .diff-visible
+    is translated to the offset of the first visible row.
+  */
+  .diff-body {
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
+    position: relative;
+  }
+
+  .diff-body-scroll {
+    overflow-x: auto;
+  }
+
+  .diff-virtual {
+    position: relative;
+    width: 100%;
+  }
+
+  .diff-visible {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    will-change: transform;
+  }
+
+  .diff-body-scroll .diff-visible :global(.diff-line),
+  .diff-body-scroll .diff-visible :global(.hunk-header) {
+    width: max-content;
+    min-width: 100%;
   }
 
   .hunk-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 4px 12px;
+    box-sizing: border-box;
+    padding: 0 12px;
     background: var(--bg-secondary);
     color: var(--text-muted);
     border-top: 1px solid var(--border-inactive);
@@ -503,9 +717,8 @@
 
   .diff-line {
     display: flex;
-    align-items: flex-start;
-    min-height: 18px;
-    border-bottom: 1px solid transparent;
+    align-items: center;
+    box-sizing: border-box;
   }
 
   .diff-line.diff-add,
@@ -556,24 +769,7 @@
     flex: 1;
     min-width: 0;
     padding: 0 8px;
-    white-space: pre-wrap;
-    word-break: break-word;
-    overflow-wrap: anywhere;
-  }
-
-  .line-content :global(.shiki) {
-    background: transparent !important;
-    color: inherit;
-    margin: 0;
-    padding: 0;
-  }
-
-  .line-content :global(pre),
-  .line-content :global(code) {
-    margin: 0;
-    padding: 0;
-    background: none;
-    font-family: inherit;
+    white-space: pre;
   }
 
   /*
@@ -622,12 +818,12 @@
   .sbs-row {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    min-height: 18px;
+    box-sizing: border-box;
   }
 
   .sbs-side {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     overflow: hidden;
     border-right: 1px solid var(--border-inactive);
   }
@@ -638,5 +834,42 @@
 
   .sbs-side.sbs-empty {
     background: var(--surface-hover);
+  }
+
+  /*
+    Wrap mode. `.diff-body.wrap` flips `.line-content` from `pre` to `pre-wrap`
+    and forces the gutter (line numbers + prefix) to stay top-aligned with the
+    first wrapped line instead of centring against the now-taller row. With
+    wrap on, virtualization is disabled (variable row heights break the
+    fixed-height offset math) and the .diff-virtual / .diff-visible wrappers
+    are inert (height: auto, transform: none from the template).
+
+    `overflow-wrap: anywhere` breaks even unbroken token runs (long URLs,
+    minified blobs), which matches the user expectation of "no horizontal
+    scroll". `word-break: break-word` would leave English-ish strings intact
+    but allow breaks at any character — `anywhere` is more aggressive and
+    safer for code.
+  */
+  .diff-body.wrap :global(.line-content) {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .diff-body.wrap :global(.diff-line),
+  .diff-body.wrap :global(.sbs-side) {
+    align-items: flex-start;
+  }
+  /* Drop the min-width rule that forces unified rows to be at least as wide
+     as the scroll container — with wrap on, we want each row to live within
+     the container's intrinsic width. */
+  .diff-body.wrap :global(.diff-line),
+  .diff-body.wrap :global(.hunk-header) {
+    width: auto;
+    min-width: 0;
+  }
+  /* Side-by-side: the columns clip with overflow: hidden in non-wrap mode.
+     With wrap on, let them grow vertically so the right side's wrapped
+     text is visible. */
+  .diff-body.wrap :global(.sbs-side) {
+    overflow: visible;
   }
 </style>

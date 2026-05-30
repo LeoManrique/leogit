@@ -27,6 +27,12 @@ export interface RepoState {
     commits: CommitInfo[]
     hasMore: boolean
     loaded: boolean
+    /**
+     * Absolute commit index (0 = HEAD) of `commits[0]`. The on-screen array
+     * is capped at MAX_COMMITS and slides forward / backward as the user
+     * scrolls, so the absolute position is tracked separately from the array.
+     */
+    windowStartOffset: number
   }
   branches: BranchInfo[]
   selectedFiles: Set<string>
@@ -78,6 +84,7 @@ const defaultState: RepoState = {
     commits: [],
     hasMore: true,
     loaded: false,
+    windowStartOffset: 0,
   },
   branches: [],
   selectedFiles: new Set(),
