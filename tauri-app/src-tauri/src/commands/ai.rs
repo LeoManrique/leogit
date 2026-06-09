@@ -65,10 +65,9 @@ pub async fn check_provider_available(
 ) -> Result<bool, String> {
     match provider.as_str() {
         "claude" => {
-            let out = tokio::process::Command::new("claude")
-                .arg("--version")
-                .output()
-                .await;
+            let mut cmd = tokio::process::Command::new("claude");
+            cmd.arg("--version");
+            let out = super::process::hide_console_async(&mut cmd).output().await;
             match out {
                 Ok(o) => Ok(o.status.success()),
                 Err(_) => Ok(false),
@@ -119,6 +118,7 @@ async fn generate_claude(diff: &str, config: &AiProviderConfig) -> Result<Commit
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    super::process::hide_console_async(&mut cmd);
 
     let mut child = cmd
         .spawn()

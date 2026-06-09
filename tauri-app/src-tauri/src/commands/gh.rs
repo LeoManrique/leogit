@@ -6,7 +6,9 @@ use std::process::Command;
 // from the UI — re-add them if/when the PR overview ships again.
 #[tauri::command]
 pub fn check_auth() -> bool {
-    let output = Command::new("gh").arg("auth").arg("status").output();
+    let mut cmd = Command::new("gh");
+    cmd.arg("auth").arg("status");
+    let output = super::process::hide_console(&mut cmd).output();
 
     match output {
         Ok(out) => out.status.success(),

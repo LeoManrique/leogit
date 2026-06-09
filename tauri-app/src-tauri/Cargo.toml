@@ -29,3 +29,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "leogit"
 path = "src/main.rs"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }

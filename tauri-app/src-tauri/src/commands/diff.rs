@@ -673,6 +673,7 @@ fn apply_patch(
 ) -> Result<(), String> {
     let mut cmd = Command::new("git");
     cmd.current_dir(repo_path);
+    super::process::hide_console(&mut cmd);
     cmd.arg("apply");
 
     if cached {

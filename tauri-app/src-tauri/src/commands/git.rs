@@ -96,6 +96,7 @@ fn git_cmd(repo_path: &str, args: &[&str]) -> Command {
         .env("TERM", "dumb")
         .env("GIT_TERMINAL_PROMPT", "0")
         .args(args);
+    super::process::hide_console(&mut cmd);
     cmd
 }
 

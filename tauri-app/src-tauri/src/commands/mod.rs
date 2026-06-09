@@ -5,6 +5,7 @@ pub mod gh;
 pub mod ai;
 pub mod terminal;
 pub mod highlight;
+pub mod process;
 
 pub use config::*;
 pub use git::*;
