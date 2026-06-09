@@ -263,21 +263,23 @@
                   </span>
                 {/if}
                 {#if isUnpushed}
-                  <svg
-                    class="unpushed-icon"
-                    width="9"
-                    height="9"
-                    viewBox="0 0 16 16"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.8"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    aria-label="Not yet pushed"
-                  >
-                    <polyline points="4,7 8,3 12,7" />
-                    <line x1="8" y1="3" x2="8" y2="13" />
-                  </svg>
+                  <span class="unpushed-badge" title="Not yet pushed" aria-label="Not yet pushed">
+                    <svg
+                      class="unpushed-icon"
+                      width="10"
+                      height="10"
+                      viewBox="0 0 16 16"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      aria-hidden="true"
+                    >
+                      <polyline points="4,7 8,3 12,7" />
+                      <line x1="8" y1="3" x2="8" y2="13" />
+                    </svg>
+                  </span>
                 {/if}
               </div>
             {/if}
@@ -415,8 +417,27 @@
     font-size: 10px;
   }
 
+  /*
+    Unpushed-commit badge. Shares the tag badge's pill family — same 16px
+    height, 5px radius, neutral --badge-bg/--badge-fg — so the two indicators
+    read as one consistent set (mirrors the inspo app, where the unpushed
+    indicator reuses the tag badge background). The up-arrow inside marks the
+    commit as "not yet pushed", far more visible than the old bare faint icon.
+  */
+  .unpushed-badge {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 16px;
+    min-width: 16px;
+    padding: 0 4px;
+    border-radius: 5px;
+    background: var(--badge-bg);
+    color: var(--badge-fg);
+  }
+
   .unpushed-icon {
-    color: var(--text-muted);
     flex-shrink: 0;
   }
 
