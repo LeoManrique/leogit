@@ -11,6 +11,7 @@ What's shipped lives in [DESIGN.md](DESIGN.md). This file tracks **what's next**
 - [x] **Push / Pull buttons render ahead / behind counts.** "Push (3)" / "Pull (1)" with tabular numerics.
 - [x] **Reusable `ContextMenu` primitive.** Used by the commit right-click menu and the push split-dropdown; unlocks future file-row / branch-row / commit-row context menus.
 - [x] macOS PATH fix at startup so `claude` / `gh` / brew binaries resolve when launched from Finder.
+- [x] **Windows: kill console-window flicker + PowerShell terminal default.** Every `git` / `gh` / `claude` spawn sets `CREATE_NO_WINDOW` (via `commands/process.rs`), so the GUI-subsystem release build never flashes a `cmd` box during the 2s status poll or on actions. The embedded terminal now ignores the Unix-only `$SHELL` on Windows (which could point at a non-resolvable POSIX path when launched from Git Bash) and prefers `pwsh.exe` → `powershell.exe` → `cmd.exe`, mirroring Windows Terminal's default shell.
 
 ## What's next
 

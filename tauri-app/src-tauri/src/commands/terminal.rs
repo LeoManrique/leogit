@@ -20,6 +20,39 @@ lazy_static! {
     static ref NEXT_PID: AtomicU32 = AtomicU32::new(1);
 }
 
+/// Find an executable by name on `PATH`, returning its full path if present.
+/// Used to probe for a shell before spawning it, so we never hand the PTY a
+/// name that doesn't resolve.
+#[cfg(windows)]
+fn which_on_path(exe: &str) -> Option<String> {
+    let paths = std::env::var_os("PATH")?;
+    std::env::split_paths(&paths)
+        .map(|dir| dir.join(exe))
+        .find(|candidate| candidate.is_file())
+        .map(|candidate| candidate.to_string_lossy().into_owned())
+}
+
+/// Pick the shell to spawn for the embedded terminal.
+///
+/// `$SHELL` is a Unix convention. On Windows it can hold a POSIX path (e.g.
+/// `/usr/bin/bash` when leogit is launched from Git Bash/MSYS) that Win32 can't
+/// resolve, which would break terminal launch — so we ignore it there and pick
+/// the best native shell instead: PowerShell 7, then Windows PowerShell, then
+/// cmd.exe (via COMSPEC). This mirrors what Windows Terminal opens by default.
+/// On Unix we honour `$SHELL`, falling back to zsh.
+#[cfg(windows)]
+fn default_shell() -> String {
+    which_on_path("pwsh.exe")
+        .or_else(|| which_on_path("powershell.exe"))
+        .or_else(|| std::env::var("COMSPEC").ok())
+        .unwrap_or_else(|| "cmd.exe".into())
+}
+
+#[cfg(not(windows))]
+fn default_shell() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into())
+}
+
 /// Start a new PTY shell with cwd=repo_path.
 /// Returns a synthetic session id used by subsequent commands.
 #[tauri::command]
@@ -34,13 +67,7 @@ pub fn start_terminal(app: AppHandle, repo_path: String) -> Result<u32, String> 
         })
         .map_err(|e| e.to_string())?;
 
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| {
-        if cfg!(windows) {
-            "cmd.exe".into()
-        } else {
-            "/bin/zsh".into()
-        }
-    });
+    let shell = default_shell();
 
     let mut cmd = CommandBuilder::new(&shell);
     cmd.cwd(&repo_path);

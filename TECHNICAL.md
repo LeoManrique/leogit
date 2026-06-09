@@ -47,7 +47,9 @@ leogit/
 │   │   │       ├── diff.rs          # parse_diff + build/apply patches
 │   │   │       ├── gh.rs            # GitHub CLI bridge (PRs, checks)
 │   │   │       ├── ai.rs            # Claude CLI + Ollama HTTP
-│   │   │       └── terminal.rs      # portable-pty session pool
+│   │   │       ├── terminal.rs      # portable-pty session pool
+│   │   │       ├── highlight.rs     # syntect diff tokenizer
+│   │   │       └── process.rs       # CREATE_NO_WINDOW spawn helpers (Windows)
 │   │   ├── capabilities/default.json
 │   │   ├── tauri.conf.json
 │   │   └── Cargo.toml
@@ -70,6 +72,10 @@ All work flows through Tauri's IPC. There are no HTTP servers, no sidecars, and 
 ### Startup PATH fix
 
 `main.rs::fix_path_env` runs once before the Tauri builder. On macOS/Linux it spawns `$SHELL -ilc 'echo -n "$PATH"'` and replaces the process PATH with the result. Without this, apps launched from Finder or a `.desktop` entry inherit a minimal PATH (e.g. `/usr/bin:/bin:/usr/sbin:/sbin`) and miss user-installed tools like `claude`, `gh`, or Homebrew binaries. No-op on Windows.
+
+### Windows console suppression
+
+Release builds set `windows_subsystem = "windows"` (in `main.rs`), so the app runs with no attached console. On Windows a console-less process that spawns a console subprocess gets a **new console window allocated and briefly flashed** for each call — and because the UI polls `git status` every 2s, that would mean a `cmd` box flickering on screen continuously, plus one on every fetch/commit/diff. Every subprocess spawn therefore routes through [commands/process.rs](tauri-app/src-tauri/src/commands/process.rs): `hide_console` (std `Command`) and `hide_console_async` (tokio `Command`) set the `CREATE_NO_WINDOW` creation flag; both are no-ops off Windows. Call sites: `git_cmd` (git.rs), `apply_patch` (diff.rs), `check_auth` (gh.rs), and both `claude` spawns (ai.rs). The PTY shell in terminal.rs is intentionally exempt — ConPTY is a pseudo-terminal, not a console subprocess, so it never flashes a window.
 
 ## IPC contract
 
@@ -203,7 +209,7 @@ Both providers run with a 120 s timeout (`DEFAULT_TIMEOUT_SECS`). Diff caps: 20 
 
 `start_terminal`:
 1. Opens a PTY at 24×80 via `portable-pty`.
-2. Picks `$SHELL`, falling back to `/bin/zsh` (Unix) or `cmd.exe` (Windows).
+2. Picks the shell via `default_shell()`: on Unix `$SHELL` (`/bin/zsh` fallback); on Windows `$SHELL` is ignored (it may hold a non-resolvable POSIX path when launched from Git Bash) and the first of `pwsh.exe` → `powershell.exe` → `cmd.exe` found on `PATH` is used, mirroring Windows Terminal's default shell.
 3. Forwards the parent env plus `TERM=xterm-256color`.
 4. Spawns the shell with cwd = repo path.
 5. Stores the session, then spawns a reader thread that loops on `read()` and emits `terminal-output-<pid>` events with the UTF-8 lossy payload. On EOF the session is removed and `terminal-closed-<pid>` is emitted.
