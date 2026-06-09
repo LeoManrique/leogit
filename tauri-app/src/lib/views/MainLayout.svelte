@@ -481,6 +481,7 @@
       ...s,
       activeCommit: commit,
       activeCommitFiles: [],
+      activeCommitStats: null,
       activeCommitFile: null,
       activeCommitFileDiff: null,
     }))
@@ -494,6 +495,17 @@
         loadCommitFileDiff(files[0])
       }
     } catch {}
+    // Line totals are non-critical chrome — fetch them separately so a stats
+    // failure never blocks the file list or diff from rendering.
+    gitApi
+      .getCommitStats(repoPath, commit.sha)
+      .then((stats) => {
+        // Guard against a stale response if the user clicked another commit.
+        if (get(repoState).activeCommit?.sha === commit.sha) {
+          repoState.update((s) => ({ ...s, activeCommitStats: stats }))
+        }
+      })
+      .catch(() => {})
   }
 
   async function loadCommitFileDiff(file: FileEntry | null): Promise<void> {
@@ -1054,6 +1066,7 @@
         <CommitDetail
           commit={$repoState.activeCommit}
           fileCount={$repoState.activeCommitFiles.length}
+          stats={$repoState.activeCommitStats}
         />
         <div class="commit-body" style="--commit-files-width: {commitFilesWidth}px;">
           <div class="commit-files-pane">

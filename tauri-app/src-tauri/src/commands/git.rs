@@ -23,6 +23,15 @@ pub struct FileEntry {
     pub display_dir: String,
 }
 
+/// Aggregate line-change totals for a single commit, summed across every file
+/// it touches. Binary files (which `git --numstat` reports as `-`/`-`) are
+/// skipped, so the totals reflect only text lines.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitStats {
+    pub additions: u32,
+    pub deletions: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommitInfo {
     pub sha: String,
@@ -793,15 +802,21 @@ fn civil_from_unix(unix: i64) -> (i64, u32, u32, u32, u32, u32) {
 
 #[tauri::command]
 pub fn get_commit_files(repo_path: String, sha: String) -> Result<Vec<FileEntry>, String> {
+    // `git log --first-parent` (not `diff-tree`) so merge commits diff against
+    // their first parent and show their files — `diff-tree` emits nothing for a
+    // merge unless given a combined-diff flag. This mirrors `get_commit_diff`,
+    // keeping the file list, the per-file diff, and the stats badge in agreement.
     let output = run_git(
         &repo_path,
         &[
-            "diff-tree",
-            "--no-commit-id",
-            "-r",
+            "log",
+            &sha,
+            "-1",
+            "--first-parent",
+            "--format=",
             "--name-status",
             "--root",
-            &sha,
+            "--no-color",
         ],
     )?;
 
@@ -856,6 +871,49 @@ pub fn get_commit_files(repo_path: String, sha: String) -> Result<Vec<FileEntry>
     sort_file_entries(&mut files);
 
     Ok(files)
+}
+
+/// Sums the added/removed line counts across every file in a commit so the
+/// commit detail header can show a single `+N / -M` badge. Uses `--numstat`,
+/// whose `<added>\t<deleted>\t<path>` lines parse cleanly; binary files report
+/// `-` in both columns and are skipped. Like `get_commit_files`, it goes through
+/// `git log --first-parent` so merge commits report their first-parent totals
+/// rather than the empty output `diff-tree` gives for merges.
+#[tauri::command]
+pub fn get_commit_stats(repo_path: String, sha: String) -> Result<CommitStats, String> {
+    let output = run_git(
+        &repo_path,
+        &[
+            "log",
+            &sha,
+            "-1",
+            "--first-parent",
+            "--format=",
+            "--numstat",
+            "--root",
+            "--no-color",
+        ],
+    )?;
+
+    let mut additions: u32 = 0;
+    let mut deletions: u32 = 0;
+    for line in output.lines() {
+        let mut cols = line.split('\t');
+        let added = cols.next();
+        let deleted = cols.next();
+        if let (Some(a), Some(d)) = (added, deleted) {
+            // Binary files show `-`; `parse` fails and we skip them.
+            if let (Ok(a), Ok(d)) = (a.parse::<u32>(), d.parse::<u32>()) {
+                additions = additions.saturating_add(a);
+                deletions = deletions.saturating_add(d);
+            }
+        }
+    }
+
+    Ok(CommitStats {
+        additions,
+        deletions,
+    })
 }
 
 /// Shared ordering for any file-list panel (working-tree status, commit

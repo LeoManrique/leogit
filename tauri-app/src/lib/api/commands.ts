@@ -35,6 +35,12 @@ export interface CommitInfo {
   refs: string[]
 }
 
+/** Aggregate line-change totals for a commit, summed across all its files. */
+export interface CommitStats {
+  additions: number
+  deletions: number
+}
+
 export interface BranchInfo {
   name: string
   is_remote: boolean
@@ -145,6 +151,8 @@ export const gitApi = {
     invoke<CommitInfo[]>('get_log', { repoPath, opts: { max_count: maxCount, skip } }),
   getCommitFiles: (repoPath: string, sha: string) =>
     invoke<FileEntry[]>('get_commit_files', { repoPath, sha }),
+  getCommitStats: (repoPath: string, sha: string) =>
+    invoke<CommitStats>('get_commit_stats', { repoPath, sha }),
   listBranches: (repoPath: string) => invoke<BranchInfo[]>('list_branches', { repoPath }),
   createBranch: (repoPath: string, name: string, startPoint: string) =>
     invoke<void>('create_branch', { repoPath, name, startPoint }),

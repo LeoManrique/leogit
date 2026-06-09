@@ -2,6 +2,7 @@ import { writable, derived } from 'svelte/store'
 import type {
   FileEntry,
   CommitInfo,
+  CommitStats,
   BranchInfo,
   DiffSelection,
   FileDiff,
@@ -51,6 +52,8 @@ export interface RepoState {
   activeTab: ActiveTab
   activeCommit: CommitInfo | null
   activeCommitFiles: FileEntry[]
+  /** Aggregate +adds/-dels for the active commit; null until fetched. */
+  activeCommitStats: CommitStats | null
   activeCommitFile: FileEntry | null
   activeCommitFileDiff: FileDiff | null
   isCommitDiffLoading: boolean
@@ -97,6 +100,7 @@ const defaultState: RepoState = {
   activeTab: 'changes',
   activeCommit: null,
   activeCommitFiles: [],
+  activeCommitStats: null,
   activeCommitFile: null,
   activeCommitFileDiff: null,
   isCommitDiffLoading: false,

@@ -1,12 +1,13 @@
 <script lang="ts">
-  import type { CommitInfo } from '$lib/api/commands'
+  import type { CommitInfo, CommitStats } from '$lib/api/commands'
 
   interface Props {
     commit: CommitInfo | null
     fileCount?: number
+    stats?: CommitStats | null
   }
 
-  let { commit = null, fileCount = 0 }: Props = $props()
+  let { commit = null, fileCount = 0, stats = null }: Props = $props()
 
   let copied = $state(false)
 
@@ -27,7 +28,15 @@
 
 {#if commit}
   <div class="commit-card">
-    <h2 class="title">{commit.summary}</h2>
+    <div class="title-row">
+      <h2 class="title">{commit.summary}</h2>
+      {#if stats && (stats.additions > 0 || stats.deletions > 0)}
+        <span class="commit-counts">
+          {#if stats.additions > 0}<span class="add-count">+{stats.additions}</span>{/if}
+          {#if stats.deletions > 0}<span class="del-count">-{stats.deletions}</span>{/if}
+        </span>
+      {/if}
+    </div>
 
     {#if commit.body}
       <pre class="body">{commit.body}</pre>
@@ -79,12 +88,36 @@
     background: var(--bg-primary);
   }
 
+  .title-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
   .title {
     font-size: 15px;
     font-weight: 600;
     color: var(--text-primary);
     margin: 0;
+    min-width: 0;
   }
+
+  /* Commit-level +adds/-dels, pinned to the top-right at the title's baseline. */
+  .commit-counts {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.4;
+  }
+
+  .add-count { color: var(--diff-add-fg); }
+  .del-count { color: var(--diff-remove-fg); }
 
   .body {
     margin: 0;

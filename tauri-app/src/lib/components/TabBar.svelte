@@ -32,7 +32,9 @@
 <style>
   .tab-bar {
     display: flex;
-    height: 34px;
+    /* Match the Header's height so the Changes/History tabs sit on the same
+       horizontal baseline as the repo chips and Pull/Push buttons next door. */
+    height: 40px;
     border-bottom: 1px solid var(--border-inactive);
     background: var(--bg-secondary);
     gap: 0;

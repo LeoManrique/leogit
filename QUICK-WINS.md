@@ -46,8 +46,6 @@ These are the cheapest wins: the backend/handlers/UI already exist and only need
 
 ## Diff viewer
 
-- [ ] **Per-file +N/-M line counters in the diff header** — instant sense of how big a file change is without scrolling.
-  - _Change:_ Add a `$derived` that walks `fileDiff.hunks` counting `line_type==='Add'` / `'Delete'` (skip when `is_binary`). Render `<span class="add-count">+{adds}</span><span class="del-count">-{dels}</span>` in .file-header, colored with `--diff-add-fg`/`--diff-remove-fg`, right-aligned via `margin-left:auto`. Hide when both are 0.  ·  _Files:_ `src/lib/components/DiffViewer.svelte`  ·  _Effort:_ small
 - [ ] **Brighten the dim .selection-dot border** — the per-line include affordance is legible the moment per-line include is enabled.
   - _Change:_ In .selection-dot, swap `border-color` from `var(--border-strong)` to `var(--border-active)` (or `--text-muted`) and bump to a 1.5px ring; keep the .selected fill. Pure CSS, one rule.  ·  _Files:_ `src/lib/components/DiffViewer.svelte`  ·  _Effort:_ small
 - [ ] **Large-diff guard with "Show diff anyway" opt-in** — opening a giant generated/lockfile diff no longer janks the UI; user opts in.

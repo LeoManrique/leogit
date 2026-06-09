@@ -369,10 +369,12 @@
   }
 
   .chip-button {
-    display: flex;
+    display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 3px 10px;
+    height: 28px;
+    padding: 0 10px;
+    box-sizing: border-box;
     background: var(--bg-elevated);
     color: var(--text-primary);
     border: 1px solid var(--border-strong);
@@ -380,7 +382,7 @@
     cursor: pointer;
     font-size: 13px;
     font-weight: 500;
-    transition: background 120ms ease;
+    transition: background 120ms ease, border-color 120ms ease;
     min-width: 0;
   }
 
@@ -443,19 +445,24 @@
 
   .right {
     display: flex;
-    gap: 4px;
+    gap: 6px;
     align-items: center;
   }
 
   button {
-    padding: 3px 10px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 28px;
+    box-sizing: border-box;
+    padding: 0 10px;
     font-size: 12px;
     cursor: pointer;
     background: transparent;
     color: var(--text-secondary);
     border: 1px solid transparent;
     border-radius: 6px;
-    transition: background 120ms ease, color 120ms ease;
+    transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
     font-family: inherit;
   }
 
@@ -469,10 +476,24 @@
     cursor: not-allowed;
   }
 
+  /*
+    Pull / Push share the chips' elevated treatment so the whole bar reads as
+    one consistent button family rather than a mix of solid chips and ghost
+    actions. The border stays static on hover (only the fill brightens) so the
+    split-button seam never shifts colour mid-row.
+  */
   .count-button {
     display: inline-flex;
     align-items: center;
     gap: 6px;
+    background: var(--bg-elevated);
+    border-color: var(--border-strong);
+    color: var(--text-primary);
+  }
+
+  .count-button:hover:not(:disabled) {
+    background: var(--surface-hover);
+    color: var(--text-primary);
   }
 
   .icon {
@@ -487,10 +508,9 @@
   }
 
   .icon-button {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    padding: 4px 6px;
+    width: 28px;
+    padding: 0;
+    color: var(--text-muted);
   }
 
   .spinning {
@@ -504,36 +524,42 @@
   }
 
   .count-badge {
-    font-size: 11px;
-    color: var(--text-muted);
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    background: var(--bg-secondary);
+    border-radius: 999px;
+    padding: 1px 6px;
     font-variant-numeric: tabular-nums;
-    min-width: 0;
   }
 
   .split-button {
     display: inline-flex;
     align-items: stretch;
+    height: 28px;
     gap: 0;
   }
 
   .split-main {
     border-top-right-radius: 0;
     border-bottom-right-radius: 0;
+    border-right: none;
     padding-right: 8px;
   }
 
   .split-chevron {
-    padding: 3px 6px;
+    width: 24px;
+    padding: 0;
+    background: var(--bg-elevated);
+    border-color: var(--border-strong);
     border-top-left-radius: 0;
     border-bottom-left-radius: 0;
     border-left: 1px solid var(--border-inactive);
     color: var(--text-muted);
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
   }
 
   .split-chevron:hover:not(:disabled) {
+    background: var(--surface-hover);
     color: var(--text-primary);
   }
 </style>

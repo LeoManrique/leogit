@@ -336,6 +336,22 @@
 
   let pairs = $derived(sideBySide ? buildPairs() : [])
 
+  // Per-file added/deleted line totals for the header badge. Binary files have
+  // no line-by-line diff, so the counters are suppressed (left at 0).
+  const lineCounts = $derived.by(() => {
+    let adds = 0
+    let dels = 0
+    if (fileDiff && !fileDiff.is_binary) {
+      for (const h of fileDiff.hunks) {
+        for (const line of h.lines) {
+          if (line.line_type === 'Add') adds++
+          else if (line.line_type === 'Delete') dels++
+        }
+      }
+    }
+    return { adds, dels }
+  })
+
   /*
     Virtualization. The diff body keeps only the visible window in the DOM
     (plus an OVERSCAN buffer on either side). A 5K-line diff previously
@@ -486,6 +502,12 @@
         <span class="arrow">→</span>
       {/if}
       <span class="new-path">{fileDiff.new_path || fileDiff.old_path}</span>
+      {#if lineCounts.adds > 0 || lineCounts.dels > 0}
+        <span class="line-counts">
+          {#if lineCounts.adds > 0}<span class="add-count">+{lineCounts.adds}</span>{/if}
+          {#if lineCounts.dels > 0}<span class="del-count">-{lineCounts.dels}</span>{/if}
+        </span>
+      {/if}
     </div>
 
     {#if fileDiff.is_binary}
@@ -651,6 +673,19 @@
   .old-path { color: var(--text-muted); }
   .arrow { color: var(--text-muted); }
   .new-path { color: var(--text-primary); }
+
+  /* Per-file +adds/-dels totals, pushed to the right edge of the header. */
+  .line-counts {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-variant-numeric: tabular-nums;
+    font-weight: 500;
+  }
+
+  .add-count { color: var(--diff-add-fg); }
+  .del-count { color: var(--diff-remove-fg); }
 
   /*
     .diff-body is the scroll container for the virtualized list. The unified

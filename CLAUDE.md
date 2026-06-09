@@ -4,7 +4,7 @@
 
 Constantly update these documents without repeating information between them.
 
-- Update `./FRONTEND.md` after significantly changing the frontend style. Remove obsolete information.
+- Update `./STYLE.md` after significantly changing the frontend style. Remove obsolete information.
 - Update `./DESIGN.md` after completing any functional design feature or big change. Remove obsolete information.
 - Update `./TECHNICAL.md` after changing any technical architecture or implementation detail. Remove obsolete information.
 - Update `./ROADMAP.md` after completing any point mentioned there. Also add new features that come up while developing.

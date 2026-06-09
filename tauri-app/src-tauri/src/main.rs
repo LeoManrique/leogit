@@ -47,6 +47,7 @@ fn main() {
             git::get_selected_diff,
             git::get_log,
             git::get_commit_files,
+            git::get_commit_stats,
             git::list_branches,
             git::create_branch,
             git::switch_branch,
