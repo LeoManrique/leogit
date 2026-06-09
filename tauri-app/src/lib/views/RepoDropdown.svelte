@@ -8,9 +8,10 @@
     repos: string[]
     currentRepo: string
     onSelect: (repo: string) => void
+    onClone: () => void
   }
 
-  let { repos = [], currentRepo = '', onSelect }: Props = $props()
+  let { repos = [], currentRepo = '', onSelect, onClone }: Props = $props()
 
   let filter = $state('')
 
@@ -145,6 +146,22 @@
       onkeydown={handleKeyDown}
       use:autofocus
     />
+    <!-- Clone lives right next to the filter, so "I don't see my repo" flows
+         straight into cloning it (matches GH Desktop's repo-list clone action). -->
+    <button
+      class="clone-btn"
+      onclick={onClone}
+      title="Clone repository"
+      aria-label="Clone repository"
+    >
+      <!-- Download-to-tray: a copy pulled down onto the local disk (the
+           established "clone" convention, à la GH Desktop's Clone action). -->
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M8 1.75v7.5" />
+        <path d="M4.75 6.5 8 9.75l3.25-3.25" />
+        <path d="M2.75 11.25v1.5c0 .69.56 1.25 1.25 1.25h8c.69 0 1.25-.56 1.25-1.25v-1.5" />
+      </svg>
+    </button>
   </div>
 
   <div class="repo-list">
@@ -198,12 +215,16 @@
   }
 
   .filter-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     padding: 10px 12px;
     border-bottom: 1px solid var(--border-inactive);
   }
 
   .filter-input {
-    width: 100%;
+    flex: 1;
+    min-width: 0;
     padding: 4px 8px;
     background: var(--bg-primary);
     border: 1px solid var(--border-strong);
@@ -216,6 +237,30 @@
     outline: none;
     border-color: var(--border-active);
     box-shadow: 0 0 0 2px var(--cursor-bg);
+  }
+
+  /* Icon-only clone trigger; tooltip ("Clone repository") comes from title. */
+  .clone-btn {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    cursor: pointer;
+    transition:
+      color 100ms ease,
+      background 100ms ease;
+  }
+
+  .clone-btn:hover {
+    color: var(--text-primary);
+    background: var(--surface-hover);
   }
 
   .repo-list {

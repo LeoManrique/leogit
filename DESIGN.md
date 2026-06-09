@@ -34,7 +34,7 @@ Two-column layout: a resizable sidebar on the left and a content area on the rig
 - *Changes tab:* diff viewer for the active file, or an empty state ("Working tree is clean" / "Select a file to view its diff").
 - *History tab:* commit detail card + a nested two-pane view (commit files on the left, per-file diff on the right). The commit files pane is independently resizable.
 
-**Header** sits on top of the main content: repo switcher trigger, branch dropdown trigger, ahead/behind indicator, merge state badge, and the action cluster (Pull / Push / PRs / Refresh / Settings / Help). The repo switcher opens a popover identical in shape to the branch dropdown — a filter input plus the discovered-repos list (basename + muted path, current repo first and dotted) — and selecting one resets the in-memory repo state, persists `last_opened_repo`, and refreshes status / branches / log / auto-fetch for the new repo without restarting the app.
+**Header** sits on top of the main content: repo switcher trigger, branch dropdown trigger, ahead/behind indicator, merge state badge, and the action cluster (Pull / Push / PRs / Refresh / Settings / Help). The repo switcher opens a popover identical in shape to the branch dropdown — a filter input plus the discovered-repos list (basename + muted path, current repo first and dotted) — and selecting one resets the in-memory repo state, persists `last_opened_repo`, and refreshes status / branches / log / auto-fetch for the new repo without restarting the app. A clone icon sits beside the filter input (tooltip "Clone repository") for the "I don't see my repo" case — see flow 11.
 
 ### 3. Staging and committing
 
@@ -101,6 +101,14 @@ Two-column layout: a resizable sidebar on the left and a content area on the rig
 
 A modal overlay grouped into Appearance / Diff / Git / AI / Repository discovery. Saves to `~/.config/leogit/config.toml`. Theme changes apply immediately on save; diff settings (`hide_whitespace`, `syntax_highlighting`, `side_by_side_diff`, `tab_size`) re-render the active diff; `fetch_interval_ms` and `auto_fetch` are read on startup (see ROADMAP — live re-arming).
 
+### 11. Cloning a repository
+
+- The clone icon beside the repo-switcher filter opens the **Clone dialog**, a modal with two tabs:
+  - **GitHub** — lazily runs `gh repo list` (your non-archived source repos, 200 max) into a filterable list sortable by **Recently modified** (default, on `pushedAt`) or **Name**; each row shows `owner/name` and a `Private` badge. Cloning a selection uses `gh repo clone` so it inherits the user's `gh` auth (private repos need no prompt). If `gh` is missing or unauthenticated the list shows the error inline with a Retry.
+  - **URL** — a free-form field accepting a full git URL or `owner/name` shorthand (expanded to `https://github.com/owner/name`); cloned via plain `git clone` with `GIT_TERMINAL_PROMPT=0` so an unauthenticated clone fails fast instead of hanging on a prompt.
+- A **Local path** field is the parent folder the repo lands in. It defaults to `last_clone_dir` (the folder used last time), falling back to the first `scan_path`, then `~/Dev`. A live preview shows the final `parent/repo` path; the backend expands a leading `~`.
+- On success leogit remembers the parent folder (`last_clone_dir`), adds the cloned path to the in-memory repo list, and opens it immediately — no restart or re-scan needed (the repo need not even live under a configured scan path).
+
 ## Keyboard surface
 
 The full list lives in [HelpOverlay.svelte](tauri-app/src/lib/views/HelpOverlay.svelte). Single-key shortcuts only fire when no input/textarea has focus; meta-modifier shortcuts work everywhere.
@@ -124,7 +132,7 @@ The full list lives in [HelpOverlay.svelte](tauri-app/src/lib/views/HelpOverlay.
 ## Persistence model
 
 - `~/.config/leogit/config.toml` — user settings (theme, AI, scan paths, diff prefs, fetch interval).
-- `~/.config/leogit/repos-state.json` — last-opened repo only.
+- `~/.config/leogit/repos-state.json` — last-opened repo (`last_opened_repo`) and last clone destination folder (`last_clone_dir`).
 - `localStorage` — UI splitter sizes (`leogit:sidebarWidth`, `leogit:commitHeight`, `leogit:commitFilesWidth`).
 - Per-session in-memory — user-deselected files, active file / commit / diff, terminal PTY ids.
 

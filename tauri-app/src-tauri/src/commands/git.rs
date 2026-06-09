@@ -1561,6 +1561,44 @@ fn expand_tilde(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+/// Resolve a clone destination: expand a leading `~`, reject a path that
+/// already exists (git/gh would fail anyway, but we give a friendlier error),
+/// and create the parent folder so the clone has somewhere to land. Returns the
+/// absolute target path the clone should write to. Shared by `clone_repo`
+/// (URL clones) and `gh::gh_clone` (GitHub clones) so both behave identically.
+pub fn prepare_clone_target(target_path: &str) -> Result<String, String> {
+    let target = expand_tilde(target_path);
+    if target.exists() {
+        return Err(format!("\"{}\" already exists.", target.display()));
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Could not create destination folder: {e}"))?;
+    }
+    Ok(target.to_string_lossy().to_string())
+}
+
+/// Clone an arbitrary git URL into `target_path`. The URL tab of the Clone
+/// dialog uses this; `GIT_TERMINAL_PROMPT=0` keeps a private/unauthenticated
+/// clone from hanging on a credential prompt and instead surfaces the error.
+/// Returns the absolute path of the freshly cloned repo so the UI can open it.
+#[tauri::command]
+pub fn clone_repo(url: String, target_path: String) -> Result<String, String> {
+    let target = prepare_clone_target(&target_path)?;
+    let mut cmd = Command::new("git");
+    cmd.env("TERM", "dumb")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .args(["clone", "--progress", &url, &target]);
+    super::process::hide_console(&mut cmd);
+    let output = cmd
+        .output()
+        .map_err(|e| format!("Could not run git: {e}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(target)
+}
+
 fn scan_for_repos(
     dir: &Path,
     root: &Path,

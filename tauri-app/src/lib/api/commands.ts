@@ -128,6 +128,18 @@ export interface Config {
 
 export interface ReposState {
   last_opened_repo?: string
+  /** Parent folder of the last clone; pre-fills the Clone dialog destination. */
+  last_clone_dir?: string
+}
+
+/** A repository surfaced in the GitHub tab of the Clone dialog (`gh repo list`). */
+export interface GhRepo {
+  name_with_owner: string
+  name: string
+  description: string
+  is_private: boolean
+  /** ISO-8601 last-push timestamp; used to sort by "recently modified". */
+  pushed_at: string
 }
 
 export const configApi = {
@@ -192,6 +204,8 @@ export const gitApi = {
     invoke<string[]>('discover_repos', { scanPaths, maxDepth }),
   isGitRepo: (path: string) => invoke<boolean>('is_git_repo', { path }),
   getRepoName: (path: string) => invoke<string>('get_repo_name', { path }),
+  cloneRepo: (url: string, targetPath: string) =>
+    invoke<string>('clone_repo', { url, targetPath }),
 }
 
 export const diffApi = {
@@ -245,6 +259,9 @@ export const highlightApi = {
 
 export const ghApi = {
   checkAuth: () => invoke<boolean>('check_auth'),
+  repoList: (limit: number) => invoke<GhRepo[]>('gh_repo_list', { limit }),
+  clone: (nameWithOwner: string, targetPath: string) =>
+    invoke<string>('gh_clone', { nameWithOwner, targetPath }),
 }
 
 export interface AiProviderConfig {

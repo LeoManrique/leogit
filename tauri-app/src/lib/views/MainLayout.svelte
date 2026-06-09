@@ -4,7 +4,14 @@
   import { repoState, resetRepoState } from '$lib/stores/repo'
   import { appState } from '$lib/stores/app'
   import { config, refreshConfig } from '$lib/stores/config'
-  import { gitApi, diffApi, configApi, type FileEntry, type CommitInfo } from '$lib/api/commands'
+  import {
+    gitApi,
+    diffApi,
+    configApi,
+    type FileEntry,
+    type CommitInfo,
+    type ReposState,
+  } from '$lib/api/commands'
 
   import Header from '$lib/components/Header.svelte'
   import TabBar from '$lib/components/TabBar.svelte'
@@ -16,6 +23,7 @@
   import CommitDetail from '$lib/views/CommitDetail.svelte'
   import BranchDropdown from '$lib/views/BranchDropdown.svelte'
   import RepoDropdown from '$lib/views/RepoDropdown.svelte'
+  import CloneOverlay from '$lib/views/CloneOverlay.svelte'
   import MergeOverlay from '$lib/views/MergeOverlay.svelte'
   import SettingsOverlay from '$lib/views/SettingsOverlay.svelte'
   import HelpOverlay from '$lib/views/HelpOverlay.svelte'
@@ -24,6 +32,10 @@
   let terminalExpanded = $state(false)
   let terminalSessionId = $state(0) // 0 = no active PTY; >0 = key for the mounted Terminal
   let showRepos = $state(false)
+  let showClone = $state(false)
+  // Destination pre-filled into the Clone dialog: last-used folder, else the
+  // first configured scan path, else ~/Dev (the backend expands the leading ~).
+  let cloneDefaultDir = $state('~/Dev')
   let showBranches = $state(false)
   let showSettings = $state(false)
   let showHelp = $state(false)
@@ -746,6 +758,15 @@
     })
   }
 
+  // Read-modify-write the persisted repos state so updating one field (e.g.
+  // last_opened_repo) never clobbers another (e.g. last_clone_dir).
+  async function persistReposState(patch: Partial<ReposState>) {
+    try {
+      const current = await configApi.loadState().catch(() => ({}) as ReposState)
+      await configApi.saveState({ ...current, ...patch })
+    } catch {}
+  }
+
   async function handleSwitchRepo(repo: string) {
     if (!repo || repo === $appState.repoPath) {
       showRepos = false
@@ -755,9 +776,7 @@
     lastHeadSha = null
     resetRepoState()
     appState.update((s) => ({ ...s, repoPath: repo }))
-    try {
-      await configApi.saveState({ last_opened_repo: repo })
-    } catch {}
+    await persistReposState({ last_opened_repo: repo })
     try {
       await Promise.all([refreshStatus(), refreshBranches(), loadInitialLog()])
       const cfg = $config
@@ -766,6 +785,29 @@
     } catch (error) {
       repoState.update((s) => ({ ...s, error: String(error) }))
     }
+  }
+
+  // Open the Clone dialog from the repo picker, seeding its destination from
+  // the last-used clone folder (falling back to the first scan path, then ~/Dev).
+  async function openClone() {
+    showRepos = false
+    let lastDir: string | undefined
+    try {
+      lastDir = (await configApi.loadState()).last_clone_dir
+    } catch {}
+    cloneDefaultDir = lastDir || $config?.scan_paths?.[0] || '~/Dev'
+    showClone = true
+  }
+
+  // A clone finished: remember where it landed, make it selectable, and open it.
+  async function handleCloned(repoPath: string, parentDir: string) {
+    showClone = false
+    await persistReposState({ last_clone_dir: parentDir })
+    appState.update((s) => ({
+      ...s,
+      repos: s.repos.includes(repoPath) ? s.repos : [...s.repos, repoPath],
+    }))
+    await handleSwitchRepo(repoPath)
   }
 
   async function handleSwitchBranch(branch: string) {
@@ -869,9 +911,9 @@
     const meta = e.ctrlKey || e.metaKey
 
     if (e.key === 'Escape') {
-      if (showRepos || showBranches || showSettings || showHelp || showMerge) {
+      if (showRepos || showClone || showBranches || showSettings || showHelp || showMerge) {
         e.preventDefault()
-        showRepos = showBranches = showSettings = showHelp = showMerge = false
+        showRepos = showClone = showBranches = showSettings = showHelp = showMerge = false
         return
       }
     }
@@ -1196,10 +1238,18 @@
           repos={$appState.repos}
           currentRepo={$appState.repoPath}
           onSelect={handleSwitchRepo}
+          onClone={openClone}
         />
       </div>
     </div>
   {/if}
+
+  <CloneOverlay
+    isOpen={showClone}
+    defaultDir={cloneDefaultDir}
+    onClose={() => (showClone = false)}
+    onCloned={handleCloned}
+  />
 
   {#if showBranches}
     <div

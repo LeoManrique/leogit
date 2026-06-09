@@ -37,6 +37,11 @@ pub struct Config {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReposState {
     pub last_opened_repo: Option<String>,
+    /// Parent folder the user last cloned into. The Clone dialog pre-fills this
+    /// so repeated clones land in the same place; falls back to the first
+    /// `scan_path` (then `~/Dev`) the first time.
+    #[serde(default)]
+    pub last_clone_dir: Option<String>,
 }
 
 fn default_scan_paths() -> Vec<String> {

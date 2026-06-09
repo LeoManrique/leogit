@@ -35,8 +35,9 @@ leogit/
 │   │       │                        # CommitMessage, DiffViewer, Terminal,
 │   │       │                        # ErrorModal, PathText
 │   │       └── views/               # MainLayout (orchestrator), RepoPicker,
-│   │                                # BranchDropdown, SettingsOverlay,
-│   │                                # HelpOverlay, MergeOverlay, CommitDetail
+│   │                                # RepoDropdown, CloneOverlay, BranchDropdown,
+│   │                                # SettingsOverlay, HelpOverlay, MergeOverlay,
+│   │                                # CommitDetail
 │   ├── src-tauri/
 │   │   ├── src/
 │   │   │   ├── main.rs              # PATH fix + invoke_handler registry
@@ -45,7 +46,7 @@ leogit/
 │   │   │       ├── config.rs        # load/save Config + ReposState
 │   │   │       ├── git.rs           # 27 git operations (status, log, branch, …)
 │   │   │       ├── diff.rs          # parse_diff + build/apply patches
-│   │   │       ├── gh.rs            # GitHub CLI bridge (PRs, checks)
+│   │   │       ├── gh.rs            # GitHub CLI bridge (auth check, repo list, clone)
 │   │   │       ├── ai.rs            # Claude CLI + Ollama HTTP
 │   │   │       ├── terminal.rs      # portable-pty session pool
 │   │   │       ├── highlight.rs     # syntect diff tokenizer
@@ -75,7 +76,7 @@ All work flows through Tauri's IPC. There are no HTTP servers, no sidecars, and 
 
 ### Windows console suppression
 
-Release builds set `windows_subsystem = "windows"` (in `main.rs`), so the app runs with no attached console. On Windows a console-less process that spawns a console subprocess gets a **new console window allocated and briefly flashed** for each call — and because the UI polls `git status` every 2s, that would mean a `cmd` box flickering on screen continuously, plus one on every fetch/commit/diff. Every subprocess spawn therefore routes through [commands/process.rs](tauri-app/src-tauri/src/commands/process.rs): `hide_console` (std `Command`) and `hide_console_async` (tokio `Command`) set the `CREATE_NO_WINDOW` creation flag; both are no-ops off Windows. Call sites: `git_cmd` (git.rs), `apply_patch` (diff.rs), `check_auth` (gh.rs), and both `claude` spawns (ai.rs). The PTY shell in terminal.rs is intentionally exempt — ConPTY is a pseudo-terminal, not a console subprocess, so it never flashes a window.
+Release builds set `windows_subsystem = "windows"` (in `main.rs`), so the app runs with no attached console. On Windows a console-less process that spawns a console subprocess gets a **new console window allocated and briefly flashed** for each call — and because the UI polls `git status` every 2s, that would mean a `cmd` box flickering on screen continuously, plus one on every fetch/commit/diff. Every subprocess spawn therefore routes through [commands/process.rs](tauri-app/src-tauri/src/commands/process.rs): `hide_console` (std `Command`) and `hide_console_async` (tokio `Command`) set the `CREATE_NO_WINDOW` creation flag; both are no-ops off Windows. Call sites: `git_cmd` and `clone_repo` (git.rs), `apply_patch` (diff.rs), `check_auth` / `gh_repo_list` / `gh_clone` (gh.rs), and both `claude` spawns (ai.rs). The PTY shell in terminal.rs is intentionally exempt — ConPTY is a pseudo-terminal, not a console subprocess, so it never flashes a window.
 
 ## IPC contract
 
@@ -84,9 +85,9 @@ The frontend never touches Tauri's raw `invoke` API directly; every backend call
 | Namespace | Commands | Backend file |
 |---|---|---|
 | `configApi` | `loadConfig`, `saveConfig`, `loadState`, `saveState` | `commands/config.rs` |
-| `gitApi` | `getStatus`, `getHeadSha`, `getDiff`, `getDiffWhitespaceIgnored`, `getCommitDiff`, `getSelectedDiff`, `getLog`, `getCommitFiles`, `listBranches`, `createBranch`, `switchBranch`, `deleteBranch`, `deleteRemoteBranch`, `renameBranch`, `commit`, `hasStagedChanges`, `formatCommitMessage`, `fetch`, `pull`, `push`, `getAheadBehind`, `getRemote`, `mergeBranch`, `mergeSquash`, `commitSquashMerge`, `mergeAbort`, `isMerging`, `countCommitsToMerge`, `discoverRepos`, `isGitRepo`, `getRepoName` | `commands/git.rs` |
+| `gitApi` | `getStatus`, `getHeadSha`, `getDiff`, `getDiffWhitespaceIgnored`, `getCommitDiff`, `getSelectedDiff`, `getLog`, `getCommitFiles`, `listBranches`, `createBranch`, `switchBranch`, `deleteBranch`, `deleteRemoteBranch`, `renameBranch`, `commit`, `hasStagedChanges`, `formatCommitMessage`, `fetch`, `pull`, `push`, `getAheadBehind`, `getRemote`, `mergeBranch`, `mergeSquash`, `commitSquashMerge`, `mergeAbort`, `isMerging`, `countCommitsToMerge`, `discoverRepos`, `isGitRepo`, `getRepoName`, `cloneRepo` | `commands/git.rs` |
 | `diffApi` | `parseDiff`, `generatePatch`, `generateInversePatch` | `commands/diff.rs` |
-| `ghApi` | `checkAuth`, `listPRs`, `getPRChecks`, `createPR`, `createPRFill`, `checkoutPR`, `getCurrentBranchPR` | `commands/gh.rs` |
+| `ghApi` | `checkAuth`, `repoList`, `clone` | `commands/gh.rs` |
 | `aiApi` | `generateCommitMessage`, `checkProviderAvailable` | `commands/ai.rs` |
 | Terminal | `start_terminal`, `write_terminal`, `resize_terminal`, `close_terminal` (called via `invoke` directly from `Terminal.svelte`) | `commands/terminal.rs` |
 
