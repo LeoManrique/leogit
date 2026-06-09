@@ -1,6 +1,8 @@
 <script lang="ts">
   import { ghApi, gitApi, type GhRepo } from '$lib/api/commands'
   import { autofocus } from '$lib/actions/autofocus'
+  import { open } from '@tauri-apps/plugin-dialog'
+  import { homeDir } from '@tauri-apps/api/path'
 
   interface Props {
     isOpen: boolean
@@ -108,6 +110,21 @@
   const canClone = $derived(
     !isCloning && destDir.trim().length > 0 && repoName.length > 0,
   )
+
+  // Native folder picker for the destination. Seeds the dialog at the current
+  // path (expanding a leading ~, which the OS picker won't understand).
+  async function browse() {
+    let start = destDir.trim()
+    if (start.startsWith('~')) {
+      try {
+        start = start.replace(/^~/, (await homeDir()).replace(/\/+$/, ''))
+      } catch {
+        start = ''
+      }
+    }
+    const picked = await open({ directory: true, defaultPath: start || undefined })
+    if (typeof picked === 'string') destDir = picked
+  }
 
   function handleOverlayKeyDown(e: KeyboardEvent) {
     if (e.key === 'Escape' && !isCloning) onClose()
@@ -247,7 +264,10 @@
         {/if}
 
         <label class="field-label" for="clone-dest">Local path</label>
-        <input id="clone-dest" type="text" class="text-input mono" bind:value={destDir} />
+        <div class="dest-row">
+          <input id="clone-dest" type="text" class="text-input mono" bind:value={destDir} />
+          <button class="browse-btn" onclick={browse} disabled={isCloning}>Browse…</button>
+        </div>
         {#if targetPath}
           <div class="path-preview">Clones into <code>{targetPath}</code></div>
         {/if}
@@ -510,6 +530,40 @@
     background: var(--badge-bg);
     padding: 1px 6px;
     border-radius: 5px;
+  }
+
+  /* Local-path field + native folder picker on one row. */
+  .dest-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .dest-row .text-input {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .browse-btn {
+    flex: 0 0 auto;
+    padding: 5px 12px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-primary);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .browse-btn:hover:not(:disabled) {
+    background: var(--surface-hover);
+  }
+
+  .browse-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .path-preview {

@@ -34,6 +34,7 @@ fn main() {
     fix_path_env();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             config::load_config,
             config::save_config,

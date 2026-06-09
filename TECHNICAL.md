@@ -7,6 +7,7 @@ Functional behavior lives in [DESIGN.md](DESIGN.md). Visual design language live
 | Layer | Choice | Notes |
 |---|---|---|
 | Shell | Tauri 2.11 | Native window, IPC, no Node runtime in production |
+| Native dialogs | `tauri-plugin-dialog` 2.7 + `@tauri-apps/plugin-dialog` | Folder picker for the Clone dialog's destination (`dialog:allow-open` capability) |
 | Backend language | Rust 2021 | Async via tokio (`features = ["full"]`) |
 | Frontend framework | Svelte 5 (runes) | `$state`, `$derived`, `$effect`, `$props` |
 | Frontend bundler | Vite 8 | `terser` for minified release builds |

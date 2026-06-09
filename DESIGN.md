@@ -106,7 +106,7 @@ A modal overlay grouped into Appearance / Diff / Git / AI / Repository discovery
 - The clone icon beside the repo-switcher filter opens the **Clone dialog**, a modal with two tabs:
   - **GitHub** — lazily runs `gh repo list` (your non-archived source repos, 200 max) into a filterable list sortable by **Recently modified** (default, on `pushedAt`) or **Name**; each row shows `owner/name` and a `Private` badge. Cloning a selection uses `gh repo clone` so it inherits the user's `gh` auth (private repos need no prompt). If `gh` is missing or unauthenticated the list shows the error inline with a Retry.
   - **URL** — a free-form field accepting a full git URL or `owner/name` shorthand (expanded to `https://github.com/owner/name`); cloned via plain `git clone` with `GIT_TERMINAL_PROMPT=0` so an unauthenticated clone fails fast instead of hanging on a prompt.
-- A **Local path** field is the parent folder the repo lands in. It defaults to `last_clone_dir` (the folder used last time), falling back to the first `scan_path`, then `~/Dev`. A live preview shows the final `parent/repo` path; the backend expands a leading `~`.
+- A **Local path** field is the parent folder the repo lands in, with a **Browse** button that opens the native folder picker (Tauri dialog plugin). It defaults to `last_clone_dir` (the folder used last time), falling back to the first `scan_path`, then `~/Dev`. A live preview shows the final `parent/repo` path; the backend expands a leading `~`.
 - On success leogit remembers the parent folder (`last_clone_dir`), adds the cloned path to the in-memory repo list, and opens it immediately — no restart or re-scan needed (the repo need not even live under a configured scan path).
 
 ## Keyboard surface
