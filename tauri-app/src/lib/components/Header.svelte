@@ -218,24 +218,9 @@
       <span class="chip-label">{$repoState.status.branch || '…'}</span>
     </button>
     <div class="status-info">
-      {#if ahead > 0 || behind > 0}
-        <span class="ahead-behind">
-          {#if ahead > 0}
-            <svg width="9" height="9" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <polyline points="4,7 8,3 12,7" />
-              <line x1="8" y1="3" x2="8" y2="13" />
-            </svg>
-            <span>{ahead}</span>
-          {/if}
-          {#if behind > 0}
-            <svg width="9" height="9" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <line x1="8" y1="3" x2="8" y2="13" />
-              <polyline points="4,9 8,13 12,9" />
-            </svg>
-            <span>{behind}</span>
-          {/if}
-        </span>
-      {:else if hasUpstream}
+      <!-- Ahead/behind counts live on the Pull/Push buttons, so the bar here
+           only confirms the in-sync state and never duplicates those numbers. -->
+      {#if hasUpstream && ahead === 0 && behind === 0}
         <span class="upstream-ok"><span class="sync-dot"></span>up to date</span>
       {/if}
       {#if $repoState.status.isMerging}
@@ -408,18 +393,6 @@
     align-items: center;
     font-size: 11px;
     font-variant-numeric: tabular-nums;
-  }
-
-  .ahead-behind {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--text-muted);
-  }
-
-  .ahead-behind svg {
-    margin-right: -2px;
-    vertical-align: -1px;
   }
 
   .upstream-ok {

@@ -28,9 +28,31 @@
   // menu via MainLayout).
   const isAmending = $derived($repoState.commitToAmend !== null)
 
+  // When exactly one file is staged, default the summary to a GitHub-Desktop
+  // style "Create/Delete/Update <file>" so the most common commit (one file)
+  // needs zero typing. Empty when 0 or many files are staged, so multi-file
+  // commits still require a real summary.
+  const autoSummary = $derived.by(() => {
+    const sel = $repoState.selectedFiles
+    if (sel.size !== 1) return ''
+    const [path] = sel
+    const file = $repoState.status.files.find((f) => f.path === path)
+    if (!file) return ''
+    const verb =
+      file.status === 'New' ? 'Create' : file.status === 'Deleted' ? 'Delete' : 'Update'
+    return `${verb} ${file.display_name}`
+  })
+
+  // What actually gets committed: the typed summary if any, otherwise the
+  // single-file auto-summary. Also drives the input placeholder so the user
+  // sees the message they'll commit before typing.
+  const effectiveSummary = $derived(summary.trim() || autoSummary)
+  const summaryPlaceholder = $derived(autoSummary || 'Summary')
+
   // Relaxed submit gate when amending: git allows --amend with no staged files
   // (message-only edit). Outside amend mode, canCommit requires file selection.
-  const canSubmit = $derived(summary.trim().length > 0 && (isAmending || $canCommit))
+  // Uses effectiveSummary so a one-file commit can submit with a blank input.
+  const canSubmit = $derived(effectiveSummary.length > 0 && (isAmending || $canCommit))
 
   // Parse Co-Authored-By trailers out of `commit.trailers`. The trailers list
   // comes from `%(trailers:unfold,only)` in git's log format, one trailer per
@@ -135,7 +157,10 @@
   }
 
   async function handleCommit() {
-    if (!summary.trim()) {
+    // effectiveSummary falls back to the single-file auto-summary, so a blank
+    // input is fine as long as something resolves; only a truly empty message
+    // (no input, no auto-summary) is rejected.
+    if (!effectiveSummary) {
       error = 'Summary is required'
       return
     }
@@ -157,7 +182,7 @@
     error = null
 
     try {
-      const fullMessage = await gitApi.formatCommitMessage(summary, description, amendCoAuthors)
+      const fullMessage = await gitApi.formatCommitMessage(effectiveSummary, description, amendCoAuthors)
       await gitApi.commit(repoPath, fullMessage, files, isAmending)
       summary = ''
       description = ''
@@ -228,7 +253,7 @@
       id="summary-input"
       type="text"
       class="summary-input"
-      placeholder="Summary"
+      placeholder={summaryPlaceholder}
       bind:value={summary}
       maxlength="200"
       disabled={isGenerating || isCommitting}
