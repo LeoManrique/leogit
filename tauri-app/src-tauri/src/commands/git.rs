@@ -1599,6 +1599,18 @@ pub fn clone_repo(url: String, target_path: String) -> Result<String, String> {
     Ok(target)
 }
 
+/// Unix timestamp (seconds) of a repo's most recent commit, or 0 when it has
+/// none / isn't readable. Powers the repo picker's "recently modified" sort;
+/// returns 0 rather than erroring so one bad repo never breaks the sort.
+#[tauri::command]
+#[must_use]
+pub fn get_last_commit_timestamp(repo_path: String) -> i64 {
+    run_git(&repo_path, &["log", "-1", "--format=%ct"])
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(0)
+}
+
 fn scan_for_repos(
     dir: &Path,
     root: &Path,

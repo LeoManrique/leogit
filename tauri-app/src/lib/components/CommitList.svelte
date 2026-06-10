@@ -128,12 +128,28 @@
     return { startIndex, endIndex }
   }
 
+  // A ticking "now" so the relative dates stay live while History is open:
+  // formatDate() reads this, so bumping it re-renders the visible "N minutes
+  // ago" labels. The 10 s cadence stays effectively free because the work is
+  // gated on visibility — we skip the tick entirely when the History pane is
+  // hidden (Changes tab → clientHeight 0) or the window is backgrounded — and
+  // the list is virtualized, so an on-screen tick only re-renders the ~14
+  // mounted rows. The interval is torn down with the component.
+  let now = $state(Date.now())
+  $effect(() => {
+    const id = setInterval(() => {
+      if (document.hidden || containerHeight === 0) return
+      now = Date.now()
+    }, 10_000)
+    return () => clearInterval(id)
+  })
+
   // Relative timestamp for every commit, regardless of age. Matches GitHub
   // Desktop's tiering so old commits read as "5 months ago" instead of an
   // absolute date the user has to mentally diff against today.
   function formatDate(dateStr: string): string {
     const date = new Date(dateStr)
-    const diffMs = Date.now() - date.getTime()
+    const diffMs = now - date.getTime()
     const mins = Math.floor(diffMs / 60_000)
     const hours = Math.floor(diffMs / 3_600_000)
     const days = Math.floor(diffMs / 86_400_000)
@@ -198,7 +214,11 @@
     const el = scrollContainer
     if (!el) return
     const ro = new ResizeObserver(() => {
-      containerHeight = el.clientHeight
+      const h = el.clientHeight
+      // Pane just became visible again (Changes → History): refresh the dates
+      // immediately instead of waiting up to 10 s for the next gated tick.
+      if (h > 0 && containerHeight === 0) now = Date.now()
+      containerHeight = h
     })
     ro.observe(el)
     containerHeight = el.clientHeight

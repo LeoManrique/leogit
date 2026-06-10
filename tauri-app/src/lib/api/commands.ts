@@ -206,6 +206,8 @@ export const gitApi = {
   getRepoName: (path: string) => invoke<string>('get_repo_name', { path }),
   cloneRepo: (url: string, targetPath: string) =>
     invoke<string>('clone_repo', { url, targetPath }),
+  getLastCommitTimestamp: (repoPath: string) =>
+    invoke<number>('get_last_commit_timestamp', { repoPath }),
 }
 
 export const diffApi = {

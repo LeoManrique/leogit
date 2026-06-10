@@ -1,5 +1,12 @@
 <script lang="ts">
   import { ensureRepoIdentifiers, repoIdentifiers } from '$lib/stores/repoIdentifiers'
+  import {
+    ensureRepoActivity,
+    repoActivity,
+    getRepoSortMode,
+    setRepoSortMode,
+    type RepoSortMode,
+  } from '$lib/stores/repoActivity'
   import type { RepoIdentifier } from '$lib/api/commands'
   import RepoTooltip from '$lib/components/RepoTooltip.svelte'
   import { autofocus } from '$lib/actions/autofocus'
@@ -14,6 +21,14 @@
   let { repos = [], currentRepo = '', onSelect, onClone }: Props = $props()
 
   let filter = $state('')
+  // Sort mode, seeded from the session-remembered preference so toggling sticks
+  // across opens. Mirrors the Clone dialog's clock / A→Z button.
+  let sortBy = $state<RepoSortMode>(getRepoSortMode())
+
+  function toggleSort() {
+    sortBy = sortBy === 'recent' ? 'name' : 'recent'
+    setRepoSortMode(sortBy)
+  }
 
   // Where the floating tooltip should render (clientX/Y), and which repo it
   // belongs to. We anchor below the hovered row, slightly to the right of
@@ -38,10 +53,12 @@
     return i === q.length
   }
 
-  // Fetch identifiers for every repo in the list whenever the list changes.
-  // Cache is module-level so reopening the dropdown is free.
+  // Fetch identifiers (labels) and last-commit timestamps (recency sort) for
+  // every repo whenever the list changes. Both caches are module-level, so
+  // reopening the dropdown is free after the first time.
   $effect(() => {
     ensureRepoIdentifiers(repos)
+    ensureRepoActivity(repos)
   })
 
   /** GitHub repo name when known, else folder basename. The primary row label. */
@@ -56,12 +73,18 @@
 
   const sortedRepos = $derived.by(() => {
     const ids = $repoIdentifiers
+    const activity = $repoActivity
+    const byName = (a: string, b: string) =>
+      primaryLabel(a, ids.get(a)).localeCompare(primaryLabel(b, ids.get(b)), undefined, {
+        sensitivity: 'base',
+      })
+    // Recent: newest last-commit first, tie-broken alphabetically — so before
+    // timestamps stream in (all 0) the list reads alphabetical, then settles
+    // into recency order as they arrive rather than jumping to a random order.
     const list = [...repos].sort((a, b) =>
-      primaryLabel(a, ids.get(a)).localeCompare(
-        primaryLabel(b, ids.get(b)),
-        undefined,
-        { sensitivity: 'base' },
-      ),
+      sortBy === 'name'
+        ? byName(a, b)
+        : (activity.get(b) ?? 0) - (activity.get(a) ?? 0) || byName(a, b),
     )
     if (currentRepo) {
       const idx = list.indexOf(currentRepo)
@@ -146,6 +169,32 @@
       onkeydown={handleKeyDown}
       use:autofocus
     />
+    <!-- Sort toggle — same clock / A→Z control as the Clone dialog. The glyph
+         itself is the state label; recency uses each repo's last-commit date. -->
+    <button
+      class="icon-btn"
+      onclick={toggleSort}
+      title={sortBy === 'recent' ? 'Sorted by recently modified' : 'Sorted alphabetically'}
+      aria-label={sortBy === 'recent' ? 'Sorted by recently modified' : 'Sorted alphabetically'}
+    >
+      {#if sortBy === 'recent'}
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="4.25" cy="8" r="4" />
+          <path d="M4.25 5.5V8l1.5 0.9" />
+          <path d="M12.5 3.5v8" />
+          <path d="M10.5 9.5 12.5 11.5 14.5 9.5" />
+        </svg>
+      {:else}
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+          <text x="0.5" y="6.6" font-size="6.5" font-weight="700" fill="currentColor" font-family="-apple-system, system-ui, sans-serif">A</text>
+          <text x="0.5" y="14.8" font-size="6.5" font-weight="700" fill="currentColor" font-family="-apple-system, system-ui, sans-serif">Z</text>
+          <g fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12.5 3.5v8" />
+            <path d="M10.5 9.5 12.5 11.5 14.5 9.5" />
+          </g>
+        </svg>
+      {/if}
+    </button>
     <!-- Clone lives right next to the filter, so "I don't see my repo" flows
          straight into cloning it (matches GH Desktop's repo-list clone action). -->
     <button
@@ -239,7 +288,9 @@
     box-shadow: 0 0 0 2px var(--cursor-bg);
   }
 
-  /* Icon-only clone trigger; tooltip ("Clone repository") comes from title. */
+  /* Icon-only filter-row buttons (sort toggle, clone trigger); tooltips come
+     from each button's title. */
+  .icon-btn,
   .clone-btn {
     flex: 0 0 auto;
     display: inline-flex;
@@ -258,6 +309,7 @@
       background 100ms ease;
   }
 
+  .icon-btn:hover,
   .clone-btn:hover {
     color: var(--text-primary);
     background: var(--surface-hover);
