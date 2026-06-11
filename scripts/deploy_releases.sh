@@ -2,11 +2,15 @@
 set -euo pipefail
 
 # Releases a new version of LeoGit:
-#   1. Validates prerequisites (gh, pnpm, cargo, codesign, git, ditto)
+#   1. Validates prerequisites (gh, pnpm, cargo, git + platform-specific tools)
 #   2. Resolves / bumps version in tauri.conf.json, Cargo.toml, package.json
 #   3. Tags the release
-#   4. Bundles leogit.app via scripts/bundle.sh (drives pnpm tauri build)
-#   5. Zips and uploads to GitHub Releases
+#   4. Bundles the app via scripts/bundle.sh (drives pnpm tauri build)
+#   5. Packages and uploads to GitHub Releases
+#
+# Runs on macOS and Linux. Each platform builds and uploads its own artifact to
+# the shared GitHub Release: macOS ships a zipped .app, Linux ships an AppImage.
+# Run it once per platform to publish a complete release.
 #
 # Usage: scripts/deploy_releases.sh [x.y.z]
 #   If a version is passed and it's higher than the current one, the script
@@ -39,15 +43,35 @@ read_version() {
   grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$TAURI_CONF" | head -1 | sed 's/.*"\([^"]*\)"$/\1/'
 }
 
+# ── Platform detection ──
+# The build/package/upload steps fork on the host OS; everything else (version
+# bump, tagging, gh upload) is shared.
+OS_KERNEL=$(uname -s)
+case "$OS_KERNEL" in
+  Darwin) TARGET_OS="macOS"; ARTIFACT_EXT="zip" ;;
+  Linux)  TARGET_OS="linux"; ARTIFACT_EXT="AppImage" ;;
+  *)      error "Unsupported OS: $OS_KERNEL (LeoGit builds on macOS and Linux)" ;;
+esac
+
 # ── Step 1: Validate prerequisites ──
 step 1 "Validating prerequisites"
 
-[ "$(uname -s)" = "Darwin" ] || error "This script only runs on macOS"
-
-for cmd in gh pnpm cargo codesign git ditto; do
+# codesign/ditto are macOS-only; Linux relies on Tauri's bundled AppImage tooling.
+PLATFORM_TOOLS=""
+[ "$TARGET_OS" = "macOS" ] && PLATFORM_TOOLS="codesign ditto"
+for cmd in gh pnpm cargo git $PLATFORM_TOOLS; do
   command -v "$cmd" &>/dev/null || error "$cmd is not installed"
   success "$cmd found"
 done
+
+# Linux AppImage builds link against the WebKitGTK dev headers Tauri uses.
+if [ "$TARGET_OS" = "linux" ]; then
+  if command -v pkg-config &>/dev/null && pkg-config --exists webkit2gtk-4.1; then
+    success "webkit2gtk-4.1 found"
+  else
+    warn "webkit2gtk-4.1 not detected — install it if 'tauri build' fails (Arch: sudo pacman -S webkit2gtk-4.1)"
+  fi
+fi
 
 gh auth status &>/dev/null || error "gh CLI not authenticated. Run: gh auth login"
 success "gh authenticated"
@@ -99,7 +123,7 @@ case "$ARCH" in
   arm64|aarch64) ARCH="arm64" ;;
   x86_64)        ARCH="amd64" ;;
 esac
-PLATFORM="macOS-$ARCH"
+PLATFORM="$TARGET_OS-$ARCH"
 success "Version: $VERSION (tag: $TAG), platform: $PLATFORM"
 
 # ── Step 3: Create git tag ──
@@ -113,22 +137,33 @@ else
   success "Created and pushed tag $TAG"
 fi
 
-# ── Step 4: Bundle + zip ──
-step 4 "Bundling leogit.app"
+# ── Step 4: Bundle + package ──
+step 4 "Bundling LeoGit"
 
 "$SCRIPT_DIR/bundle.sh"
-APP_PATH="$APP_DIR/src-tauri/target/release/bundle/macos/leogit.app"
-[ -d "$APP_PATH" ] || error "Bundle script did not produce $APP_PATH"
 
 DIST_DIR="$PROJECT_ROOT/dist"
 mkdir -p "$DIST_DIR"
-ARTIFACT="LeoGit-$VERSION-$PLATFORM.zip"
+ARTIFACT="LeoGit-$VERSION-$PLATFORM.$ARTIFACT_EXT"
 ARTIFACT_PATH="$DIST_DIR/$ARTIFACT"
 rm -f "$ARTIFACT_PATH"
-# `ditto -c -k --keepParent` is the macOS-canonical way to zip an .app:
-# preserves resource forks, xattrs, and symlinks (plain `zip` strips them and
-# can produce a bundle that Finder refuses to open after extraction).
-ditto -c -k --keepParent "$APP_PATH" "$ARTIFACT_PATH"
+
+if [ "$TARGET_OS" = "macOS" ]; then
+  APP_PATH="$APP_DIR/src-tauri/target/release/bundle/macos/leogit.app"
+  [ -d "$APP_PATH" ] || error "Bundle script did not produce $APP_PATH"
+  # `ditto -c -k --keepParent` is the macOS-canonical way to zip an .app:
+  # preserves resource forks, xattrs, and symlinks (plain `zip` strips them and
+  # can produce a bundle that Finder refuses to open after extraction).
+  ditto -c -k --keepParent "$APP_PATH" "$ARTIFACT_PATH"
+else
+  # Tauri writes the AppImage under bundle/appimage/ with its own version/arch
+  # naming, so glob for it rather than reconstructing the filename. The AppImage
+  # is already a single self-contained executable — just copy it into dist/.
+  APPIMAGE=$(ls "$APP_DIR/src-tauri/target/release/bundle/appimage/"*.AppImage 2>/dev/null | head -1 || true)
+  [ -n "$APPIMAGE" ] && [ -f "$APPIMAGE" ] || error "Bundle script did not produce an AppImage"
+  cp "$APPIMAGE" "$ARTIFACT_PATH"
+  chmod +x "$ARTIFACT_PATH"
+fi
 success "Packaged: $ARTIFACT ($(du -h "$ARTIFACT_PATH" | cut -f1))"
 
 # ── Step 5: Upload to GitHub Release ──
@@ -138,6 +173,8 @@ if gh release view "$TAG" --repo "$REPO" &>/dev/null; then
   warn "Release $TAG already exists, uploading artifacts (clobber)"
   gh release upload "$TAG" "$ARTIFACT_PATH" --clobber --repo "$REPO"
 else
+  # Notes cover both platforms regardless of which one creates the release —
+  # the other platform uploads its artifact with --clobber and leaves notes as-is.
   gh release create "$TAG" "$ARTIFACT_PATH" \
     --repo "$REPO" \
     --title "LeoGit $TAG" \
@@ -151,11 +188,16 @@ A fast, native Git client built with Tauri and Svelte.
 curl -fsSL https://raw.githubusercontent.com/$REPO/main/scripts/install.sh | bash
 \`\`\`
 
-Or download \`$ARTIFACT\` below and drag \`leogit.app\` into \`/Applications\`. The bundle is ad-hoc signed, so on first launch right-click → Open (or run \`xattr -cr /Applications/leogit.app\` — the install script does this for you).
+The installer auto-detects your platform.
+
+**macOS** — or download \`LeoGit-$VERSION-macOS-*.zip\` below and drag \`leogit.app\` into \`/Applications\`. The bundle is ad-hoc signed, so on first launch right-click → Open (or run \`xattr -cr /Applications/leogit.app\` — the install script does this for you).
+
+**Linux** — or download \`LeoGit-$VERSION-linux-*.AppImage\` below, \`chmod +x\` it, and run. The install script also drops a launcher in your app menu.
 
 ### Requirements
 
-- macOS 14+ (Intel or Apple Silicon)"
+- macOS 14+ (Intel or Apple Silicon)
+- Linux (x86_64) with WebKitGTK 4.1 + FUSE 2 (Arch: \`sudo pacman -S webkit2gtk-4.1 fuse2\`)"
 fi
 success "Uploaded $ARTIFACT to release $TAG"
 

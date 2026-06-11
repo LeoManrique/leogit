@@ -20,6 +20,14 @@ A calm desktop Git client built with Tauri 2, Rust, and Svelte 5. Designed to fe
 - Node.js 18+ and `pnpm` for development.
 - Rust 1.95+ for building from source.
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/LeoManrique/leogit/main/scripts/install.sh | bash
+```
+
+Auto-detects your platform: installs `leogit.app` into `/Applications` on macOS, or the AppImage into `~/.local/bin` with an app-menu launcher on Linux (x86_64; needs WebKitGTK 4.1 + FUSE 2 — on Arch, `sudo pacman -S webkit2gtk-4.1 fuse2`). Or grab a `.zip` / `.AppImage` from the [latest release](https://github.com/LeoManrique/leogit/releases/latest).
+
 ## Quick start
 
 ```bash

@@ -7,7 +7,6 @@ src-tauri/target/
 
 # Node
 node_modules/
-pnpm-lock.yaml
 dist/
 .svelte-kit/
 .vite/

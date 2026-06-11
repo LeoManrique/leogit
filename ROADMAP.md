@@ -97,6 +97,7 @@ What's shipped lives in [DESIGN.md](DESIGN.md). This file tracks **what's next**
 - [ ] View / Push / Delete tags with unpushed-tag indicator and push counter.
 - [ ] Drag a commit onto the branch dropdown to cherry-pick into any branch.
 - [ ] Resizable toolbar buttons (e.g. `Cmd-8/9` widens push/pull and branch dropdown).
+- [x] **Linux packaging + install.** `deploy_releases.sh` builds an AppImage and `install.sh` installs it to `~/.local/bin` with a `.desktop` launcher; macOS ships a zipped `.app`. One AppImage covers GNOME / COSMIC (same WebKitGTK runtime).
 - [ ] **App signing + notarization (macOS).** Configure in `src-tauri/tauri.conf.json` for distributable DMGs.
 - [ ] **Auto-update.** Tauri's updater plugin needs a signed release feed.
 - [ ] **CI build matrix.** macOS / Linux / Windows on push.
