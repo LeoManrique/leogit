@@ -72,9 +72,9 @@ VERSION="${TAG#v}"
 success "Latest version: $VERSION (tag: $TAG)"
 
 # ── Step 4: Download artifact ──
-step 4 "Downloading $APP_NAME"
-
 ARTIFACT="LeoGit-$VERSION-$PLATFORM.$ARTIFACT_EXT"
+step 4 "Downloading $ARTIFACT"
+
 # `|| true` keeps a no-match from tripping `set -o pipefail` and aborting the
 # script silently before the explicit "not found" check below can run.
 DOWNLOAD_URL=$(echo "$RELEASE_JSON" | { grep -o '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*'"$ARTIFACT"'"' || true; } | head -1 | sed 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
