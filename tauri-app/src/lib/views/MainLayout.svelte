@@ -1048,6 +1048,7 @@
           unpushedShas={$repoState.status.unpushedShas}
           hasResolvedUpstream={$repoState.status.upstream !== ''}
           windowStartOffset={$repoState.log.windowStartOffset}
+          loaded={$repoState.log.loaded}
           onSelect={loadCommitFiles}
           onLoadMore={loadMoreCommits}
           onLoadEarlier={loadEarlierCommits}

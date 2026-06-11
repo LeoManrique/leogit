@@ -145,6 +145,16 @@ fn run_git_combined(repo_path: &str, args: &[&str]) -> Result<(bool, String), St
     Ok((output.status.success(), combined))
 }
 
+/// Returns true if the repository has at least one commit (HEAD resolves to a
+/// commit). A fresh repo with an unborn HEAD returns false rather than erroring,
+/// letting callers treat "no commits yet" as a valid empty state instead of
+/// hitting git's "does not have any commits yet" fatal.
+fn has_commits(repo_path: &str) -> bool {
+    git_cmd(repo_path, &["rev-parse", "--verify", "--quiet", "HEAD"])
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
 // ---------------------------------------------------------------------------
 // Path display helpers
 // ---------------------------------------------------------------------------
@@ -629,6 +639,13 @@ const LOG_FORMAT: &str = "%H%x01%h%x01%s%x01%b%x01%an%x01%ae%x01%ad%x01%cn%x01%c
 
 #[tauri::command]
 pub fn get_log(repo_path: String, opts: LogOptions) -> Result<Vec<CommitInfo>, String> {
+    // A fresh repo with an unborn HEAD has no commits to show; `git log` would
+    // fail with "does not have any commits yet" (exit 128). Treat it as an empty
+    // history so the History tab renders its empty state instead of an error.
+    if !has_commits(&repo_path) {
+        return Ok(Vec::new());
+    }
+
     let max_count = if opts.max_count <= 0 { 50 } else { opts.max_count };
     let max_arg = format!("--max-count={}", max_count);
     let skip_arg = format!("--skip={}", opts.skip);
@@ -1119,13 +1136,17 @@ pub fn commit(
         return Err("no files selected — select files first".to_string());
     }
 
-    // Reset the index to HEAD so only what the user selected gets committed.
-    let reset = git_cmd(&repo_path, &["reset", "HEAD"])
+    // Clear the staging area so only what the user selected gets committed.
+    // A pathspec reset (`reset -- .`) is used instead of `reset HEAD` so this
+    // also works on a fresh repo whose HEAD is still unborn — `reset HEAD` fails
+    // there with "ambiguous argument 'HEAD'". The repo root is the cwd, so `.`
+    // covers the whole index, matching `reset HEAD` on repos that have commits.
+    let reset = git_cmd(&repo_path, &["reset", "--", "."])
         .output()
         .map_err(|e| format!("git reset: {}", e))?;
     if !reset.status.success() {
         return Err(format!(
-            "git reset HEAD failed: {}",
+            "git reset failed: {}",
             String::from_utf8_lossy(&reset.stderr).trim()
         ));
     }
@@ -1726,4 +1747,113 @@ pub fn get_repo_name(path: &str) -> String {
         .and_then(|name| name.to_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    /// Initialise a throwaway repo with a committer identity. Local config
+    /// disables commit signing so the tests don't depend on the developer's
+    /// global git setup.
+    fn init_repo(dir: &Path) {
+        let git = |args: &[&str]| {
+            let ok = Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .status()
+                .expect("spawn git")
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test User"]);
+        git(&["config", "commit.gpgsign", "false"]);
+    }
+
+    fn new_file(path: &str) -> FileEntry {
+        FileEntry {
+            path: path.to_string(),
+            orig_path: None,
+            status: FileStatus::New,
+            xy: "A.".to_string(),
+            display_name: path.to_string(),
+            display_dir: String::new(),
+        }
+    }
+
+    fn default_log_opts() -> LogOptions {
+        LogOptions {
+            max_count: 50,
+            skip: 0,
+        }
+    }
+
+    /// Regression: the first commit on a fresh repo (unborn HEAD) must succeed.
+    /// It used to fail because the index reset ran `git reset HEAD`, which errors
+    /// when HEAD doesn't exist yet. Also verifies the selective-commit guarantee
+    /// still holds — only the file the user selected is committed.
+    #[test]
+    fn commit_succeeds_on_fresh_repo_and_only_commits_selected_files() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_repo(repo);
+        fs::write(repo.join("README.md"), "hello\n").expect("write README");
+        fs::write(repo.join(".gitignore"), "node_modules\n").expect("write gitignore");
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+
+        commit(
+            repo_path.clone(),
+            "Create initial script".to_string(),
+            vec![new_file("README.md")],
+            None,
+        )
+        .expect("first commit on a fresh repo should succeed");
+
+        // Only README.md was committed; .gitignore stays untracked.
+        let tracked = run_git(&repo_path, &["ls-files"]).expect("ls-files");
+        assert_eq!(tracked.lines().collect::<Vec<_>>(), vec!["README.md"]);
+    }
+
+    /// Regression: opening History on a fresh repo (unborn HEAD) must not error.
+    /// `git log` exits 128 there ("does not have any commits yet"); `get_log`
+    /// should treat that as an empty history.
+    #[test]
+    fn get_log_returns_empty_on_fresh_repo() {
+        let tmp = tempdir().expect("tempdir");
+        init_repo(tmp.path());
+        let repo_path = tmp.path().to_str().expect("utf-8 path").to_string();
+
+        let log = get_log(repo_path, default_log_opts())
+            .expect("get_log on an empty repo should be Ok, not an error");
+        assert!(log.is_empty(), "fresh repo should have no commits");
+    }
+
+    /// After the first commit, `get_log` reports it and `has_commits` flips true.
+    #[test]
+    fn has_commits_and_log_reflect_first_commit() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_repo(repo);
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+
+        assert!(!has_commits(&repo_path), "fresh repo has no commits");
+
+        fs::write(repo.join("a.txt"), "x\n").expect("write file");
+        commit(
+            repo_path.clone(),
+            "First".to_string(),
+            vec![new_file("a.txt")],
+            None,
+        )
+        .expect("commit should succeed");
+
+        assert!(has_commits(&repo_path), "repo has a commit after committing");
+        let log = get_log(repo_path, default_log_opts()).expect("get_log");
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].summary, "First");
+    }
 }

@@ -22,6 +22,13 @@
      * slide (otherwise the user's cursor would jump up/down by N rows).
      */
     windowStartOffset?: number
+    /**
+     * Whether the initial history load has completed. Gates the "No commits
+     * yet" empty state so it only shows for a genuinely empty repo (e.g. a
+     * freshly initialized one), not during the brief window before the first
+     * `get_log` resolves on a repo that does have commits.
+     */
+    loaded?: boolean
     onSelect: (commit: CommitInfo) => void
     onLoadMore: () => void
     onLoadEarlier?: () => void
@@ -35,6 +42,7 @@
     unpushedShas = new Set<string>(),
     hasResolvedUpstream = false,
     windowStartOffset = 0,
+    loaded = true,
     onSelect,
     onLoadMore,
     onLoadEarlier,
@@ -255,6 +263,11 @@
 </script>
 
 <div class="commit-list" bind:this={scrollContainer} onscroll={handleScroll}>
+  {#if loaded && commits.length === 0}
+    <div class="empty-state">
+      <p>No commits yet</p>
+    </div>
+  {/if}
   <div class="virtual-scroll" style="height: {commits.length * ROW_HEIGHT}px">
     <div class="visible-items" style="transform: translateY({offsetPx}px)">
       {#each visibleCommits as commit, i (commit.sha)}
@@ -338,6 +351,15 @@
     background: var(--bg-primary);
     border-right: 1px solid var(--border-inactive);
     padding: 4px 6px;
+  }
+
+  .empty-state {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-faint);
+    font-size: 13px;
   }
 
   .virtual-scroll {

@@ -9,8 +9,15 @@ install:
     cd {{app}} && pnpm install
 
 # Run development server
+#
+# `just dev` runs `cargo run` directly, so it bypasses the install.sh wrapper
+# that exports WEBKIT_DISABLE_DMABUF_RENDERER on NVIDIA. Apply the same guard
+# here: WebKitGTK's DMABUF/GBM renderer crashes on the proprietary NVIDIA driver
+# (blank window / "Gdk Error 71 Protocol error" on Wayland). /dev/nvidia0 exists
+# only with the proprietary driver, so this stays inert on AMD/Intel/nouveau and
+# honors a pre-set value.
 dev:
-    cd {{app}} && pnpm tauri dev
+    cd {{app}} && [ -z "${WEBKIT_DISABLE_DMABUF_RENDERER:-}" ] && [ -e /dev/nvidia0 ] && export WEBKIT_DISABLE_DMABUF_RENDERER=1; pnpm tauri dev
 
 # Build development binary
 build:

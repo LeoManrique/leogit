@@ -168,7 +168,7 @@ Branch fallback: if `# branch.head` is absent (empty repo) the code calls `git r
 
 `commit` is the safest path through a partial-stage commit:
 
-1. `git reset HEAD` to clear the index (only the user's selection should make it into the commit).
+1. `git reset -- .` to clear the index (only the user's selection should make it into the commit). The pathspec form is used instead of `git reset HEAD` so the same step works on a fresh repo whose HEAD is still unborn — `reset HEAD` fails there with "ambiguous argument 'HEAD'", while `reset -- .` (the repo root is the cwd, so `.` covers the whole index) succeeds and still unstages everything.
 2. `stage_files` splits the selection into renamed (needs `--force-remove` on the old path), deleted, and normal, then calls `git update-index --add --remove [--force-remove] --replace -z --stdin`.
 3. `has_staged_changes` validates the index isn't empty (`git diff --cached --quiet` returns 1 when there are staged changes).
 4. The commit message is piped to `git commit -F -` via stdin (avoids arg-length and shell-quoting issues).
@@ -184,6 +184,8 @@ Branch fallback: if `# branch.head` is absent (empty repo) the code calls `git r
 Dates come back in `--date=raw` form (`<unix> <tz>`). To avoid pulling in `chrono`, the code implements `civil_from_unix` using Howard Hinnant's proleptic Gregorian algorithm and emits ISO-8601 strings manually.
 
 The trailing `%D` captures every symbolic ref pointing at the commit (branches, `HEAD`, tags); it's split on commas into `CommitInfo.refs`. The commit list derives tag pills from this by keeping entries prefixed `tag: ` and stripping that prefix — no extra git call needed.
+
+On a fresh repo with an unborn HEAD, `get_log` short-circuits to an empty list rather than letting `git log` fail with exit 128 ("does not have any commits yet"). It uses the shared `has_commits` helper (`git rev-parse --verify --quiet HEAD`, exit 0 only when HEAD resolves to a commit) — a precise check that, unlike blindly accepting exit 128, never masks a genuinely broken repo. The History tab then renders its "No commits yet" empty state instead of an error.
 
 ### Discovery
 
