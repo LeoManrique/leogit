@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/schema.json",
   "productName": "leogit",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "identifier": "com.leomanrique.leogit",
   "build": {
     "beforeDevCommand": "pnpm run dev:vite",

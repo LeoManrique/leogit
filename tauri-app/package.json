@@ -1,6 +1,6 @@
 {
   "name": "leogit",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Visual Git client built with Tauri and Svelte",
   "type": "module",
   "scripts": {
