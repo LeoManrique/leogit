@@ -119,13 +119,33 @@ if [ "$OS" = "darwin" ]; then
 
   success "Installed: $DEST"
 else
-  # AppImage is a single self-contained executable. Install it onto PATH as
-  # `leogit` and register a .desktop launcher so GNOME/COSMIC app menus list it.
+  # AppImage is a single self-contained executable. Install it as
+  # `leogit.AppImage` and put a small `leogit` wrapper onto PATH that execs it;
+  # register a .desktop launcher so GNOME/COSMIC app menus list it.
   BIN_DIR="$HOME/.local/bin"
+  APPIMAGE_DEST="$BIN_DIR/leogit.AppImage"
   DEST="$BIN_DIR/leogit"
   mkdir -p "$BIN_DIR"
-  [ -e "$DEST" ] && warn "Replaced existing $DEST"
-  mv -f "$TMP_DIR/$ARTIFACT" "$DEST"
+  [ -e "$APPIMAGE_DEST" ] && warn "Replaced existing $APPIMAGE_DEST"
+  mv -f "$TMP_DIR/$ARTIFACT" "$APPIMAGE_DEST"
+  chmod +x "$APPIMAGE_DEST"
+
+  # WebKitGTK's DMABUF/GBM renderer is broken on the NVIDIA proprietary driver:
+  # it spams "Failed to create GBM buffer of size WxH: Invalid argument" and can
+  # leave a blank or garbled window. Disabling that renderer falls back to a
+  # working path. We detect at launch (not install) because the active GPU and
+  # session type are runtime properties. `/dev/nvidia0` exists only when the
+  # proprietary driver is loaded — nouveau uses /dev/dri and isn't affected — so
+  # this stays inert on AMD/Intel/nouveau. An already-set value is honored, so
+  # users can force it on or off.
+  cat > "$DEST" <<'WRAPPER'
+#!/usr/bin/env bash
+APPIMAGE="$(dirname "$(readlink -f "$0")")/leogit.AppImage"
+if [ -z "${WEBKIT_DISABLE_DMABUF_RENDERER:-}" ] && [ -e /dev/nvidia0 ]; then
+  export WEBKIT_DISABLE_DMABUF_RENDERER=1
+fi
+exec "$APPIMAGE" "$@"
+WRAPPER
   chmod +x "$DEST"
 
   # Pull the bundled icon out for the launcher. --appimage-extract unpacks
@@ -135,7 +155,7 @@ else
   mkdir -p "$ICON_DIR"
   (
     cd "$TMP_DIR"
-    "$DEST" --appimage-extract >/dev/null 2>&1 || true
+    "$APPIMAGE_DEST" --appimage-extract >/dev/null 2>&1 || true
     ICON_SRC=$(ls squashfs-root/*.png 2>/dev/null | head -1 || true)
     [ -z "$ICON_SRC" ] && [ -f squashfs-root/.DirIcon ] && ICON_SRC="squashfs-root/.DirIcon"
     [ -n "$ICON_SRC" ] && cp "$ICON_SRC" "$ICON_DEST"
