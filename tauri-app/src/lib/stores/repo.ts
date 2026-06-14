@@ -18,6 +18,8 @@ export interface RepoStatus {
   behind: number
   files: FileEntry[]
   isMerging: boolean
+  /** Whether the repo has any configured remote. False → offer "Publish to GitHub". */
+  hasRemote: boolean
   /** SHAs of commits the user still needs to push, used to mark History rows. */
   unpushedShas: Set<string>
 }
@@ -78,6 +80,7 @@ const defaultStatus: RepoStatus = {
   behind: 0,
   files: [],
   isMerging: false,
+  hasRemote: false,
   unpushedShas: new Set(),
 }
 

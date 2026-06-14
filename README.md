@@ -8,6 +8,7 @@ A calm desktop Git client built with Tauri 2, Rust, and Svelte 5. Designed to fe
 - **AI commit messages** generated from the selected diff via the local `claude` CLI or a self-hosted Ollama instance.
 - **Browse history** with a virtualized commit list, per-commit file diffs, and trailers/SHA copy.
 - **Manage branches** (create / switch / delete) and **merge** (regular or squash) with conflict detection.
+- **Push / pull** with ahead-behind badges and force-push-with-lease (offered only when the branch has diverged), or **publish a remote-less repo to GitHub** in one click via the GitHub CLI.
 - **Open pull requests** through the GitHub CLI: list, check CI status, create, checkout.
 - **Embedded terminal** docked at the bottom of the window, running the user's `$SHELL` in the repo directory.
 - **Auto-fetch** + 2 s status polling so the UI stays in sync with anything the user does in another terminal.

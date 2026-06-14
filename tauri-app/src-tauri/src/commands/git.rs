@@ -85,6 +85,9 @@ pub struct RepoStatus {
     pub ahead: i32,
     pub behind: i32,
     pub files: Vec<FileEntry>,
+    /// Whether the repo has at least one configured remote. When false the UI
+    /// offers "Publish to GitHub" instead of Push, since there's nowhere to push.
+    pub has_remote: bool,
     /// SHAs of commits reachable from HEAD but not from the remote tracking
     /// branch — i.e. commits the user still needs to push. Empty when the
     /// branch has no resolvable upstream or is in sync. Used by the History
@@ -296,8 +299,16 @@ pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
         ahead: 0,
         behind: 0,
         files: Vec::new(),
+        has_remote: false,
         unpushed_shas: Vec::new(),
     };
+
+    // Configured remotes, queried once and reused below (the no-upstream
+    // ahead/behind fallback needs the first remote's name). `has_remote` drives
+    // the UI's Push-vs-Publish choice.
+    let remotes_out = run_git(&repo_path, &["remote"]).unwrap_or_default();
+    let first_remote = remotes_out.lines().map(str::trim).find(|l| !l.is_empty());
+    result.has_remote = first_remote.is_some();
 
     if bytes.is_empty() {
         return Ok(result);
@@ -373,35 +384,31 @@ pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
     // the next push needs `--set-upstream`, and lying about it would break
     // first-push behaviour.
     if !result.has_upstream && !result.branch.is_empty() {
-        if let Ok(remotes) = run_git(&repo_path, &["remote"]) {
-            if let Some(first_remote) = remotes.lines().next().map(str::trim) {
-                if !first_remote.is_empty() {
-                    let remote_ref = format!("refs/remotes/{}/{}", first_remote, result.branch);
-                    let exists = git_cmd(
-                        &repo_path,
-                        &["rev-parse", "--verify", "--quiet", &remote_ref],
-                    )
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
-                    if exists {
-                        let range = format!("HEAD...{}", remote_ref);
-                        if let Ok(out) = run_git(
-                            &repo_path,
-                            &["rev-list", "--left-right", "--count", &range, "--"],
-                        ) {
-                            let parts: Vec<&str> = out.split_whitespace().collect();
-                            if parts.len() == 2 {
-                                result.ahead = parts[0].parse().unwrap_or(0);
-                                result.behind = parts[1].parse().unwrap_or(0);
-                                // Surface the synthesised tracking name so the
-                                // UI / debug logs make sense; this is purely
-                                // informational and does NOT flip has_upstream.
-                                result.upstream =
-                                    format!("{}/{} (inferred)", first_remote, result.branch);
-                                effective_upstream = Some(remote_ref);
-                            }
-                        }
+        if let Some(first_remote) = first_remote {
+            let remote_ref = format!("refs/remotes/{}/{}", first_remote, result.branch);
+            let exists = git_cmd(
+                &repo_path,
+                &["rev-parse", "--verify", "--quiet", &remote_ref],
+            )
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+            if exists {
+                let range = format!("HEAD...{}", remote_ref);
+                if let Ok(out) = run_git(
+                    &repo_path,
+                    &["rev-list", "--left-right", "--count", &range, "--"],
+                ) {
+                    let parts: Vec<&str> = out.split_whitespace().collect();
+                    if parts.len() == 2 {
+                        result.ahead = parts[0].parse().unwrap_or(0);
+                        result.behind = parts[1].parse().unwrap_or(0);
+                        // Surface the synthesised tracking name so the UI /
+                        // debug logs make sense; this is purely informational
+                        // and does NOT flip has_upstream.
+                        result.upstream =
+                            format!("{}/{} (inferred)", first_remote, result.branch);
+                        effective_upstream = Some(remote_ref);
                     }
                 }
             }
@@ -497,7 +504,14 @@ pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
 // Diff commands
 // ---------------------------------------------------------------------------
 
-fn diff_args_for_file<'a>(file: &'a FileEntry, ignore_ws: bool) -> Vec<&'a str> {
+/// SHA of git's canonical empty tree object. Git always recognizes this hash
+/// even when the object isn't physically in the database. Diffing a tracked
+/// file against it instead of `HEAD` produces a correct "all lines added" patch
+/// on a fresh repo with an unborn HEAD, where `git diff HEAD` fails with
+/// "fatal: bad revision 'HEAD'".
+const EMPTY_TREE_SHA: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+fn diff_args_for_file<'a>(file: &'a FileEntry, head_ref: &'a str, ignore_ws: bool) -> Vec<&'a str> {
     let untracked = matches!(file.status, FileStatus::New) && file.xy.starts_with('?');
     let mut args: Vec<&str> = vec![
         "diff",
@@ -514,7 +528,7 @@ fn diff_args_for_file<'a>(file: &'a FileEntry, ignore_ws: bool) -> Vec<&'a str> 
         args.push("/dev/null");
         args.push(&file.path);
     } else {
-        args.push("HEAD");
+        args.push(head_ref);
         if ignore_ws {
             args.push("-w");
         }
@@ -527,7 +541,14 @@ fn diff_args_for_file<'a>(file: &'a FileEntry, ignore_ws: bool) -> Vec<&'a str> 
 /// Run a diff command. For untracked files, `git diff --no-index` exits with status 1
 /// to signal "files differ", which is expected — we treat that as success.
 fn run_diff(repo_path: &str, file: &FileEntry, ignore_ws: bool) -> Result<String, String> {
-    let args = diff_args_for_file(file, ignore_ws);
+    // On a fresh repo (unborn HEAD) there is no `HEAD` to diff against, so fall
+    // back to the empty tree and the staged/working file shows as fully added.
+    let head_ref = if has_commits(repo_path) {
+        "HEAD"
+    } else {
+        EMPTY_TREE_SHA
+    };
+    let args = diff_args_for_file(file, head_ref, ignore_ws);
     let arg_refs: Vec<&str> = args.iter().copied().collect();
     let output = git_cmd(repo_path, &arg_refs)
         .output()
@@ -1855,5 +1876,57 @@ mod tests {
         let log = get_log(repo_path, default_log_opts()).expect("get_log");
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].summary, "First");
+    }
+
+    /// Regression: viewing a staged file's diff on a fresh repo (unborn HEAD)
+    /// must not error. It used to fail with "git diff failed: fatal: bad
+    /// revision 'HEAD'" because the diff was anchored at `HEAD`, which doesn't
+    /// exist yet. We now diff against the empty tree, so the file shows fully
+    /// added.
+    #[test]
+    fn diff_on_fresh_repo_shows_staged_file_as_added() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_repo(repo);
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+
+        fs::write(repo.join("README.md"), "hello\nworld\n").expect("write README");
+        run_git(&repo_path, &["add", "README.md"]).expect("stage README");
+
+        let diff = get_diff(repo_path, new_file("README.md"))
+            .expect("diff on a fresh repo should be Ok, not an error");
+        assert!(diff.contains("+hello"), "added line missing: {diff}");
+        assert!(diff.contains("+world"), "added line missing: {diff}");
+    }
+
+    /// `get_status.has_remote` reflects whether any remote is configured. The UI
+    /// uses it to offer "Publish to GitHub" instead of Push when it's false.
+    #[test]
+    fn status_reports_has_remote() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_repo(repo);
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+
+        fs::write(repo.join("a.txt"), "x\n").expect("write file");
+        commit(
+            repo_path.clone(),
+            "First".to_string(),
+            vec![new_file("a.txt")],
+            None,
+        )
+        .expect("commit should succeed");
+
+        let before = get_status(repo_path.clone()).expect("get_status");
+        assert!(!before.has_remote, "no remote configured yet");
+
+        run_git(
+            &repo_path,
+            &["remote", "add", "origin", "https://example.com/x/y.git"],
+        )
+        .expect("add remote");
+
+        let after = get_status(repo_path).expect("get_status");
+        assert!(after.has_remote, "remote is now configured");
     }
 }

@@ -83,6 +83,7 @@ fn main() {
             gh::check_auth,
             gh::gh_repo_list,
             gh::gh_clone,
+            gh::gh_publish_repo,
             ai::generate_commit_message,
             ai::check_provider_available,
             terminal::start_terminal,

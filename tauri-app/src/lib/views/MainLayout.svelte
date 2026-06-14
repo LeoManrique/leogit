@@ -231,6 +231,7 @@
             behind: status.behind,
             files: status.files,
             isMerging,
+            hasRemote: status.has_remote,
             unpushedShas: new Set(status.unpushed_shas ?? []),
           },
           selectedFiles: nextSelected,

@@ -1,10 +1,11 @@
 <script lang="ts">
   import { repoState } from '$lib/stores/repo'
   import { appState } from '$lib/stores/app'
-  import { gitApi } from '$lib/api/commands'
+  import { gitApi, ghApi } from '$lib/api/commands'
   import { ensureRepoIdentifiers, repoIdentifiers } from '$lib/stores/repoIdentifiers'
   import ContextMenu, { type ContextMenuItem } from './ContextMenu.svelte'
   import ForcePushConfirm from './ForcePushConfirm.svelte'
+  import PublishRepository from './PublishRepository.svelte'
   import RepoTooltip from './RepoTooltip.svelte'
 
   interface Props {
@@ -70,12 +71,23 @@
 
   let pushMenu = $state<{ x: number; y: number } | null>(null)
   let showForcePushConfirm = $state(false)
+  let showPublish = $state(false)
+  let isPublishing = $state(false)
   // Cache the remote name so the confirm dialog can show it without re-querying.
   let cachedRemote = $state('origin')
 
   const ahead = $derived($repoState.status.ahead)
   const behind = $derived($repoState.status.behind)
   const hasUpstream = $derived($repoState.status.hasUpstream)
+  // A loaded branch with no remote → publish instead of push. Gating on `branch`
+  // avoids briefly flashing "Publish" before the first status load resolves.
+  const noRemote = $derived(
+    !!$appState.repoPath && !!$repoState.status.branch && !$repoState.status.hasRemote,
+  )
+  // Force-push is only meaningful when the branch has diverged from its upstream
+  // (commits on both sides). A plain ahead-only branch fast-forwards, so offering
+  // force push there is noise — hence the menu item only appears when diverged.
+  const hasDiverged = $derived(hasUpstream && ahead > 0 && behind > 0)
 
   async function handleRefresh() {
     if (isRefreshing) return
@@ -94,6 +106,7 @@
           ahead: status.ahead,
           behind: status.behind,
           files: status.files,
+          hasRemote: status.has_remote,
           unpushedShas: new Set(status.unpushed_shas ?? []),
         },
         error: undefined,
@@ -161,6 +174,31 @@
     }
   }
 
+  // Main split-button click: publish when there's no remote yet, otherwise push.
+  function handlePushButton() {
+    if (noRemote) {
+      showPublish = true
+    } else {
+      handlePush()
+    }
+  }
+
+  async function handlePublish(name: string, description: string, isPrivate: boolean) {
+    if (isPublishing) return
+    const repoPath = $appState.repoPath
+    if (!repoPath) return
+    isPublishing = true
+    try {
+      await ghApi.publishRepo(repoPath, name, description, isPrivate)
+      showPublish = false
+      await handleRefresh()
+    } catch (error) {
+      repoState.update((s) => ({ ...s, error: String(error) }))
+    } finally {
+      isPublishing = false
+    }
+  }
+
   function openPushMenu(e: MouseEvent) {
     e.preventDefault()
     e.stopPropagation()
@@ -176,19 +214,28 @@
     gitApi.getRemote(repoPath).then((r) => (cachedRemote = r)).catch(() => {})
   })
 
-  const pushMenuItems = $derived<ContextMenuItem[]>([
-    {
-      label: 'Push',
-      action: handlePush,
-      enabled: !isPushing,
-    },
-    {
-      label: 'Force push (with lease)…',
-      action: () => (showForcePushConfirm = true),
-      enabled: hasUpstream && !isPushing,
-      destructive: true,
-    },
-  ])
+  const pushMenuItems = $derived<ContextMenuItem[]>(
+    noRemote
+      ? [{ label: 'Publish to GitHub…', action: () => (showPublish = true), enabled: !isPushing }]
+      : [
+          {
+            label: 'Push',
+            action: handlePush,
+            enabled: !isPushing,
+          },
+          // Only offered once the branch has actually diverged — see `hasDiverged`.
+          ...(hasDiverged
+            ? [
+                {
+                  label: 'Force push (with lease)…',
+                  action: () => (showForcePushConfirm = true),
+                  enabled: !isPushing,
+                  destructive: true,
+                },
+              ]
+            : []),
+        ],
+  )
 </script>
 
 <header class="header">
@@ -253,14 +300,24 @@
     <div class="split-button">
       <button
         class="count-button split-main"
-        onclick={handlePush}
-        disabled={isPushing}
-        title={ahead > 0 ? `Push ${ahead} commit${ahead === 1 ? '' : 's'} to remote` : 'Push to remote'}
+        onclick={handlePushButton}
+        disabled={isPushing || isPublishing}
+        title={noRemote
+          ? 'Publish this repository to GitHub'
+          : ahead > 0
+            ? `Push ${ahead} commit${ahead === 1 ? '' : 's'} to remote`
+            : 'Push to remote'}
       >
-        {#if isPushing}
+        {#if isPushing || isPublishing}
           <svg class="icon spinning" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
             <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" />
             <polyline points="13.5,2 13.5,5 10.5,5" />
+          </svg>
+        {:else if noRemote}
+          <svg class="icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M4.5 11.5a2.5 2.5 0 0 1 0-5 3.2 3.2 0 0 1 6.1-1 2.4 2.4 0 0 1 .9 4.6" />
+            <line x1="8" y1="7.5" x2="8" y2="13" />
+            <polyline points="6,9.5 8,7.5 10,9.5" />
           </svg>
         {:else}
           <svg class="icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -268,13 +325,13 @@
             <polyline points="4,8 8,4 12,8" />
           </svg>
         {/if}
-        <span>Push</span>
-        {#if ahead > 0}<span class="count-badge">{ahead}</span>{/if}
+        <span>{noRemote ? 'Publish' : 'Push'}</span>
+        {#if !noRemote && ahead > 0}<span class="count-badge">{ahead}</span>{/if}
       </button>
       <button
         class="split-chevron"
         onclick={openPushMenu}
-        disabled={isPushing}
+        disabled={isPushing || isPublishing}
         aria-label="More push options"
         title="More push options"
       >
@@ -330,6 +387,15 @@
     {isPushing}
     onConfirm={handleForcePush}
     onCancel={() => (showForcePushConfirm = false)}
+  />
+{/if}
+
+{#if showPublish}
+  <PublishRepository
+    defaultName={repoName}
+    {isPublishing}
+    onPublish={handlePublish}
+    onCancel={() => (showPublish = false)}
   />
 {/if}
 

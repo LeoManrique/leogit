@@ -86,6 +86,61 @@ pub fn gh_repo_list(limit: u32) -> Result<Vec<GhRepo>, String> {
         .collect())
 }
 
+/// Publish a local repository to GitHub via `gh repo create`. Creates the
+/// remote repo under the authenticated user, wires it up as the `origin` remote
+/// of the local repo, and pushes the current branch — the same one-shot flow as
+/// GitHub Desktop's "Publish Repository". `gh` supplies the auth, so this works
+/// for private repos without any token plumbing on our side.
+///
+/// `name` is the GitHub repository name (may be `owner/name` to target an org).
+/// An empty `description` is omitted rather than sent as a blank value.
+#[tauri::command]
+pub fn gh_publish_repo(
+    repo_path: String,
+    name: String,
+    description: String,
+    is_private: bool,
+) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Repository name is required.".to_string());
+    }
+    let visibility = if is_private { "--private" } else { "--public" };
+    let description = description.trim();
+    let mut args: Vec<&str> = vec![
+        "repo",
+        "create",
+        name,
+        "--source",
+        &repo_path,
+        "--remote",
+        "origin",
+        "--push",
+        visibility,
+    ];
+    if !description.is_empty() {
+        args.push("--description");
+        args.push(description);
+    }
+
+    let mut cmd = Command::new("gh");
+    cmd.args(&args);
+    let output = super::process::hide_console(&mut cmd)
+        .output()
+        .map_err(|_| "GitHub CLI (gh) is not installed.".to_string())?;
+    if !output.status.success() {
+        // gh writes its diagnostics (auth, name collision, etc.) to stderr.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        return Err(if stderr.is_empty() {
+            "gh repo create failed. Is `gh` authenticated? Run `gh auth login`.".to_string()
+        } else {
+            stderr.to_string()
+        });
+    }
+    Ok(())
+}
+
 /// Clone a GitHub repo by `owner/name` into `target_path` using `gh repo clone`
 /// so it inherits the user's `gh` auth (private repos work without a prompt).
 /// Returns the absolute path of the cloned repo.

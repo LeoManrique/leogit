@@ -16,6 +16,8 @@ export interface RepoStatus {
   ahead: number
   behind: number
   files: FileEntry[]
+  /** Whether the repo has any configured remote. Drives Push vs. Publish in the UI. */
+  has_remote: boolean
   /** SHAs of commits reachable from HEAD but not on the remote. Empty when in sync or no upstream. */
   unpushed_shas: string[]
 }
@@ -264,6 +266,8 @@ export const ghApi = {
   repoList: (limit: number) => invoke<GhRepo[]>('gh_repo_list', { limit }),
   clone: (nameWithOwner: string, targetPath: string) =>
     invoke<string>('gh_clone', { nameWithOwner, targetPath }),
+  publishRepo: (repoPath: string, name: string, description: string, isPrivate: boolean) =>
+    invoke<void>('gh_publish_repo', { repoPath, name, description, isPrivate }),
 }
 
 export interface AiProviderConfig {
