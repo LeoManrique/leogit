@@ -921,16 +921,16 @@
 
     if (inField) return
 
-    if (e.key === '`' && !meta) {
+    if (meta && e.key === '`') {
       e.preventDefault()
       toggleTerminalMinimize()
-    } else if (e.key === 'b' && !meta) {
+    } else if (meta && e.key === 'b') {
       e.preventDefault()
       showBranches = !showBranches
     } else if (e.key === '?' && !meta) {
       e.preventDefault()
       showHelp = !showHelp
-    } else if (e.key === ',' && !meta) {
+    } else if (meta && e.key === ',') {
       e.preventDefault()
       showSettings = !showSettings
     } else if (meta && e.key === 'r') {
@@ -1166,7 +1166,7 @@
           <button
             class="terminal-label"
             onclick={toggleTerminalMinimize}
-            title={terminalExpanded ? 'Minimize terminal (`)' : 'Expand terminal (`)'}
+            title={terminalExpanded ? 'Minimize terminal (Ctrl+`)' : 'Expand terminal (Ctrl+`)'}
             aria-label={terminalExpanded ? 'Minimize terminal' : 'Expand terminal'}
           >
             <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1189,7 +1189,7 @@
             <button
               class="terminal-control-button"
               onclick={toggleTerminalMinimize}
-              title={terminalExpanded ? 'Minimize terminal (`)' : 'Expand terminal (`)'}
+              title={terminalExpanded ? 'Minimize terminal (Ctrl+`)' : 'Expand terminal (Ctrl+`)'}
               aria-label={terminalExpanded ? 'Minimize terminal' : 'Expand terminal'}
             >
               {#if terminalExpanded}

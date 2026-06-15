@@ -13,13 +13,13 @@
   const shortcuts = [
     { key: 'Ctrl/Cmd + Enter', description: 'Commit selected files' },
     { key: 'Ctrl/Cmd + G', description: 'Generate commit message with AI' },
-    { key: 'Ctrl/Cmd + P', description: 'Cycle AI provider' },
+    { key: 'Ctrl/Cmd + P', description: 'Push (or publish) to remote' },
     { key: 'Ctrl/Cmd + R', description: 'Refresh status' },
     { key: 'Ctrl/Cmd + L', description: 'Toggle Changes / History tab' },
-    { key: 'B', description: 'Open branch picker' },
-    { key: ',', description: 'Open settings' },
+    { key: 'Ctrl/Cmd + B', description: 'Open branch picker' },
+    { key: 'Ctrl/Cmd + ,', description: 'Open settings' },
+    { key: 'Ctrl/Cmd + `', description: 'Toggle terminal' },
     { key: '?', description: 'Open this help' },
-    { key: '`', description: 'Toggle terminal' },
     { key: 'Escape', description: 'Close overlay' },
   ]
 </script>

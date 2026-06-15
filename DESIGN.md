@@ -52,7 +52,7 @@ Two-column layout: a resizable sidebar on the left and a content area on the rig
 
 ### 4. AI commit message generation
 
-- The composer has a provider dropdown (Claude / Ollama) and a **Generate** button.
+- The composer has a provider dropdown (Claude / Ollama) and a **Generate** button. The dropdown reads from and writes back to the persisted `ai_provider` config — the same source of truth as the Settings overlay — so the choice survives restarts and the two stay in sync.
 - Generate sends the unified diff of the currently selected files only (untracked files are diffed via `--no-index`). The diff goes to the chosen provider with a strict JSON prompt.
 - **Claude**: shells out to the `claude` CLI (`--print --output-format json --model <model>`). Model defaults to `sonnet`. Diff size is capped at 20 MB.
 - **Ollama**: posts to `http://localhost:11434/api/generate` (or `ollama_server_url`). Model defaults to `tavernari/git-commit-message:latest`. Diff size is capped at 50 MB.
@@ -113,19 +113,19 @@ A modal overlay grouped into Appearance / Diff / Git / AI / Repository discovery
 
 ## Keyboard surface
 
-The full list lives in [HelpOverlay.svelte](tauri-app/src/lib/views/HelpOverlay.svelte). Single-key shortcuts only fire when no input/textarea has focus; meta-modifier shortcuts work everywhere.
+The full list lives in [HelpOverlay.svelte](tauri-app/src/lib/views/HelpOverlay.svelte). The commit composer's `Ctrl/Cmd + Enter` and `Ctrl/Cmd + G` act while it is focused, and `Ctrl/Cmd + P` (push) works everywhere — including while typing. Every other (window-level) shortcut is suppressed while a text input or textarea has focus, so they never interfere with the composer. `?` is the only shortcut with no modifier.
 
 | Key | Action | Scope |
 |---|---|---|
 | `Ctrl/Cmd + Enter` | Commit selected files (or "Amend commit" when in amend mode) | Commit composer focused |
 | `Ctrl/Cmd + G` | Generate commit message with AI | Commit composer focused |
-| `Ctrl/Cmd + P` | Cycle AI provider (Claude ↔ Ollama) | Commit composer focused |
-| `Ctrl/Cmd + R` | Refresh status | Global |
-| `Ctrl/Cmd + L` | Toggle Changes / History tab | Global |
-| `B` | Open branch picker | Global, no input focused |
-| `,` | Open Settings | Global, no input focused |
+| `Ctrl/Cmd + P` | Push to remote (or Publish when the branch has no remote) | Global |
+| `Ctrl/Cmd + R` | Refresh status | Global, no input focused |
+| `Ctrl/Cmd + L` | Toggle Changes / History tab | Global, no input focused |
+| `Ctrl/Cmd + B` | Open branch picker | Global, no input focused |
+| `Ctrl/Cmd + ,` | Open Settings | Global, no input focused |
+| `Ctrl/Cmd` + `` ` `` | Toggle terminal (collapsed ↔ expanded) | Global, no input focused |
 | `?` | Open Help | Global, no input focused |
-| `` ` `` | Toggle terminal (collapsed ↔ expanded) | Global, no input focused |
 | `Space` | Toggle file selection on focused row | File list focused |
 | `↑` / `↓` | Move active file (loads its diff) | File list focused |
 | `Home` / `End` (or `Cmd+↑` / `Cmd+↓`) | Jump to first / last file | File list focused |

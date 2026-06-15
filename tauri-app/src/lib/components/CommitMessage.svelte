@@ -3,6 +3,7 @@
   import { repoState, canCommit } from '$lib/stores/repo'
   import { appState } from '$lib/stores/app'
   import { gitApi, aiApi, configApi, type AiProviderConfig } from '$lib/api/commands'
+  import { config } from '$lib/stores/config'
 
   interface Props {
     onCommitted?: () => void
@@ -13,7 +14,12 @@
 
   let summary = $state('')
   let description = $state('')
-  let provider = $state<'claude' | 'ollama'>('claude')
+  // The active AI provider is sourced from — and persisted to — the shared
+  // config store, so the choice survives restarts and stays in sync with the
+  // Settings overlay. Any unrecognized stored value falls back to Claude.
+  const provider = $derived<'claude' | 'ollama'>(
+    $config?.ai_provider === 'ollama' ? 'ollama' : 'claude',
+  )
   let isGenerating = $state(false)
   let isCommitting = $state(false)
   let error = $state<string | null>(null)
@@ -152,8 +158,18 @@
     }
   }
 
-  function cycleProvider() {
-    provider = provider === 'claude' ? 'ollama' : 'claude'
+  // Persist a provider change to the config store (optimistic local update,
+  // then write to disk). Used by the composer's provider dropdown.
+  async function setProvider(next: 'claude' | 'ollama') {
+    const cfg = $config
+    if (!cfg || cfg.ai_provider === next) return
+    const updated = { ...cfg, ai_provider: next }
+    config.set(updated)
+    try {
+      await configApi.saveConfig(updated)
+    } catch (err) {
+      error = `Failed to save provider: ${String(err)}`
+    }
   }
 
   async function handleCommit() {
@@ -221,9 +237,6 @@
     if (meta && e.key === 'g') {
       e.preventDefault()
       if (!isGenerating) handleGenerate()
-    } else if (meta && e.key === 'p') {
-      e.preventDefault()
-      cycleProvider()
     } else if (meta && e.key === 'Enter') {
       e.preventDefault()
       if (canSubmit && !isCommitting) handleCommit()
@@ -280,7 +293,12 @@
 
   <div class="button-bar">
     <div class="button-group">
-      <select class="provider-select" bind:value={provider} disabled={isGenerating || isCommitting}>
+      <select
+        class="provider-select"
+        value={provider}
+        onchange={(e) => setProvider(e.currentTarget.value as 'claude' | 'ollama')}
+        disabled={isGenerating || isCommitting}
+      >
         <option value="claude">Claude</option>
         <option value="ollama">Ollama</option>
       </select>

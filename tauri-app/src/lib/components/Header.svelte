@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte'
   import { repoState } from '$lib/stores/repo'
   import { appState } from '$lib/stores/app'
   import { gitApi, ghApi } from '$lib/api/commands'
@@ -214,6 +215,23 @@
     gitApi.getRemote(repoPath).then((r) => (cachedRemote = r)).catch(() => {})
   })
 
+  // Ctrl/Cmd+P triggers the primary split-button action — push, or publish when
+  // the branch has no remote yet — mirroring the button's own enabled state.
+  // Registered globally (not gated on focus) so it works while composing a
+  // commit, matching how desktop Git clients bind push.
+  function handleGlobalKeyDown(e: KeyboardEvent) {
+    const meta = e.ctrlKey || e.metaKey
+    if (meta && (e.key === 'p' || e.key === 'P')) {
+      e.preventDefault()
+      if (!isPushing && !isPublishing && $appState.repoPath) handlePushButton()
+    }
+  }
+
+  onMount(() => {
+    window.addEventListener('keydown', handleGlobalKeyDown)
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown)
+  })
+
   const pushMenuItems = $derived<ContextMenuItem[]>(
     noRemote
       ? [{ label: 'Publish to GitHub…', action: () => (showPublish = true), enabled: !isPushing }]
@@ -254,7 +272,7 @@
       </svg>
       <span class="chip-label">{repoName || '…'}</span>
     </button>
-    <button class="chip-button" onclick={onOpenBranches} title="Switch branch (B)">
+    <button class="chip-button" onclick={onOpenBranches} title="Switch branch (Ctrl+B)">
       <svg class="chip-icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <circle cx="4" cy="3.5" r="1.4" />
         <circle cx="4" cy="12.5" r="1.4" />
@@ -303,10 +321,10 @@
         onclick={handlePushButton}
         disabled={isPushing || isPublishing}
         title={noRemote
-          ? 'Publish this repository to GitHub'
+          ? 'Publish this repository to GitHub (Ctrl+P)'
           : ahead > 0
-            ? `Push ${ahead} commit${ahead === 1 ? '' : 's'} to remote`
-            : 'Push to remote'}
+            ? `Push ${ahead} commit${ahead === 1 ? '' : 's'} to remote (Ctrl+P)`
+            : 'Push to remote (Ctrl+P)'}
       >
         {#if isPushing || isPublishing}
           <svg class="icon spinning" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
@@ -346,7 +364,7 @@
         <polyline points="13.5,2 13.5,5 10.5,5" />
       </svg>
     </button>
-    <button class="icon-button" onclick={onOpenSettings} title="Settings (,)" aria-label="Settings">
+    <button class="icon-button" onclick={onOpenSettings} title="Settings (Ctrl+,)" aria-label="Settings">
       <svg class="icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <circle cx="8" cy="8" r="2.2" />
         <path d="M13 9.5l1.2.7-1 1.7-1.3-.5a4.6 4.6 0 0 1-1.4.8L10.2 14H7.8l-.3-1.8a4.6 4.6 0 0 1-1.4-.8l-1.3.5-1-1.7L5 9.5a4.7 4.7 0 0 1 0-3L3.8 5.8l1-1.7 1.3.5a4.6 4.6 0 0 1 1.4-.8L7.8 2h2.4l.3 1.8a4.6 4.6 0 0 1 1.4.8l1.3-.5 1 1.7-1.2.7a4.7 4.7 0 0 1 0 3z" />
