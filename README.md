@@ -1,6 +1,6 @@
 # leogit
 
-A calm desktop Git client built with Tauri 2, Rust, and Svelte 5. Designed to feel like the macOS apps it sits next to: dense, tabular, quick, no marketing pills.
+A calm desktop Git client built with Tauri 2, Rust, and Svelte 5. Designed to get Git things done quickly.
 
 ## What it does
 
