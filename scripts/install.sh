@@ -141,6 +141,17 @@ else
   cat > "$DEST" <<'WRAPPER'
 #!/usr/bin/env bash
 APPIMAGE="$(dirname "$(readlink -f "$0")")/leogit.AppImage"
+
+# Optional per-user launch tweaks (extra env vars, compositor-specific scaling).
+# Kept in a separate file the installer never overwrites, so customizations
+# survive updates that regenerate this wrapper. Ships nothing by default, so
+# this is inert unless the user creates it. Example (Hyprland fractional scale):
+#   if [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
+#     export GDK_BACKEND=x11 GDK_DPI_SCALE=1.5
+#   fi
+LAUNCH_ENV="${XDG_CONFIG_HOME:-$HOME/.config}/leogit/launch-env"
+[ -f "$LAUNCH_ENV" ] && . "$LAUNCH_ENV"
+
 if [ -z "${WEBKIT_DISABLE_DMABUF_RENDERER:-}" ] && [ -e /dev/nvidia0 ]; then
   export WEBKIT_DISABLE_DMABUF_RENDERER=1
 fi
