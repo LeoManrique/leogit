@@ -127,7 +127,7 @@ Two intervals live in `MainLayout.svelte`:
 - **Status poll** — every 2000 ms. Runs `get_status` silently + `get_head_sha`. If the HEAD SHA changed, the commit log is refreshed in place keeping the same loaded count so the user doesn't lose scroll position.
 - **Auto-fetch** — every `fetch_interval_ms` (default 30 000). Skipped if the user is currently typing in an input/textarea or the window is hidden. Runs `git fetch --prune --recurse-submodules=on-demand` against the first remote.
 
-Both also fire on `visibilitychange` (regaining visibility) and global focus events. Both clear on unmount.
+On regaining focus (`window` `focus`) or visibility (`visibilitychange`), `MainLayout` runs a one-shot **resync** — silent `get_status`, HEAD poll, and a *forced* re-fetch of the diff for the file open in the changes pane (`loadDiffForFile(file, { force: true })`), since it may have changed on disk while the app was backgrounded. A `resyncing` guard collapses the focus+visibility double-fire (common under tiling WMs) into a single run. Auto-fetch is **not** part of this resync. All listeners and intervals clear on unmount.
 
 ## Git layer
 

@@ -411,12 +411,17 @@
     }
   }
 
-  async function loadDiffForFile(file: FileEntry | null): Promise<void> {
+  async function loadDiffForFile(
+    file: FileEntry | null,
+    opts: { force?: boolean } = {},
+  ): Promise<void> {
     // Re-activating the same file that's already on screen (or already
     // being fetched) is a no-op — skip the refetch so arrow scrolls past
-    // and back don't churn the pane.
+    // and back don't churn the pane. `force` overrides this so a focus-return
+    // refresh re-fetches the open file even though its path is unchanged.
     const current = get(repoState)
     if (
+      !opts.force &&
       file &&
       current.activeFile?.path === file.path &&
       (current.activeFileDiff !== null || current.isDiffLoading)
@@ -487,6 +492,14 @@
         error: String(error),
       }))
     }
+  }
+
+  // Re-fetch the diff for the file currently open in the changes pane. Used on
+  // app re-focus, where the file may have been edited on disk while we were
+  // away. No-op when nothing is selected.
+  function reloadActiveDiff(): void {
+    const active = get(repoState).activeFile
+    if (active) loadDiffForFile(active, { force: true })
   }
 
   async function loadCommitFiles(commit: CommitInfo | null): Promise<void> {
@@ -621,11 +634,30 @@
     }, intervalMs)
   }
 
-  function handleVisibilityChange(): void {
-    if (!document.hidden && $appState.phase === 'main') {
-      refreshStatus({ silent: true })
+  // Re-sync when the app becomes active again — window focus, or the window
+  // turning visible. Status and HEAD may have moved, and the file open in the
+  // changes pane may have been edited on disk while we were away, so its diff
+  // is re-fetched too. Guarded against overlapping runs since `focus` and
+  // `visibilitychange` can both fire on a single window activation.
+  let resyncing = false
+  async function resyncOnActive(): Promise<void> {
+    if (resyncing || $appState.phase !== 'main') return
+    resyncing = true
+    try {
+      await refreshStatus({ silent: true })
       pollHeadSha()
+      reloadActiveDiff()
+    } finally {
+      resyncing = false
     }
+  }
+
+  function handleVisibilityChange(): void {
+    if (!document.hidden) resyncOnActive()
+  }
+
+  function handleWindowFocus(): void {
+    resyncOnActive()
   }
 
   function handleFocusEvent(e: FocusEvent): void {
@@ -990,6 +1022,7 @@
   onMount(() => {
     initialize().catch(console.error)
     document.addEventListener('visibilitychange', handleVisibilityChange)
+    window.addEventListener('focus', handleWindowFocus)
     document.addEventListener('focusin', handleFocusEvent)
     document.addEventListener('focusout', handleFocusEvent)
     window.addEventListener('keydown', handleKeyDown)
@@ -998,6 +1031,7 @@
       if (statusInterval) clearInterval(statusInterval)
       if (fetchInterval) clearInterval(fetchInterval)
       document.removeEventListener('visibilitychange', handleVisibilityChange)
+      window.removeEventListener('focus', handleWindowFocus)
       document.removeEventListener('focusin', handleFocusEvent)
       document.removeEventListener('focusout', handleFocusEvent)
       window.removeEventListener('keydown', handleKeyDown)
