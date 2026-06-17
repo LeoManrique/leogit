@@ -88,33 +88,51 @@ step 2 "Determining version"
 CURRENT_VERSION=$(read_version)
 [ -z "$CURRENT_VERSION" ] && error "Could not read version from tauri.conf.json"
 
-if [ -z "$VERSION" ]; then
+# Validate an explicit version arg up front; otherwise ship the current version.
+if [ -n "$VERSION" ]; then
+  [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || error "Version must be x.y.z (got: $VERSION)"
+else
   VERSION="$CURRENT_VERSION"
+fi
+
+# Guard: never publish behind GitHub's "latest" release. install.sh installs
+# from /releases/latest, so uploading artifacts to an older tag leaves them
+# invisible to installers and can strand the real latest release without this
+# platform's build. A stale version here almost always means the local tree is
+# behind origin — the fix is `git pull`. Skipped when no release exists yet.
+LATEST_TAG=$(gh api "repos/$REPO/releases/latest" --jq '.tag_name' 2>/dev/null || true)
+if [ -n "$LATEST_TAG" ]; then
+  LATEST_VERSION="${LATEST_TAG#v}"
+  OLDER=$(printf '%s\n%s\n' "$VERSION" "$LATEST_VERSION" | sort -V | head -1)
+  if [ "$VERSION" != "$LATEST_VERSION" ] && [ "$OLDER" = "$VERSION" ]; then
+    error "Refusing to release v$VERSION: GitHub's latest release is already $LATEST_TAG. Your local tree is likely behind origin — run 'git pull' (then bump if you intend a new version) and retry."
+  fi
+  success "Latest GitHub release: $LATEST_TAG"
+else
+  success "No published release yet — this will be the first"
+fi
+
+if [ "$VERSION" = "$CURRENT_VERSION" ]; then
   success "Using current version: $VERSION"
 else
-  [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || error "Version must be x.y.z (got: $VERSION)"
-  if [ "$VERSION" = "$CURRENT_VERSION" ]; then
-    success "Version $VERSION already set, no bump needed"
-  else
-    HIGHER=$(printf '%s\n%s\n' "$CURRENT_VERSION" "$VERSION" | sort -V | tail -1)
-    [ "$HIGHER" = "$VERSION" ] || error "New version $VERSION is not greater than current $CURRENT_VERSION"
-    # tauri.conf.json + package.json: "version": "X"
-    sed -i.bak "s/\"version\"[[:space:]]*:[[:space:]]*\"$CURRENT_VERSION\"/\"version\": \"$VERSION\"/" "$TAURI_CONF"
-    sed -i.bak "s/\"version\"[[:space:]]*:[[:space:]]*\"$CURRENT_VERSION\"/\"version\": \"$VERSION\"/" "$PKG_JSON"
-    # Cargo.toml: the package version is the only line starting with `version =`
-    # (dependency versions are `name = { version = ... }` or `name = "x"`).
-    sed -i.bak "s/^version = \"$CURRENT_VERSION\"/version = \"$VERSION\"/" "$CARGO_TOML"
-    rm -f "$TAURI_CONF.bak" "$PKG_JSON.bak" "$CARGO_TOML.bak"
-    # Cargo.lock records the workspace package's own version too. Sync it now
-    # (-w touches only workspace members, not dependency pins) so the build in
-    # step 4 doesn't resync it and leave the tree dirty after the release.
-    (cd "$APP_DIR/src-tauri" && cargo update -w >/dev/null 2>&1) \
-      || warn "cargo update -w failed; Cargo.lock may be left stale"
-    git add "$TAURI_CONF" "$PKG_JSON" "$CARGO_TOML" "$CARGO_LOCK"
-    git commit -m "Bump version to $VERSION"
-    git push
-    success "Bumped $CURRENT_VERSION → $VERSION and pushed"
-  fi
+  HIGHER=$(printf '%s\n%s\n' "$CURRENT_VERSION" "$VERSION" | sort -V | tail -1)
+  [ "$HIGHER" = "$VERSION" ] || error "New version $VERSION is not greater than current $CURRENT_VERSION"
+  # tauri.conf.json + package.json: "version": "X"
+  sed -i.bak "s/\"version\"[[:space:]]*:[[:space:]]*\"$CURRENT_VERSION\"/\"version\": \"$VERSION\"/" "$TAURI_CONF"
+  sed -i.bak "s/\"version\"[[:space:]]*:[[:space:]]*\"$CURRENT_VERSION\"/\"version\": \"$VERSION\"/" "$PKG_JSON"
+  # Cargo.toml: the package version is the only line starting with `version =`
+  # (dependency versions are `name = { version = ... }` or `name = "x"`).
+  sed -i.bak "s/^version = \"$CURRENT_VERSION\"/version = \"$VERSION\"/" "$CARGO_TOML"
+  rm -f "$TAURI_CONF.bak" "$PKG_JSON.bak" "$CARGO_TOML.bak"
+  # Cargo.lock records the workspace package's own version too. Sync it now
+  # (-w touches only workspace members, not dependency pins) so the build in
+  # step 4 doesn't resync it and leave the tree dirty after the release.
+  (cd "$APP_DIR/src-tauri" && cargo update -w >/dev/null 2>&1) \
+    || warn "cargo update -w failed; Cargo.lock may be left stale"
+  git add "$TAURI_CONF" "$PKG_JSON" "$CARGO_TOML" "$CARGO_LOCK"
+  git commit -m "Bump version to $VERSION"
+  git push
+  success "Bumped $CURRENT_VERSION → $VERSION and pushed"
 fi
 
 TAG="v$VERSION"
