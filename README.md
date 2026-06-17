@@ -40,6 +40,8 @@ just check       # type-check (svelte-check + cargo check)
 
 (Or run the underlying `pnpm tauri …` commands directly — see `justfile`.)
 
+> **Windows:** `just` runs every recipe through `sh`, which ships with [Git for Windows](https://git-scm.com/download/win). Add `C:\Program Files\Git\usr\bin` to your `PATH` (then open a new terminal) so `sh` — and the `rm`/`[`/inline-env bits the recipes use — resolve. Avoid the `bash` at `C:\Windows\System32\bash.exe`; that's the WSL launcher, not Git Bash.
+
 On first run the app scans the configured paths (default: `~/Dev`, `~/dev`, `~/code`, `~/Code`, `~/Projects`, `~/src`) for git repos, then either opens the previously used one or shows a picker.
 
 ## Repository layout

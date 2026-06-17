@@ -1,5 +1,12 @@
 app := "tauri-app"
 
+# `just` runs every recipe with `sh`, including on Windows. Git for Windows ships
+# it at C:\Program Files\Git\usr\bin; keep that directory on PATH so the POSIX
+# recipes below (cd && …, rm -rf, inline env vars, the /dev/nvidia0 guard) run
+# unchanged on every platform. Pinned explicitly so it survives a future just
+# release that might default Windows to PowerShell.
+set windows-shell := ["sh", "-cu"]
+
 # List available recipes
 default:
     @just --list
