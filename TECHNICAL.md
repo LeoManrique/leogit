@@ -96,11 +96,13 @@ Every command is registered in [src-tauri/src/main.rs](tauri-app/src-tauri/src/m
 
 ## State management (frontend)
 
-Three writable Svelte stores, all in [src/lib/stores](tauri-app/src/lib/stores):
+The three core writable Svelte stores, all in [src/lib/stores](tauri-app/src/lib/stores):
 
 - **`appState`** — top-level phase machine (`loading` / `repo-picker` / `main` / `error`), the discovered repo list, the chosen repo path, and whether `gh` is authenticated.
 - **`repoState`** — everything tied to the currently open repo: status (branch, upstream, ahead/behind, files, isMerging), log pagination, branches, the user's selection sets (`selectedFiles`, `userDeselected`), per-file diff selection (`Map<path, DiffSelection>`), active file/diff, active commit/files/diff, loading flags, last error.
 - **`config`** — the live Config object. `refreshConfig()` reloads from disk and also calls `applyTheme()` which flips `document.documentElement.dataset.theme`.
+
+Alongside these are smaller purpose-built stores: **`repoIdentifiers`** and **`repoActivity`** lazily cache each repo's GitHub identifier and last-commit timestamp (module-level maps that re-publish on each fetch, so reopening the repo picker is free), and **`reposState`** owns the persisted `repos-state.json` document — the `repoSortMode` / `cloneSortMode` writables plus `patchReposState` (single read-modify-write writer) and `hydrateReposState` (startup seed).
 
 `MainLayout.svelte` is the orchestrator: it owns the polling intervals, focus listeners, and most of the cross-cutting handlers (commit, switch branch, merge, etc.). Components stay dumb — they receive props and emit callbacks; they don't read or write the stores directly when avoidable.
 
@@ -241,7 +243,7 @@ Defined in [src-tauri/src/commands/config.rs](tauri-app/src-tauri/src/commands/c
 
 - Config dir is resolved via `directories::BaseDirs::config_dir().join("leogit")` (`~/.config/leogit` on Linux, `~/Library/Application Support/leogit` on macOS, `%APPDATA%\leogit` on Windows). It's created if missing.
 - `config.toml` — every field on the `Config` struct. New fields carry `#[serde(default = "…")]` so users on older configs keep working. Defaults are written to disk on first run so the file is discoverable.
-- `repos-state.json` — only `last_opened_repo` for now. JSON instead of TOML to keep it cheap to extend.
+- `repos-state.json` — `last_opened_repo`, `last_clone_dir`, and the two sort-toggle preferences (`repo_sort_mode`, `clone_sort_mode`). Every field is `Option`/`#[serde(default)]` so older state files load fine. JSON instead of TOML to keep it cheap to extend. The frontend treats this file as a single document: the `reposState` store's `patchReposState` does read-modify-write so one writer never clobbers another field, and `hydrateReposState` seeds the reactive sort-mode stores at startup.
 - All save commands write atomically via `fs::write`.
 
 ## Tauri capabilities

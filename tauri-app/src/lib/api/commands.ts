@@ -132,6 +132,10 @@ export interface ReposState {
   last_opened_repo?: string
   /** Parent folder of the last clone; pre-fills the Clone dialog destination. */
   last_clone_dir?: string
+  /** Persisted sort mode for the repo picker ('recent' | 'name'). */
+  repo_sort_mode?: string
+  /** Persisted sort mode for the Clone dialog's GitHub repo list ('recent' | 'name'). */
+  clone_sort_mode?: string
 }
 
 /** A repository surfaced in the GitHub tab of the Clone dialog (`gh repo list`). */

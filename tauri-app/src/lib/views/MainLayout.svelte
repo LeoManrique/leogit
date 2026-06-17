@@ -4,13 +4,13 @@
   import { repoState, resetRepoState } from '$lib/stores/repo'
   import { appState } from '$lib/stores/app'
   import { config, refreshConfig } from '$lib/stores/config'
+  import { hydrateReposState, patchReposState } from '$lib/stores/reposState'
   import {
     gitApi,
     diffApi,
     configApi,
     type FileEntry,
     type CommitInfo,
-    type ReposState,
   } from '$lib/api/commands'
 
   import Header from '$lib/components/Header.svelte'
@@ -791,15 +791,6 @@
     })
   }
 
-  // Read-modify-write the persisted repos state so updating one field (e.g.
-  // last_opened_repo) never clobbers another (e.g. last_clone_dir).
-  async function persistReposState(patch: Partial<ReposState>) {
-    try {
-      const current = await configApi.loadState().catch(() => ({}) as ReposState)
-      await configApi.saveState({ ...current, ...patch })
-    } catch {}
-  }
-
   async function handleSwitchRepo(repo: string) {
     if (!repo || repo === $appState.repoPath) {
       showRepos = false
@@ -809,7 +800,7 @@
     lastHeadSha = null
     resetRepoState()
     appState.update((s) => ({ ...s, repoPath: repo }))
-    await persistReposState({ last_opened_repo: repo })
+    await patchReposState({ last_opened_repo: repo })
     try {
       await Promise.all([refreshStatus(), refreshBranches(), loadInitialLog()])
       const cfg = $config
@@ -835,7 +826,7 @@
   // A clone finished: remember where it landed, make it selectable, and open it.
   async function handleCloned(repoPath: string, parentDir: string) {
     showClone = false
-    await persistReposState({ last_clone_dir: parentDir })
+    await patchReposState({ last_clone_dir: parentDir })
     appState.update((s) => ({
       ...s,
       repos: s.repos.includes(repoPath) ? s.repos : [...s.repos, repoPath],
@@ -976,6 +967,8 @@
 
   async function initialize() {
     await refreshConfig()
+    // Seed the persisted repo/clone sort-mode toggles before either picker opens.
+    hydrateReposState()
     await Promise.all([refreshStatus(), refreshBranches(), loadInitialLog()])
     startStatusPolling()
     const cfg = $config

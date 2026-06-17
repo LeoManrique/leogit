@@ -1,5 +1,6 @@
 <script lang="ts">
   import { ghApi, gitApi, type GhRepo } from '$lib/api/commands'
+  import { cloneSortMode, setCloneSortMode } from '$lib/stores/reposState'
   import { autofocus } from '$lib/actions/autofocus'
   import { open } from '@tauri-apps/plugin-dialog'
   import { homeDir } from '@tauri-apps/api/path'
@@ -31,7 +32,6 @@
   let reposLoaded = $state(false)
   let ghFilter = $state('')
   let selectedRepo = $state<GhRepo | null>(null)
-  let sortBy = $state<'recent' | 'name'>('recent')
 
   // URL tab state.
   let url = $state('')
@@ -73,7 +73,7 @@
       : [...repos]
     // Recently-modified (newest pushedAt first — ISO-8601 sorts lexically) or
     // alphabetical by repo name (case-insensitive so casing doesn't split groups).
-    return sortBy === 'name'
+    return $cloneSortMode === 'name'
       ? list.sort((a, b) =>
           a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }),
         )
@@ -202,11 +202,11 @@
             />
             <button
               class="sort-btn"
-              onclick={() => (sortBy = sortBy === 'recent' ? 'name' : 'recent')}
-              title={sortBy === 'recent' ? 'Sorted by recently modified' : 'Sorted alphabetically'}
-              aria-label={sortBy === 'recent' ? 'Sorted by recently modified' : 'Sorted alphabetically'}
+              onclick={() => setCloneSortMode($cloneSortMode === 'recent' ? 'name' : 'recent')}
+              title={$cloneSortMode === 'recent' ? 'Sorted by recently modified' : 'Sorted alphabetically'}
+              aria-label={$cloneSortMode === 'recent' ? 'Sorted by recently modified' : 'Sorted alphabetically'}
             >
-              {#if sortBy === 'recent'}
+              {#if $cloneSortMode === 'recent'}
                 <!-- Clock + down arrow = most-recently-modified first (mirrors the
                      A→Z glyph's arrow so the two modes read as a matched pair). -->
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

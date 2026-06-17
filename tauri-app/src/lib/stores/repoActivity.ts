@@ -41,18 +41,3 @@ export function ensureRepoActivity(paths: string[]): void {
     inflight.set(path, p)
   }
 }
-
-// Sort preference for the repo picker, remembered for the session (not the
-// disk config) so toggling it sticks across dropdown opens. Defaults to
-// alphabetical — the picker's long-standing order — so opening it never
-// reshuffles unexpectedly; the clock button opts into recency.
-export type RepoSortMode = 'recent' | 'name'
-let sortMode: RepoSortMode = 'name'
-
-export function getRepoSortMode(): RepoSortMode {
-  return sortMode
-}
-
-export function setRepoSortMode(mode: RepoSortMode): void {
-  sortMode = mode
-}

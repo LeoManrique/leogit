@@ -42,6 +42,13 @@ pub struct ReposState {
     /// `scan_path` (then `~/Dev`) the first time.
     #[serde(default)]
     pub last_clone_dir: Option<String>,
+    /// Sort mode for the repo picker (`"recent"` | `"name"`). Persisted so the
+    /// toggle sticks across restarts; `None` falls back to the recency default.
+    #[serde(default)]
+    pub repo_sort_mode: Option<String>,
+    /// Sort mode for the Clone dialog's GitHub repo list (`"recent"` | `"name"`).
+    #[serde(default)]
+    pub clone_sort_mode: Option<String>,
 }
 
 fn default_scan_paths() -> Vec<String> {

@@ -1,12 +1,7 @@
 <script lang="ts">
   import { ensureRepoIdentifiers, repoIdentifiers } from '$lib/stores/repoIdentifiers'
-  import {
-    ensureRepoActivity,
-    repoActivity,
-    getRepoSortMode,
-    setRepoSortMode,
-    type RepoSortMode,
-  } from '$lib/stores/repoActivity'
+  import { ensureRepoActivity, repoActivity } from '$lib/stores/repoActivity'
+  import { repoSortMode, setRepoSortMode } from '$lib/stores/reposState'
   import type { RepoIdentifier } from '$lib/api/commands'
   import RepoTooltip from '$lib/components/RepoTooltip.svelte'
   import { autofocus } from '$lib/actions/autofocus'
@@ -21,13 +16,10 @@
   let { repos = [], currentRepo = '', onSelect, onClone }: Props = $props()
 
   let filter = $state('')
-  // Sort mode, seeded from the session-remembered preference so toggling sticks
-  // across opens. Mirrors the Clone dialog's clock / A→Z button.
-  let sortBy = $state<RepoSortMode>(getRepoSortMode())
-
+  // Sort mode lives in the persisted store so toggling sticks across opens and
+  // restarts. Mirrors the Clone dialog's clock / A→Z button.
   function toggleSort() {
-    sortBy = sortBy === 'recent' ? 'name' : 'recent'
-    setRepoSortMode(sortBy)
+    setRepoSortMode($repoSortMode === 'recent' ? 'name' : 'recent')
   }
 
   // Where the floating tooltip should render (clientX/Y), and which repo it
@@ -82,7 +74,7 @@
     // timestamps stream in (all 0) the list reads alphabetical, then settles
     // into recency order as they arrive rather than jumping to a random order.
     const list = [...repos].sort((a, b) =>
-      sortBy === 'name'
+      $repoSortMode === 'name'
         ? byName(a, b)
         : (activity.get(b) ?? 0) - (activity.get(a) ?? 0) || byName(a, b),
     )
@@ -174,10 +166,10 @@
     <button
       class="icon-btn"
       onclick={toggleSort}
-      title={sortBy === 'recent' ? 'Sorted by recently modified' : 'Sorted alphabetically'}
-      aria-label={sortBy === 'recent' ? 'Sorted by recently modified' : 'Sorted alphabetically'}
+      title={$repoSortMode === 'recent' ? 'Sorted by recently modified' : 'Sorted alphabetically'}
+      aria-label={$repoSortMode === 'recent' ? 'Sorted by recently modified' : 'Sorted alphabetically'}
     >
-      {#if sortBy === 'recent'}
+      {#if $repoSortMode === 'recent'}
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <circle cx="4.25" cy="8" r="4" />
           <path d="M4.25 5.5V8l1.5 0.9" />
