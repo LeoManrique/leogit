@@ -45,8 +45,10 @@ pub struct GhRepo {
 }
 
 /// List the signed-in user's GitHub repositories via the `gh` CLI, most
-/// recently pushed first. Errors carry a friendly message when `gh` is missing
-/// or unauthenticated so the Clone dialog can point the user at a fix.
+/// recently pushed first. Includes forks (so e.g. a forked repo can still be
+/// cloned from the dialog) but skips archived repos. Errors carry a friendly
+/// message when `gh` is missing or unauthenticated so the Clone dialog can
+/// point the user at a fix.
 #[tauri::command]
 pub fn gh_repo_list(limit: u32) -> Result<Vec<GhRepo>, String> {
     let mut cmd = Command::new("gh");
@@ -54,7 +56,6 @@ pub fn gh_repo_list(limit: u32) -> Result<Vec<GhRepo>, String> {
         "repo",
         "list",
         "--no-archived",
-        "--source",
         "--limit",
         &limit.to_string(),
         "--json",
