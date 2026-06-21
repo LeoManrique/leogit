@@ -8,6 +8,7 @@ Functional behavior lives in [DESIGN.md](DESIGN.md). Visual design language live
 |---|---|---|
 | Shell | Tauri 2.11 | Native window, IPC, no Node runtime in production |
 | Native dialogs | `tauri-plugin-dialog` 2.7 + `@tauri-apps/plugin-dialog` | Folder picker for the Clone dialog's destination (`dialog:allow-open` capability) |
+| Single instance | `tauri-plugin-single-instance` 2.4 | Forwards a second `leogit <dir>` launch to the running window instead of duplicating it (see *Command-line repo opening*) |
 | Backend language | Rust 2021 | Async via tokio (`features = ["full"]`) |
 | Frontend framework | Svelte 5 (runes) | `$state`, `$derived`, `$effect`, `$props` |
 | Frontend bundler | Vite 8 | `terser` for minified release builds |
@@ -41,11 +42,12 @@ leogit/
 │   │                                # CommitDetail
 │   ├── src-tauri/
 │   │   ├── src/
-│   │   │   ├── main.rs              # PATH fix + invoke_handler registry
+│   │   │   ├── main.rs              # PATH fix + single-instance + invoke_handler registry
 │   │   │   ├── lib.rs               # Re-exports commands::*
 │   │   │   └── commands/
 │   │   │       ├── config.rs        # load/save Config + ReposState
 │   │   │       ├── git.rs           # 27 git operations (status, log, branch, …)
+│   │   │       ├── launch.rs        # `leogit <dir>` repo opening (CLI arg + single-instance)
 │   │   │       ├── diff.rs          # parse_diff + build/apply patches
 │   │   │       ├── gh.rs            # GitHub CLI bridge (auth check, repo list, clone)
 │   │   │       ├── ai.rs            # Claude CLI + Ollama HTTP
@@ -75,6 +77,14 @@ All work flows through Tauri's IPC. There are no HTTP servers, no sidecars, and 
 
 `main.rs::fix_path_env` runs once before the Tauri builder. On macOS/Linux it spawns `$SHELL -ilc 'echo -n "$PATH"'` and replaces the process PATH with the result. Without this, apps launched from Finder or a `.desktop` entry inherit a minimal PATH (e.g. `/usr/bin:/bin:/usr/sbin:/sbin`) and miss user-installed tools like `claude`, `gh`, or Homebrew binaries. No-op on Windows.
 
+### Command-line repo opening
+
+The `leogit [dir]` shell command (installed by `install.sh`, see *Release pipeline*) opens a repo straight from a terminal. All the app-side logic lives in [commands/launch.rs](tauri-app/src-tauri/src/commands/launch.rs):
+
+- **Argv → repo path.** `resolve_repo_arg` takes the first non-flag argument, resolves it against the cwd, **canonicalizes** it (so it de-dupes against the canonical paths from `discover_repos`), and keeps it only if it's a git repo. A bare `leogit` or a non-repo arg resolves to `None`, so the app just launches/focuses.
+- **Cold start** (app not running): `main.rs` calls `resolve_repo_arg` *before* the builder and stashes the result in a process-global via `set_pending_open_repo`. The frontend claims it once on mount through the `take_pending_open_repo` command (`appApi.takePendingOpenRepo`), which clears it so a reload won't re-open. In `App.svelte` this wins over the remembered `last_opened_repo` and is added to the repo list even if it lives outside the scan paths.
+- **Warm start** (app already running): `tauri-plugin-single-instance` — registered **first** in `main.rs`, as the plugin requires — detects the second launch, hands its argv/cwd to `handle_second_instance`, which focuses the window and emits an `open-repo` event with the resolved path. The plugin keys on the app identifier via a `/tmp/<identifier>_si.sock` Unix socket (the second process connects, forwards, and `exit(0)`s). The frontend handles the event by phase: `MainLayout` (in `main`) reuses `handleSwitchRepo` via `openExternalRepo`; `App.svelte` handles the pre-`main` phases. The two listeners are mutually exclusive — `App` ignores the event while phase is `main`, and `MainLayout` is only mounted then.
+
 ### Windows console suppression
 
 Release builds set `windows_subsystem = "windows"` (in `main.rs`), so the app runs with no attached console. On Windows a console-less process that spawns a console subprocess gets a **new console window allocated and briefly flashed** for each call — and because the UI polls `git status` every 2s, that would mean a `cmd` box flickering on screen continuously, plus one on every fetch/commit/diff. Every subprocess spawn therefore routes through [commands/process.rs](tauri-app/src-tauri/src/commands/process.rs): `hide_console` (std `Command`) and `hide_console_async` (tokio `Command`) set the `CREATE_NO_WINDOW` creation flag; both are no-ops off Windows. Call sites: `git_cmd` and `clone_repo` (git.rs), `apply_patch` (diff.rs), `check_auth` / `gh_repo_list` / `gh_clone` / `gh_publish_repo` (gh.rs), and both `claude` spawns (ai.rs). The PTY shell in terminal.rs is intentionally exempt — ConPTY is a pseudo-terminal, not a console subprocess, so it never flashes a window.
@@ -86,10 +96,11 @@ The frontend never touches Tauri's raw `invoke` API directly; every backend call
 | Namespace | Commands | Backend file |
 |---|---|---|
 | `configApi` | `loadConfig`, `saveConfig`, `loadState`, `saveState` | `commands/config.rs` |
-| `gitApi` | `getStatus`, `getHeadSha`, `getDiff`, `getDiffWhitespaceIgnored`, `getCommitDiff`, `getSelectedDiff`, `getLog`, `getCommitFiles`, `listBranches`, `createBranch`, `switchBranch`, `deleteBranch`, `deleteRemoteBranch`, `renameBranch`, `commit`, `hasStagedChanges`, `formatCommitMessage`, `fetch`, `pull`, `push`, `getAheadBehind`, `getRemote`, `mergeBranch`, `mergeSquash`, `commitSquashMerge`, `mergeAbort`, `isMerging`, `countCommitsToMerge`, `discoverRepos`, `isGitRepo`, `getRepoName`, `cloneRepo`, `getLastCommitTimestamp` | `commands/git.rs` |
+| `gitApi` | `getStatus`, `getHeadSha`, `getDiff`, `getDiffWhitespaceIgnored`, `getCommitDiff`, `getSelectedDiff`, `getLog`, `getCommitFiles`, `listBranches`, `createBranch`, `switchBranch`, `deleteBranch`, `deleteRemoteBranch`, `renameBranch`, `commit`, `hasStagedChanges`, `formatCommitMessage`, `repoSyncStatus`, `fetch`, `pull`, `push`, `getAheadBehind`, `getRemote`, `mergeBranch`, `mergeSquash`, `commitSquashMerge`, `mergeAbort`, `isMerging`, `countCommitsToMerge`, `discoverRepos`, `isGitRepo`, `getRepoName`, `cloneRepo`, `getLastCommitTimestamp` | `commands/git.rs` |
 | `diffApi` | `parseDiff`, `generatePatch`, `generateInversePatch` | `commands/diff.rs` |
 | `ghApi` | `checkAuth`, `repoList`, `clone` | `commands/gh.rs` |
 | `aiApi` | `generateCommitMessage`, `checkProviderAvailable` | `commands/ai.rs` |
+| `appApi` | `takePendingOpenRepo` | `commands/launch.rs` |
 | Terminal | `start_terminal`, `write_terminal`, `resize_terminal`, `close_terminal` (called via `invoke` directly from `Terminal.svelte`) | `commands/terminal.rs` |
 
 Every command is registered in [src-tauri/src/main.rs](tauri-app/src-tauri/src/main.rs) via `tauri::generate_handler![…]`. **Adding a new command requires three edits**: implement it in `commands/<module>.rs`, register it in `main.rs`, wrap it in `api/commands.ts`.
@@ -102,7 +113,7 @@ The three core writable Svelte stores, all in [src/lib/stores](tauri-app/src/lib
 - **`repoState`** — everything tied to the currently open repo: status (branch, upstream, ahead/behind, files, isMerging), log pagination, branches, the user's selection sets (`selectedFiles`, `userDeselected`), per-file diff selection (`Map<path, DiffSelection>`), active file/diff, active commit/files/diff, loading flags, last error.
 - **`config`** — the live Config object. `refreshConfig()` reloads from disk and also calls `applyTheme()` which flips `document.documentElement.dataset.theme`.
 
-Alongside these are smaller purpose-built stores: **`repoIdentifiers`** and **`repoActivity`** lazily cache each repo's GitHub identifier and last-commit timestamp (module-level maps that re-publish on each fetch, so reopening the repo picker is free), and **`reposState`** owns the persisted `repos-state.json` document — the `repoSortMode` / `cloneSortMode` writables plus `patchReposState` (single read-modify-write writer) and `hydrateReposState` (startup seed).
+Alongside these are smaller purpose-built stores: **`repoIdentifiers`** and **`repoActivity`** lazily cache each repo's GitHub identifier and last-commit timestamp (module-level maps that re-publish on each fetch, so reopening the repo picker is free), **`repoSync`** caches each repo's ahead/behind counts for the picker's pull/push badges (`setRepoSync` records counts the active poll already computed; `syncRepo` fetches + recomputes one repo, with per-path in-flight de-duplication), and **`reposState`** owns the persisted `repos-state.json` document — the `repoSortMode` / `cloneSortMode` / `recentRepos` writables plus `patchReposState` (the single read-modify-write writer — every patch is chained through one promise tail so concurrent writes can't interleave and lose a field, since the load+save spans two unlocked IPC calls), `recordRecentRepo` (promote a repo to the front of the recents list, capped at 50; returns the persistence promise), and `hydrateReposState` (startup seed).
 
 `MainLayout.svelte` is the orchestrator: it owns the polling intervals, focus listeners, and most of the cross-cutting handlers (commit, switch branch, merge, etc.). Components stay dumb — they receive props and emit callbacks; they don't read or write the stores directly when avoidable.
 
@@ -124,12 +135,13 @@ This is what keeps polling unobtrusive: a 2 s status refresh never silently re-s
 
 ### Polling and lifecycle
 
-Two intervals live in `MainLayout.svelte`:
+`MainLayout.svelte` owns two intervals plus the tiered sync scheduler:
 
-- **Status poll** — every 2000 ms. Runs `get_status` silently + `get_head_sha`. If the HEAD SHA changed, the commit log is refreshed in place keeping the same loaded count so the user doesn't lose scroll position.
-- **Auto-fetch** — every `fetch_interval_ms` (default 30 000). Skipped if the user is currently typing in an input/textarea or the window is hidden. Runs `git fetch --prune --recurse-submodules=on-demand` against the first remote.
+- **Status poll** — every 2000 ms. Runs `get_status` silently + `get_head_sha`. If the HEAD SHA changed, the commit log is refreshed in place keeping the same loaded count so the user doesn't lose scroll position. Each run also pushes the active repo's ahead/behind into the `repoSync` store (via `setRepoSync`) so the picker badge for the open repo stays live without a dedicated fetch.
+- **Auto-fetch** — every `fetch_interval_ms` (default 30 000). Skipped if the user is currently typing in an input/textarea or the window is hidden. Calls `fetchActiveRemote` (`git fetch --prune --recurse-submodules=on-demand` against the first remote) then a silent `get_status`.
+- **Tiered repo-sync scheduler** ([repoSyncScheduler.ts](tauri-app/src/lib/services/repoSyncScheduler.ts)) — three intervals (2 / 5 / 10 min) plus staggered startup kicks. Each tick slices the `recentRepos` list (active excluded) into tiers — next 4, next 5, next 10 — and refreshes each via `repo_sync_status` sequentially. Started in `initialize` (after `hydrateReposState` resolves, so recents are seeded) and stopped on unmount.
 
-On regaining focus (`window` `focus`) or visibility (`visibilitychange`), `MainLayout` runs a one-shot **resync** — silent `get_status`, HEAD poll, and a *forced* re-fetch of the diff for the file open in the changes pane (`loadDiffForFile(file, { force: true })`), since it may have changed on disk while the app was backgrounded. A `resyncing` guard collapses the focus+visibility double-fire (common under tiling WMs) into a single run. Auto-fetch is **not** part of this resync. All listeners and intervals clear on unmount.
+On regaining focus (`window` `focus`) or visibility (`visibilitychange`), `MainLayout` runs a one-shot **resync** — `fetchActiveRemote` (so a moved upstream surfaces immediately, unlike before), silent `get_status`, HEAD poll, a *forced* re-fetch of the diff for the file open in the changes pane (`loadDiffForFile(file, { force: true })`), and `repoSyncScheduler.refocusSync()` (the throttled top-tier refresh). A `resyncing` guard collapses the focus+visibility double-fire (common under tiling WMs) into a single run. All listeners, intervals, and scheduler timers clear on unmount.
 
 ## Git layer
 
@@ -147,9 +159,11 @@ Three helpers shape the output:
 
 ### Status parsing
 
-`get_status` uses `status --untracked-files=all --branch --porcelain=v2 -z`. Because porcelain v2 interleaves line-terminated `# branch.*` headers with NUL-terminated file entries, the parser strips headers off the front byte-by-byte, then splits the remainder on NUL. Type-2 (rename) entries occupy two NUL segments — the second holds the original path — so the loop manually advances `i` when it sees `2 `.
+`get_status` uses `status --untracked-files=all --branch --porcelain=v2 -z`. Under `-z` the **whole** stream is NUL-terminated — `# branch.*` headers included (there are no newlines anywhere) — so the parser walks the leading `# `-prefixed records by splitting on NUL, stops at the first non-header record, then splits the remainder on NUL for the file entries. Type-2 (rename) entries occupy two NUL segments — the second holds the original path — so the loop manually advances `i` when it sees `2 `. (Splitting headers on `\n` instead of NUL was a long-standing latent bug: it parsed zero headers, so `has_upstream` silently stayed false and ahead/behind survived only via the rev-parse + remote-tracking fallbacks — `repo_sync_status`, lacking those fallbacks, returned 0/0. Regression-tested in `status_parses_upstream_and_ahead_behind_from_porcelain_headers`.)
 
 Branch fallback: if `# branch.head` is absent (empty repo) the code calls `git rev-parse --abbrev-ref HEAD` to fill in.
+
+Ahead/behind: `# branch.ab` is only emitted when the branch has a tracking upstream. For a branch that was never `push -u`'d but has a matching `refs/remotes/<remote>/<branch>`, the shared `remote_tracking_ahead_behind` helper computes the counts with `git rev-list --left-right --count HEAD...<ref>` (left = ahead, right = behind) without flipping `has_upstream` (which still gates whether the next push needs `--set-upstream`). `repo_sync_status` — the lighter sibling powering the picker badges — reuses both `first_remote` and that helper but runs `status --untracked-files=no` (headers only, no file scan) and optionally fetches first; its best-effort fetch swallows offline/auth errors so a stale-but-known count still comes back.
 
 ### Diff parsing
 
@@ -286,7 +300,7 @@ Bundle targets: `app` + `dmg` (macOS), `deb` + `appimage` (Linux), `msi` (Window
 - **macOS** — `bundle.sh` builds `leogit.app` (`--bundles app`) and ad-hoc signs it; the deploy script zips it with `ditto` into `LeoGit-<ver>-macOS-<arch>.zip`.
 - **Linux** — `bundle.sh` builds an AppImage (`--bundles appimage`, no signing); the deploy script copies it to `LeoGit-<ver>-linux-<arch>.AppImage`.
 
-`install.sh` is the curlable installer and auto-detects the platform: on macOS it unpacks into `/Applications`, strips quarantine, and re-registers with Launch Services; on Linux it drops the AppImage at `~/.local/bin/leogit.AppImage` behind a `~/.local/bin/leogit` wrapper, extracts the bundled icon, and writes a `~/.local/share/applications/leogit.desktop` launcher (warning if FUSE 2 is absent, since Arch ships only FUSE 3). The wrapper exports `WEBKIT_DISABLE_DMABUF_RENDERER=1` at launch when `/dev/nvidia0` is present (the proprietary NVIDIA driver's DMABUF/GBM path crashes WebKitGTK with "Failed to create GBM buffer" errors); it's detected per-launch rather than at install time because the active GPU is a runtime property, stays inert on AMD/Intel/nouveau, and honors a pre-set value. The desktop environment (GNOME, COSMIC, …) is irrelevant — both run the same WebKitGTK/GTK runtime — so one AppImage serves every Arch machine.
+`install.sh` is the curlable installer and auto-detects the platform: on macOS it unpacks into `/Applications`, strips quarantine, and re-registers with Launch Services; on Linux it drops the AppImage at `~/.local/bin/leogit.AppImage` behind a `~/.local/bin/leogit` wrapper, extracts the bundled icon, and writes a `~/.local/share/applications/leogit.desktop` launcher (warning if FUSE 2 is absent, since Arch ships only FUSE 3). The wrapper exports `WEBKIT_DISABLE_DMABUF_RENDERER=1` at launch when `/dev/nvidia0` is present (the proprietary NVIDIA driver's DMABUF/GBM path crashes WebKitGTK with "Failed to create GBM buffer" errors); it's detected per-launch rather than at install time because the active GPU is a runtime property, stays inert on AMD/Intel/nouveau, and honors a pre-set value. The desktop environment (GNOME, COSMIC, …) is irrelevant — both run the same WebKitGTK/GTK runtime — so one AppImage serves every Arch machine. As a final step it installs the `leogit [dir]` shell command into the user's login shell: it detects `$SHELL` (which survives `curl … | bash`, being inherited from the parent) and writes a `leogit()` function — into `~/.zshrc` (zsh), `~/.bashrc` on Linux / `~/.bash_profile` on macOS (bash), or an autoloaded `~/.config/fish/functions/leogit.fish` (fish); an unknown shell gets the snippet printed for manual setup. For zsh/bash the function lives inside an idempotent `# >>> leogit >>>` … `# <<< leogit <<<` marker block that re-installs replace rather than stack. The function resolves the directory and opens it (macOS `open -n --args`; Linux the PATH wrapper) — see *Command-line repo opening* for the app side.
 
 **Linux build host (one-time setup).** Building the AppImage needs the Rust toolchain plus Tauri's GTK/WebKit deps and AppImage tooling:
 

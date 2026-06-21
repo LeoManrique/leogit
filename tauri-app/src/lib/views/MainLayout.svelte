@@ -1,10 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { get } from 'svelte/store'
+  import { listen } from '@tauri-apps/api/event'
   import { repoState, resetRepoState } from '$lib/stores/repo'
   import { appState } from '$lib/stores/app'
   import { config, refreshConfig } from '$lib/stores/config'
-  import { hydrateReposState, patchReposState } from '$lib/stores/reposState'
+  import { hydrateReposState, patchReposState, recordRecentRepo } from '$lib/stores/reposState'
+  import { setRepoSync } from '$lib/stores/repoSync'
+  import { repoSyncScheduler } from '$lib/services/repoSyncScheduler'
   import {
     gitApi,
     diffApi,
@@ -241,6 +244,13 @@
           isDiffLoading: activeFileGone ? false : s.isDiffLoading,
           error: opts.silent ? s.error : undefined,
         }
+      })
+      // Keep the picker's badge for the active repo live off the same counts
+      // the 2s poll already computed — no extra fetch needed for the open repo.
+      setRepoSync(repoPath, {
+        ahead: status.ahead,
+        behind: status.behind,
+        hasRemote: status.has_remote,
       })
     } catch (error) {
       if (!opts.silent) {
@@ -606,14 +616,20 @@
     }
   }
 
-  async function performAutoFetch(): Promise<void> {
+  // Best-effort fetch of the active repo's remote. Swallows offline/auth/no-remote
+  // errors so callers can always follow up with a status refresh regardless.
+  async function fetchActiveRemote(): Promise<void> {
     const repoPath = $appState.repoPath
     if (!repoPath) return
     try {
       const remote = await gitApi.getRemote(repoPath)
       await gitApi.fetch(repoPath, remote)
-      await refreshStatus({ silent: true })
     } catch {}
+  }
+
+  async function performAutoFetch(): Promise<void> {
+    await fetchActiveRemote()
+    await refreshStatus({ silent: true })
   }
 
   function startStatusPolling(): void {
@@ -644,9 +660,14 @@
     if (resyncing || $appState.phase !== 'main') return
     resyncing = true
     try {
+      // Coming back to the app: fetch the active repo so a remote that moved
+      // while we were away surfaces on the Pull button, then refresh local state.
+      await fetchActiveRemote()
       await refreshStatus({ silent: true })
       pollHeadSha()
       reloadActiveDiff()
+      // Also refresh the top recents tier so their picker badges aren't stale.
+      repoSyncScheduler.refocusSync()
     } finally {
       resyncing = false
     }
@@ -801,6 +822,11 @@
     resetRepoState()
     appState.update((s) => ({ ...s, repoPath: repo }))
     await patchReposState({ last_opened_repo: repo })
+    // Promote to the front of the recents list (re-tiers the background sync)
+    // and fetch it now — "open a repo" should always pull its latest counts,
+    // including for the untiered long tail.
+    recordRecentRepo(repo)
+    repoSyncScheduler.syncOnSwitch(repo)
     try {
       await Promise.all([refreshStatus(), refreshBranches(), loadInitialLog()])
       const cfg = $config
@@ -809,6 +835,20 @@
     } catch (error) {
       repoState.update((s) => ({ ...s, error: String(error) }))
     }
+  }
+
+  // A `leogit <dir>` invocation reached the already-running app (forwarded by
+  // the single-instance plugin as an `open-repo` event). Make the repo
+  // selectable — it may live outside the scan paths — then switch to it.
+  // Re-running `leogit .` on the open repo is a no-op beyond the window focus
+  // the backend already did.
+  async function openExternalRepo(path: string) {
+    if (!path) return
+    console.log('[launch] open-repo event — switching to:', path)
+    if (!$appState.repos.includes(path)) {
+      appState.update((s) => ({ ...s, repos: [...s.repos, path] }))
+    }
+    await handleSwitchRepo(path)
   }
 
   // Open the Clone dialog from the repo picker, seeding its destination from
@@ -967,13 +1007,25 @@
 
   async function initialize() {
     await refreshConfig()
-    // Seed the persisted repo/clone sort-mode toggles before either picker opens.
-    hydrateReposState()
+    // Seed the persisted sort-mode toggles and recents list before either
+    // picker opens. Awaited so recordRecentRepo below prepends to the hydrated
+    // list rather than racing the hydration that would otherwise clobber it.
+    await hydrateReposState()
+    // The repo we launched into counts as the most-recent open.
+    const repoPath = $appState.repoPath
+    if (repoPath) recordRecentRepo(repoPath)
     await Promise.all([refreshStatus(), refreshBranches(), loadInitialLog()])
     startStatusPolling()
     const cfg = $config
     const intervalMs = cfg?.auto_fetch ? cfg.fetch_interval_ms || 30000 : 0
     startAutoFetch(intervalMs)
+    // Kick one immediate fetch of the open repo so the Pull "behind" badge
+    // resolves within a second of launch instead of waiting up to a full
+    // auto-fetch interval (and at all when auto-fetch is off). Non-blocking so
+    // it never delays first paint. Mirrors the fetch-on-refocus behaviour.
+    void performAutoFetch()
+    // Background pull/push badges for the other recent repos in the picker.
+    repoSyncScheduler.start()
   }
 
   $effect(() => {
@@ -1012,8 +1064,16 @@
     }
   })
 
+  let unlistenOpenRepo: (() => void) | null = null
+
   onMount(() => {
     initialize().catch(console.error)
+    // Live `leogit <dir>` switches while the app is open (see openExternalRepo).
+    listen<string>('open-repo', (e) => openExternalRepo(e.payload).catch(console.error)).then(
+      (u) => {
+        unlistenOpenRepo = u
+      }
+    )
     document.addEventListener('visibilitychange', handleVisibilityChange)
     window.addEventListener('focus', handleWindowFocus)
     document.addEventListener('focusin', handleFocusEvent)
@@ -1023,6 +1083,8 @@
     return () => {
       if (statusInterval) clearInterval(statusInterval)
       if (fetchInterval) clearInterval(fetchInterval)
+      repoSyncScheduler.stop()
+      unlistenOpenRepo?.()
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       window.removeEventListener('focus', handleWindowFocus)
       document.removeEventListener('focusin', handleFocusEvent)

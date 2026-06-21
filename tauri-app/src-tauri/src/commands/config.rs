@@ -49,6 +49,11 @@ pub struct ReposState {
     /// Sort mode for the Clone dialog's GitHub repo list (`"recent"` | `"name"`).
     #[serde(default)]
     pub clone_sort_mode: Option<String>,
+    /// Repo paths in most-recently-opened-first order. Drives the picker's
+    /// tiered background sync (recently used repos get fetched more often) and
+    /// is capped client-side. `None` on first run / pre-migration state files.
+    #[serde(default)]
+    pub recent_repos: Option<Vec<String>>,
 }
 
 fn default_scan_paths() -> Vec<String> {

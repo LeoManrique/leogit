@@ -19,6 +19,7 @@ lazy_static = "1.4.0"
 syntect = { version = "5.3", default-features = false, features = ["parsing", "regex-fancy"] }
 two-face = "0.5"
 tauri-plugin-dialog = "2.7.1"
+tauri-plugin-single-instance = "2.4.2"
 
 [build-dependencies]
 tauri-build = { version = "2.6.2", features = [] }

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { ensureRepoIdentifiers, repoIdentifiers } from '$lib/stores/repoIdentifiers'
   import { ensureRepoActivity, repoActivity } from '$lib/stores/repoActivity'
+  import { repoSync } from '$lib/stores/repoSync'
   import { repoSortMode, setRepoSortMode } from '$lib/stores/reposState'
   import type { RepoIdentifier } from '$lib/api/commands'
   import RepoTooltip from '$lib/components/RepoTooltip.svelte'
@@ -214,6 +215,7 @@
         {@const label = primaryLabel(repo, id)}
         {@const prefix = needsDisambiguation(label) && id ? `${id.owner}/` : ''}
         {@const isCurrent = repo === currentRepo}
+        {@const sync = $repoSync.get(repo)}
         <button
           class="repo-item"
           class:current={isCurrent}
@@ -226,6 +228,26 @@
           <span class="repo-name">
             {#if prefix}<span class="repo-owner">{prefix}</span>{/if}{label}
           </span>
+          <!-- Behind (pull / down arrow) then ahead (push / up arrow), matching
+               the header's Pull/Push glyphs. Shown only when non-zero. -->
+          {#if sync && sync.behind > 0}
+            <span class="sync-badge behind" title={`${sync.behind} commit${sync.behind === 1 ? '' : 's'} to pull`}>
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <line x1="8" y1="3" x2="8" y2="12" />
+                <polyline points="4,8 8,12 12,8" />
+              </svg>
+              {sync.behind}
+            </span>
+          {/if}
+          {#if sync && sync.ahead > 0}
+            <span class="sync-badge ahead" title={`${sync.ahead} commit${sync.ahead === 1 ? '' : 's'} to push`}>
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <line x1="8" y1="4" x2="8" y2="13" />
+                <polyline points="4,8 8,4 12,8" />
+              </svg>
+              {sync.ahead}
+            </span>
+          {/if}
         </button>
       {/each}
     {/if}
@@ -364,6 +386,33 @@
   */
   .repo-owner {
     color: var(--text-muted);
+  }
+
+  /*
+    Per-repo pull/push badges. Behind (pull) and ahead (push) reuse the header
+    Pull/Push arrow glyphs so the whole app speaks one visual language. Kept
+    muted and compact so a scan of the list reads as names first, counts second;
+    they brighten with the row on hover.
+  */
+  .sync-badge {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 11px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-muted);
+    line-height: 1;
+  }
+
+  .sync-badge svg {
+    flex-shrink: 0;
+  }
+
+  .repo-item:hover .sync-badge,
+  .repo-item.current .sync-badge {
+    color: var(--text-secondary);
   }
 
 </style>

@@ -11,7 +11,7 @@ set -euo pipefail
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
 
-TOTAL_STEPS=5
+TOTAL_STEPS=6
 step()    { echo -e "\n${BLUE}[$1/$TOTAL_STEPS]${NC} ${CYAN}$2${NC}"; }
 success() { echo -e "  ${GREEN}✓ $1${NC}"; }
 warn()    { echo -e "  ${YELLOW}⚠ $1${NC}"; }
@@ -20,6 +20,123 @@ error()   { echo -e "  ${RED}✗ $1${NC}"; exit 1; }
 REPO="LeoManrique/leogit"
 API_URL="https://api.github.com/repos/$REPO/releases/latest"
 TMP_DIR="/tmp/leogit-install"
+
+# ── leogit() shell command ────────────────────────────────────────────────────
+# A `leogit` shell function lets you open a repo straight from a terminal:
+# `leogit` (current dir) or `leogit <path>`. It resolves the directory and hands
+# it to the app — on macOS via `open -n --args` (a fresh process whose argv the
+# single-instance plugin forwards to the running window), on Linux via the PATH
+# wrapper, backgrounded so the terminal returns. Installed into the rc file of
+# the user's login shell (detected from $SHELL in Step 6 below).
+
+# Emit the marker-delimited zsh/bash block for the current $OS. Quoted heredocs
+# keep $dir / $target / $1 literal in the generated function body.
+leogit_shell_block() {
+  cat <<'HEADER'
+# >>> leogit >>>
+# LeoGit shell command — open a repository from the terminal: `leogit [dir]`.
+# Managed by the LeoGit installer; re-running the installer replaces this block.
+HEADER
+  if [ "$OS" = "darwin" ]; then
+    cat <<'MAC'
+leogit() {
+  local target="${1:-.}" dir
+  if ! dir=$(cd "$target" 2>/dev/null && pwd); then
+    echo "leogit: no such directory: $target" >&2
+    return 1
+  fi
+  open -na "/Applications/leogit.app" --args "$dir"
+}
+MAC
+  else
+    cat <<'LINUX'
+leogit() {
+  local target="${1:-.}" dir
+  if ! dir=$(cd "$target" 2>/dev/null && pwd); then
+    echo "leogit: no such directory: $target" >&2
+    return 1
+  fi
+  # `command` bypasses this function to reach the PATH wrapper; the subshell
+  # backgrounds and detaches it so the prompt returns immediately.
+  ( command leogit "$dir" >/dev/null 2>&1 & )
+}
+LINUX
+  fi
+  echo "# <<< leogit <<<"
+}
+
+# Replace any prior managed block in the given rc file, then append a fresh one.
+# Idempotent: re-running the installer never stacks duplicate functions.
+install_block_into_rc() {
+  local rc="$1"
+  touch "$rc" 2>/dev/null || return 1
+  if grep -q '# >>> leogit >>>' "$rc" 2>/dev/null; then
+    sed -i.bak '/# >>> leogit >>>/,/# <<< leogit <<</d' "$rc" && rm -f "$rc.bak"
+    # Collapse the trailing blank line(s) the deletion leaves behind so repeated
+    # installs don't accumulate empty lines. $(…) strips all trailing newlines;
+    # printf restores exactly one.
+    local body; body=$(cat "$rc"); printf '%s\n' "$body" > "$rc"
+  fi
+  { printf '\n'; leogit_shell_block; } >> "$rc"
+}
+
+# fish autoloads functions from their own files — write one (idempotent by
+# overwrite) instead of editing config.fish. fish has no subshell operator, so
+# we resolve the path with realpath rather than `cd && pwd`.
+install_fish_function() {
+  local dir="${XDG_CONFIG_HOME:-$HOME/.config}/fish/functions"
+  mkdir -p "$dir" 2>/dev/null || return 1
+  local f="$dir/leogit.fish"
+  if [ "$OS" = "darwin" ]; then
+    cat > "$f" <<'FISH'
+function leogit --description 'Open a repository in LeoGit'
+    set -l target $argv[1]
+    test -z "$target"; and set target "."
+    if not test -d "$target"
+        echo "leogit: no such directory: $target" >&2
+        return 1
+    end
+    open -na "/Applications/leogit.app" --args (realpath "$target")
+end
+FISH
+  else
+    cat > "$f" <<'FISH'
+function leogit --description 'Open a repository in LeoGit'
+    set -l target $argv[1]
+    test -z "$target"; and set target "."
+    if not test -d "$target"
+        echo "leogit: no such directory: $target" >&2
+        return 1
+    end
+    command leogit (realpath "$target") >/dev/null 2>&1 &
+    disown
+end
+FISH
+  fi
+}
+
+# Detect the login shell ($SHELL survives `curl … | bash` — it's inherited from
+# the parent) and install the function into the matching rc file. Sets
+# LEOGIT_SHELL_RC / LEOGIT_SHELL_NAME for the post-install hint; returns 1 for an
+# unknown shell so the caller can print a manual snippet instead.
+install_leogit_shell_command() {
+  LEOGIT_SHELL_NAME=$(basename "${SHELL:-}")
+  case "$LEOGIT_SHELL_NAME" in
+    zsh)
+      LEOGIT_SHELL_RC="${ZDOTDIR:-$HOME}/.zshrc"
+      install_block_into_rc "$LEOGIT_SHELL_RC" ;;
+    bash)
+      # Linux interactive shells read ~/.bashrc; macOS Terminal starts login
+      # shells that read ~/.bash_profile.
+      [ "$OS" = "darwin" ] && LEOGIT_SHELL_RC="$HOME/.bash_profile" || LEOGIT_SHELL_RC="$HOME/.bashrc"
+      install_block_into_rc "$LEOGIT_SHELL_RC" ;;
+    fish)
+      LEOGIT_SHELL_RC="${XDG_CONFIG_HOME:-$HOME/.config}/fish/functions/leogit.fish"
+      install_fish_function ;;
+    *)
+      return 1 ;;
+  esac
+}
 
 # ── Step 1: Detect platform ──
 step 1 "Detecting platform"
@@ -198,10 +315,24 @@ fi
 
 rm -rf "$TMP_DIR"
 
+# ── Step 6: Install the `leogit` shell command ──
+step 6 "Installing the leogit shell command"
+
+if install_leogit_shell_command; then
+  success "Added leogit() to $LEOGIT_SHELL_RC ($LEOGIT_SHELL_NAME)"
+else
+  warn "Unrecognized shell '${LEOGIT_SHELL_NAME:-unknown}' — add this to your shell config manually:"
+  leogit_shell_block
+fi
+
 echo -e "\n${GREEN}═══ LeoGit $VERSION installed ═══${NC}"
 if [ "$OS" = "darwin" ]; then
   echo -e "  ${CYAN}Open from /Applications, Spotlight, or:  open $DEST${NC}"
 else
   echo -e "  ${CYAN}Launch from your app menu, or run:  leogit${NC}"
   echo -e "  ${CYAN}(ensure ~/.local/bin is on your PATH)${NC}"
+fi
+if [ -n "${LEOGIT_SHELL_RC:-}" ]; then
+  echo -e "  ${CYAN}Terminal command:  leogit [dir]  — open a repo in LeoGit${NC}"
+  echo -e "  ${CYAN}Run it in a new terminal (or 'source $LEOGIT_SHELL_RC' first).${NC}"
 fi

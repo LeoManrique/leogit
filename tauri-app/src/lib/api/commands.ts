@@ -61,6 +61,13 @@ export interface AheadBehind {
   behind: number
 }
 
+/** Lightweight per-repo sync summary for the picker's pull/push badges. */
+export interface RepoSync {
+  ahead: number
+  behind: number
+  has_remote: boolean
+}
+
 export interface RepoIdentifier {
   owner: string
   name: string
@@ -136,6 +143,8 @@ export interface ReposState {
   repo_sort_mode?: string
   /** Persisted sort mode for the Clone dialog's GitHub repo list ('recent' | 'name'). */
   clone_sort_mode?: string
+  /** Repo paths, most-recently-opened first. Drives the picker's tiered sync. */
+  recent_repos?: string[]
 }
 
 /** A repository surfaced in the GitHub tab of the Clone dialog (`gh repo list`). */
@@ -153,6 +162,14 @@ export const configApi = {
   saveConfig: (cfg: Config) => invoke<void>('save_config', { cfg }),
   loadState: () => invoke<ReposState>('load_state'),
   saveState: (state: ReposState) => invoke<void>('save_state', { state }),
+}
+
+export const appApi = {
+  /**
+   * Claim a repo path passed on a cold-start `leogit <dir>` command line (null
+   * for a bare launch). Warm starts arrive via the `open-repo` event instead.
+   */
+  takePendingOpenRepo: () => invoke<string | null>('take_pending_open_repo'),
 }
 
 export const gitApi = {
@@ -188,10 +205,17 @@ export const gitApi = {
   hasStagedChanges: (repoPath: string) => invoke<boolean>('has_staged_changes', { repoPath }),
   formatCommitMessage: (summary: string, description: string, coAuthors: string[] = []) =>
     invoke<string>('format_commit_message', { summary, description, coAuthors }),
+  repoSyncStatus: (repoPath: string, doFetch: boolean) =>
+    invoke<RepoSync>('repo_sync_status', { repoPath, doFetch }),
   fetch: (repoPath: string, remote: string) => invoke<void>('fetch', { repoPath, remote }),
   pull: (repoPath: string, remote: string) => invoke<void>('pull', { repoPath, remote }),
-  push: (repoPath: string, remote: string, branch: string, setUpstream: boolean, forceWithLease: boolean) =>
-    invoke<void>('push', { repoPath, remote, branch, setUpstream, forceWithLease }),
+  push: (
+    repoPath: string,
+    remote: string,
+    branch: string,
+    setUpstream: boolean,
+    forceWithLease: boolean
+  ) => invoke<void>('push', { repoPath, remote, branch, setUpstream, forceWithLease }),
   getAheadBehind: (repoPath: string, upstream: string) =>
     invoke<AheadBehind>('get_ahead_behind', { repoPath, upstream }),
   getRemote: (repoPath: string) => invoke<string>('get_remote', { repoPath }),
@@ -210,8 +234,7 @@ export const gitApi = {
     invoke<string[]>('discover_repos', { scanPaths, maxDepth }),
   isGitRepo: (path: string) => invoke<boolean>('is_git_repo', { path }),
   getRepoName: (path: string) => invoke<string>('get_repo_name', { path }),
-  cloneRepo: (url: string, targetPath: string) =>
-    invoke<string>('clone_repo', { url, targetPath }),
+  cloneRepo: (url: string, targetPath: string) => invoke<string>('clone_repo', { url, targetPath }),
   getLastCommitTimestamp: (repoPath: string) =>
     invoke<number>('get_last_commit_timestamp', { repoPath }),
 }
@@ -261,8 +284,7 @@ export interface Token {
 export type TokenLine = Token[]
 
 export const highlightApi = {
-  highlightDiff: (fileDiff: FileDiff) =>
-    invoke<TokenLine[]>('highlight_diff', { fileDiff }),
+  highlightDiff: (fileDiff: FileDiff) => invoke<TokenLine[]>('highlight_diff', { fileDiff }),
 }
 
 export const ghApi = {

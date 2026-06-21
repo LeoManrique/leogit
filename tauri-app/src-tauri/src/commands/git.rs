@@ -75,6 +75,18 @@ pub struct AheadBehind {
     pub behind: i32,
 }
 
+/// Lightweight per-repo sync summary used by the repo picker's background
+/// scheduler to render pull/push badges without fully opening each repo.
+/// Computed from `git status` headers (no working-tree file scan).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoSync {
+    pub ahead: i32,
+    pub behind: i32,
+    /// Whether the repo has at least one configured remote. Repos with no
+    /// remote can never be ahead/behind, so the picker skips their badges.
+    pub has_remote: bool,
+}
+
 /// Full status payload returned by `get_status`.
 /// Includes branch metadata parsed from `# branch.*` headers as well as the file list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,6 +168,52 @@ fn has_commits(repo_path: &str) -> bool {
     git_cmd(repo_path, &["rev-parse", "--verify", "--quiet", "HEAD"])
         .output()
         .is_ok_and(|o| o.status.success())
+}
+
+/// First configured remote name (e.g. "origin"), or `None` when the repo has
+/// no remotes. Used both to gate Push-vs-Publish and to locate the
+/// remote-tracking ref for the no-upstream ahead/behind fallback.
+fn first_remote(repo_path: &str) -> Option<String> {
+    let out = run_git(repo_path, &["remote"]).unwrap_or_default();
+    out.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(str::to_string)
+}
+
+/// Ahead/behind for a branch that has no explicit upstream, measured against
+/// `refs/remotes/<remote>/<branch>` when such a ref exists. Returns the counts
+/// alongside the resolved remote-tracking ref so callers can list unpushed
+/// commits. `None` when there's no matching remote ref (unpublished branch,
+/// detached HEAD, etc.). Shared by `get_status` and `repo_sync_status` so the
+/// fallback stays identical in both.
+fn remote_tracking_ahead_behind(
+    repo_path: &str,
+    remote: &str,
+    branch: &str,
+) -> Option<(i32, i32, String)> {
+    let remote_ref = format!("refs/remotes/{remote}/{branch}");
+    let exists = git_cmd(repo_path, &["rev-parse", "--verify", "--quiet", &remote_ref])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !exists {
+        return None;
+    }
+    let range = format!("HEAD...{remote_ref}");
+    let out = run_git(
+        repo_path,
+        &["rev-list", "--left-right", "--count", &range, "--"],
+    )
+    .ok()?;
+    // Output: "<ahead>\t<behind>" — left side is HEAD, right side is the ref.
+    let parts: Vec<&str> = out.split_whitespace().collect();
+    if parts.len() == 2 {
+        let ahead = parts[0].parse().unwrap_or(0);
+        let behind = parts[1].parse().unwrap_or(0);
+        Some((ahead, behind, remote_ref))
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -303,32 +361,29 @@ pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
         unpushed_shas: Vec::new(),
     };
 
-    // Configured remotes, queried once and reused below (the no-upstream
+    // Configured remote, queried once and reused below (the no-upstream
     // ahead/behind fallback needs the first remote's name). `has_remote` drives
     // the UI's Push-vs-Publish choice.
-    let remotes_out = run_git(&repo_path, &["remote"]).unwrap_or_default();
-    let first_remote = remotes_out.lines().map(str::trim).find(|l| !l.is_empty());
+    let first_remote = first_remote(&repo_path);
     result.has_remote = first_remote.is_some();
 
     if bytes.is_empty() {
         return Ok(result);
     }
 
-    // Branch headers are newline-terminated inside the porcelain output.
-    // File entries are NUL-terminated. We process the bytes in order:
-    // strip leading header lines (those starting with "# ") and then split
-    // the remainder on NUL.
-    //
-    // The header section ends at the first byte that does not begin a "# " line.
+    // Under `-z`, EVERY porcelain v2 record — `# branch.*` headers included — is
+    // NUL-terminated; there are no newlines in the output. We walk the leading
+    // header records (those starting with "# "), then split the remainder on NUL
+    // for the file entries. The header section ends at the first record that does
+    // not begin with "# ".
     let mut rest: &[u8] = &bytes;
 
-    // Process headers line-by-line until we hit a non-header line.
-    while let Some(nl_pos) = rest.iter().position(|&b| b == b'\n') {
-        let line = &rest[..nl_pos];
-        if !line.starts_with(b"# ") {
+    while let Some(sep) = rest.iter().position(|&b| b == b'\0') {
+        let record = &rest[..sep];
+        if !record.starts_with(b"# ") {
             break;
         }
-        let line_str = String::from_utf8_lossy(line);
+        let line_str = String::from_utf8_lossy(record);
         if let Some(rem) = line_str.strip_prefix("# branch.head ") {
             let val = rem.trim();
             result.branch = if val == "(detached)" {
@@ -340,8 +395,7 @@ pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
             result.upstream = rem.trim().to_string();
             result.has_upstream = true;
         } else if let Some(rem) = line_str.strip_prefix("# branch.ab ") {
-            let ab = rem.trim();
-            let parts: Vec<&str> = ab.split_whitespace().collect();
+            let parts: Vec<&str> = rem.split_whitespace().collect();
             if parts.len() == 2 {
                 let ahead = parts[0].trim_start_matches('+').parse().unwrap_or(0);
                 let behind = parts[1].trim_start_matches('-').parse().unwrap_or(0);
@@ -349,7 +403,7 @@ pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
                 result.behind = behind;
             }
         }
-        rest = &rest[nl_pos + 1..];
+        rest = &rest[sep + 1..];
     }
 
     // Fallback: if branch.head wasn't present (e.g., empty repo), try rev-parse.
@@ -384,33 +438,17 @@ pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
     // the next push needs `--set-upstream`, and lying about it would break
     // first-push behaviour.
     if !result.has_upstream && !result.branch.is_empty() {
-        if let Some(first_remote) = first_remote {
-            let remote_ref = format!("refs/remotes/{}/{}", first_remote, result.branch);
-            let exists = git_cmd(
-                &repo_path,
-                &["rev-parse", "--verify", "--quiet", &remote_ref],
-            )
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-            if exists {
-                let range = format!("HEAD...{}", remote_ref);
-                if let Ok(out) = run_git(
-                    &repo_path,
-                    &["rev-list", "--left-right", "--count", &range, "--"],
-                ) {
-                    let parts: Vec<&str> = out.split_whitespace().collect();
-                    if parts.len() == 2 {
-                        result.ahead = parts[0].parse().unwrap_or(0);
-                        result.behind = parts[1].parse().unwrap_or(0);
-                        // Surface the synthesised tracking name so the UI /
-                        // debug logs make sense; this is purely informational
-                        // and does NOT flip has_upstream.
-                        result.upstream =
-                            format!("{}/{} (inferred)", first_remote, result.branch);
-                        effective_upstream = Some(remote_ref);
-                    }
-                }
+        if let Some(remote) = first_remote.as_deref() {
+            if let Some((ahead, behind, remote_ref)) =
+                remote_tracking_ahead_behind(&repo_path, remote, &result.branch)
+            {
+                result.ahead = ahead;
+                result.behind = behind;
+                // Surface the synthesised tracking name so the UI / debug logs
+                // make sense; this is purely informational and does NOT flip
+                // has_upstream.
+                result.upstream = format!("{}/{} (inferred)", remote, result.branch);
+                effective_upstream = Some(remote_ref);
             }
         }
     }
@@ -1294,6 +1332,99 @@ pub fn format_commit_message(
 // Fetch / pull / push / ahead-behind / remote
 // ---------------------------------------------------------------------------
 
+/// Background sync for the repo picker's pull/push badges. Optionally fetches
+/// the repo's first remote (best-effort — network errors are swallowed so a
+/// stale-but-known ahead/behind still comes back), then computes the current
+/// branch's ahead/behind. Deliberately lighter than `get_status`: it skips the
+/// untracked-file scan (`-uno`) and never lists files, since the picker only
+/// needs the two counts for many repos at a time.
+#[tauri::command]
+pub fn repo_sync_status(repo_path: String, do_fetch: bool) -> Result<RepoSync, String> {
+    let remote = first_remote(&repo_path);
+
+    // Best-effort fetch. A failure (offline, auth) must not blank the badge —
+    // we fall through and report ahead/behind from whatever refs we already
+    // have. `--prune` keeps deleted remote branches from lingering.
+    if do_fetch {
+        if let Some(remote) = remote.as_deref() {
+            let _ = run_git_combined(
+                &repo_path,
+                &[
+                    "fetch",
+                    "--prune",
+                    "--recurse-submodules=on-demand",
+                    remote,
+                ],
+            );
+        }
+    }
+
+    let mut sync = RepoSync {
+        ahead: 0,
+        behind: 0,
+        has_remote: remote.is_some(),
+    };
+
+    // Headers only: branch.head, branch.upstream, branch.ab. `-uno` skips the
+    // potentially expensive untracked-file walk we don't need here.
+    let bytes = run_git_raw(
+        &repo_path,
+        &[
+            "--no-optional-locks",
+            "status",
+            "--untracked-files=no",
+            "--branch",
+            "--porcelain=2",
+            "-z",
+        ],
+    )?;
+
+    // Under `-z` the header records are NUL-terminated (no newlines in the
+    // output), so walk them by splitting on NUL — same as get_status.
+    let mut branch = String::new();
+    let mut has_upstream = false;
+    let mut rest: &[u8] = &bytes;
+    while let Some(sep) = rest.iter().position(|&b| b == b'\0') {
+        let record = &rest[..sep];
+        if !record.starts_with(b"# ") {
+            break;
+        }
+        let line_str = String::from_utf8_lossy(record);
+        if let Some(rem) = line_str.strip_prefix("# branch.head ") {
+            let val = rem.trim();
+            branch = if val == "(detached)" {
+                String::new()
+            } else {
+                val.to_string()
+            };
+        } else if line_str.starts_with("# branch.upstream ") {
+            has_upstream = true;
+        } else if let Some(rem) = line_str.strip_prefix("# branch.ab ") {
+            let parts: Vec<&str> = rem.split_whitespace().collect();
+            if parts.len() == 2 {
+                sync.ahead = parts[0].trim_start_matches('+').parse().unwrap_or(0);
+                sync.behind = parts[1].trim_start_matches('-').parse().unwrap_or(0);
+            }
+        }
+        rest = &rest[sep + 1..];
+    }
+
+    // Same no-upstream fallback as get_status: a branch never `push -u`'d emits
+    // no `# branch.ab`, so compare against the remote-tracking ref directly.
+    if !has_upstream && !branch.is_empty() {
+        if let Some(remote) = remote.as_deref() {
+            if let Some((ahead, behind, _)) =
+                remote_tracking_ahead_behind(&repo_path, remote, &branch)
+            {
+                sync.ahead = ahead;
+                sync.behind = behind;
+            }
+        }
+    }
+
+    Ok(sync)
+}
+
 #[tauri::command]
 pub fn fetch(repo_path: String, remote: String) -> Result<(), String> {
     let (ok, combined) = run_git_combined(
@@ -1747,7 +1878,7 @@ pub fn discover_repos(scan_paths: Vec<String>, max_depth: u32) -> Result<Vec<Str
     Ok(repos)
 }
 
-fn is_git_repo_path(path: &Path) -> bool {
+pub fn is_git_repo_path(path: &Path) -> bool {
     let dotgit = path.join(".git");
     // .git can be a directory (normal repo) or a regular file (worktree).
     match std::fs::metadata(&dotgit) {
@@ -1928,5 +2059,64 @@ mod tests {
 
         let after = get_status(repo_path).expect("get_status");
         assert!(after.has_remote, "remote is now configured");
+    }
+
+    /// Regression: porcelain v2 `-z` output is NUL-terminated end to end — the
+    /// `# branch.*` headers carry no newlines — so the header parser must split
+    /// on NUL. The old newline-based loop parsed zero headers: `has_upstream`
+    /// stayed false (masked in get_status by the rev-parse + remote-tracking
+    /// fallbacks) and `repo_sync_status`, which has no branch fallback, reported
+    /// ahead=behind=0 for every repo, so the picker badges never appeared.
+    #[test]
+    fn status_parses_upstream_and_ahead_behind_from_porcelain_headers() {
+        let tmp = tempdir().expect("tempdir");
+        let work = tmp.path().join("work");
+        let remote = tmp.path().join("remote.git");
+        fs::create_dir_all(&work).expect("mkdir work");
+        init_repo(&work);
+        let work_path = work.to_str().expect("utf-8 path").to_string();
+
+        fs::write(work.join("a.txt"), "1\n").expect("write file");
+        commit(
+            work_path.clone(),
+            "first".to_string(),
+            vec![new_file("a.txt")],
+            None,
+        )
+        .expect("commit");
+
+        // Bare remote + upstream tracking, entirely local (no network).
+        let bare = remote.to_str().expect("utf-8 path");
+        run_git(&work_path, &["init", "--bare", bare]).expect("init bare");
+        run_git(&work_path, &["remote", "add", "origin", bare]).expect("add remote");
+        run_git(&work_path, &["push", "-u", "origin", "HEAD"]).expect("push -u");
+
+        // One local commit that hasn't been pushed → ahead by 1.
+        fs::write(work.join("b.txt"), "2\n").expect("write file");
+        commit(
+            work_path.clone(),
+            "second".to_string(),
+            vec![new_file("b.txt")],
+            None,
+        )
+        .expect("commit");
+
+        let st = get_status(work_path.clone()).expect("get_status");
+        assert!(st.has_upstream, "branch.upstream header must be parsed");
+        assert!(
+            st.upstream.starts_with("origin/") && !st.upstream.contains("inferred"),
+            "real upstream, not the no-upstream fallback's '(inferred)' label: {}",
+            st.upstream
+        );
+        assert_eq!(st.ahead, 1, "one unpushed local commit");
+        assert_eq!(st.behind, 0);
+
+        // repo_sync_status must derive the same counts from the headers; with the
+        // old newline parser `branch` stayed empty, the fallback was skipped, and
+        // this returned 0/0.
+        let sync = repo_sync_status(work_path, false).expect("repo_sync_status");
+        assert_eq!(sync.ahead, 1, "repo_sync_status must parse ahead from header");
+        assert_eq!(sync.behind, 0);
+        assert!(sync.has_remote);
     }
 }

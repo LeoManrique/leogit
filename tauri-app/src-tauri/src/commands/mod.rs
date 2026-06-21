@@ -1,5 +1,6 @@
 pub mod config;
 pub mod git;
+pub mod launch;
 pub mod diff;
 pub mod gh;
 pub mod ai;

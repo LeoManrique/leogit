@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use leogit_lib::commands::*;
+use leogit_lib::commands::{ai, config, diff, gh, git, highlight, launch, terminal};
 
 // macOS/Linux apps launched from Finder/.desktop inherit a minimal PATH
 // (e.g. /usr/bin:/bin:/usr/sbin:/sbin) and miss user-installed binaries like
@@ -33,7 +33,20 @@ fn fix_path_env() {}
 fn main() {
     fix_path_env();
 
+    // Resolve a cold-start `leogit <dir>` path before the window exists; the
+    // frontend claims it on mount via `take_pending_open_repo`. Warm starts go
+    // through the single-instance callback below instead.
+    let args: Vec<String> = std::env::args().collect();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    launch::set_pending_open_repo(launch::resolve_repo_arg(&args, &cwd));
+
     tauri::Builder::default()
+        // single-instance must be registered first (plugins run in registration
+        // order). It forwards a second `leogit <dir>` invocation's argv to the
+        // running instance instead of spawning a duplicate window.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            launch::handle_second_instance(app, &argv, &cwd);
+        }))
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             config::load_config,
@@ -59,6 +72,7 @@ fn main() {
             git::undo_last_commit,
             git::has_staged_changes,
             git::format_commit_message,
+            git::repo_sync_status,
             git::fetch,
             git::pull,
             git::push,
@@ -90,6 +104,7 @@ fn main() {
             terminal::write_terminal,
             terminal::resize_terminal,
             terminal::close_terminal,
+            launch::take_pending_open_repo,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,15 +1,39 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import { get } from 'svelte/store'
+  import { listen } from '@tauri-apps/api/event'
   import { appState } from '$lib/stores/app'
   import { refreshConfig } from '$lib/stores/config'
-  import { ghApi, gitApi, configApi } from '$lib/api/commands'
+  import { ghApi, gitApi, configApi, appApi } from '$lib/api/commands'
+  import { patchReposState, recordRecentRepo } from '$lib/stores/reposState'
   import { homeDir } from '@tauri-apps/api/path'
   import MainLayout from '$lib/views/MainLayout.svelte'
   import RepoPicker from '$lib/views/RepoPicker.svelte'
 
+  let unlistenOpenRepo: (() => void) | null = null
+
   onMount(() => {
     initializeApp()
+    // Warm-start `leogit <dir>`: a second invocation focuses this window and
+    // emits `open-repo`. While in 'main', MainLayout owns the live switch (it
+    // must reset its own view state); here we only handle the pre-main phases.
+    listen<string>('open-repo', (e) => handleOpenRepoEvent(e.payload)).then((u) => {
+      unlistenOpenRepo = u
+    })
+    return () => unlistenOpenRepo?.()
   })
+
+  function handleOpenRepoEvent(path: string) {
+    if (!path || get(appState).phase === 'main') return
+    appState.update((s) => ({
+      ...s,
+      phase: 'main',
+      repos: s.repos.includes(path) ? s.repos : [...s.repos, path],
+      repoPath: path,
+    }))
+    patchReposState({ last_opened_repo: path })
+    recordRecentRepo(path)
+  }
 
   async function initializeApp() {
     try {
@@ -34,13 +58,27 @@
       const repos = await gitApi.discoverRepos(resolved, scanDepth)
       const state = await configApi.loadState().catch(() => ({ last_opened_repo: undefined }))
 
+      // A repo passed on the cold-start command line (`leogit <dir>`) wins over
+      // the remembered/last-opened repo. It may live outside the scan paths, so
+      // add it to the list even if discovery didn't surface it.
+      const launchRepo = await appApi.takePendingOpenRepo().catch(() => null)
+      if (launchRepo) {
+        console.log('[launch] opening repo from command line:', launchRepo)
+        const withLaunch = repos.includes(launchRepo) ? repos : [...repos, launchRepo]
+        appState.update((s) => ({ ...s, phase: 'main', repos: withLaunch, repoPath: launchRepo }))
+        patchReposState({ last_opened_repo: launchRepo })
+        recordRecentRepo(launchRepo)
+        return
+      }
+
       if (state.last_opened_repo && repos.includes(state.last_opened_repo)) {
         appState.update((s) => ({ ...s, phase: 'main', repos, repoPath: state.last_opened_repo! }))
         return
       }
       if (repos.length === 1) {
         appState.update((s) => ({ ...s, phase: 'main', repos, repoPath: repos[0] }))
-        configApi.saveState({ last_opened_repo: repos[0] }).catch(console.error)
+        // Read-modify-write so we don't clobber sort modes / recent_repos.
+        patchReposState({ last_opened_repo: repos[0] })
         return
       }
 
@@ -52,7 +90,8 @@
 
   function handleRepoSelect(repo: string) {
     appState.update((s) => ({ ...s, phase: 'main', repoPath: repo }))
-    configApi.saveState({ last_opened_repo: repo }).catch(console.error)
+    // Read-modify-write so we don't clobber sort modes / recent_repos.
+    patchReposState({ last_opened_repo: repo })
   }
 </script>
 
