@@ -66,6 +66,9 @@ export interface RepoSync {
   ahead: number
   behind: number
   has_remote: boolean
+  /** Whether a requested background fetch actually reached the remote (true
+   * when none was requested / no remote). Feeds the connectivity breaker. */
+  fetched: boolean
 }
 
 export interface RepoIdentifier {
@@ -203,6 +206,12 @@ export const gitApi = {
     invoke<void>('commit', { repoPath, message, files, amend }),
   undoLastCommit: (repoPath: string) => invoke<void>('undo_last_commit', { repoPath }),
   hasStagedChanges: (repoPath: string) => invoke<boolean>('has_staged_changes', { repoPath }),
+  /** Discard working-tree changes for the given files (revert tracked, trash untracked). */
+  discardFiles: (repoPath: string, files: FileEntry[]) =>
+    invoke<void>('discard_files', { repoPath, files }),
+  /** Append the given ready-to-write patterns to the repo's root .gitignore. */
+  appendToGitignore: (repoPath: string, patterns: string[]) =>
+    invoke<void>('append_to_gitignore', { repoPath, patterns }),
   formatCommitMessage: (summary: string, description: string, coAuthors: string[] = []) =>
     invoke<string>('format_commit_message', { summary, description, coAuthors }),
   repoSyncStatus: (repoPath: string, doFetch: boolean) =>
@@ -237,6 +246,19 @@ export const gitApi = {
   cloneRepo: (url: string, targetPath: string) => invoke<string>('clone_repo', { url, targetPath }),
   getLastCommitTimestamp: (repoPath: string) =>
     invoke<number>('get_last_commit_timestamp', { repoPath }),
+}
+
+/**
+ * OS-shell integration for working-tree files. Paths are repo-relative; the
+ * backend joins them onto the repo path so a Windows backslash vs. git's
+ * forward-slash mismatch never reaches the file system.
+ */
+export const osApi = {
+  /** Reveal a file in the platform file manager (Finder / Explorer / file manager). */
+  revealPath: (repoPath: string, relPath: string) =>
+    invoke<void>('reveal_path', { repoPath, relPath }),
+  /** Open a file with the OS's default application for its type. */
+  openPath: (repoPath: string, relPath: string) => invoke<void>('open_path', { repoPath, relPath }),
 }
 
 export const diffApi = {

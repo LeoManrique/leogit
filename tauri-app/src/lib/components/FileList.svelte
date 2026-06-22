@@ -1,13 +1,21 @@
 <script lang="ts">
   import { tick } from 'svelte'
   import type { FileEntry } from '$lib/api/commands'
+  import { revealLabel, fileExtension, type FileContextActions } from '$lib/services/fileActions'
   import PathText from './PathText.svelte'
+  import ContextMenu, { type ContextMenuItem } from './ContextMenu.svelte'
 
   interface Props {
     files: FileEntry[]
     selectedFiles?: Set<string>
     activeFile?: FileEntry | null
     showCheckbox?: boolean
+    /**
+     * Right-click actions for each file row. Supplied only by the working-tree
+     * Changes list; omit it (e.g. on the commit-detail file list) and rows keep
+     * the native menu with no custom context menu.
+     */
+    contextActions?: FileContextActions
     onActivate: (file: FileEntry) => void
     onToggle?: (file: FileEntry) => void
     /**
@@ -29,6 +37,7 @@
     selectedFiles = new Set(),
     activeFile = null,
     showCheckbox = true,
+    contextActions,
     onActivate,
     onToggle = () => {},
     onToggleAll,
@@ -237,6 +246,92 @@
     }
   }
 
+  // ---- Context menu ----------------------------------------------------
+  // Tracks the open menu's anchor and the files it acts on. Null when closed.
+  let contextMenu = $state<{ x: number; y: number; files: FileEntry[] } | null>(null)
+
+  function openContextMenu(e: MouseEvent, file: FileEntry) {
+    // No actions wired (e.g. commit-detail list) → leave the native menu alone.
+    if (!contextActions) return
+    e.preventDefault()
+    e.stopPropagation()
+    // Right-clicking inside a multi-row selection acts on the whole selection;
+    // right-clicking elsewhere re-selects just that row first (Finder / GH
+    // Desktop semantics).
+    let targets: FileEntry[]
+    if (rowSelection.has(file.path) && rowSelection.size > 1) {
+      targets = files.filter((f) => rowSelection.has(f.path))
+    } else {
+      rowAnchor = file.path
+      rowSelection = new Set([file.path])
+      onActivate(file)
+      targets = [file]
+    }
+    contextMenu = { x: e.clientX, y: e.clientY, files: targets }
+  }
+
+  function separator(): ContextMenuItem {
+    return { separator: true, label: '', action: () => {} }
+  }
+
+  // Build the menu for the current target set. Multi-selection collapses to the
+  // bulk discard (the only action that's meaningful for many files at once);
+  // a single file gets the full menu.
+  const menuItems = $derived.by<ContextMenuItem[]>(() => {
+    const actions = contextActions
+    const menu = contextMenu
+    if (!actions || !menu) return []
+    const targets = menu.files
+
+    if (targets.length > 1) {
+      return [
+        {
+          label: `Discard ${targets.length} Selected Changes…`,
+          destructive: true,
+          action: () => actions.discard(targets),
+        },
+      ]
+    }
+
+    const file = targets[0]
+    if (!file) return []
+    const ext = fileExtension(file.path)
+    const onDisk = file.status !== 'Deleted'
+
+    const items: ContextMenuItem[] = [
+      { label: 'Discard Changes…', destructive: true, action: () => actions.discard([file]) },
+      separator(),
+      { label: 'Ignore File (Add to .gitignore)', action: () => actions.ignoreFile(file) },
+    ]
+    if (ext) {
+      items.push({
+        label: `Ignore All ${ext} Files (Add to .gitignore)`,
+        action: () => actions.ignoreExtension(ext),
+      })
+    }
+    items.push(
+      separator(),
+      { label: 'Copy File Path', action: () => actions.copyPath(file) },
+      { label: 'Copy Relative File Path', action: () => actions.copyRelativePath(file) },
+      separator(),
+      { label: revealLabel(), enabled: onDisk, action: () => actions.reveal(file) },
+      {
+        label: 'Open with Default Program',
+        enabled: onDisk,
+        action: () => actions.openWithDefault(file),
+      },
+    )
+    return items
+  })
+
+  // Drop the menu if its target files leave the list (e.g. a background status
+  // refresh removes a file the menu was anchored to).
+  $effect(() => {
+    if (!contextMenu) return
+    const present = new Set(files.map((f) => f.path))
+    if (!contextMenu.files.every((f) => present.has(f.path))) contextMenu = null
+  })
+
 </script>
 
 <div class="file-list">
@@ -296,6 +391,7 @@
             data-file-row-index={fileIndex}
             style="top: {fileIndex * ROW_HEIGHT}px;"
             onclick={(e) => handleRowClick(e, file)}
+            oncontextmenu={(e) => openContextMenu(e, file)}
             role="button"
             tabindex="0"
             onkeydown={(e) => {
@@ -365,6 +461,20 @@
     {/if}
   </div>
 </div>
+
+<!--
+  Rendered outside `.file-list` so the menu's `position: fixed` resolves against
+  the viewport. (FileList has no `transform` ancestor, but keeping it a sibling
+  matches CommitList and is robust if that changes.)
+-->
+{#if contextMenu !== null}
+  <ContextMenu
+    x={contextMenu.x}
+    y={contextMenu.y}
+    items={menuItems}
+    onClose={() => (contextMenu = null)}
+  />
+{/if}
 
 <style>
   .file-list {

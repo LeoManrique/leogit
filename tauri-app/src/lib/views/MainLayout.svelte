@@ -9,16 +9,24 @@
   import { setRepoSync } from '$lib/stores/repoSync'
   import { repoSyncScheduler } from '$lib/services/repoSyncScheduler'
   import {
+    shouldAttemptBackground,
+    recordResult,
+    initConnectivity,
+  } from '$lib/services/connectivity'
+  import {
     gitApi,
     diffApi,
     configApi,
     type FileEntry,
     type CommitInfo,
   } from '$lib/api/commands'
+  import * as fileActions from '$lib/services/fileActions'
+  import type { FileContextActions } from '$lib/services/fileActions'
 
   import Header from '$lib/components/Header.svelte'
   import TabBar from '$lib/components/TabBar.svelte'
   import FileList from '$lib/components/FileList.svelte'
+  import DiscardConfirm from '$lib/components/DiscardConfirm.svelte'
   import CommitMessage from '$lib/components/CommitMessage.svelte'
   import CommitList from '$lib/components/CommitList.svelte'
   import DiffViewer from '$lib/components/DiffViewer.svelte'
@@ -618,13 +626,26 @@
 
   // Best-effort fetch of the active repo's remote. Swallows offline/auth/no-remote
   // errors so callers can always follow up with a status refresh regardless.
+  // This is automatic (timer / refocus / cold-open), so it's gated on
+  // connectivity: skipped while offline or backing off, and its outcome feeds
+  // the breaker so a recovered link re-enables background syncing app-wide.
   async function fetchActiveRemote(): Promise<void> {
     const repoPath = $appState.repoPath
     if (!repoPath) return
+    if (!shouldAttemptBackground()) return
+    let remote: string
     try {
-      const remote = await gitApi.getRemote(repoPath)
+      remote = await gitApi.getRemote(repoPath)
+    } catch {
+      return // local remote lookup failed — not a connectivity signal
+    }
+    if (!remote) return
+    try {
       await gitApi.fetch(repoPath, remote)
-    } catch {}
+      recordResult(true)
+    } catch {
+      recordResult(false)
+    }
   }
 
   async function performAutoFetch(): Promise<void> {
@@ -810,6 +831,70 @@
       }
       return { ...s, selectedFiles: nextSelected, userDeselected: nextDeselected }
     })
+  }
+
+  // ---- Changes-tab context menu --------------------------------------------
+  // Files pending a discard confirmation; null when the dialog is closed.
+  let discardTarget = $state<FileEntry[] | null>(null)
+  let isDiscarding = $state(false)
+
+  // Run a side-effect-only file action (copy / reveal / open), surfacing any
+  // failure through the shared error modal. No-op without an open repo.
+  function runFileAction(fn: (repoPath: string) => Promise<void>): void {
+    const repoPath = $appState.repoPath
+    if (!repoPath) return
+    fn(repoPath).catch((error) => {
+      repoState.update((s) => ({ ...s, error: String(error) }))
+    })
+  }
+
+  async function ignoreFiles(append: (repoPath: string) => Promise<void>): Promise<void> {
+    const repoPath = $appState.repoPath
+    if (!repoPath) return
+    try {
+      await append(repoPath)
+      // The newly-ignored untracked file drops out of the changes list.
+      await refreshStatus({ silent: true })
+    } catch (error) {
+      repoState.update((s) => ({ ...s, error: String(error) }))
+    }
+  }
+
+  function requestDiscard(files: FileEntry[]): void {
+    if (files.length > 0) discardTarget = files
+  }
+
+  async function confirmDiscard(): Promise<void> {
+    const repoPath = $appState.repoPath
+    const files = discardTarget
+    if (!repoPath || !files) return
+    isDiscarding = true
+    try {
+      await gitApi.discardFiles(repoPath, files)
+      discardTarget = null
+      // refreshStatus prunes the discarded files from the list / active diff.
+      await refreshStatus({ silent: true })
+    } catch (error) {
+      repoState.update((s) => ({ ...s, error: String(error) }))
+    } finally {
+      isDiscarding = false
+    }
+  }
+
+  function cancelDiscard(): void {
+    if (!isDiscarding) discardTarget = null
+  }
+
+  // Intents raised by FileList's right-click menu. Repo path + refresh + the
+  // confirm dialog live here; FileList only decides what to show.
+  const fileContextActions: FileContextActions = {
+    discard: requestDiscard,
+    ignoreFile: (file) => void ignoreFiles((repo) => fileActions.ignoreFile(repo, file)),
+    ignoreExtension: (ext) => void ignoreFiles((repo) => fileActions.ignoreExtension(repo, ext)),
+    copyPath: (file) => runFileAction((repo) => fileActions.copyAbsolutePath(repo, file)),
+    copyRelativePath: (file) => runFileAction(() => fileActions.copyRelativePath(file)),
+    reveal: (file) => runFileAction((repo) => fileActions.revealFile(repo, file)),
+    openWithDefault: (file) => runFileAction((repo) => fileActions.openWithDefault(repo, file)),
   }
 
   async function handleSwitchRepo(repo: string) {
@@ -1065,6 +1150,7 @@
   })
 
   let unlistenOpenRepo: (() => void) | null = null
+  let teardownConnectivity: (() => void) | null = null
 
   onMount(() => {
     initialize().catch(console.error)
@@ -1079,11 +1165,19 @@
     document.addEventListener('focusin', handleFocusEvent)
     document.addEventListener('focusout', handleFocusEvent)
     window.addEventListener('keydown', handleKeyDown)
+    // The moment the OS reports connectivity back, refresh the active repo and
+    // the top picker tier immediately instead of waiting out the backoff window.
+    teardownConnectivity = initConnectivity(() => {
+      if ($appState.phase !== 'main') return
+      void performAutoFetch()
+      repoSyncScheduler.refocusSync()
+    })
 
     return () => {
       if (statusInterval) clearInterval(statusInterval)
       if (fetchInterval) clearInterval(fetchInterval)
       repoSyncScheduler.stop()
+      teardownConnectivity?.()
       unlistenOpenRepo?.()
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       window.removeEventListener('focus', handleWindowFocus)
@@ -1108,6 +1202,7 @@
           files={$repoState.status.files}
           selectedFiles={$repoState.selectedFiles}
           activeFile={$repoState.activeFile}
+          contextActions={fileContextActions}
           onActivate={handleFileActivate}
           onToggle={handleFileToggle}
           onToggleAll={handleToggleAll}
@@ -1374,6 +1469,15 @@
 
   <SettingsOverlay isOpen={showSettings} onClose={() => (showSettings = false)} />
   <HelpOverlay isOpen={showHelp} onClose={() => (showHelp = false)} />
+
+  {#if discardTarget}
+    <DiscardConfirm
+      files={discardTarget}
+      {isDiscarding}
+      onConfirm={confirmDiscard}
+      onCancel={cancelDiscard}
+    />
+  {/if}
 
   {#if $repoState.error}
     <ErrorModal

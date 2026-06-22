@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FileStatus {
@@ -85,6 +86,12 @@ pub struct RepoSync {
     /// Whether the repo has at least one configured remote. Repos with no
     /// remote can never be ahead/behind, so the picker skips their badges.
     pub has_remote: bool,
+    /// Whether the optional network fetch actually reached the remote. `true`
+    /// when no fetch was requested or there was no remote to reach (nothing to
+    /// report), `false` when a requested fetch failed/timed out. The frontend
+    /// feeds this to its connectivity circuit breaker so a run of failed
+    /// background fetches backs off instead of hammering an unreachable remote.
+    pub fetched: bool,
 }
 
 /// Full status payload returned by `get_status`.
@@ -158,6 +165,84 @@ fn run_git_combined(repo_path: &str, args: &[&str]) -> Result<(bool, String), St
     let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
     combined.push_str(&String::from_utf8_lossy(&output.stderr));
     Ok((output.status.success(), combined))
+}
+
+// ---------------------------------------------------------------------------
+// Network git: bounded so an offline / flaky connection can't hang a thread
+// ---------------------------------------------------------------------------
+//
+// Two layers of protection, both applied to every remote-touching git op:
+//   1. Transport timeouts baked into the command (`git_net_cmd`) so git itself
+//      aborts a connect or stalled transfer quickly.
+//   2. A hard kill-timeout (`process::run_timed`) as a backstop, in case a
+//      transport ignores the knobs above and wedges anyway.
+// The commands that use these are also `#[tauri::command(async)]` so they run
+// on a worker thread, never the UI thread — a slow remote degrades a badge,
+// it never freezes the app.
+
+/// Background badge fetches: tiny, fired on a timer for many repos, so they
+/// fail fast — if a remote isn't reachable in a few seconds we abandon and keep
+/// the last-known counts.
+const NET_BG_CONNECT_SECS: u64 = 8;
+const NET_BG_STALL_SECS: u64 = 8;
+const NET_BG_TIMEOUT: Duration = Duration::from_secs(12);
+
+/// User-initiated transfers (Pull/Push/Fetch/Clone buttons): generous, because
+/// a legitimate large transfer takes a while. The connect/stall knobs still
+/// abort a *stalled* connection fast; the hard cap only catches a wedged
+/// process that's making no progress at all.
+const NET_UI_CONNECT_SECS: u64 = 15;
+const NET_UI_STALL_SECS: u64 = 30;
+const NET_UI_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Build a `git` Command for a *network* operation with transport timeouts so an
+/// unreachable or stalled remote fails fast instead of hanging:
+///   - SSH: `ConnectTimeout` bounds the TCP/handshake; `BatchMode=yes` refuses
+///     any interactive prompt (so a missing key errors immediately).
+///   - HTTP(S): `http.lowSpeedLimit`/`http.lowSpeedTime` abort a transfer that
+///     drops below ~1 KB/s for `stall_secs` (covers a dropped connection mid
+///     transfer, which a plain connect timeout would miss).
+/// `current_dir` is `None` for `clone` (no repo exists yet).
+fn git_net_cmd(
+    current_dir: Option<&str>,
+    args: &[&str],
+    connect_secs: u64,
+    stall_secs: u64,
+) -> Command {
+    let mut cmd = Command::new("git");
+    if let Some(dir) = current_dir {
+        cmd.current_dir(dir);
+    }
+    cmd.env("TERM", "dumb")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env(
+            "GIT_SSH_COMMAND",
+            format!("ssh -o ConnectTimeout={connect_secs} -o BatchMode=yes"),
+        )
+        .arg("-c")
+        .arg("http.lowSpeedLimit=1000")
+        .arg("-c")
+        .arg(format!("http.lowSpeedTime={stall_secs}"))
+        .args(args);
+    super::process::hide_console(&mut cmd);
+    cmd
+}
+
+/// Run a network git op with both the transport timeouts of [`git_net_cmd`] and
+/// the hard kill-timeout of [`process::run_timed`]. Returns
+/// `(succeeded, combined_output)`.
+fn run_git_net(
+    current_dir: Option<&str>,
+    args: &[&str],
+    connect_secs: u64,
+    stall_secs: u64,
+    timeout: Duration,
+) -> Result<(bool, String), String> {
+    let cmd = git_net_cmd(current_dir, args, connect_secs, stall_secs);
+    let out = super::process::run_timed(cmd, &format!("git {}", args.join(" ")), timeout)?;
+    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+    combined.push_str(&String::from_utf8_lossy(&out.stderr));
+    Ok((out.status.success(), combined))
 }
 
 /// Returns true if the repository has at least one commit (HEAD resolves to a
@@ -1087,14 +1172,23 @@ pub fn delete_branch(repo_path: String, name: String) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_remote_branch(
     repo_path: String,
     remote: String,
     branch: String,
 ) -> Result<(), String> {
     let refspec = format!(":{}", branch);
-    run_git(&repo_path, &["push", &remote, &refspec])?;
+    let (ok, combined) = run_git_net(
+        Some(&repo_path),
+        &["push", &remote, &refspec],
+        NET_UI_CONNECT_SECS,
+        NET_UI_STALL_SECS,
+        NET_UI_TIMEOUT,
+    )?;
+    if !ok {
+        return Err(format!("git push failed: {}", combined.trim()));
+    }
     Ok(())
 }
 
@@ -1300,6 +1394,166 @@ pub fn has_staged_changes(repo_path: String) -> Result<bool, String> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Discard / ignore (Changes-tab context menu)
+// ---------------------------------------------------------------------------
+
+/// The subset of `paths` that exist as blobs in the `HEAD` tree. Empty on an
+/// unborn HEAD (a repo with no commits yet) or when nothing matches.
+///
+/// Used by [`discard_files`] to tell tracked files (restore from HEAD) from
+/// files git has never committed — untracked, freshly `git add`-ed, or the new
+/// side of a rename — which have no HEAD version to fall back to and must be
+/// removed instead. `-r` makes the pathspecs resolve to nested blobs; `-z`
+/// keeps paths with spaces/newlines intact.
+fn head_paths(repo_path: &str, paths: &[String]) -> HashSet<String> {
+    if paths.is_empty() || !has_commits(repo_path) {
+        return HashSet::new();
+    }
+    let mut args: Vec<&str> = vec!["ls-tree", "-r", "-z", "--name-only", "HEAD", "--"];
+    args.extend(paths.iter().map(String::as_str));
+    match run_git_raw(repo_path, &args) {
+        Ok(bytes) => bytes
+            .split(|&b| b == 0)
+            .filter(|s| !s.is_empty())
+            .map(|s| String::from_utf8_lossy(s).into_owned())
+            .collect(),
+        Err(_) => HashSet::new(),
+    }
+}
+
+/// Discard the working-tree changes of `files`, restoring the repo to its
+/// committed state for each.
+///
+/// Tracked files (modified, deleted, conflicted, and the original side of a
+/// rename) are restored from `HEAD` in both the index and the working tree.
+/// Files with no committed version (untracked, staged additions, and the new
+/// side of a rename) can't be "reverted", so their working-tree copy is moved
+/// to the OS trash — recoverable, unlike `rm` — and any staged entry is
+/// dropped from the index. Runs on a worker thread so a large discard never
+/// blocks the UI.
+///
+/// # Errors
+/// Returns `Err` if the underlying `git reset` / `git checkout` fails. A file
+/// that can't be moved to the trash (already gone, permissions) is logged and
+/// skipped rather than aborting the whole operation.
+#[tauri::command]
+pub fn discard_files(repo_path: &str, files: Vec<FileEntry>) -> Result<(), String> {
+    if files.is_empty() {
+        return Ok(());
+    }
+
+    // Every path whose HEAD membership decides how we discard it: the path
+    // itself plus the pre-rename original.
+    let mut candidates: Vec<String> = Vec::new();
+    for f in &files {
+        candidates.push(f.path.clone());
+        if let Some(orig) = &f.orig_path {
+            candidates.push(orig.clone());
+        }
+    }
+    let in_head = head_paths(repo_path, &candidates);
+
+    // `restore` → tracked paths to `git checkout HEAD --`.
+    // `trash_and_unstage` → never-committed paths to trash + `git reset --`.
+    let mut restore: Vec<String> = Vec::new();
+    let mut trash_and_unstage: Vec<String> = Vec::new();
+    for f in files {
+        match f.orig_path {
+            // Rename: bring back the committed original, drop the new path.
+            Some(orig) if in_head.contains(&orig) => {
+                restore.push(orig);
+                trash_and_unstage.push(f.path);
+            }
+            _ if in_head.contains(&f.path) => restore.push(f.path),
+            _ => trash_and_unstage.push(f.path),
+        }
+    }
+
+    // 1) Move never-committed working-tree files to the trash so an accidental
+    //    discard is recoverable. Best-effort per file.
+    for rel in &trash_and_unstage {
+        let abs = Path::new(repo_path).join(rel);
+        if abs.exists() {
+            if let Err(e) = trash::delete(&abs) {
+                eprintln!("discard_files: could not trash {}: {e}", abs.display());
+            }
+        }
+    }
+
+    // 2) Drop any staged additions from the index. The pathspec form (no
+    //    `HEAD`) is unborn-HEAD safe, matching `commit`'s reset above; it's a
+    //    harmless no-op for purely untracked paths.
+    if !trash_and_unstage.is_empty() {
+        let mut args: Vec<&str> = vec!["reset", "--"];
+        args.extend(trash_and_unstage.iter().map(String::as_str));
+        let (ok, out) = run_git_combined(repo_path, &args)?;
+        if !ok {
+            return Err(format!("git reset failed: {}", out.trim()));
+        }
+    }
+
+    // 3) Restore tracked files to their committed state (index + worktree).
+    if !restore.is_empty() {
+        let mut args: Vec<&str> = vec!["checkout", "HEAD", "--"];
+        args.extend(restore.iter().map(String::as_str));
+        let (ok, out) = run_git_combined(repo_path, &args)?;
+        if !ok {
+            return Err(format!("git checkout failed: {}", out.trim()));
+        }
+    }
+
+    Ok(())
+}
+
+/// Append `patterns` to the repo's root `.gitignore`, one per line, creating
+/// the file if absent. Lines already present (compared trimmed) are skipped so
+/// repeated "Ignore" clicks don't pile up duplicates.
+///
+/// Callers pass ready-to-write patterns: a literal file path (with its glob
+/// metacharacters escaped) or a glob like `*.log`. A trailing newline is
+/// ensured before appending so existing rules aren't joined onto.
+///
+/// # Errors
+/// Returns `Err` if the `.gitignore` file can't be written.
+#[tauri::command]
+pub fn append_to_gitignore(repo_path: &str, patterns: Vec<String>) -> Result<(), String> {
+    if patterns.is_empty() {
+        return Ok(());
+    }
+    let path = Path::new(repo_path).join(".gitignore");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+
+    // Skip patterns already on a line of the file, and de-dup within this batch
+    // (e.g. two selected files sharing a name).
+    let present: HashSet<&str> = existing.lines().map(str::trim).collect();
+    let mut to_add: Vec<String> = Vec::new();
+    for p in patterns {
+        let trimmed = p.trim();
+        if trimmed.is_empty()
+            || present.contains(trimmed)
+            || to_add.iter().any(|a| a == trimmed)
+        {
+            continue;
+        }
+        to_add.push(trimmed.to_string());
+    }
+    if to_add.is_empty() {
+        return Ok(());
+    }
+
+    let mut out = existing;
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    for p in to_add {
+        out.push_str(&p);
+        out.push('\n');
+    }
+    std::fs::write(&path, out).map_err(|e| format!("write .gitignore: {e}"))?;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn format_commit_message(
     summary: String,
@@ -1338,24 +1592,31 @@ pub fn format_commit_message(
 /// branch's ahead/behind. Deliberately lighter than `get_status`: it skips the
 /// untracked-file scan (`-uno`) and never lists files, since the picker only
 /// needs the two counts for many repos at a time.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn repo_sync_status(repo_path: String, do_fetch: bool) -> Result<RepoSync, String> {
     let remote = first_remote(&repo_path);
 
-    // Best-effort fetch. A failure (offline, auth) must not blank the badge —
-    // we fall through and report ahead/behind from whatever refs we already
-    // have. `--prune` keeps deleted remote branches from lingering.
+    // Best-effort, time-boxed fetch. A failure (offline, auth, timeout) must not
+    // blank the badge — we fall through and report ahead/behind from whatever
+    // refs we already have. `--prune` keeps deleted remote branches from
+    // lingering. `fetched` records whether we actually reached the remote so the
+    // frontend's circuit breaker can back off after a run of failures.
+    let mut fetched = true;
     if do_fetch {
         if let Some(remote) = remote.as_deref() {
-            let _ = run_git_combined(
-                &repo_path,
+            fetched = run_git_net(
+                Some(&repo_path),
                 &[
                     "fetch",
                     "--prune",
                     "--recurse-submodules=on-demand",
                     remote,
                 ],
-            );
+                NET_BG_CONNECT_SECS,
+                NET_BG_STALL_SECS,
+                NET_BG_TIMEOUT,
+            )
+            .is_ok_and(|(ok, _)| ok);
         }
     }
 
@@ -1363,6 +1624,7 @@ pub fn repo_sync_status(repo_path: String, do_fetch: bool) -> Result<RepoSync, S
         ahead: 0,
         behind: 0,
         has_remote: remote.is_some(),
+        fetched,
     };
 
     // Headers only: branch.head, branch.upstream, branch.ab. `-uno` skips the
@@ -1425,16 +1687,19 @@ pub fn repo_sync_status(repo_path: String, do_fetch: bool) -> Result<RepoSync, S
     Ok(sync)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn fetch(repo_path: String, remote: String) -> Result<(), String> {
-    let (ok, combined) = run_git_combined(
-        &repo_path,
+    let (ok, combined) = run_git_net(
+        Some(&repo_path),
         &[
             "fetch",
             "--prune",
             "--recurse-submodules=on-demand",
             &remote,
         ],
+        NET_UI_CONNECT_SECS,
+        NET_UI_STALL_SECS,
+        NET_UI_TIMEOUT,
     )?;
     if !ok {
         return Err(format!("git fetch failed: {}", combined.trim()));
@@ -1442,17 +1707,22 @@ pub fn fetch(repo_path: String, remote: String) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pull(repo_path: String, remote: String) -> Result<(), String> {
-    let (ok, combined) =
-        run_git_combined(&repo_path, &["pull", "--ff", "--recurse-submodules", &remote])?;
+    let (ok, combined) = run_git_net(
+        Some(&repo_path),
+        &["pull", "--ff", "--recurse-submodules", &remote],
+        NET_UI_CONNECT_SECS,
+        NET_UI_STALL_SECS,
+        NET_UI_TIMEOUT,
+    )?;
     if !ok {
         return Err(format!("git pull failed: {}", combined.trim()));
     }
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn push(
     repo_path: String,
     remote: String,
@@ -1470,7 +1740,13 @@ pub fn push(
     args.push(&remote);
     args.push(&branch);
 
-    let (ok, combined) = run_git_combined(&repo_path, &args)?;
+    let (ok, combined) = run_git_net(
+        Some(&repo_path),
+        &args,
+        NET_UI_CONNECT_SECS,
+        NET_UI_STALL_SECS,
+        NET_UI_TIMEOUT,
+    )?;
     if !ok {
         return Err(format!("git push failed: {}", combined.trim()));
     }
@@ -1755,19 +2031,19 @@ pub fn prepare_clone_target(target_path: &str) -> Result<String, String> {
 /// dialog uses this; `GIT_TERMINAL_PROMPT=0` keeps a private/unauthenticated
 /// clone from hanging on a credential prompt and instead surfaces the error.
 /// Returns the absolute path of the freshly cloned repo so the UI can open it.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn clone_repo(url: String, target_path: String) -> Result<String, String> {
     let target = prepare_clone_target(&target_path)?;
-    let mut cmd = Command::new("git");
-    cmd.env("TERM", "dumb")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .args(["clone", "--progress", &url, &target]);
-    super::process::hide_console(&mut cmd);
-    let output = cmd
-        .output()
-        .map_err(|e| format!("Could not run git: {e}"))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    // No `current_dir` — the repo doesn't exist yet; clone writes to `target`.
+    let (ok, combined) = run_git_net(
+        None,
+        &["clone", "--progress", &url, &target],
+        NET_UI_CONNECT_SECS,
+        NET_UI_STALL_SECS,
+        NET_UI_TIMEOUT,
+    )?;
+    if !ok {
+        return Err(combined.trim().to_string());
     }
     Ok(target)
 }
@@ -2118,5 +2394,159 @@ mod tests {
         assert_eq!(sync.ahead, 1, "repo_sync_status must parse ahead from header");
         assert_eq!(sync.behind, 0);
         assert!(sync.has_remote);
+    }
+
+    fn modified_file(path: &str) -> FileEntry {
+        FileEntry {
+            path: path.to_string(),
+            orig_path: None,
+            status: FileStatus::Modified,
+            xy: ".M".to_string(),
+            display_name: path.to_string(),
+            display_dir: String::new(),
+        }
+    }
+
+    fn deleted_file(path: &str) -> FileEntry {
+        FileEntry {
+            path: path.to_string(),
+            orig_path: None,
+            status: FileStatus::Deleted,
+            xy: ".D".to_string(),
+            display_name: path.to_string(),
+            display_dir: String::new(),
+        }
+    }
+
+    /// `head_paths` is the classifier `discard_files` relies on: a committed
+    /// path is in HEAD (→ restore from HEAD), a never-committed one is not (→
+    /// trash + unstage). Keeps the trash-touching branch of discard untested by
+    /// design so the suite never moves real files to the OS trash.
+    #[test]
+    fn head_paths_distinguishes_committed_from_new() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_repo(repo);
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+
+        fs::write(repo.join("tracked.txt"), "x\n").expect("write");
+        commit(
+            repo_path.clone(),
+            "add".to_string(),
+            vec![new_file("tracked.txt")],
+            None,
+        )
+        .expect("commit");
+
+        let in_head = head_paths(
+            &repo_path,
+            &["tracked.txt".to_string(), "never.txt".to_string()],
+        );
+        assert!(in_head.contains("tracked.txt"), "committed file is in HEAD");
+        assert!(!in_head.contains("never.txt"), "uncommitted file is not");
+    }
+
+    /// An unborn HEAD (fresh repo, no commits) has no tree, so nothing classifies
+    /// as tracked — every changed file is then a never-committed one.
+    #[test]
+    fn head_paths_empty_on_unborn_head() {
+        let tmp = tempdir().expect("tempdir");
+        init_repo(tmp.path());
+        let repo_path = tmp.path().to_str().expect("utf-8 path").to_string();
+        assert!(head_paths(&repo_path, &["whatever.txt".to_string()]).is_empty());
+    }
+
+    /// Discarding a modified tracked file reverts it to its committed content
+    /// and leaves the working tree clean.
+    #[test]
+    fn discard_reverts_a_modified_tracked_file() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_repo(repo);
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+
+        fs::write(repo.join("a.txt"), "v1\n").expect("write");
+        commit(
+            repo_path.clone(),
+            "add a".to_string(),
+            vec![new_file("a.txt")],
+            None,
+        )
+        .expect("commit");
+
+        fs::write(repo.join("a.txt"), "v2-uncommitted\n").expect("modify");
+        discard_files(&repo_path, vec![modified_file("a.txt")]).expect("discard");
+
+        assert_eq!(
+            fs::read_to_string(repo.join("a.txt")).expect("read"),
+            "v1\n",
+            "modified file must be reverted to HEAD"
+        );
+        let st = get_status(repo_path).expect("status");
+        assert!(st.files.is_empty(), "working tree should be clean: {:?}", st.files);
+    }
+
+    /// Discarding a deleted tracked file restores it from HEAD.
+    #[test]
+    fn discard_restores_a_deleted_tracked_file() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_repo(repo);
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+
+        fs::write(repo.join("a.txt"), "keep\n").expect("write");
+        commit(
+            repo_path.clone(),
+            "add a".to_string(),
+            vec![new_file("a.txt")],
+            None,
+        )
+        .expect("commit");
+
+        fs::remove_file(repo.join("a.txt")).expect("delete");
+        discard_files(&repo_path, vec![deleted_file("a.txt")]).expect("discard");
+
+        assert_eq!(
+            fs::read_to_string(repo.join("a.txt")).expect("read"),
+            "keep\n",
+            "deleted file must be restored from HEAD"
+        );
+    }
+
+    /// Creates the file when absent, appends each pattern on its own line, and
+    /// never writes a pattern that's already present.
+    #[test]
+    fn append_to_gitignore_creates_and_dedupes() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+
+        append_to_gitignore(&repo_path, vec!["*.log".into(), "secret.txt".into()])
+            .expect("append");
+        let content = fs::read_to_string(repo.join(".gitignore")).expect("read");
+        assert!(content.contains("*.log"), "missing pattern: {content}");
+        assert!(content.contains("secret.txt"), "missing pattern: {content}");
+        assert!(content.ends_with('\n'), "must end with a newline: {content:?}");
+
+        append_to_gitignore(&repo_path, vec!["*.log".into()]).expect("append again");
+        let content = fs::read_to_string(repo.join(".gitignore")).expect("read");
+        assert_eq!(content.matches("*.log").count(), 1, "no duplicate: {content}");
+    }
+
+    /// A `.gitignore` whose last line has no trailing newline must not get the
+    /// new pattern joined onto it.
+    #[test]
+    fn append_to_gitignore_inserts_newline_before_appending() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+        fs::write(repo.join(".gitignore"), "foo").expect("seed");
+
+        append_to_gitignore(&repo_path, vec!["bar".into()]).expect("append");
+        assert_eq!(
+            fs::read_to_string(repo.join(".gitignore")).expect("read"),
+            "foo\nbar\n",
+            "must not join onto the last rule"
+        );
     }
 }

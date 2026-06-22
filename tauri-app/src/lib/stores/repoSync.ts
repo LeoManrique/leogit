@@ -1,5 +1,6 @@
 import { writable } from 'svelte/store'
 import { gitApi } from '$lib/api/commands'
+import { shouldAttemptBackground, recordResult } from '$lib/services/connectivity'
 
 // Per-repo ahead/behind counts powering the repo picker's pull/push badges.
 // Populated two ways: the tiered background scheduler (`syncRepo`) refreshes
@@ -45,15 +46,28 @@ export function setRepoSync(path: string, counts: SyncCounts): void {
  * it hits the network first (the scheduler fetches; cheap recomputes don't).
  * Fire-and-forget: failures leave the previous value in place. In-flight
  * requests for the same path are coalesced.
+ *
+ * `background` marks automatic, timer-driven syncs (vs. a user opening a repo):
+ * a background fetch is skipped entirely while we're offline / backing off, so
+ * we don't keep spawning fetches we know will fail. Either way, the fetch's
+ * outcome is reported to the connectivity breaker so it can trip or recover.
  */
-export async function syncRepo(path: string, doFetch: boolean): Promise<void> {
+export async function syncRepo(path: string, doFetch: boolean, background = false): Promise<void> {
   if (inflight.has(path)) return
+  // Skip background fetches when offline / in a backoff window. The non-fetch
+  // recompute is local and harmless, but if we're not fetching there's nothing
+  // new to compute, so just bail.
+  if (doFetch && background && !shouldAttemptBackground()) return
   inflight.add(path)
   try {
     const s = await gitApi.repoSyncStatus(path, doFetch)
     setRepoSync(path, { ahead: s.ahead, behind: s.behind, hasRemote: s.has_remote })
+    // Only a real network attempt (fetch requested, remote exists) is a
+    // connectivity signal; a no-remote repo says nothing about the link.
+    if (doFetch && s.has_remote) recordResult(s.fetched)
   } catch {
-    // Transient (offline, repo moved) — keep the last-known counts.
+    // The command itself failed (repo moved, parse error) — not a reliable
+    // network signal, so leave the breaker alone and keep last-known counts.
   } finally {
     inflight.delete(path)
   }

@@ -18,6 +18,7 @@ Functional behavior lives in [DESIGN.md](DESIGN.md). Visual design language live
 | PTY | `portable-pty` 0.9 | Spawns user `$SHELL`, falls back to `/bin/zsh` / `cmd.exe` |
 | HTTP | `reqwest` 0.13 | Used only for Ollama |
 | Config | `toml` 1.1 + `directories` 6 + `serde_json` | `~/.config/leogit/{config.toml,repos-state.json}` |
+| Recoverable delete | `trash` 5 | "Discard" sends never-committed files to the OS trash instead of unlinking |
 | Build tool | `just` | Wraps `pnpm tauri …` |
 
 ## Repository layout
@@ -46,14 +47,15 @@ leogit/
 │   │   │   ├── lib.rs               # Re-exports commands::*
 │   │   │   └── commands/
 │   │   │       ├── config.rs        # load/save Config + ReposState
-│   │   │       ├── git.rs           # 27 git operations (status, log, branch, …)
+│   │   │       ├── git.rs           # git operations (status, log, branch, discard, ignore, …)
 │   │   │       ├── launch.rs        # `leogit <dir>` repo opening (CLI arg + single-instance)
 │   │   │       ├── diff.rs          # parse_diff + build/apply patches
 │   │   │       ├── gh.rs            # GitHub CLI bridge (auth check, repo list, clone)
 │   │   │       ├── ai.rs            # Claude CLI + Ollama HTTP
 │   │   │       ├── terminal.rs      # portable-pty session pool
 │   │   │       ├── highlight.rs     # syntect diff tokenizer
-│   │   │       └── process.rs       # CREATE_NO_WINDOW spawn helpers (Windows)
+│   │   │       ├── os.rs            # reveal-in-file-manager + open-with-default-app
+│   │   │       └── process.rs       # CREATE_NO_WINDOW spawn + run_timed helpers
 │   │   ├── capabilities/default.json
 │   │   ├── tauri.conf.json
 │   │   └── Cargo.toml
@@ -87,7 +89,15 @@ The `leogit [dir]` shell command (installed by `install.sh`, see *Release pipeli
 
 ### Windows console suppression
 
-Release builds set `windows_subsystem = "windows"` (in `main.rs`), so the app runs with no attached console. On Windows a console-less process that spawns a console subprocess gets a **new console window allocated and briefly flashed** for each call — and because the UI polls `git status` every 2s, that would mean a `cmd` box flickering on screen continuously, plus one on every fetch/commit/diff. Every subprocess spawn therefore routes through [commands/process.rs](tauri-app/src-tauri/src/commands/process.rs): `hide_console` (std `Command`) and `hide_console_async` (tokio `Command`) set the `CREATE_NO_WINDOW` creation flag; both are no-ops off Windows. Call sites: `git_cmd` and `clone_repo` (git.rs), `apply_patch` (diff.rs), `check_auth` / `gh_repo_list` / `gh_clone` / `gh_publish_repo` (gh.rs), and both `claude` spawns (ai.rs). The PTY shell in terminal.rs is intentionally exempt — ConPTY is a pseudo-terminal, not a console subprocess, so it never flashes a window.
+Release builds set `windows_subsystem = "windows"` (in `main.rs`), so the app runs with no attached console. On Windows a console-less process that spawns a console subprocess gets a **new console window allocated and briefly flashed** for each call — and because the UI polls `git status` every 2s, that would mean a `cmd` box flickering on screen continuously, plus one on every fetch/commit/diff. Every subprocess spawn therefore routes through [commands/process.rs](tauri-app/src-tauri/src/commands/process.rs): `hide_console` (std `Command`) and `hide_console_async` (tokio `Command`) set the `CREATE_NO_WINDOW` creation flag; both are no-ops off Windows. Call sites: `git_cmd` / `git_net_cmd` (git.rs), `apply_patch` (diff.rs), `check_auth` / `gh_repo_list` / `gh_clone` / `gh_publish_repo` (gh.rs), and both `claude` spawns (ai.rs). The PTY shell in terminal.rs is intentionally exempt — ConPTY is a pseudo-terminal, not a console subprocess, so it never flashes a window.
+
+### Network resilience (offline / flaky)
+
+Every remote-touching command is engineered so an unreachable or flaky network degrades a badge — it never freezes the app. Three layers:
+
+1. **Off the main thread.** All network commands (`fetch`, `pull`, `push`, `clone_repo`, `repo_sync_status`, `delete_remote_branch`, and the four `gh` commands) are declared `#[tauri::command(async)]`. A plain synchronous Tauri command runs on the **main thread** — a blocking `git fetch` there freezes the window; `(async)` runs it on a worker thread instead, so the 2s status poll and repo switches keep flowing while a fetch is in flight.
+2. **Time-boxed subprocesses.** `process::run_timed(cmd, label, timeout)` is the single chokepoint: it spawns the child, drains both pipes on helper threads (so a chatty `git --progress` can't pipe-buffer-deadlock), and **kills the child** if it outlives `timeout`, returning a `… timed out …` error. `git_net_cmd` additionally bakes transport timeouts into the command — `GIT_SSH_COMMAND="ssh -o ConnectTimeout=N -o BatchMode=yes"` (SSH connect cap + no interactive prompts) and `-c http.lowSpeedLimit=1000 -c http.lowSpeedTime=N` (abort an HTTP transfer that stalls). Budgets: **background** badge fetches are short (8s connect/stall, 12s hard kill — fail fast, keep last-known counts); **user-initiated** transfers are generous (15/30s, 600s hard kill — never kill a real large transfer, only a wedged one). Unit-tested in `process::tests` (`run_timed_kills_a_hung_child_promptly`).
+3. **Don't keep firing when down.** [services/connectivity.ts](tauri-app/src/lib/services/connectivity.ts) gates *automatic/background* fetches (the auto-fetch timer, the tiered scheduler, the refocus/cold-open resync) on `navigator.onLine` plus a consecutive-failure circuit breaker: after 2 failures it opens with an exponential backoff window (30s → 5min cap), suppressing background fetches until the window lapses, when exactly one probe is allowed through. `repo_sync_status` returns a `fetched` flag so the breaker can tell a real fetch failure from a no-remote repo. User-initiated actions (Pull/Push/switch) always attempt (still bounded by the backend timeout) and their outcome feeds the breaker, so a successful manual pull — or the OS `online` event — re-opens background syncing immediately and triggers a resync.
 
 ## IPC contract
 
@@ -96,8 +106,9 @@ The frontend never touches Tauri's raw `invoke` API directly; every backend call
 | Namespace | Commands | Backend file |
 |---|---|---|
 | `configApi` | `loadConfig`, `saveConfig`, `loadState`, `saveState` | `commands/config.rs` |
-| `gitApi` | `getStatus`, `getHeadSha`, `getDiff`, `getDiffWhitespaceIgnored`, `getCommitDiff`, `getSelectedDiff`, `getLog`, `getCommitFiles`, `listBranches`, `createBranch`, `switchBranch`, `deleteBranch`, `deleteRemoteBranch`, `renameBranch`, `commit`, `hasStagedChanges`, `formatCommitMessage`, `repoSyncStatus`, `fetch`, `pull`, `push`, `getAheadBehind`, `getRemote`, `mergeBranch`, `mergeSquash`, `commitSquashMerge`, `mergeAbort`, `isMerging`, `countCommitsToMerge`, `discoverRepos`, `isGitRepo`, `getRepoName`, `cloneRepo`, `getLastCommitTimestamp` | `commands/git.rs` |
+| `gitApi` | `getStatus`, `getHeadSha`, `getDiff`, `getDiffWhitespaceIgnored`, `getCommitDiff`, `getSelectedDiff`, `getLog`, `getCommitFiles`, `listBranches`, `createBranch`, `switchBranch`, `deleteBranch`, `deleteRemoteBranch`, `renameBranch`, `commit`, `hasStagedChanges`, `discardFiles`, `appendToGitignore`, `formatCommitMessage`, `repoSyncStatus`, `fetch`, `pull`, `push`, `getAheadBehind`, `getRemote`, `mergeBranch`, `mergeSquash`, `commitSquashMerge`, `mergeAbort`, `isMerging`, `countCommitsToMerge`, `discoverRepos`, `isGitRepo`, `getRepoName`, `cloneRepo`, `getLastCommitTimestamp` | `commands/git.rs` |
 | `diffApi` | `parseDiff`, `generatePatch`, `generateInversePatch` | `commands/diff.rs` |
+| `osApi` | `revealPath`, `openPath` | `commands/os.rs` |
 | `ghApi` | `checkAuth`, `repoList`, `clone` | `commands/gh.rs` |
 | `aiApi` | `generateCommitMessage`, `checkProviderAvailable` | `commands/ai.rs` |
 | `appApi` | `takePendingOpenRepo` | `commands/launch.rs` |
@@ -138,8 +149,8 @@ This is what keeps polling unobtrusive: a 2 s status refresh never silently re-s
 `MainLayout.svelte` owns two intervals plus the tiered sync scheduler:
 
 - **Status poll** — every 2000 ms. Runs `get_status` silently + `get_head_sha`. If the HEAD SHA changed, the commit log is refreshed in place keeping the same loaded count so the user doesn't lose scroll position. Each run also pushes the active repo's ahead/behind into the `repoSync` store (via `setRepoSync`) so the picker badge for the open repo stays live without a dedicated fetch.
-- **Auto-fetch** — every `fetch_interval_ms` (default 30 000). Skipped if the user is currently typing in an input/textarea or the window is hidden. Calls `fetchActiveRemote` (`git fetch --prune --recurse-submodules=on-demand` against the first remote) then a silent `get_status`.
-- **Tiered repo-sync scheduler** ([repoSyncScheduler.ts](tauri-app/src/lib/services/repoSyncScheduler.ts)) — three intervals (2 / 5 / 10 min) plus staggered startup kicks. Each tick slices the `recentRepos` list (active excluded) into tiers — next 4, next 5, next 10 — and refreshes each via `repo_sync_status` sequentially. Started in `initialize` (after `hydrateReposState` resolves, so recents are seeded) and stopped on unmount.
+- **Auto-fetch** — every `fetch_interval_ms` (default 30 000). Skipped if the user is currently typing in an input/textarea or the window is hidden. Calls `fetchActiveRemote` (`git fetch --prune --recurse-submodules=on-demand` against the first remote) then a silent `get_status`. `fetchActiveRemote` self-skips when offline / backing off and reports its outcome to the connectivity breaker (see *Network resilience*).
+- **Tiered repo-sync scheduler** ([repoSyncScheduler.ts](tauri-app/src/lib/services/repoSyncScheduler.ts)) — three intervals (2 / 5 / 10 min) plus staggered startup kicks. Each tick slices the `recentRepos` list (active excluded) into tiers — next 4, next 5, next 10 — and refreshes each via `repo_sync_status` sequentially. Tier syncs are tagged `background`, so the whole scheduler goes quiet while offline (each `syncRepo` consults the breaker) instead of grinding through dead fetches. Started in `initialize` (after `hydrateReposState` resolves, so recents are seeded) and stopped on unmount.
 
 On regaining focus (`window` `focus`) or visibility (`visibilitychange`), `MainLayout` runs a one-shot **resync** — `fetchActiveRemote` (so a moved upstream surfaces immediately, unlike before), silent `get_status`, HEAD poll, a *forced* re-fetch of the diff for the file open in the changes pane (`loadDiffForFile(file, { force: true })`), and `repoSyncScheduler.refocusSync()` (the throttled top-tier refresh). A `resyncing` guard collapses the focus+visibility double-fire (common under tiling WMs) into a single run. All listeners, intervals, and scheduler timers clear on unmount.
 
@@ -151,11 +162,12 @@ All git operations go through `std::process::Command::new("git")` with these def
 - `TERM=dumb` — suppresses pagers and color codes.
 - `GIT_TERMINAL_PROMPT=0` — prevents a credential prompt from blocking the process indefinitely.
 
-Three helpers shape the output:
+Helpers shape the output:
 
 - `run_git_raw` — returns the raw bytes (used for NUL-delimited or binary-ish output, e.g. `status --porcelain=v2 -z`).
 - `run_git` — returns trimmed UTF-8 (most line-oriented commands).
-- `run_git_combined` — returns `(success, stdout+stderr)` regardless of exit code (used for `fetch`/`pull`/`push`/`merge` where the error message is the value).
+- `run_git_combined` — returns `(success, stdout+stderr)` regardless of exit code (used for local commands like `merge` where the error message is the value).
+- `run_git_net` — the **network** runner (`fetch`/`pull`/`push`/`clone`/badge fetch). Builds the command via `git_net_cmd` (SSH/HTTP transport timeouts) and runs it through `process::run_timed` (hard kill-timeout). See *Network resilience* for the full rationale and budgets.
 
 ### Status parsing
 
@@ -163,7 +175,7 @@ Three helpers shape the output:
 
 Branch fallback: if `# branch.head` is absent (empty repo) the code calls `git rev-parse --abbrev-ref HEAD` to fill in.
 
-Ahead/behind: `# branch.ab` is only emitted when the branch has a tracking upstream. For a branch that was never `push -u`'d but has a matching `refs/remotes/<remote>/<branch>`, the shared `remote_tracking_ahead_behind` helper computes the counts with `git rev-list --left-right --count HEAD...<ref>` (left = ahead, right = behind) without flipping `has_upstream` (which still gates whether the next push needs `--set-upstream`). `repo_sync_status` — the lighter sibling powering the picker badges — reuses both `first_remote` and that helper but runs `status --untracked-files=no` (headers only, no file scan) and optionally fetches first; its best-effort fetch swallows offline/auth errors so a stale-but-known count still comes back.
+Ahead/behind: `# branch.ab` is only emitted when the branch has a tracking upstream. For a branch that was never `push -u`'d but has a matching `refs/remotes/<remote>/<branch>`, the shared `remote_tracking_ahead_behind` helper computes the counts with `git rev-list --left-right --count HEAD...<ref>` (left = ahead, right = behind) without flipping `has_upstream` (which still gates whether the next push needs `--set-upstream`). `repo_sync_status` — the lighter sibling powering the picker badges — reuses both `first_remote` and that helper but runs `status --untracked-files=no` (headers only, no file scan) and optionally fetches first. Its fetch is best-effort and **time-boxed** (`run_git_net`, background budget): a failure/timeout swallows so a stale-but-known count still comes back, and the outcome is surfaced as the `fetched` flag for the frontend's connectivity breaker.
 
 ### Diff parsing
 
@@ -188,6 +200,15 @@ Ahead/behind: `# branch.ab` is only emitted when the branch has a tracking upstr
 2. `stage_files` splits the selection into renamed (needs `--force-remove` on the old path), deleted, and normal, then calls `git update-index --add --remove [--force-remove] --replace -z --stdin`.
 3. `has_staged_changes` validates the index isn't empty (`git diff --cached --quiet` returns 1 when there are staged changes).
 4. The commit message is piped to `git commit -F -` via stdin (avoids arg-length and shell-quoting issues).
+
+### Discard & ignore
+
+`discard_files` powers the Changes-tab "Discard" menu. It classifies each target by **HEAD membership**, not by the porcelain status code, via `head_paths` — a single `git ls-tree -r -z --name-only HEAD -- <paths>` that returns which of the targets exist as committed blobs (empty on an unborn HEAD). That sidesteps the ambiguity in the status code (an `AA` add/add conflict has no HEAD blob; a rename's new path doesn't either) and needs no per-file `cat-file`. Then:
+
+- **In HEAD** (modified / deleted / conflicted / a rename's *original* path) → restored with `git checkout HEAD -- <paths>` (index + worktree both reset to the committed version).
+- **Not in HEAD** (untracked, staged adds, a rename's *new* path) → can't be "reverted", so the working-tree file is moved to the **OS trash** (the `trash` crate — recoverable, unlike `rm`; best-effort per file, a failure is logged and skipped) and any staged entry is dropped with `git reset -- <paths>` (pathspec form, unborn-HEAD-safe like the commit reset). `discard_files` is a sync command taking `repo_path: &str` — it's local and fast, like `commit`. Covered by `discard_*` / `head_paths_*` tests.
+
+`append_to_gitignore(repo_path, patterns)` appends ready-to-write lines to the repo-root `.gitignore`, ensuring a trailing newline first and skipping any pattern already present (compared trimmed, de-duped within the batch). The frontend builds the patterns: "Ignore File" escapes the path's glob metacharacters (`[ ] ! * # ?`, via `fileActions.escapeGitignorePath`) so it matches verbatim; "Ignore All .ext" writes a raw `*.ext` glob.
 
 ### Log parsing
 
@@ -217,7 +238,12 @@ Both providers share `build_prompt` — a strict JSON-only instruction with rule
 2. Tries `serde_json::from_str` and accepts any of `title`/`summary`/`subject`/`message` and `description`/`body`/`details`.
 3. Falls back to "first line = title, rest = description" if JSON parsing fails entirely.
 
-**Claude** spawns `claude --print --output-format json --model <model>` and pipes the prompt to stdin. The CLI wraps the actual model output in `{"type":"result","result":"<inner json>"}`, so the parser tries the wrapper first and falls back to direct parsing.
+**Claude** spawns `claude --print --output-format json --model <model>` and pipes the prompt to stdin. `parse_claude_envelope` reads the CLI's JSON envelope `{"type":"result","subtype":…,"is_error":bool,"result":"<text>", "api_error_status":…}`:
+
+- **`is_error == true`** (e.g. a transient `529 Overloaded`) → the CLI's own message is surfaced verbatim as an `Err`. Critically, the CLI exits **0** in this case, so the `is_error` flag — not the exit code — is what distinguishes a failure; without this check the error text would be parsed straight into the commit title.
+- otherwise the model's reply lives in `result` and is parsed as the commit message (falling back to parsing raw stdout when the text isn't the envelope).
+
+Two robustness measures around the spawn: the prompt is streamed on a separate task (so a large diff can't deadlock against the child filling its stdout pipe before we drain it), and the child is `kill_on_drop` so a slow CLI doesn't outlive a timeout as an orphan. The spawn also sets `CLAUDE_CODE_MAX_RETRIES = 2`: by default the CLI retries a transient overload with backoff for *minutes*, far past our timeout, so the user only ever saw "timed out"; the cap makes it fail in seconds with the real error while still riding out a single blip.
 
 **Ollama** posts to `<base_url>/api/generate` with `{model, prompt, stream: false, format: "json"}`. A 404 is translated to a friendly `ollama pull <model>` hint.
 
@@ -250,6 +276,15 @@ Everything in `gh.rs` shells out to the `gh` CLI:
 - `create_pr` / `create_pr_fill` → `gh pr create [--title --body | --fill] [--base] [--draft]`. Returns the PR URL.
 - `checkout_pr` → `gh pr checkout <n>`.
 - `get_current_branch_pr` → `gh pr list --head <branch> --state open` (returns the first match or `None`).
+
+## OS integration layer
+
+[commands/os.rs](tauri-app/src-tauri/src/commands/os.rs) holds the two file-manager hand-offs behind the Changes-tab menu. Both take a repo-relative path and join it onto the repo path **in Rust** (`PathBuf::from(repo_path).join(rel_path)`) so git's forward-slash paths never clash with Windows separators, then spawn a platform launcher:
+
+- `reveal_path` — macOS `open -R`, Windows `explorer /select,<path>`, Linux `xdg-open <parent dir>` (no portable "select file" there).
+- `open_path` — macOS `open`, Windows `cmd /c start "" <path>`, Linux `xdg-open <path>`.
+
+They're `#[tauri::command(async)]` (worker thread) and routed through `process::run_timed` (15 s cap, so a wedged file manager can't hang a thread) with `hide_console` for the Windows no-flash guarantee. The launchers are treated as fire-and-forget: a completed run is success regardless of exit code, because some launchers (notably `explorer /select,`) return non-zero even on success — only a spawn failure (e.g. `xdg-open` absent) or a timeout surfaces as an error. The frontend side (clipboard copy, label selection) lives in [services/fileActions.ts](tauri-app/src/lib/services/fileActions.ts); the menu is built in `FileList.svelte` and the destructive-discard confirmation in [DiscardConfirm.svelte](tauri-app/src/lib/components/DiscardConfirm.svelte).
 
 ## Config & persistence
 

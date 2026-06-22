@@ -20,6 +20,9 @@ syntect = { version = "5.3", default-features = false, features = ["parsing", "r
 two-face = "0.5"
 tauri-plugin-dialog = "2.7.1"
 tauri-plugin-single-instance = "2.4.2"
+# Recoverable deletes for the Changes-tab "Discard" action: never-committed
+# files go to the OS trash rather than being unlinked outright.
+trash = "5"
 
 [build-dependencies]
 tauri-build = { version = "2.6.2", features = [] }

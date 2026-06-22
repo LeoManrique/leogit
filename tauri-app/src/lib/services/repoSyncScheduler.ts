@@ -61,10 +61,11 @@ function computeTiers(): Tiers {
 }
 
 /** Fetch + recompute each repo in a tier sequentially, to keep the number of
- * concurrent `git fetch` processes low. */
+ * concurrent `git fetch` processes low. Marked `background` so the whole tier
+ * goes quiet while offline / backing off (each `syncRepo` self-skips). */
 async function syncTier(repos: string[]): Promise<void> {
   for (const repo of repos) {
-    await syncRepo(repo, true)
+    await syncRepo(repo, true, true)
   }
 }
 
