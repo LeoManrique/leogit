@@ -101,6 +101,7 @@ Two-column layout: a resizable sidebar on the left and a content area on the rig
 
 - Docked at the bottom of the main content area, ~280 px tall when expanded.
 - Toggle with the backtick key (`` ` ``) or the header chevron. A separate `+` button spawns additional sessions; the X button kills the current PTY.
+- Whenever the section is shown — first open, a new session, or re-expanding from minimized — the terminal grabs keyboard focus so you can type immediately without clicking into it.
 - Spawns a shell with the repo path as cwd. On Unix it uses the user's `$SHELL` (`/bin/zsh` fallback); on Windows it ignores `$SHELL` (a Unix artifact that can hold a non-resolvable POSIX path when launched from Git Bash) and prefers `pwsh.exe` → `powershell.exe` → `cmd.exe`, mirroring Windows Terminal's default. Parent env is forwarded plus `TERM=xterm-256color`.
 - xterm.js handles rendering; FitAddon syncs cols/rows to the backend on resize. Output is streamed back via per-pid Tauri events (`terminal-output-<pid>`); `terminal-closed-<pid>` fires when the shell exits.
 - Switching repos kills the active terminal session so we never leak shells from a prior repo.

@@ -7,7 +7,7 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event'
   import '@xterm/xterm/css/xterm.css'
 
-  let { repoPath }: { repoPath: string } = $props()
+  let { repoPath, expanded = true }: { repoPath: string; expanded?: boolean } = $props()
 
   let container: HTMLDivElement | undefined = $state()
   let term: Terminal | null = null
@@ -15,6 +15,9 @@
   let pid: number | null = null
   let unlisteners: UnlistenFn[] = []
   let resizeObserver: ResizeObserver | null = null
+  // Flips true once xterm is open so the focus effect never runs before `term`
+  // exists. Stays false on a fresh remount ({#key}) until that instance mounts.
+  let mounted = $state(false)
 
   onMount(() => {
     if (!container) return
@@ -48,6 +51,8 @@
     })
     resizeObserver.observe(container)
 
+    mounted = true
+
     return () => {
       resizeObserver?.disconnect()
       resizeObserver = null
@@ -61,6 +66,16 @@
       term?.dispose()
       term = null
       fitAddon = null
+    }
+  })
+
+  // Focus the terminal whenever the section is showing: on first open, on a new
+  // session (remounted via {#key}), and when re-expanded from minimized. Guard on
+  // `mounted` so focus() never runs before xterm exists, and skip while collapsed
+  // since the container is display:none then and a hidden element can't take focus.
+  $effect(() => {
+    if (mounted && expanded) {
+      term?.focus()
     }
   })
 
