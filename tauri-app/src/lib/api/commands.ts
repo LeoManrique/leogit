@@ -7,6 +7,13 @@ export interface FileEntry {
   xy: string
   display_name: string
   display_dir: string
+  /**
+   * True when this entry is an embedded git repository (a nested repo with its
+   * own `.git`). It commits as a gitlink — a pointer to the nested repo's
+   * commit — rather than copying the folder's files, so the UI flags the row
+   * and confirms before committing.
+   */
+  embedded: boolean
 }
 
 export interface RepoStatus {

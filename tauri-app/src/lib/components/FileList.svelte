@@ -442,9 +442,19 @@
               />
             {/if}
 
-            <div class="status-badge" style="color: {getStatusColor(file.status)}">
-              {getStatusLabel(file.status)}
-            </div>
+            {#if file.embedded}
+              <div
+                class="status-badge"
+                style="color: var(--status-blue)"
+                title="Nested Git repository — commits as a link, not its files"
+              >
+                ↪
+              </div>
+            {:else}
+              <div class="status-badge" style="color: {getStatusColor(file.status)}">
+                {getStatusLabel(file.status)}
+              </div>
+            {/if}
 
             {#if file.orig_path}
               <div class="file-info" title={file.path}>

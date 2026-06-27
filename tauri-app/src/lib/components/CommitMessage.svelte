@@ -2,8 +2,9 @@
   import { get } from 'svelte/store'
   import { repoState, canCommit } from '$lib/stores/repo'
   import { appState } from '$lib/stores/app'
-  import { gitApi, aiApi, configApi, type AiProviderConfig } from '$lib/api/commands'
+  import { gitApi, aiApi, configApi, type AiProviderConfig, type FileEntry } from '$lib/api/commands'
   import { config } from '$lib/stores/config'
+  import EmbeddedRepoConfirm from './EmbeddedRepoConfirm.svelte'
 
   interface Props {
     onCommitted?: () => void
@@ -24,6 +25,16 @@
   let isCommitting = $state(false)
   let error = $state<string | null>(null)
   let charCount = $derived(summary.length)
+
+  // Files staged for the commit that's awaiting embedded-repo confirmation.
+  // Non-empty only while the EmbeddedRepoConfirm modal is open; cleared once the
+  // user confirms or cancels. The modal lists the embedded entries within.
+  let pendingFiles = $state<FileEntry[]>([])
+  const pendingEmbedded = $derived(pendingFiles.filter((f) => f.embedded))
+  // Outer repo name (repoPath basename) for the warning copy.
+  const outerRepoName = $derived(
+    $appState.repoPath.split('/').filter(Boolean).pop() ?? 'this repository',
+  )
 
   // Co-author trailers preserved from the commit being amended, re-applied via
   // format_commit_message on commit. Plain trailers, e.g. "Name <email>".
@@ -194,6 +205,21 @@
       return
     }
 
+    // Committing an embedded git repository stages a gitlink, not the folder's
+    // files — a surprising outcome we confirm before proceeding. Defer to the
+    // modal, which calls performCommit on confirm.
+    if (files.some((f) => f.embedded)) {
+      pendingFiles = files
+      return
+    }
+
+    await performCommit(files)
+  }
+
+  async function performCommit(files: FileEntry[]) {
+    const repoPath = $appState.repoPath
+    if (!repoPath) return
+
     isCommitting = true
     error = null
 
@@ -215,6 +241,9 @@
       error = `${isAmending ? 'Amend' : 'Commit'} failed: ${String(err)}`
     } finally {
       isCommitting = false
+      // Close the confirm modal (if this commit came from it) whether it
+      // succeeded or failed, so a failure's error message isn't hidden behind it.
+      pendingFiles = []
     }
   }
 
@@ -327,6 +356,16 @@
     </button>
   </div>
 </div>
+
+{#if pendingEmbedded.length > 0}
+  <EmbeddedRepoConfirm
+    repos={pendingEmbedded}
+    outerRepo={outerRepoName}
+    {isCommitting}
+    onConfirm={() => performCommit(pendingFiles)}
+    onCancel={() => (pendingFiles = [])}
+  />
+{/if}
 
 <style>
   .commit-message-container {

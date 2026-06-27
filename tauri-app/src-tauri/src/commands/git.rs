@@ -22,6 +22,14 @@ pub struct FileEntry {
     pub xy: String,
     pub display_name: String,
     pub display_dir: String,
+    /// True when this entry is an embedded git repository (a nested repo with
+    /// its own `.git`). Git reports it as a single untracked directory entry —
+    /// it never recurses into it, even under `--untracked-files=all` — so the
+    /// path keeps a trailing slash. Committing it stages a gitlink (a pointer to
+    /// the nested repo's commit), not the folder's files; the UI surfaces that
+    /// distinction before letting the user commit. Always false for tracked
+    /// changes and ordinary untracked files.
+    pub embedded: bool,
 }
 
 /// Aggregate line-change totals for a single commit, summed across every file
@@ -373,6 +381,7 @@ fn parse_ordinary_entry(seg: &str) -> Option<FileEntry> {
         xy,
         display_name,
         display_dir,
+        embedded: false,
     })
 }
 
@@ -397,6 +406,7 @@ fn parse_rename_entry(seg: &str, orig_path: String) -> Option<FileEntry> {
         xy,
         display_name,
         display_dir,
+        embedded: false,
     })
 }
 
@@ -417,6 +427,7 @@ fn parse_unmerged_entry(seg: &str) -> Option<FileEntry> {
         xy,
         display_name,
         display_dir,
+        embedded: false,
     })
 }
 
@@ -581,8 +592,11 @@ pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
         };
 
         if let Some(rest_seg) = seg_str.strip_prefix("? ") {
-            // Untracked file
+            // Untracked file. A trailing slash means git reported a directory
+            // rather than a file — under `-uall` that only happens for an
+            // embedded git repository, which git won't recurse into.
             let path = rest_seg.to_string();
+            let embedded = path.ends_with('/');
             let (display_name, display_dir) = extract_display_name_and_dir(&path);
             result.files.push(FileEntry {
                 path,
@@ -591,6 +605,7 @@ pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
                 xy: "??".to_string(),
                 display_name,
                 display_dir,
+                embedded,
             });
         } else if seg_str.starts_with("1 ") {
             if let Some(e) = parse_ordinary_entry(seg_str) {
@@ -1026,6 +1041,7 @@ pub fn get_commit_files(repo_path: String, sha: String) -> Result<Vec<FileEntry>
             xy: code.to_string(),
             display_name,
             display_dir,
+            embedded: false,
         });
     }
 
@@ -1269,9 +1285,70 @@ fn stage_files(repo_path: &str, files: &[FileEntry]) -> Result<(), String> {
         }
     }
 
+    // Removals (rename source paths, deletions) go through update-index, whose
+    // --force-remove is the precise tool for dropping an index entry.
     update_index(repo_path, &renamed_old, true)?;
-    update_index(repo_path, &normal, false)?;
+    // Additions/modifications go through `git add`, not update-index. update-index
+    // silently ignores any path that resolves to a directory ("Ignoring path …/"),
+    // which left embedded git repositories (nested repos git reports as a single
+    // directory entry) unstaged and surfaced the misleading "staging produced no
+    // changes" error. `git add` stages a directory's files and an embedded repo as
+    // a gitlink, matching the git CLI.
+    git_add(repo_path, &normal)?;
     update_index(repo_path, &deleted, true)?;
+    Ok(())
+}
+
+/// Stage the given paths as additions/modifications via porcelain `git add`.
+///
+/// Paths are piped NUL-separated through `--pathspec-from-file` to sidestep
+/// arg-length and quoting limits, mirroring [`update_index`]. Embedded-repo
+/// advice is silenced (`advice.addEmbeddedRepo=false`) because the UI already
+/// explains the gitlink before the user gets here.
+fn git_add(repo_path: &str, paths: &[String]) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let mut child = git_cmd(
+        repo_path,
+        &[
+            "-c",
+            "advice.addEmbeddedRepo=false",
+            "add",
+            "--pathspec-from-file=-",
+            "--pathspec-file-nul",
+        ],
+    )
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .map_err(|e| format!("git add: {e}"))?;
+
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| "failed to open stdin".to_string())?;
+        let mut buf = Vec::new();
+        for p in paths {
+            buf.extend_from_slice(p.as_bytes());
+            buf.push(0);
+        }
+        stdin
+            .write_all(&buf)
+            .map_err(|e| format!("write stdin: {e}"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("git add wait: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git add failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
     Ok(())
 }
 
@@ -2210,6 +2287,7 @@ mod tests {
             xy: "A.".to_string(),
             display_name: path.to_string(),
             display_dir: String::new(),
+            embedded: false,
         }
     }
 
@@ -2244,6 +2322,64 @@ mod tests {
         // Only README.md was committed; .gitignore stays untracked.
         let tracked = run_git(&repo_path, &["ls-files"]).expect("ls-files");
         assert_eq!(tracked.lines().collect::<Vec<_>>(), vec!["README.md"]);
+    }
+
+    /// Regression: an embedded git repository (a nested repo with its own
+    /// `.git`) is reported by `get_status` as a single `embedded` directory
+    /// entry, and committing it stages a gitlink (mode 160000) instead of
+    /// failing with "staging produced no changes". The failure came from
+    /// `update-index --add` silently ignoring the directory ("Ignoring path …/");
+    /// additions now go through `git add`, which creates the gitlink.
+    #[test]
+    fn commits_embedded_repo_as_gitlink() {
+        let tmp = tempdir().expect("tempdir");
+        let outer = tmp.path();
+        init_repo(outer);
+        let outer_path = outer.to_str().expect("utf-8 path").to_string();
+
+        // Born HEAD on the outer repo keeps the test focused on the gitlink path.
+        fs::write(outer.join("README.md"), "outer\n").expect("write README");
+        commit(
+            outer_path.clone(),
+            "init".to_string(),
+            vec![new_file("README.md")],
+            None,
+        )
+        .expect("outer initial commit");
+
+        // A nested repo with its own commit, so the gitlink has a target.
+        let nested = outer.join("nested");
+        fs::create_dir(&nested).expect("mkdir nested");
+        init_repo(&nested);
+        fs::write(nested.join("inner.txt"), "inner\n").expect("write inner");
+        let nested_path = nested.to_str().expect("utf-8 path").to_string();
+        run_git(&nested_path, &["add", "inner.txt"]).expect("stage inner");
+        run_git(&nested_path, &["commit", "-q", "-m", "inner"]).expect("commit inner");
+
+        // get_status flags it embedded and keeps the trailing slash.
+        let st = get_status(outer_path.clone()).expect("status");
+        let entry = st
+            .files
+            .iter()
+            .find(|f| f.path.starts_with("nested"))
+            .expect("nested entry present in status");
+        assert!(entry.embedded, "nested repo should be flagged embedded");
+        assert!(entry.path.ends_with('/'), "embedded path keeps trailing slash");
+
+        // Committing it must succeed and produce a gitlink (mode 160000).
+        commit(
+            outer_path.clone(),
+            "Add nested".to_string(),
+            vec![entry.clone()],
+            None,
+        )
+        .expect("committing an embedded repo should stage a gitlink, not fail");
+
+        let staged = run_git(&outer_path, &["ls-files", "--stage", "nested"]).expect("ls-files");
+        assert!(
+            staged.starts_with("160000"),
+            "nested should be committed as a gitlink, got: {staged}"
+        );
     }
 
     /// Regression: opening History on a fresh repo (unborn HEAD) must not error.
@@ -2404,6 +2540,7 @@ mod tests {
             xy: ".M".to_string(),
             display_name: path.to_string(),
             display_dir: String::new(),
+            embedded: false,
         }
     }
 
@@ -2415,6 +2552,7 @@ mod tests {
             xy: ".D".to_string(),
             display_name: path.to_string(),
             display_dir: String::new(),
+            embedded: false,
         }
     }
 
