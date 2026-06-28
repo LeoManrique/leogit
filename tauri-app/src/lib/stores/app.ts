@@ -1,10 +1,6 @@
 import { writable, derived } from 'svelte/store'
 
-export type AppPhase =
-  | 'loading'
-  | 'repo-picker'
-  | 'main'
-  | 'error'
+export type AppPhase = 'loading' | 'repo-picker' | 'main' | 'error'
 
 export interface AppState {
   phase: AppPhase

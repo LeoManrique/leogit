@@ -115,6 +115,7 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 - Hover row: `--surface-hover` tint, nothing more. No left-edge accent bar, no scale transform.
 - Selected (active diff) row: `--bg-tertiary` background, 6px radius, no border. The selection state, not the staging state, gets visual emphasis.
 - Checkbox: native-feeling square, 14px, accent fill when checked. Mixed-state (some hunks staged) uses an em-dash glyph, not a "minus" pill.
+- **Renames** render `[from] → [to]` where both sides share the same middle-truncation (collapse the directory to `…`, always keep the filename) so a deep `from` path can't crowd the `to` out of view. The `from` side is fully muted (filename included); the `to` side is the normal filename treatment. Both flex to equal width.
 
 ### Diff viewer
 

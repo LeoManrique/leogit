@@ -6,8 +6,8 @@
 
 :root {
   color-scheme: light dark;
-  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', system-ui,
-    sans-serif;
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', system-ui, sans-serif;
   font-size: 13px;
   line-height: 1.5;
   font-synthesis: none;
@@ -124,18 +124,43 @@
 /* Syntax class selectors — applied by DiffViewer's token renderer.
    `.syn-plain`, `.syn-variable`, `.syn-punctuation` intentionally inherit
    --text-primary so they read against any theme background. */
-.syn-keyword     { color: var(--syn-keyword); }
-.syn-string      { color: var(--syn-string); }
-.syn-comment     { color: var(--syn-comment); font-style: italic; }
-.syn-function    { color: var(--syn-function); }
-.syn-type        { color: var(--syn-type); }
-.syn-number      { color: var(--syn-number); }
-.syn-constant    { color: var(--syn-constant); }
-.syn-operator    { color: var(--syn-operator); }
-.syn-tag         { color: var(--syn-tag); }
-.syn-attribute   { color: var(--syn-attribute); }
-.syn-builtin     { color: var(--syn-builtin); }
-.syn-decorator   { color: var(--syn-decorator); }
+.syn-keyword {
+  color: var(--syn-keyword);
+}
+.syn-string {
+  color: var(--syn-string);
+}
+.syn-comment {
+  color: var(--syn-comment);
+  font-style: italic;
+}
+.syn-function {
+  color: var(--syn-function);
+}
+.syn-type {
+  color: var(--syn-type);
+}
+.syn-number {
+  color: var(--syn-number);
+}
+.syn-constant {
+  color: var(--syn-constant);
+}
+.syn-operator {
+  color: var(--syn-operator);
+}
+.syn-tag {
+  color: var(--syn-tag);
+}
+.syn-attribute {
+  color: var(--syn-attribute);
+}
+.syn-builtin {
+  color: var(--syn-builtin);
+}
+.syn-decorator {
+  color: var(--syn-decorator);
+}
 
 html,
 body {
@@ -167,7 +192,9 @@ button {
   padding: 3px 12px;
   background: var(--bg-elevated);
   color: var(--text-primary);
-  transition: background 120ms ease, border-color 120ms ease;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease;
 }
 
 button:hover:not(:disabled) {

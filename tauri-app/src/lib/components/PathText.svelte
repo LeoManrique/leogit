@@ -1,9 +1,15 @@
 <script lang="ts">
   interface Props {
     path: string
+    /**
+     * Render as the "from" side of a rename: whole path muted (filename
+     * included). Truncation still keeps the filename and collapses the
+     * directory, so both sides of a move read the same way.
+     */
+    dim?: boolean
   }
 
-  let { path }: Props = $props()
+  let { path, dim = false }: Props = $props()
 
   let container: HTMLDivElement
   let measureRef: HTMLSpanElement
@@ -91,7 +97,7 @@
 </script>
 
 <div class="path-text" bind:this={container} title={truncated ? path : undefined}>
-  <span class="path-visible"
+  <span class="path-visible" class:dim
     >{#if parts.dir}<span class="dirname">{parts.dir}</span>{/if}<span class="filename">{parts.name}</span></span
   >
   <span bind:this={measureRef} class="path-measure" aria-hidden="true"></span>
@@ -127,5 +133,11 @@
 
   .filename {
     color: var(--text-primary);
+  }
+
+  /* "From" side of a rename: whole path muted so the "to" side reads as the
+     current name. Filename stays legible (no strikethrough). */
+  .path-visible.dim .filename {
+    color: var(--text-muted);
   }
 </style>

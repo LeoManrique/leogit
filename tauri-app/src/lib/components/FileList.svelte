@@ -457,8 +457,8 @@
             {/if}
 
             {#if file.orig_path}
-              <div class="file-info" title={file.path}>
-                <span class="orig">{file.orig_path}</span>
+              <div class="file-info">
+                <PathText path={file.orig_path} dim />
                 <span class="arrow">→</span>
                 <PathText path={file.path} />
               </div>
@@ -618,15 +618,6 @@
     font-size: 13px;
     white-space: nowrap;
     gap: 4px;
-  }
-
-  .orig {
-    color: var(--text-muted);
-    text-decoration: line-through;
-    flex-shrink: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    min-width: 0;
   }
 
   .arrow {
