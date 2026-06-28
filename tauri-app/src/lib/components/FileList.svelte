@@ -44,6 +44,11 @@
     onBulkToggle,
   }: Props = $props()
 
+  // Shown on a dirty submodule's disabled checkbox/badge. Its inner changes
+  // aren't a parent-repo change, so they must be committed in the submodule.
+  const SUBMODULE_DIRTY_HINT =
+    'This submodule has uncommitted changes that must be committed inside the submodule before they can be part of this repository.'
+
   // Visual multi-row selection. Independent of commit inclusion — this is the
   // user's mouse-/keyboard-driven highlight, not the staged set. Lives local
   // to FileList so it survives tab switches (component stays mounted) but
@@ -164,6 +169,12 @@
 
   function handleCheckboxClick(e: MouseEvent, file: FileEntry) {
     e.stopPropagation()
+    // The checkbox is `disabled` for dirty submodules so this shouldn't fire,
+    // but guard anyway: it can never be staged from the parent repo.
+    if (file.submodule_dirty) {
+      e.preventDefault()
+      return
+    }
     if (e.shiftKey && checkboxAnchor && checkboxAnchor !== file.path) {
       // Cancel the native toggle — we'll drive every checkbox in the range,
       // including this one, via the bulk callback.
@@ -194,11 +205,17 @@
 
   let masterCheckbox = $state<HTMLInputElement | null>(null)
 
+  // A dirty submodule (changed inside, pointer unmoved) can't be staged from
+  // the parent repo, so it's never selectable — the master toggle and its
+  // checked/indeterminate state ignore it, or it could never read "all checked".
+  const selectable = (f: FileEntry) => !f.submodule_dirty
+  const selectableFiles = $derived(files.filter(selectable))
+
   const allSelected = $derived(
-    files.length > 0 && files.every((f) => selectedFiles.has(f.path)),
+    selectableFiles.length > 0 && selectableFiles.every((f) => selectedFiles.has(f.path)),
   )
   const isIndeterminate = $derived(
-    !allSelected && files.some((f) => selectedFiles.has(f.path)),
+    !allSelected && selectableFiles.some((f) => selectedFiles.has(f.path)),
   )
 
   // `indeterminate` is a DOM property, not an attribute — Svelte can't render
@@ -388,6 +405,7 @@
             class:active={isActive}
             class:included={isSelected}
             class:row-selected={isRowSelected}
+            class:submodule-dirty={file.submodule_dirty}
             data-file-row-index={fileIndex}
             style="top: {fileIndex * ROW_HEIGHT}px;"
             onclick={(e) => handleRowClick(e, file)}
@@ -436,7 +454,13 @@
                 type="checkbox"
                 class="file-checkbox"
                 checked={isSelected}
-                aria-label={isSelected ? `Exclude ${file.path} from commit` : `Include ${file.path} in commit`}
+                disabled={file.submodule_dirty}
+                title={file.submodule_dirty ? SUBMODULE_DIRTY_HINT : undefined}
+                aria-label={file.submodule_dirty
+                  ? SUBMODULE_DIRTY_HINT
+                  : isSelected
+                    ? `Exclude ${file.path} from commit`
+                    : `Include ${file.path} in commit`}
                 onclick={(e) => handleCheckboxClick(e, file)}
                 onkeydown={(e) => e.stopPropagation()}
               />
@@ -450,6 +474,8 @@
               >
                 ↪
               </div>
+            {:else if file.submodule_dirty}
+              <div class="status-badge submodule-badge" title={SUBMODULE_DIRTY_HINT}>↪</div>
             {:else}
               <div class="status-badge" style="color: {getStatusColor(file.status)}">
                 {getStatusLabel(file.status)}
@@ -593,6 +619,11 @@
     margin: 0;
   }
 
+  .file-checkbox:disabled {
+    cursor: not-allowed;
+    opacity: 0.4;
+  }
+
   .file-checkbox:focus-visible {
     outline: 2px solid var(--border-active);
     outline-offset: 2px;
@@ -627,5 +658,15 @@
 
   .file-row.included :global(.filename) {
     font-weight: 500;
+  }
+
+  /* Dirty submodule: can't be staged from the parent, so the row reads as
+     inactive (muted name) while still being clickable to view its diff. */
+  .file-row.submodule-dirty :global(.filename) {
+    color: var(--text-muted);
+  }
+
+  .status-badge.submodule-badge {
+    color: var(--text-muted);
   }
 </style>

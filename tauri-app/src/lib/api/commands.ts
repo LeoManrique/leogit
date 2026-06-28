@@ -14,6 +14,14 @@ export interface FileEntry {
    * and confirms before committing.
    */
   embedded: boolean
+  /**
+   * True when this entry is a tracked submodule that is dirty inside (its own
+   * working tree has modified/untracked content) but whose recorded commit
+   * pointer has NOT moved. The parent repo has nothing to stage, so a commit
+   * would fail — the inner changes must be committed inside the submodule
+   * first. The UI disables the row instead of letting the commit fail.
+   */
+  submodule_dirty: boolean
 }
 
 export interface RepoStatus {

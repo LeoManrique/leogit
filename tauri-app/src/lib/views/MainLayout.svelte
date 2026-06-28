@@ -210,6 +210,12 @@
     })
   }
 
+  // A submodule that is dirty inside but whose recorded commit hasn't moved
+  // can't be staged from the parent repo (`git add` is a no-op), so it's never
+  // eligible for commit selection. Every writer to `selectedFiles` skips these
+  // so the user can't include one and hit "staging produced no changes".
+  const isCommittable = (f: FileEntry) => !f.submodule_dirty
+
   async function refreshStatus(opts: { silent?: boolean } = {}): Promise<void> {
     const repoPath = $appState.repoPath
     if (!repoPath) return
@@ -220,7 +226,7 @@
         const presentPaths = new Set(status.files.map((f) => f.path))
         const nextSelected = new Set<string>()
         for (const f of status.files) {
-          if (!s.userDeselected.has(f.path)) nextSelected.add(f.path)
+          if (isCommittable(f) && !s.userDeselected.has(f.path)) nextSelected.add(f.path)
         }
         const nextDeselected = new Set<string>()
         for (const p of s.userDeselected) {
@@ -786,7 +792,7 @@
       if (selectAll) {
         return {
           ...s,
-          selectedFiles: new Set(s.status.files.map((f) => f.path)),
+          selectedFiles: new Set(s.status.files.filter(isCommittable).map((f) => f.path)),
           userDeselected: new Set(),
         }
       }
@@ -805,11 +811,15 @@
     repoState.update((s) => {
       const nextSelected = new Set(s.selectedFiles)
       const nextDeselected = new Set(s.userDeselected)
+      // A range can sweep over a dirty submodule; it can never be included.
+      const blocked = new Set(
+        s.status.files.filter((f) => !isCommittable(f)).map((f) => f.path),
+      )
       for (const p of paths) {
-        if (include) {
+        if (include && !blocked.has(p)) {
           nextSelected.add(p)
           nextDeselected.delete(p)
-        } else {
+        } else if (!include) {
           nextSelected.delete(p)
           nextDeselected.add(p)
         }
@@ -819,6 +829,9 @@
   }
 
   function handleFileToggle(file: FileEntry) {
+    // The row's checkbox is disabled for dirty submodules; ignore any toggle
+    // that still reaches here (e.g. a programmatic call) so it stays excluded.
+    if (!isCommittable(file)) return
     repoState.update((s) => {
       const nextSelected = new Set(s.selectedFiles)
       const nextDeselected = new Set(s.userDeselected)
@@ -1269,6 +1282,15 @@
       {#if $repoState.activeTab === 'changes'}
         {#if $repoState.isDiffLoadingSlow}
           <div class="diff-empty">Loading diff…</div>
+        {:else if $repoState.activeFile?.submodule_dirty}
+          <div class="diff-empty submodule-changes">
+            <p class="submodule-title">Submodule changes</p>
+            <p class="muted">
+              This submodule has modified content that hasn't been committed. Those changes
+              must be committed inside the submodule before they can be part of this
+              repository.
+            </p>
+          </div>
         {:else if $repoState.activeFileDiff}
           <DiffViewer
             fileDiff={$repoState.activeFileDiff}
@@ -1664,6 +1686,25 @@
   .diff-empty .muted {
     color: var(--text-faint);
     font-size: 12px;
+  }
+
+  /* Submodule whose inner working tree is dirty but pointer hasn't moved: the
+     raw diff is just an opaque `Subproject commit …-dirty` line, so we explain
+     it instead, mirroring the checkbox being disabled in the file list. */
+  .submodule-changes {
+    padding: 0 32px;
+  }
+
+  .submodule-changes .submodule-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .submodule-changes .muted {
+    max-width: 420px;
+    text-align: center;
+    line-height: 1.5;
   }
 
   .terminal-section {

@@ -30,6 +30,15 @@ pub struct FileEntry {
     /// distinction before letting the user commit. Always false for tracked
     /// changes and ordinary untracked files.
     pub embedded: bool,
+    /// True when this entry is a tracked submodule that is dirty *inside* (its
+    /// own working tree has modified or untracked content) but whose recorded
+    /// commit pointer has NOT moved. There is nothing the parent repo can stage
+    /// — `git add` is a no-op — so the change can't be committed from here; the
+    /// inner changes must be committed inside the submodule first. The UI
+    /// disables this entry rather than letting a commit fail with "staging
+    /// produced no changes". A submodule whose pointer *did* move is committable
+    /// and leaves this false.
+    pub submodule_dirty: bool,
 }
 
 /// Aggregate line-change totals for a single commit, summed across every file
@@ -359,6 +368,22 @@ fn status_from_xy(xy: &str) -> FileStatus {
     FileStatus::Modified
 }
 
+/// Classify the porcelain-v2 `sub` field (the 3rd field of a changed entry).
+///
+/// It is 4 chars: `N...` for a non-submodule, or `S<c><m><u>` for a submodule
+/// where `c`=`C` if the recorded commit changed, `m`=`M` if it has modified
+/// tracked content, and `u`=`U` if it has untracked content.
+///
+/// Returns true only for the *dirty-but-pointer-unmoved* case: a submodule
+/// (`c` is `.`, not `C`) with at least one of `m`/`u` set. That is the one
+/// state the parent repo cannot stage — there is no gitlink change to add, so a
+/// commit would fail. When the commit moved (`c` is `C`) the gitlink *is*
+/// stageable, so this returns false.
+fn is_dirty_submodule(sub: &str) -> bool {
+    let b = sub.as_bytes();
+    b.len() == 4 && b[0] == b'S' && b[1] == b'.' && (b[2] == b'M' || b[3] == b'U')
+}
+
 // ---------------------------------------------------------------------------
 // get_status: parses porcelain v2 -z output
 // ---------------------------------------------------------------------------
@@ -373,6 +398,7 @@ fn parse_ordinary_entry(seg: &str) -> Option<FileEntry> {
     let xy = parts[1].to_string();
     let path = parts[8].to_string();
     let status = status_from_xy(&xy);
+    let submodule_dirty = is_dirty_submodule(parts[2]);
     let (display_name, display_dir) = extract_display_name_and_dir(&path);
     Some(FileEntry {
         path,
@@ -382,6 +408,7 @@ fn parse_ordinary_entry(seg: &str) -> Option<FileEntry> {
         display_name,
         display_dir,
         embedded: false,
+        submodule_dirty,
     })
 }
 
@@ -407,6 +434,7 @@ fn parse_rename_entry(seg: &str, orig_path: String) -> Option<FileEntry> {
         display_name,
         display_dir,
         embedded: false,
+        submodule_dirty: false,
     })
 }
 
@@ -428,6 +456,7 @@ fn parse_unmerged_entry(seg: &str) -> Option<FileEntry> {
         display_name,
         display_dir,
         embedded: false,
+        submodule_dirty: false,
     })
 }
 
@@ -606,6 +635,7 @@ pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
                 display_name,
                 display_dir,
                 embedded,
+                submodule_dirty: false,
             });
         } else if seg_str.starts_with("1 ") {
             if let Some(e) = parse_ordinary_entry(seg_str) {
@@ -1042,6 +1072,7 @@ pub fn get_commit_files(repo_path: String, sha: String) -> Result<Vec<FileEntry>
             display_name,
             display_dir,
             embedded: false,
+            submodule_dirty: false,
         });
     }
 
@@ -2288,6 +2319,7 @@ mod tests {
             display_name: path.to_string(),
             display_dir: String::new(),
             embedded: false,
+            submodule_dirty: false,
         }
     }
 
@@ -2385,6 +2417,41 @@ mod tests {
     /// Regression: opening History on a fresh repo (unborn HEAD) must not error.
     /// `git log` exits 128 there ("does not have any commits yet"); `get_log`
     /// should treat that as an empty history.
+    /// `is_dirty_submodule` must fire only for a submodule that is dirty inside
+    /// with no pointer move — the one state the parent repo can't stage. A moved
+    /// pointer (`SC..`) and plain files (`N...`) stay committable (false).
+    #[test]
+    fn classifies_only_unstageable_dirty_submodules() {
+        // Dirty inside, pointer unmoved → not stageable from the parent.
+        assert!(is_dirty_submodule("S.M."), "modified tracked content");
+        assert!(is_dirty_submodule("S..U"), "untracked content");
+        assert!(is_dirty_submodule("S.MU"), "both modified and untracked");
+        // Committable or irrelevant → false.
+        assert!(!is_dirty_submodule("SC.."), "pointer moved — stage the gitlink");
+        assert!(!is_dirty_submodule("SCMU"), "pointer moved, also dirty");
+        assert!(!is_dirty_submodule("S..."), "submodule with nothing changed");
+        assert!(!is_dirty_submodule("N..."), "not a submodule");
+        assert!(!is_dirty_submodule(""), "empty field");
+    }
+
+    /// A porcelain-v2 ordinary entry for a dirty-but-unmoved submodule must
+    /// parse into an entry flagged `submodule_dirty`, while a normal file must
+    /// not. The `sub` field is the 3rd token (`S.M.` vs `N...`).
+    #[test]
+    fn parses_dirty_submodule_flag_from_ordinary_entry() {
+        let sub = parse_ordinary_entry(
+            "1 .M S.M. 160000 160000 160000 abc123 abc123 vendor/lib",
+        )
+        .expect("ordinary entry parses");
+        assert!(sub.submodule_dirty, "dirty submodule must be flagged");
+
+        let file = parse_ordinary_entry(
+            "1 .M N... 100644 100644 100644 abc123 def456 src/main.rs",
+        )
+        .expect("ordinary entry parses");
+        assert!(!file.submodule_dirty, "a normal file is never flagged");
+    }
+
     #[test]
     fn get_log_returns_empty_on_fresh_repo() {
         let tmp = tempdir().expect("tempdir");
@@ -2541,6 +2608,7 @@ mod tests {
             display_name: path.to_string(),
             display_dir: String::new(),
             embedded: false,
+            submodule_dirty: false,
         }
     }
 
@@ -2553,6 +2621,7 @@ mod tests {
             display_name: path.to_string(),
             display_dir: String::new(),
             embedded: false,
+            submodule_dirty: false,
         }
     }
 
