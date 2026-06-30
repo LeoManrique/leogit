@@ -129,6 +129,15 @@ pub struct RepoStatus {
     /// branch has no resolvable upstream or is in sync. Used by the History
     /// view to mark unpushed rows.
     pub unpushed_shas: Vec<String>,
+    /// True when HEAD points straight at a commit rather than a branch — the
+    /// "detached HEAD" state, e.g. after checking out a commit by SHA. The UI
+    /// surfaces this distinctly from a normal branch (which stays empty here)
+    /// so the user knows new commits won't advance any branch.
+    pub detached: bool,
+    /// Full SHA of the current HEAD commit, parsed for free from porcelain v2's
+    /// `# branch.oid`. Empty only for an unborn branch (a freshly initialised
+    /// repo with no commits). Powers the detached-HEAD label ("On <short>").
+    pub head_sha: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -484,6 +493,8 @@ pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
         files: Vec::new(),
         has_remote: false,
         unpushed_shas: Vec::new(),
+        detached: false,
+        head_sha: String::new(),
     };
 
     // Configured remote, queried once and reused below (the no-upstream
@@ -511,11 +522,20 @@ pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
         let line_str = String::from_utf8_lossy(record);
         if let Some(rem) = line_str.strip_prefix("# branch.head ") {
             let val = rem.trim();
-            result.branch = if val == "(detached)" {
+            result.detached = val == "(detached)";
+            result.branch = if result.detached {
                 String::new()
             } else {
                 val.to_string()
             };
+        } else if let Some(rem) = line_str.strip_prefix("# branch.oid ") {
+            // Porcelain v2 emits the HEAD commit OID here, or "(initial)" for an
+            // unborn branch. Capturing it gives us the current SHA with no extra
+            // `rev-parse` — used to label the detached-HEAD state.
+            let val = rem.trim();
+            if val != "(initial)" {
+                result.head_sha = val.to_string();
+            }
         } else if let Some(rem) = line_str.strip_prefix("# branch.upstream ") {
             result.upstream = rem.trim().to_string();
             result.has_upstream = true;
@@ -1291,6 +1311,29 @@ fn checkout_tracking_branch(repo_path: &str, remote_branch: &str) -> Result<(), 
             repo_path,
             &["checkout", "-b", local_name, "--track", remote_branch],
         )?;
+    }
+    Ok(())
+}
+
+/// Check out a commit by SHA, detaching HEAD onto it.
+///
+/// Mirrors GitHub Desktop's "Checkout commit": runs `git checkout <sha>`, which
+/// leaves the working tree on a detached HEAD pointing at that commit. The user
+/// can inspect or branch from it, then reattach to a branch via the branch
+/// picker. `get_status` reports the result with `detached = true`.
+///
+/// The caller passes a full SHA from the History list, so there's no ambiguity
+/// with a branch or file name.
+///
+/// # Errors
+/// Returns `Err` if `git checkout` fails — most commonly when uncommitted
+/// changes would be overwritten by the target commit; git's message is surfaced
+/// verbatim so the user can commit or stash first.
+#[tauri::command]
+pub fn checkout_commit(repo_path: &str, sha: &str) -> Result<(), String> {
+    let (ok, combined) = run_git_combined(repo_path, &["checkout", sha])?;
+    if !ok {
+        return Err(format!("Checkout failed: {}", combined.trim()));
     }
     Ok(())
 }
@@ -2790,6 +2833,100 @@ mod tests {
             st.unpushed_shas.contains(&c1),
             "a commit that's on no remote must be marked unpushed: {:?}",
             st.unpushed_shas
+        );
+    }
+
+    /// On a normal branch, `get_status` reports `detached = false`, the branch
+    /// name, and the HEAD SHA parsed from porcelain v2's `# branch.oid`.
+    #[test]
+    fn get_status_reports_branch_and_head_sha() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_repo(repo);
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+
+        fs::write(repo.join("a.txt"), "1\n").expect("write file");
+        commit(repo_path.clone(), "only".into(), vec![new_file("a.txt")], None).expect("commit");
+        let head = run_git(&repo_path, &["rev-parse", "HEAD"])
+            .expect("rev-parse HEAD")
+            .trim()
+            .to_string();
+
+        let st = get_status(repo_path).expect("get_status");
+        assert!(!st.detached, "a born branch is not detached");
+        assert!(!st.branch.is_empty(), "branch name is reported");
+        assert_eq!(st.head_sha, head, "head_sha matches HEAD");
+    }
+
+    /// After `checkout_commit` onto an older commit, `get_status` reports a
+    /// detached HEAD: `detached = true`, an empty branch, and `head_sha` equal
+    /// to the checked-out commit. Reattaching to a branch clears it. This pins
+    /// the whole "Checkout commit" round-trip the History context menu relies on.
+    #[test]
+    fn checkout_commit_detaches_then_branch_reattaches() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_repo(repo);
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+
+        // Two commits so there's an older one to detach onto.
+        fs::write(repo.join("a.txt"), "1\n").expect("write a");
+        commit(repo_path.clone(), "first".into(), vec![new_file("a.txt")], None).expect("commit 1");
+        let first = run_git(&repo_path, &["rev-parse", "HEAD"])
+            .expect("rev-parse first")
+            .trim()
+            .to_string();
+        let branch = get_status(repo_path.clone()).expect("status").branch;
+
+        fs::write(repo.join("b.txt"), "2\n").expect("write b");
+        commit(repo_path.clone(), "second".into(), vec![new_file("b.txt")], None)
+            .expect("commit 2");
+
+        checkout_commit(&repo_path, &first).expect("checkout first commit");
+        let detached = get_status(repo_path.clone()).expect("status while detached");
+        assert!(detached.detached, "HEAD is detached after checkout_commit");
+        assert!(detached.branch.is_empty(), "no branch while detached");
+        assert_eq!(detached.head_sha, first, "HEAD is the checked-out commit");
+
+        // Reattaching to the branch clears the detached state.
+        switch_branch(repo_path.clone(), branch).expect("switch back to branch");
+        let reattached = get_status(repo_path).expect("status after reattach");
+        assert!(!reattached.detached, "branch checkout clears detached HEAD");
+        assert!(!reattached.branch.is_empty(), "branch name restored");
+    }
+
+    /// `checkout_commit` refuses to clobber uncommitted work: when a tracked file
+    /// has local edits that the target commit would overwrite, git aborts and we
+    /// surface the error instead of silently losing the changes.
+    #[test]
+    fn checkout_commit_fails_when_local_changes_would_be_overwritten() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_repo(repo);
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+
+        fs::write(repo.join("a.txt"), "v1\n").expect("write v1");
+        commit(repo_path.clone(), "first".into(), vec![new_file("a.txt")], None).expect("commit 1");
+        let first = run_git(&repo_path, &["rev-parse", "HEAD"])
+            .expect("rev-parse first")
+            .trim()
+            .to_string();
+
+        // Second commit changes a.txt, then leave an uncommitted edit on top.
+        fs::write(repo.join("a.txt"), "v2\n").expect("write v2");
+        commit(repo_path.clone(), "second".into(), vec![modified_file("a.txt")], None)
+            .expect("commit 2");
+        fs::write(repo.join("a.txt"), "dirty\n").expect("write dirty");
+
+        let err = checkout_commit(&repo_path, &first).expect_err("checkout must fail");
+        assert!(
+            err.contains("Checkout failed"),
+            "error is surfaced, not swallowed: {err}"
+        );
+        // The repo stays on its branch — the failed checkout didn't detach.
+        assert!(
+            !get_status(repo_path).expect("status").detached,
+            "a refused checkout leaves HEAD attached"
         );
     }
 

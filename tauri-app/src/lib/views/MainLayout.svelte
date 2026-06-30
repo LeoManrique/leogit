@@ -27,6 +27,7 @@
   import TabBar from '$lib/components/TabBar.svelte'
   import FileList from '$lib/components/FileList.svelte'
   import DiscardConfirm from '$lib/components/DiscardConfirm.svelte'
+  import CheckoutCommitConfirm from '$lib/components/CheckoutCommitConfirm.svelte'
   import CommitMessage from '$lib/components/CommitMessage.svelte'
   import CommitList from '$lib/components/CommitList.svelte'
   import DiffViewer from '$lib/components/DiffViewer.svelte'
@@ -250,6 +251,8 @@
             isMerging,
             hasRemote: status.has_remote,
             unpushedShas: new Set(status.unpushed_shas ?? []),
+            detached: status.detached,
+            headSha: status.head_sha,
           },
           selectedFiles: nextSelected,
           userDeselected: nextDeselected,
@@ -737,6 +740,40 @@
 
   function handleStopAmending(): void {
     repoState.update((s) => ({ ...s, commitToAmend: null }))
+  }
+
+  // ---- Checkout commit (detached HEAD) -------------------------------------
+  // Commit pending a checkout confirmation; null when the dialog is closed.
+  let checkoutTarget = $state<CommitInfo | null>(null)
+  let isCheckingOut = $state(false)
+
+  function handleCheckoutCommit(commit: CommitInfo): void {
+    checkoutTarget = commit
+  }
+
+  async function confirmCheckout(): Promise<void> {
+    const repoPath = $appState.repoPath
+    const commit = checkoutTarget
+    if (!repoPath || !commit) return
+    isCheckingOut = true
+    try {
+      await gitApi.checkoutCommit(repoPath, commit.sha)
+      // The checked-out commit is now HEAD. Seed lastHeadSha so the poll doesn't
+      // redundantly reload the log, then refresh status (detached state) and the
+      // log (now rooted at this commit), mirroring handleCommitted.
+      lastHeadSha = commit.sha
+      await Promise.all([refreshStatus({ silent: true }), refreshLog()])
+    } catch (error) {
+      repoState.update((s) => ({ ...s, error: String(error) }))
+    } finally {
+      // Always close the dialog so any error surfaces in the ErrorModal alone.
+      checkoutTarget = null
+      isCheckingOut = false
+    }
+  }
+
+  function cancelCheckout(): void {
+    if (!isCheckingOut) checkoutTarget = null
   }
 
   // Parse the Co-Authored-By trailers off a commit and split the body.
@@ -1252,6 +1289,7 @@
           onLoadEarlier={loadEarlierCommits}
           onAmendCommit={handleStartAmending}
           onUndoCommit={handleUndoCommit}
+          onCheckoutCommit={handleCheckoutCommit}
         />
       </div>
     </div>
@@ -1498,6 +1536,15 @@
       {isDiscarding}
       onConfirm={confirmDiscard}
       onCancel={cancelDiscard}
+    />
+  {/if}
+
+  {#if checkoutTarget}
+    <CheckoutCommitConfirm
+      commit={checkoutTarget}
+      {isCheckingOut}
+      onConfirm={confirmCheckout}
+      onCancel={cancelCheckout}
     />
   {/if}
 

@@ -65,6 +65,7 @@ fn main() {
             git::list_branches,
             git::create_branch,
             git::switch_branch,
+            git::checkout_commit,
             git::delete_branch,
             git::delete_remote_branch,
             git::rename_branch,

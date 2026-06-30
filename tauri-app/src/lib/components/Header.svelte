@@ -80,6 +80,11 @@
   const ahead = $derived($repoState.status.ahead)
   const behind = $derived($repoState.status.behind)
   const hasUpstream = $derived($repoState.status.hasUpstream)
+  // Detached HEAD (after "Checkout commit"): the chip shows the short SHA instead
+  // of a branch name, and push/pull are suppressed since there's no branch to
+  // push. The user returns to a branch via the branch picker.
+  const detached = $derived($repoState.status.detached)
+  const detachedShort = $derived($repoState.status.headSha.slice(0, 7))
   // A loaded branch with no remote → publish instead of push. Gating on `branch`
   // avoids briefly flashing "Publish" before the first status load resolves.
   const noRemote = $derived(
@@ -119,6 +124,8 @@
           files: status.files,
           hasRemote: status.has_remote,
           unpushedShas: new Set(status.unpushed_shas ?? []),
+          detached: status.detached,
+          headSha: status.head_sha,
         },
         error: undefined,
       }))
@@ -287,20 +294,37 @@
       </svg>
       <span class="chip-label">{repoName || '…'}</span>
     </button>
-    <button class="chip-button" onclick={onOpenBranches} title="Switch branch (Ctrl+B)">
-      <svg class="chip-icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <circle cx="4" cy="3.5" r="1.4" />
-        <circle cx="4" cy="12.5" r="1.4" />
-        <circle cx="12" cy="6" r="1.4" />
-        <path d="M4 5v6" />
-        <path d="M4 9c0-2.5 2-3 4-3h2.6" />
-      </svg>
-      <span class="chip-label">{$repoState.status.branch || '…'}</span>
+    <button
+      class="chip-button"
+      onclick={onOpenBranches}
+      title={detached ? 'Detached HEAD — pick a branch to return to' : 'Switch branch (Ctrl+B)'}
+    >
+      {#if detached}
+        <!-- Commit node (detached HEAD points at a commit, not a branch). -->
+        <svg class="chip-icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="8" cy="8" r="2.6" />
+          <path d="M2 8h2.8" />
+          <path d="M11.2 8H14" />
+        </svg>
+      {:else}
+        <svg class="chip-icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="4" cy="3.5" r="1.4" />
+          <circle cx="4" cy="12.5" r="1.4" />
+          <circle cx="12" cy="6" r="1.4" />
+          <path d="M4 5v6" />
+          <path d="M4 9c0-2.5 2-3 4-3h2.6" />
+        </svg>
+      {/if}
+      <span class="chip-label">
+        {#if detached}On {detachedShort}{:else}{$repoState.status.branch || '…'}{/if}
+      </span>
     </button>
     <div class="status-info">
       <!-- Ahead/behind counts live on the Pull/Push buttons, so the bar here
            only confirms the in-sync state and never duplicates those numbers. -->
-      {#if hasUpstream && ahead === 0 && behind === 0}
+      {#if detached}
+        <span class="detached" title="HEAD is not on any branch">DETACHED HEAD</span>
+      {:else if hasUpstream && ahead === 0 && behind === 0}
         <span class="upstream-ok"><span class="sync-dot"></span>up to date</span>
       {/if}
       {#if $repoState.status.isMerging}
@@ -340,14 +364,16 @@
       <button
         class="count-button split-main"
         onclick={handlePushButton}
-        disabled={isPushing || isPublishing}
-        title={noRemote
-          ? 'Publish this repository to GitHub (Ctrl+P)'
-          : publishBranch
-            ? `Publish this branch to ${cachedRemote} (Ctrl+P)`
-            : ahead > 0
-              ? `Push ${ahead} commit${ahead === 1 ? '' : 's'} to remote (Ctrl+P)`
-              : 'Push to remote (Ctrl+P)'}
+        disabled={isPushing || isPublishing || detached}
+        title={detached
+          ? 'Detached HEAD — check out a branch to push'
+          : noRemote
+            ? 'Publish this repository to GitHub (Ctrl+P)'
+            : publishBranch
+              ? `Publish this branch to ${cachedRemote} (Ctrl+P)`
+              : ahead > 0
+                ? `Push ${ahead} commit${ahead === 1 ? '' : 's'} to remote (Ctrl+P)`
+                : 'Push to remote (Ctrl+P)'}
       >
         {#if isPushing || isPublishing}
           <svg class="icon spinning" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
@@ -378,7 +404,7 @@
       <button
         class="split-chevron"
         onclick={openPushMenu}
-        disabled={isPushing || isPublishing}
+        disabled={isPushing || isPublishing || detached}
         aria-label="More push options"
         title="More push options"
       >
@@ -524,6 +550,12 @@
   }
 
   .merging {
+    color: var(--status-yellow);
+    font-weight: 500;
+    letter-spacing: 0.02em;
+  }
+
+  .detached {
     color: var(--status-yellow);
     font-weight: 500;
     letter-spacing: 0.02em;

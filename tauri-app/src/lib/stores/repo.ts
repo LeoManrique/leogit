@@ -22,6 +22,10 @@ export interface RepoStatus {
   hasRemote: boolean
   /** SHAs of commits the user still needs to push, used to mark History rows. */
   unpushedShas: Set<string>
+  /** True when HEAD is detached (on a commit, not a branch), e.g. after "Checkout commit". */
+  detached: boolean
+  /** Full SHA of HEAD; empty only on an unborn branch. Labels the detached-HEAD state. */
+  headSha: string
 }
 
 export interface RepoState {
@@ -82,6 +86,8 @@ const defaultStatus: RepoStatus = {
   isMerging: false,
   hasRemote: false,
   unpushedShas: new Set(),
+  detached: false,
+  headSha: '',
 }
 
 const defaultState: RepoState = {

@@ -34,6 +34,7 @@
     onLoadEarlier?: () => void
     onAmendCommit?: (commit: CommitInfo) => void
     onUndoCommit?: (commit: CommitInfo) => void
+    onCheckoutCommit?: (commit: CommitInfo) => void
   }
 
   let {
@@ -48,6 +49,7 @@
     onLoadEarlier,
     onAmendCommit,
     onUndoCommit,
+    onCheckoutCommit,
   }: Props = $props()
 
   let contextMenu = $state<{ x: number; y: number; commit: CommitInfo; idx: number } | null>(
@@ -84,6 +86,15 @@
               (!hasResolvedUpstream || unpushedShas.has(contextMenu.commit.sha)),
             action: () => {
               if (contextMenu) onUndoCommit?.(contextMenu.commit)
+            },
+          },
+          {
+            label: 'Checkout commit',
+            // Any commit except the current HEAD (idx 0) — checking out HEAD is a
+            // no-op. Lands the user in a detached HEAD, matching GitHub Desktop.
+            enabled: contextMenu.idx !== 0 && onCheckoutCommit !== undefined,
+            action: () => {
+              if (contextMenu) onCheckoutCommit?.(contextMenu.commit)
             },
           },
           { separator: true, label: '', action: () => {} },
