@@ -76,7 +76,7 @@ Two-column layout: a resizable sidebar on the left and a content area on the rig
 ### 6. Branches
 
 - The header branch button opens the **Branch Dropdown** overlay: local branches first, then remote branches, sorted by most recent committer date.
-- Switching is a `git checkout <name> --`. Status and branch list refresh automatically.
+- Switching to a **local** branch is a `git checkout <name> --`. Picking a **remote** branch (e.g. `origin/feature`) checks out a local tracking branch instead of landing in detached HEAD: the local name drops the remote prefix (`origin/feature` → `feature`, `origin/team/x` → `team/x`) and is created with `git checkout -b <local> --track <remote>`; if that local branch already exists it's simply switched to. Status and branch list refresh automatically.
 - **Create branch**: inline input in the dropdown; new branch is created from the current HEAD and immediately switched to.
 - **Delete branch**: row-level X icon on local branches (only non-current). Confirmation step before `git branch -D`.
 - Other supported commands (no UI yet): rename, delete remote branch, merge, squash merge, merge abort, conflict detection (`MERGE_HEAD` presence).

@@ -1207,9 +1207,59 @@ pub fn create_branch(repo_path: String, name: String, start_point: String) -> Re
     Ok(())
 }
 
+/// Whether a local branch (`refs/heads/<name>`) exists. `show-ref --quiet`
+/// exits non-zero when the ref is missing, which `run_git` surfaces as `Err`.
+fn local_branch_exists(repo_path: &str, name: &str) -> bool {
+    run_git(
+        repo_path,
+        &["show-ref", "--verify", "--quiet", &format!("refs/heads/{name}")],
+    )
+    .is_ok()
+}
+
+/// Whether a remote-tracking branch (`refs/remotes/<name>`) exists, where
+/// `name` is the short form shown in the UI (e.g. `origin/feature`).
+fn remote_branch_exists(repo_path: &str, name: &str) -> bool {
+    run_git(
+        repo_path,
+        &["show-ref", "--verify", "--quiet", &format!("refs/remotes/{name}")],
+    )
+    .is_ok()
+}
+
 #[tauri::command]
 pub fn switch_branch(repo_path: String, branch: String) -> Result<(), String> {
+    // A remote-only branch (e.g. `origin/feature`) has to become a local tracking
+    // branch — `git checkout origin/feature --` would otherwise treat the ref as a
+    // commit-ish and land us in detached HEAD. Guarding on "not already a local
+    // branch" means a local branch whose name legitimately contains a slash
+    // (`feature/foo`) is never misread as a remote ref.
+    if !local_branch_exists(&repo_path, &branch) && remote_branch_exists(&repo_path, &branch) {
+        return checkout_tracking_branch(&repo_path, &branch);
+    }
     run_git(&repo_path, &["checkout", &branch, "--"])?;
+    Ok(())
+}
+
+/// Check out a remote branch (`origin/feature`) as a local tracking branch. The
+/// local name drops the remote prefix (`origin/feature` -> `feature`,
+/// `origin/team/x` -> `team/x`), matching what `git switch <name>`'s DWIM does.
+/// If a local branch of that name already exists it's switched to as-is instead
+/// of recreated (which would fail), so clicking a second remote's same-named
+/// branch simply reuses the existing local branch.
+fn checkout_tracking_branch(repo_path: &str, remote_branch: &str) -> Result<(), String> {
+    let local_name = remote_branch
+        .split_once('/')
+        .map_or(remote_branch, |(_, rest)| rest);
+
+    if local_branch_exists(repo_path, local_name) {
+        run_git(repo_path, &["checkout", local_name, "--"])?;
+    } else {
+        run_git(
+            repo_path,
+            &["checkout", "-b", local_name, "--track", remote_branch],
+        )?;
+    }
     Ok(())
 }
 
@@ -2755,5 +2805,77 @@ mod tests {
             "foo\nbar\n",
             "must not join onto the last rule"
         );
+    }
+
+    /// Regression: selecting a branch from the dropdown's *Remote Branches*
+    /// section (`origin/<name>`) must check out a local **tracking** branch, not
+    /// detach HEAD. The old `git checkout origin/<name> --` treated the ref as a
+    /// commit-ish (the trailing `--`), landing the user in detached HEAD. Also
+    /// covers the collision path: re-selecting it once the local branch exists
+    /// must just switch, never recreate-and-fail.
+    #[test]
+    fn switch_to_remote_branch_creates_local_tracking_branch() {
+        let tmp = tempdir().expect("tempdir");
+
+        // Upstream repo with a `feature` branch the clone won't have locally.
+        let upstream = tmp.path().join("upstream");
+        fs::create_dir(&upstream).expect("mkdir upstream");
+        init_repo(&upstream);
+        let upstream_path = upstream.to_str().expect("utf-8 path").to_string();
+        fs::write(upstream.join("README.md"), "hello\n").expect("write README");
+        commit(
+            upstream_path.clone(),
+            "init".to_string(),
+            vec![new_file("README.md")],
+            None,
+        )
+        .expect("seed commit");
+        // Capture the default branch name (could be main or master depending on
+        // the host's init.defaultBranch) so we can return to it before cloning.
+        let default_branch =
+            run_git(&upstream_path, &["symbolic-ref", "--short", "HEAD"]).expect("default branch");
+        run_git(&upstream_path, &["checkout", "-q", "-b", "feature"]).expect("create feature");
+        fs::write(upstream.join("feature.txt"), "f\n").expect("write feature file");
+        commit(
+            upstream_path.clone(),
+            "feat".to_string(),
+            vec![new_file("feature.txt")],
+            None,
+        )
+        .expect("feature commit");
+        // Leave upstream on its default branch so the clone checks *that* out and
+        // `feature` exists only as a remote-tracking ref.
+        run_git(&upstream_path, &["checkout", "-q", &default_branch]).expect("back to default");
+
+        // Clone it: clone has refs/remotes/origin/feature but no local `feature`.
+        let clone = tmp.path().join("clone");
+        let cloned = Command::new("git")
+            .args(["clone", "-q", &upstream_path, clone.to_str().expect("utf-8 path")])
+            .status()
+            .expect("spawn git clone")
+            .success();
+        assert!(cloned, "git clone failed");
+        let clone_path = clone.to_str().expect("utf-8 path").to_string();
+
+        // Selecting origin/feature with no local branch yet -> tracking branch.
+        switch_branch(clone_path.clone(), "origin/feature".to_string())
+            .expect("switching to a remote branch should succeed");
+        let head = run_git(&clone_path, &["symbolic-ref", "--short", "HEAD"])
+            .expect("HEAD must be a branch, not detached");
+        assert_eq!(head, "feature", "should land on a local 'feature' branch");
+        let tracked = run_git(
+            &clone_path,
+            &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        )
+        .expect("upstream ref");
+        assert_eq!(tracked, "origin/feature", "local branch must track origin/feature");
+
+        // Re-selecting it once the local branch exists must switch, not fail.
+        run_git(&clone_path, &["checkout", "-q", &default_branch]).expect("hop away");
+        switch_branch(clone_path.clone(), "origin/feature".to_string())
+            .expect("re-selecting an already-tracked remote branch must not fail");
+        let head_again =
+            run_git(&clone_path, &["symbolic-ref", "--short", "HEAD"]).expect("HEAD ref");
+        assert_eq!(head_again, "feature");
     }
 }
