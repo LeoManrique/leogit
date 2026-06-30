@@ -578,20 +578,52 @@ pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
         }
     }
 
-    // List unpushed commit SHAs so the History view can mark them. Skipped
-    // when there's nothing to mark — avoids an extra `git rev-list` on every
-    // 2s status poll for in-sync branches.
-    if result.ahead > 0 {
-        if let Some(upstream_ref) = effective_upstream.as_deref() {
-            let exclude = format!("^{}", upstream_ref);
-            if let Ok(out) = run_git(&repo_path, &["rev-list", "HEAD", &exclude]) {
-                result.unpushed_shas = out
-                    .lines()
-                    .map(str::trim)
-                    .filter(|l| !l.is_empty())
-                    .map(str::to_string)
-                    .collect();
-            }
+    // List unpushed commit SHAs so the History view can mark them with an
+    // up-arrow, matching GitHub Desktop. Two cases:
+    //
+    //  - The branch tracks an upstream (real or inferred) and is ahead: the
+    //    unpushed set is `HEAD ^<upstream>` — exactly the commits ahead of it.
+    //  - The branch has no resolvable upstream — a new local branch never pushed,
+    //    with no same-named remote ref (e.g. cloned `main`, branched off, committed)
+    //    — but the repo has a remote: fall back to `HEAD --not --remotes`, i.e.
+    //    local commits not reachable from ANY remote branch. That marks the new
+    //    commits while leaving the shared base (on `origin/main`) unmarked. Without
+    //    this fallback the History view showed no arrows at all on an unpublished
+    //    branch, since `ahead` stays 0 there. When the repo has a remote but no
+    //    remote-tracking refs yet (just `remote add`, never pushed), this correctly
+    //    marks every commit — none of them are on the remote.
+    //
+    // Why `--remotes` (every remote) rather than scoping to the push remote:
+    // `--not --remotes` is conservative — it can only ever UNDER-mark (miss an
+    // arrow on a commit that also happens to live on some unrelated remote ref),
+    // never FALSE-mark a commit that's already pushed. Scoping to a single guessed
+    // remote (e.g. the alphabetically-first one) would draw a false arrow on an
+    // already-pushed commit whenever that guess isn't the real push target — a
+    // worse error than the rare under-mark. The only divergence from GitHub Desktop
+    // is a multi-remote/fork setup where a commit was pushed to a non-default
+    // remote only; accepted as a known limitation.
+    //
+    // Both are skipped when there's nothing to compute (an in-sync upstream
+    // branch, or a repo with no remotes) to avoid an extra `git rev-list` on the
+    // 2s status poll.
+    let exclude_upstream = effective_upstream.as_deref().map(|up| format!("^{up}"));
+    let unpushed_args: Option<Vec<&str>> = if result.ahead > 0 {
+        exclude_upstream
+            .as_deref()
+            .map(|ex| vec!["rev-list", "HEAD", ex])
+    } else if effective_upstream.is_none() && result.has_remote && !result.branch.is_empty() {
+        Some(vec!["rev-list", "HEAD", "--not", "--remotes"])
+    } else {
+        None
+    };
+    if let Some(args) = unpushed_args {
+        if let Ok(out) = run_git(&repo_path, &args) {
+            result.unpushed_shas = out
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect();
         }
     }
 
@@ -2597,6 +2629,118 @@ mod tests {
         assert_eq!(sync.ahead, 1, "repo_sync_status must parse ahead from header");
         assert_eq!(sync.behind, 0);
         assert!(sync.has_remote);
+    }
+
+    /// Regression: on a branch with no upstream — cloned a base, branched off,
+    /// then committed — the History view must still mark the new local commit as
+    /// unpushed (the up-arrow), while leaving the shared base (on `origin/<def>`)
+    /// unmarked. `ahead` stays 0 without an upstream, so the unpushed list falls
+    /// back to `HEAD --not --remotes`. Mirrors GitHub Desktop; previously leogit
+    /// computed nothing here and showed no arrows at all.
+    #[test]
+    fn unpushed_shas_marks_local_commits_on_unpublished_branch() {
+        let tmp = tempdir().expect("tempdir");
+        let work = tmp.path().join("work");
+        let remote = tmp.path().join("remote.git");
+        fs::create_dir_all(&work).expect("mkdir work");
+        init_repo(&work);
+        let work_path = work.to_str().expect("utf-8 path").to_string();
+
+        // Base commit, published to origin so a remote-tracking ref exists.
+        fs::write(work.join("a.txt"), "1\n").expect("write file");
+        commit(work_path.clone(), "base".into(), vec![new_file("a.txt")], None).expect("commit base");
+        let base_sha = run_git(&work_path, &["rev-parse", "HEAD"])
+            .expect("rev-parse base")
+            .trim()
+            .to_string();
+
+        let bare = remote.to_str().expect("utf-8 path");
+        run_git(&work_path, &["init", "--bare", bare]).expect("init bare");
+        run_git(&work_path, &["remote", "add", "origin", bare]).expect("add remote");
+        run_git(&work_path, &["push", "-u", "origin", "HEAD"]).expect("push -u");
+
+        // A new branch with NO upstream + a local-only commit on top of the base.
+        run_git(&work_path, &["checkout", "-b", "feature"]).expect("checkout -b");
+        fs::write(work.join("b.txt"), "2\n").expect("write file");
+        commit(work_path.clone(), "local".into(), vec![new_file("b.txt")], None)
+            .expect("commit local");
+        let local_sha = run_git(&work_path, &["rev-parse", "HEAD"])
+            .expect("rev-parse local")
+            .trim()
+            .to_string();
+
+        let st = get_status(work_path).expect("get_status");
+        assert!(!st.has_upstream, "the new branch has no upstream");
+        assert!(
+            st.unpushed_shas.contains(&local_sha),
+            "the local-only commit must be marked unpushed: {:?}",
+            st.unpushed_shas
+        );
+        assert!(
+            !st.unpushed_shas.contains(&base_sha),
+            "the shared base (on origin) must NOT be marked unpushed: {:?}",
+            st.unpushed_shas
+        );
+    }
+
+    /// A repo with no remote has nowhere to push, so no commit is "unpushed" —
+    /// the History view shows no arrows. Pins the `has_remote` gate on the
+    /// no-upstream fallback (without it, `--not --remotes` would mark every
+    /// commit on a purely local repo).
+    #[test]
+    fn unpushed_shas_empty_without_a_remote() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_repo(repo);
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+
+        fs::write(repo.join("a.txt"), "1\n").expect("write file");
+        commit(repo_path.clone(), "only".into(), vec![new_file("a.txt")], None).expect("commit");
+
+        let st = get_status(repo_path).expect("get_status");
+        assert!(!st.has_remote, "no remote configured");
+        assert!(
+            st.unpushed_shas.is_empty(),
+            "no remote → nothing is 'unpushed': {:?}",
+            st.unpushed_shas
+        );
+    }
+
+    /// A remote is configured but nothing was ever pushed/fetched, so there are
+    /// zero `refs/remotes/*`. Every local commit is genuinely not on the remote,
+    /// so all are marked unpushed. Pins this deliberate behavior: we do NOT gate
+    /// the fallback on remote-tracking refs existing, because that would wrongly
+    /// hide arrows for a freshly `remote add`ed repo whose commits really are
+    /// unpushed.
+    #[test]
+    fn unpushed_shas_marks_all_commits_when_remote_has_no_tracking_refs() {
+        let tmp = tempdir().expect("tempdir");
+        let work = tmp.path().join("work");
+        let remote = tmp.path().join("remote.git");
+        fs::create_dir_all(&work).expect("mkdir work");
+        init_repo(&work);
+        let work_path = work.to_str().expect("utf-8 path").to_string();
+
+        fs::write(work.join("a.txt"), "1\n").expect("write file");
+        commit(work_path.clone(), "c1".into(), vec![new_file("a.txt")], None).expect("commit");
+        let c1 = run_git(&work_path, &["rev-parse", "HEAD"])
+            .expect("rev-parse")
+            .trim()
+            .to_string();
+
+        // Remote configured but never pushed/fetched → no refs/remotes/* exist.
+        let bare = remote.to_str().expect("utf-8 path");
+        run_git(&work_path, &["init", "--bare", bare]).expect("init bare");
+        run_git(&work_path, &["remote", "add", "origin", bare]).expect("add remote");
+
+        let st = get_status(work_path).expect("get_status");
+        assert!(st.has_remote, "remote is configured");
+        assert!(!st.has_upstream, "no upstream yet");
+        assert!(
+            st.unpushed_shas.contains(&c1),
+            "a commit that's on no remote must be marked unpushed: {:?}",
+            st.unpushed_shas
+        );
     }
 
     fn modified_file(path: &str) -> FileEntry {

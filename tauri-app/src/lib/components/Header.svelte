@@ -85,6 +85,16 @@
   const noRemote = $derived(
     !!$appState.repoPath && !!$repoState.status.branch && !$repoState.status.hasRemote,
   )
+  // The repo has a remote but the current branch isn't tracking anything yet →
+  // "Publish branch" (push + set upstream), matching GitHub Desktop. Distinct
+  // from `noRemote` (no remote at all → publish the whole repo to GitHub). Once
+  // published the branch gains an upstream and this flips back to a plain Push.
+  const publishBranch = $derived(
+    !!$appState.repoPath &&
+      !!$repoState.status.branch &&
+      $repoState.status.hasRemote &&
+      !hasUpstream,
+  )
   // Force-push is only meaningful when the branch has diverged from its upstream
   // (commits on both sides). A plain ahead-only branch fast-forwards, so offering
   // force push there is noise — hence the menu item only appears when diverged.
@@ -175,7 +185,10 @@
     }
   }
 
-  // Main split-button click: publish when there's no remote yet, otherwise push.
+  // Main split-button click: publish the repo to GitHub when there's no remote
+  // yet, otherwise push. The "Publish branch" state (remote exists, branch has
+  // no upstream) routes through `handlePush`, which sets the upstream because
+  // `!hasUpstream` — so the same handler both publishes a branch and pushes.
   function handlePushButton() {
     if (noRemote) {
       showPublish = true
@@ -235,7 +248,9 @@
   const pushMenuItems = $derived<ContextMenuItem[]>(
     noRemote
       ? [{ label: 'Publish to GitHub…', action: () => (showPublish = true), enabled: !isPushing }]
-      : [
+      : publishBranch
+        ? [{ label: 'Publish branch', action: handlePush, enabled: !isPushing }]
+        : [
           {
             label: 'Push',
             action: handlePush,
@@ -295,26 +310,32 @@
   </div>
 
   <div class="right">
-    <button
-      class="count-button"
-      onclick={handlePull}
-      disabled={isPulling}
-      title={behind > 0 ? `Pull ${behind} commit${behind === 1 ? '' : 's'} from remote` : 'Pull from remote'}
-    >
-      {#if isPulling}
-        <svg class="icon spinning" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
-          <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" />
-          <polyline points="13.5,2 13.5,5 10.5,5" />
-        </svg>
-      {:else}
-        <svg class="icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <line x1="8" y1="3" x2="8" y2="12" />
-          <polyline points="4,8 8,12 12,8" />
-        </svg>
-      {/if}
-      <span>Pull</span>
-      {#if behind > 0}<span class="count-badge">{behind}</span>{/if}
-    </button>
+    <!-- Pull only makes sense once the branch tracks a remote. Before that the
+         primary button is "Publish branch" (or "Publish" with no remote), and a
+         Pull button would have nothing to pull from — so hide it, matching
+         GitHub Desktop, which shows only the publish affordance until then. -->
+    {#if hasUpstream}
+      <button
+        class="count-button"
+        onclick={handlePull}
+        disabled={isPulling}
+        title={behind > 0 ? `Pull ${behind} commit${behind === 1 ? '' : 's'} from remote` : 'Pull from remote'}
+      >
+        {#if isPulling}
+          <svg class="icon spinning" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+            <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" />
+            <polyline points="13.5,2 13.5,5 10.5,5" />
+          </svg>
+        {:else}
+          <svg class="icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="8" y1="3" x2="8" y2="12" />
+            <polyline points="4,8 8,12 12,8" />
+          </svg>
+        {/if}
+        <span>Pull</span>
+        {#if behind > 0}<span class="count-badge">{behind}</span>{/if}
+      </button>
+    {/if}
     <div class="split-button">
       <button
         class="count-button split-main"
@@ -322,9 +343,11 @@
         disabled={isPushing || isPublishing}
         title={noRemote
           ? 'Publish this repository to GitHub (Ctrl+P)'
-          : ahead > 0
-            ? `Push ${ahead} commit${ahead === 1 ? '' : 's'} to remote (Ctrl+P)`
-            : 'Push to remote (Ctrl+P)'}
+          : publishBranch
+            ? `Publish this branch to ${cachedRemote} (Ctrl+P)`
+            : ahead > 0
+              ? `Push ${ahead} commit${ahead === 1 ? '' : 's'} to remote (Ctrl+P)`
+              : 'Push to remote (Ctrl+P)'}
       >
         {#if isPushing || isPublishing}
           <svg class="icon spinning" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
@@ -337,14 +360,20 @@
             <line x1="8" y1="7.5" x2="8" y2="13" />
             <polyline points="6,9.5 8,7.5 10,9.5" />
           </svg>
+        {:else if publishBranch}
+          <svg class="icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="8" y1="3" x2="8" y2="10.5" />
+            <polyline points="5,6 8,3 11,6" />
+            <path d="M3.5 13h9" />
+          </svg>
         {:else}
           <svg class="icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <line x1="8" y1="4" x2="8" y2="13" />
             <polyline points="4,8 8,4 12,8" />
           </svg>
         {/if}
-        <span>{noRemote ? 'Publish' : 'Push'}</span>
-        {#if !noRemote && ahead > 0}<span class="count-badge">{ahead}</span>{/if}
+        <span>{noRemote ? 'Publish' : publishBranch ? 'Publish branch' : 'Push'}</span>
+        {#if !noRemote && !publishBranch && ahead > 0}<span class="count-badge">{ahead}</span>{/if}
       </button>
       <button
         class="split-chevron"
