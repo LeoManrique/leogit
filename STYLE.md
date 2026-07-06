@@ -116,7 +116,8 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 - Selected (active diff) row: `--bg-tertiary` background, 6px radius, no border. The selection state, not the staging state, gets visual emphasis.
 - Checkbox: native-feeling square, 14px, accent fill when checked. Mixed-state (some hunks staged) uses an em-dash glyph, not a "minus" pill.
 - **Nested repos & submodules** swap the status letter for a ↪ link glyph: blue `--status-blue` for an embedded repo (commits as a gitlink), muted `--text-muted` for a **dirty submodule** that can't be staged from the parent. The dirty submodule also mutes its filename and **disables its checkbox** (40% opacity, `not-allowed` cursor) with a tooltip explaining the change must be committed inside the submodule — the same "inactive but still selectable to view" treatment a read-only row gets. Its diff pane shows a centered "Submodule changes" message rather than a raw subproject-commit line.
-- **Renames** render `[from] → [to]` where both sides share the same middle-truncation (collapse the directory to `…`, always keep the filename) so a deep `from` path can't crowd the `to` out of view. The `from` side is fully muted (filename included); the `to` side is the normal filename treatment. Both flex to equal width.
+- **Path truncation prefers the filename.** When a row is too narrow, the muted directory shrinks to a trailing `…/` bridge but never below a first-letter `b…/` hint, so a nested file can't be mistaken for a root file; the bright filename middle-truncates only once the hint plus the full filename can't fit. Directory characters are never styled as filename or vice versa.
+- **Renames** render `[from] → [to]` where both sides share the same filename-first truncation so a deep `from` path can't crowd the `to` out of view. The `from` side is fully muted (filename included); the `to` side is the normal filename treatment. Both flex to equal width.
 
 ### Diff viewer
 

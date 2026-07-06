@@ -25,32 +25,49 @@
     return `${pre}…${post}`
   }
 
-  function truncatePath(p: string, length: number): string {
-    if (p.length <= length) return p
-    if (length <= 0) return ''
-    if (length === 1) return '…'
+  interface PathParts {
+    dir: string
+    name: string
+  }
+
+  /**
+   * Truncate a path into its muted directory part and bright filename part.
+   * The directory shrinks first, down to a trailing "…/" bridge — but never
+   * below a first-letter "b…/" hint, so a nested file can't be mistaken for
+   * a root file. Only once the hint plus the full filename can't fit does
+   * the filename itself middle-truncate. Building the parts here (instead of
+   * splitting a truncated string) keeps directory characters from ever being
+   * styled as filename or vice versa.
+   */
+  function truncatePathParts(p: string, length: number): PathParts {
     const lastSep = p.lastIndexOf('/')
-    if (lastSep === -1) return truncateMid(p, length)
-    const filenameLen = p.length - lastSep - 1
-    if (filenameLen + 2 > length) return truncateMid(p, length)
-    const pre = p.substring(0, length - filenameLen - 2)
-    const post = p.substring(lastSep)
-    return `${pre}…${post}`
-  }
-
-  function splitDisplay(displayed: string): { dir: string; name: string } {
-    const lastSep = displayed.lastIndexOf('/')
-    if (lastSep === -1) return { dir: '', name: displayed }
-    return {
-      dir: displayed.substring(0, lastSep + 1),
-      name: displayed.substring(lastSep + 1),
+    const dir = lastSep === -1 ? '' : p.substring(0, lastSep + 1)
+    const name = p.substring(lastSep + 1)
+    if (p.length <= length) return { dir, name }
+    if (length <= 0) return { dir: '', name: '' }
+    if (dir) {
+      if (name.length + 3 <= length) {
+        const keep = length - name.length - 2
+        return { dir: `${dir.substring(0, keep)}…/`, name }
+      }
+      // A dir short enough to fit within the hint's footprint shows whole.
+      const hint = dir.length <= 3 ? dir : `${dir[0]}…/`
+      if (length > hint.length) {
+        return { dir: hint, name: truncateMid(name, length - hint.length) }
+      }
+      // Trailing-slash paths (untracked directories) have no filename to keep.
+      if (!name) return { dir: '…', name: '' }
     }
+    return { dir: '', name: truncateMid(name, length) }
   }
 
-  const displayed = $derived(
-    displayLength === null ? path : truncatePath(path, displayLength),
-  )
-  const parts = $derived(splitDisplay(displayed))
+  function displayAt(length: number): string {
+    const { dir, name } = truncatePathParts(path, length)
+    return dir + name
+  }
+
+  const parts = $derived(truncatePathParts(path, displayLength ?? path.length))
+  const displayed = $derived(parts.dir + parts.name)
   const truncated = $derived(displayed.length < path.length)
 
   function measureWidth(text: string): number {
@@ -75,7 +92,7 @@
     let best = 1
     while (lo <= hi) {
       const mid = Math.floor((lo + hi) / 2)
-      const w = measureWidth(truncatePath(path, mid))
+      const w = measureWidth(displayAt(mid))
       if (w <= available) {
         best = mid
         lo = mid + 1
