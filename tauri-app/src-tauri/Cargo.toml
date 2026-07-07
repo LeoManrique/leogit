@@ -1,6 +1,6 @@
 [package]
 name = "leogit"
-version = "0.1.19"
+version = "0.1.20"
 description = "Visual Git client built with Tauri and Svelte"
 authors = ["Leonardo Manrique"]
 edition = "2021"
