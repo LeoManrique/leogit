@@ -324,8 +324,6 @@
            only confirms the in-sync state and never duplicates those numbers. -->
       {#if detached}
         <span class="detached" title="HEAD is not on any branch">DETACHED HEAD</span>
-      {:else if hasUpstream && ahead === 0 && behind === 0}
-        <span class="upstream-ok"><span class="sync-dot"></span>up to date</span>
       {/if}
       {#if $repoState.status.isMerging}
         <span class="merging">MERGING</span>
