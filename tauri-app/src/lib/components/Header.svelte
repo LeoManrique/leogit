@@ -539,21 +539,6 @@
     font-variant-numeric: tabular-nums;
   }
 
-  .upstream-ok {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    color: var(--text-muted);
-  }
-
-  .sync-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--status-green);
-    flex-shrink: 0;
-  }
-
   .merging {
     color: var(--status-yellow);
     font-weight: 500;
