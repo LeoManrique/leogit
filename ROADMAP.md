@@ -34,6 +34,8 @@ What's shipped lives in [DESIGN.md](DESIGN.md). This file tracks **what's next**
 
 ## What's next
 
+- [x] **Claude CLI failures surface their real error.** A non-zero exit with an empty stderr (the CLI puts API/auth errors in the stdout JSON envelope) used to show a bare "Claude CLI failed:". `claude_failure_message` now falls back stdout-envelope → stderr → stdout → exit status, so the message is never blank. Covered by unit tests plus an `#[ignore]`d fake-CLI e2e test in `commands::ai::tests`.
+- [ ] **Clippy pedantic backlog.** ~240 pre-existing pedantic warnings remain outside `ai.rs` (mostly `git.rs` at 156, then `diff.rs`, `config.rs`, `terminal.rs`, `gh.rs`, `highlight.rs`). `ai.rs` is clean; sweep the rest file-by-file.
 - [ ] **Brighten the line-selection dot.** The current `selection-dot` is too dim against `--bg-primary`; bump alpha or use `--border-active` outline even when unselected.
 - [ ] **AI generation must respect line-level selection.** Currently `getSelectedDiff` sends full file diffs for every selected file. It should use `diffApi.generatePatch(repoPath, fileDiff, selection)` per file so the AI only sees the lines actually selected. Requires propagating per-file `DiffSelection` (already in `repoState.diffSelection`) into the generate flow.
 - [ ] **Commit composer auto-resize on focus.** When the user focuses the message section, grow it temporarily so summary + description are both visible. Optionally allow manual resize via `Ctrl+Shift+Arrow`.

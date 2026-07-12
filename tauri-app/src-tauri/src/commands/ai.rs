@@ -41,12 +41,15 @@ fn build_prompt(diff: &str) -> String {
          - Write the description in third person and omit articles (\"a\", \"an\", \"the\")\n\
          - Return ONLY the JSON object, no markdown fences, no extra text\n\n\
          Git diff:\n\
-         ```diff\n{}\n```\n\n\
-         Generate the commit message as JSON:",
-        diff
+         ```diff\n{diff}\n```\n\n\
+         Generate the commit message as JSON:"
     )
 }
 
+/// # Errors
+/// Returns a human-readable message when the diff is empty or oversized, the
+/// provider is unknown or unreachable, or the provider's response can't be
+/// parsed as a commit message.
 #[tauri::command]
 pub async fn generate_commit_message(
     diff: String,
@@ -59,10 +62,13 @@ pub async fn generate_commit_message(
     match provider.as_str() {
         "claude" => generate_claude(&diff, &config).await,
         "ollama" => generate_ollama(&diff, &config).await,
-        _ => Err(format!("Unknown AI provider: {}", provider)),
+        _ => Err(format!("Unknown AI provider: {provider}")),
     }
 }
 
+/// # Errors
+/// Returns an error only for an unknown provider name; probe failures map to
+/// `Ok(false)` so the UI can gate features without surfacing raw errors.
 #[tauri::command]
 pub async fn check_provider_available(
     provider: String,
@@ -82,12 +88,11 @@ pub async fn check_provider_available(
             let base_url = config
                 .base_url
                 .unwrap_or_else(|| "http://localhost:11434".to_string());
-            let client = match reqwest::Client::builder()
+            let Ok(client) = reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
                 .build()
-            {
-                Ok(c) => c,
-                Err(_) => return Ok(false),
+            else {
+                return Ok(false);
             };
             match client
                 .get(format!("{}/api/tags", base_url.trim_end_matches('/')))
@@ -98,7 +103,7 @@ pub async fn check_provider_available(
                 Err(_) => Ok(false),
             }
         }
-        _ => Err(format!("Unknown AI provider: {}", provider)),
+        _ => Err(format!("Unknown AI provider: {provider}")),
     }
 }
 
@@ -151,17 +156,48 @@ async fn generate_claude(diff: &str, config: &AiProviderConfig) -> Result<Commit
     .await;
     let Ok(result) = timed else {
         writer.abort();
-        return Err("Claude CLI timed out".to_string());
+        return Err(format!("Claude CLI timed out after {DEFAULT_TIMEOUT_SECS}s"));
     };
     let out = result.map_err(|e| format!("Claude CLI error: {e}"))?;
     let _ = writer.await;
 
     if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("Claude CLI failed: {stderr}"));
+        return Err(claude_failure_message(&out));
     }
 
     parse_claude_envelope(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Build the error for a non-zero claude CLI exit. The CLI is inconsistent
+/// about where it reports failures: API and auth errors land in the stdout
+/// JSON envelope (`is_error` + `result`), crashes write to stderr, and a
+/// killed process may emit nothing at all — so try each in turn and fall back
+/// to the exit status rather than ever surfacing a blank error.
+fn claude_failure_message(out: &std::process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let detail = envelope_error_message(&stdout)
+        .or_else(|| non_empty_trimmed(&stderr))
+        .or_else(|| non_empty_trimmed(&stdout));
+    match detail {
+        Some(msg) => format!("Claude CLI failed: {}", truncate_error(&msg)),
+        None => format!("Claude CLI failed ({}) with no error output", out.status),
+    }
+}
+
+fn non_empty_trimmed(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// Cap error text shown in the UI; a Node stack trace can run to kilobytes
+/// and the useful part (the message) is at the top.
+fn truncate_error(msg: &str) -> String {
+    const MAX_ERROR_CHARS: usize = 1000;
+    match msg.char_indices().nth(MAX_ERROR_CHARS) {
+        Some((cut, _)) => format!("{}…", &msg[..cut]),
+        None => msg.to_string(),
+    }
 }
 
 /// Interpret the claude CLI's `--output-format json` envelope:
@@ -174,21 +210,49 @@ async fn generate_claude(diff: &str, config: &AiProviderConfig) -> Result<Commit
 /// the raw output when the text isn't the JSON envelope at all.
 fn parse_claude_envelope(stdout: &str) -> Result<CommitMessage, String> {
     if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(stdout) {
-        if matches!(
-            wrapper.get("is_error").and_then(serde_json::Value::as_bool),
-            Some(true)
-        ) {
-            let msg = wrapper
-                .get("result")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("Claude CLI reported an error");
-            return Err(msg.to_string());
+        if is_error_envelope(&wrapper) {
+            // Fall back to a placeholder rather than dropping through: on this
+            // exit-0 path there is no stderr to consult, and letting the raw
+            // envelope reach parse_commit_message_text would turn it into a
+            // bogus commit title.
+            let msg = envelope_message(&wrapper)
+                .unwrap_or_else(|| "Claude CLI reported an error".to_string());
+            return Err(truncate_error(&msg));
         }
         if let Some(inner) = wrapper.get("result").and_then(serde_json::Value::as_str) {
             return parse_commit_message_text(inner);
         }
     }
     parse_commit_message_text(stdout)
+}
+
+fn is_error_envelope(wrapper: &serde_json::Value) -> bool {
+    matches!(
+        wrapper.get("is_error").and_then(serde_json::Value::as_bool),
+        Some(true)
+    )
+}
+
+/// The envelope's `result` text, when it is a non-empty string.
+fn envelope_message(wrapper: &serde_json::Value) -> Option<String> {
+    wrapper
+        .get("result")
+        .and_then(serde_json::Value::as_str)
+        .and_then(non_empty_trimmed)
+}
+
+/// Extract the human-readable message from an `is_error` CLI envelope.
+/// `None` when the text isn't an error envelope — or when the envelope carries
+/// no usable message (empty/missing/non-string `result`), so the caller's
+/// stderr/stdout/exit-status fallbacks get their chance instead of being
+/// short-circuited by a blank or placeholder string.
+fn envelope_error_message(stdout: &str) -> Option<String> {
+    let wrapper = serde_json::from_str::<serde_json::Value>(stdout).ok()?;
+    if is_error_envelope(&wrapper) {
+        envelope_message(&wrapper)
+    } else {
+        None
+    }
 }
 
 async fn generate_ollama(diff: &str, config: &AiProviderConfig) -> Result<CommitMessage, String> {
@@ -221,10 +285,10 @@ async fn generate_ollama(diff: &str, config: &AiProviderConfig) -> Result<Commit
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
         .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
     let resp = client
-        .post(format!("{}/api/generate", base_url))
+        .post(format!("{base_url}/api/generate"))
         .json(&body)
         .send()
         .await
@@ -232,7 +296,7 @@ async fn generate_ollama(diff: &str, config: &AiProviderConfig) -> Result<Commit
             if e.is_timeout() {
                 "Ollama request timed out".to_string()
             } else {
-                format!("Failed to reach Ollama: {}", e)
+                format!("Failed to reach Ollama: {e}")
             }
         })?;
 
@@ -241,17 +305,16 @@ async fn generate_ollama(diff: &str, config: &AiProviderConfig) -> Result<Commit
         let text = resp.text().await.unwrap_or_default();
         if status.as_u16() == 404 {
             return Err(format!(
-                "model {:?} not found - run: ollama pull {}",
-                model, model
+                "model {model:?} not found - run: ollama pull {model}"
             ));
         }
-        return Err(format!("Ollama HTTP {}: {}", status, text));
+        return Err(format!("Ollama HTTP {status}: {text}"));
     }
 
     let json: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| format!("Failed to parse Ollama JSON: {}", e))?;
+        .map_err(|e| format!("Failed to parse Ollama JSON: {e}"))?;
 
     let text = json
         .get("response")
@@ -286,7 +349,7 @@ fn parse_commit_message_text(text: &str) -> Result<CommitMessage, String> {
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty())
             })
-            .map(|s| s.to_string());
+            .map(ToString::to_string);
         let description = ["description", "body", "details"]
             .iter()
             .find_map(|k| {
@@ -294,7 +357,7 @@ fn parse_commit_message_text(text: &str) -> Result<CommitMessage, String> {
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty())
             })
-            .map(|s| s.to_string())
+            .map(ToString::to_string)
             .unwrap_or_default();
 
         if let Some(t) = title {
@@ -351,5 +414,141 @@ mod tests {
         let msg = parse_claude_envelope(stdout).expect("raw commit json");
         assert_eq!(msg.title, "Fix parser");
         assert_eq!(msg.description, "Handle empty input");
+    }
+
+    #[cfg(unix)]
+    fn output(code: i32, stdout: &str, stderr: &str) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    // The regression from the UI: the CLI exits non-zero with its error in the
+    // stdout envelope and *nothing* on stderr, which used to surface as a bare
+    // "Claude CLI failed: ".
+    #[cfg(unix)]
+    #[test]
+    fn failure_message_reads_stdout_envelope_when_stderr_is_empty() {
+        let stdout = r#"{"type":"result","is_error":true,"result":"Invalid API key. Please run /login"}"#;
+        let msg = claude_failure_message(&output(1, stdout, ""));
+        assert_eq!(msg, "Claude CLI failed: Invalid API key. Please run /login");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failure_message_prefers_envelope_over_noisy_stderr() {
+        let stdout = r#"{"is_error":true,"result":"API Error: 401 Unauthorized"}"#;
+        let msg = claude_failure_message(&output(1, stdout, "(node) DeprecationWarning: …\n"));
+        assert_eq!(msg, "Claude CLI failed: API Error: 401 Unauthorized");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failure_message_uses_trimmed_stderr_then_raw_stdout() {
+        let msg = claude_failure_message(&output(1, "", "Error: something broke\n"));
+        assert_eq!(msg, "Claude CLI failed: Error: something broke");
+
+        let msg = claude_failure_message(&output(1, "plain text error", "  \n"));
+        assert_eq!(msg, "Claude CLI failed: plain text error");
+    }
+
+    // Whitespace-only output must not produce a blank error — fall back to the
+    // exit status so the user always sees *something* actionable.
+    #[cfg(unix)]
+    #[test]
+    fn failure_message_falls_back_to_exit_status() {
+        let msg = claude_failure_message(&output(3, " \n", ""));
+        assert!(
+            msg.contains("exit status: 3") && msg.contains("no error output"),
+            "should describe the exit status: {msg}"
+        );
+    }
+
+    // An error envelope whose `result` is empty or non-string must not
+    // short-circuit the fallback chain with a blank or placeholder message
+    // when the real error sits on stderr.
+    #[cfg(unix)]
+    #[test]
+    fn failure_message_skips_contentless_envelope_in_favor_of_stderr() {
+        let empty = r#"{"type":"result","is_error":true,"result":""}"#;
+        let msg = claude_failure_message(&output(1, empty, "Invalid API key\n"));
+        assert_eq!(msg, "Claude CLI failed: Invalid API key");
+
+        let non_string = r#"{"is_error":true,"result":null}"#;
+        let msg = claude_failure_message(&output(1, non_string, "Invalid API key\n"));
+        assert_eq!(msg, "Claude CLI failed: Invalid API key");
+    }
+
+    // On the exit-0 path the same contentless envelope has no stderr to fall
+    // back to: surface the placeholder, never a blank Err and never the raw
+    // envelope masquerading as a commit message.
+    #[test]
+    fn envelope_with_contentless_error_yields_placeholder_not_blank() {
+        for stdout in [
+            r#"{"type":"result","is_error":true,"result":""}"#,
+            r#"{"type":"result","is_error":true,"result":"  "}"#,
+            r#"{"type":"result","is_error":true}"#,
+            r#"{"type":"result","is_error":true,"result":{"nested":"shape"}}"#,
+        ] {
+            let err = parse_claude_envelope(stdout).expect_err("is_error must map to Err");
+            assert_eq!(err, "Claude CLI reported an error", "for envelope {stdout}");
+        }
+    }
+
+    // The 1000-char cap applies on the exit-0 is_error path too, not just the
+    // non-zero-exit path.
+    #[test]
+    fn exit_zero_envelope_error_is_truncated() {
+        let huge = "e".repeat(5000);
+        let stdout = format!(r#"{{"is_error":true,"result":"{huge}"}}"#);
+        let err = parse_claude_envelope(&stdout).expect_err("is_error must map to Err");
+        assert_eq!(err.chars().count(), 1001, "1000 chars plus ellipsis");
+    }
+
+    #[test]
+    fn long_errors_are_truncated_for_the_ui() {
+        let long = "x".repeat(5000);
+        let msg = truncate_error(&long);
+        assert_eq!(msg.chars().count(), 1001, "1000 chars plus ellipsis");
+        assert!(msg.ends_with('…'));
+        assert_eq!(truncate_error("short"), "short");
+    }
+
+    // The cap counts chars, not bytes: a multibyte message under the limit
+    // must come back untouched (no spurious ellipsis), and a long one must be
+    // cut at a char boundary without panicking.
+    #[test]
+    fn truncation_counts_chars_not_bytes() {
+        let short_multibyte = "é".repeat(600); // 600 chars, 1200 bytes
+        assert_eq!(truncate_error(&short_multibyte), short_multibyte);
+
+        let long_multibyte = "日".repeat(1500);
+        let msg = truncate_error(&long_multibyte);
+        assert_eq!(msg.chars().count(), 1001, "1000 chars plus ellipsis");
+        assert!(msg.ends_with('…'));
+    }
+
+    // Manual end-to-end check of the spawn → wait → failure-message path.
+    // Run with a fake failing `claude` first on PATH:
+    //   PATH="<dir with fake claude>:$PATH" cargo test --lib claude_e2e -- --ignored
+    #[tokio::test]
+    #[ignore = "requires a fake `claude` binary prepended to PATH"]
+    async fn claude_e2e_nonzero_exit_with_stdout_envelope_surfaces_real_error() {
+        let config = AiProviderConfig {
+            provider: "claude".to_string(),
+            model: None,
+            api_key: None,
+            base_url: None,
+        };
+        let err = generate_claude("fake diff", &config)
+            .await
+            .expect_err("fake CLI exits non-zero");
+        assert!(
+            err.contains("Invalid API key"),
+            "error should carry the envelope message, got: {err}"
+        );
     }
 }
