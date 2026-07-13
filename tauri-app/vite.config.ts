@@ -16,5 +16,12 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     minify: 'terser',
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [{ name: 'xterm', test: /node_modules[\\/]@xterm/ }],
+        },
+      },
+    },
   },
 })

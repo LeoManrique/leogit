@@ -11,8 +11,8 @@ Functional behavior lives in [DESIGN.md](DESIGN.md). Visual design language live
 | Single instance | `tauri-plugin-single-instance` 2.4 | Forwards a second `leogit <dir>` launch to the running window instead of duplicating it (see *Command-line repo opening*) |
 | Backend language | Rust 2021 | Async via tokio (`features = ["full"]`) |
 | Frontend framework | Svelte 5 (runes) | `$state`, `$derived`, `$effect`, `$props` |
-| Frontend bundler | Vite 8 | `terser` for minified release builds |
-| Type system | TypeScript 5.9 strict | `$lib/*` alias points at `src/lib/*` |
+| Frontend bundler | Vite 8 (rolldown) | `terser` for minified release builds; `@xterm/*` split into its own chunk (rolldown `codeSplitting` group) to keep every chunk under the 500 kB warning |
+| Type system | TypeScript 7 strict (native `tsc`) | `typescript` is npm-aliased to `@typescript/typescript6` — svelte-check/editors need the JS API until TS 7.1 ships the programmatic API. `$lib/*` alias points at `src/lib/*` |
 | Diff syntax | syntect 5.3 + two-face 0.5 (Rust) | Class-based output; theme colours live in `--syn-*` CSS variables |
 | Terminal UI | xterm.js 6 + FitAddon + WebLinksAddon | Black background, 12 px monospace |
 | PTY | `portable-pty` 0.9 | Spawns user `$SHELL`, falls back to `/bin/zsh` / `cmd.exe` |
@@ -336,6 +336,8 @@ just check           # pnpm svelte-check + cargo check
 just format          # prettier + cargo fmt
 just clean           # nuke dist/, target/, node_modules
 ```
+
+Inside `tauri-app`, `pnpm run check:native` runs the same tsconfig through the TypeScript 7 native compiler (`tsc --noEmit`, ~0.2 s full check) for fast feedback on `.ts` files; `pnpm check` (svelte-check, on the TS 6 JS line) stays authoritative because the native compiler doesn't see `.svelte` files. `src/vite-env.d.ts` (`vite/client` types) declares the CSS side-effect imports that TS 6/7's stricter resolution (TS2882) would otherwise reject.
 
 The Tauri dev command uses `beforeDevCommand: pnpm run dev:vite` (per `tauri.conf.json`) so the Vite dev server starts in-process. Release builds use `beforeBuildCommand: pnpm run build:frontend` which writes static assets to `tauri-app/dist`, then `frontendDist: "../dist"` points the bundle at them.
 
