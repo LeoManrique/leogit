@@ -1463,7 +1463,11 @@
         {#if terminalSessionId > 0}
           <div class="terminal-container">
             {#key `${$appState.repoPath}:${terminalSessionId}`}
-              <Terminal repoPath={$appState.repoPath} expanded={terminalExpanded} />
+              <Terminal
+                repoPath={$appState.repoPath}
+                expanded={terminalExpanded}
+                onExit={killTerminalSession}
+              />
             {/key}
           </div>
         {/if}

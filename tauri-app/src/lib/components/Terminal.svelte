@@ -7,7 +7,11 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event'
   import '@xterm/xterm/css/xterm.css'
 
-  let { repoPath, expanded = true }: { repoPath: string; expanded?: boolean } = $props()
+  let {
+    repoPath,
+    expanded = true,
+    onExit,
+  }: { repoPath: string; expanded?: boolean; onExit?: () => void } = $props()
 
   let container: HTMLDivElement | undefined = $state()
   let term: Terminal | null = null
@@ -87,8 +91,12 @@
       const u1 = await listen<string>(`terminal-output-${pid}`, (e) => {
         term?.write(e.payload)
       })
+      // The shell exited on its own (`exit`, Ctrl+D, or a crash). Null the pid
+      // first so unmount cleanup skips close_terminal — the backend already
+      // dropped the session before emitting — then let the parent tear down.
       const u2 = await listen(`terminal-closed-${pid}`, () => {
         pid = null
+        onExit?.()
       })
       unlisteners.push(u1, u2)
 
