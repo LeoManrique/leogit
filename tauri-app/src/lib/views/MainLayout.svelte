@@ -1333,7 +1333,7 @@
           <DiffViewer
             fileDiff={$repoState.activeFileDiff}
             selection={null}
-            repoPath={$appState.repoPath}
+            blobSource={{ kind: 'workingTree', repoPath: $appState.repoPath }}
             showSelection={false}
             syntaxHighlighting={$config?.syntax_highlighting ?? true}
             sideBySide={$config?.side_by_side_diff ?? false}
@@ -1384,7 +1384,13 @@
               <DiffViewer
                 fileDiff={$repoState.activeCommitFileDiff}
                 selection={null}
-                repoPath={$appState.repoPath}
+                blobSource={$repoState.activeCommit
+                  ? {
+                      kind: 'commit',
+                      repoPath: $appState.repoPath,
+                      sha: $repoState.activeCommit.sha,
+                    }
+                  : null}
                 showSelection={false}
                 syntaxHighlighting={$config?.syntax_highlighting ?? true}
                 sideBySide={$config?.side_by_side_diff ?? false}

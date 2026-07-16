@@ -853,6 +853,34 @@ pub fn get_commit_diff(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Blob reads
+// ---------------------------------------------------------------------------
+
+/// Read a file's full contents at `rev` (`git show <rev>:<path>`).
+///
+/// The syntax highlighter needs this: syntect is a stateful, line-sequential
+/// parser, so it must start at line 1 to know which context a given line sits
+/// in (e.g. inside a `<script lang="ts">` block). A diff only carries the lines
+/// that changed, which is never enough to establish that state.
+///
+/// `path` is repo-relative; git resolves `<rev>:<path>` from the repo root.
+/// Returns `Err` when the path doesn't exist at that rev (added/deleted files) —
+/// callers treat that as "no tokens for this side" rather than a failure.
+pub(crate) fn read_blob(repo_path: &str, rev: &str, path: &str) -> Result<String, String> {
+    let spec = format!("{rev}:{path}");
+    let bytes = run_git_raw(repo_path, &["show", &spec])?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Read a file's contents from the working tree. This is the `new` side of an
+/// uncommitted diff, which by definition has no rev to `git show`.
+pub(crate) fn read_working_tree_file(repo_path: &str, path: &str) -> Result<String, String> {
+    let full = Path::new(repo_path).join(path);
+    let bytes = std::fs::read(&full).map_err(|e| format!("read {}: {e}", full.display()))?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 #[tauri::command]
 pub fn get_selected_diff(repo_path: String, files: Vec<FileEntry>) -> Result<String, String> {
     if files.is_empty() {
@@ -3158,5 +3186,101 @@ mod tests {
         let head_again =
             run_git(&clone_path, &["symbolic-ref", "--short", "HEAD"]).expect("HEAD ref");
         assert_eq!(head_again, "feature");
+    }
+
+    /// `read_blob` must return the COMMITTED contents, not the working-tree
+    /// ones, while `read_working_tree_file` returns what's on disk. The syntax
+    /// highlighter relies on that split to tokenize a diff's old and new sides
+    /// independently.
+    #[test]
+    fn read_blob_returns_committed_contents_and_working_tree_returns_disk() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_repo(repo);
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+
+        fs::write(repo.join("a.txt"), "committed\n").expect("write");
+        commit(
+            repo_path.clone(),
+            "Add a.txt".to_string(),
+            vec![new_file("a.txt")],
+            None,
+        )
+        .expect("commit");
+
+        // Diverge the working tree from HEAD.
+        fs::write(repo.join("a.txt"), "modified\n").expect("rewrite");
+
+        assert_eq!(
+            read_blob(&repo_path, "HEAD", "a.txt").expect("read HEAD blob"),
+            "committed\n",
+            "read_blob must read the commit, not the working tree"
+        );
+        assert_eq!(
+            read_working_tree_file(&repo_path, "a.txt").expect("read disk"),
+            "modified\n",
+            "read_working_tree_file must read the working tree"
+        );
+    }
+
+    /// A path that doesn't exist at that rev (a newly added file) must Err
+    /// rather than panic — the highlighter falls back to "no tokens for the old
+    /// side" in that case.
+    #[test]
+    fn read_blob_errors_for_path_absent_at_rev() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_repo(repo);
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+
+        fs::write(repo.join("a.txt"), "one\n").expect("write");
+        commit(
+            repo_path.clone(),
+            "Add a.txt".to_string(),
+            vec![new_file("a.txt")],
+            None,
+        )
+        .expect("commit");
+
+        assert!(
+            read_blob(&repo_path, "HEAD", "never-existed.txt").is_err(),
+            "a path absent at the rev must Err, not panic"
+        );
+    }
+
+    /// Reading a blob from a parent rev (`<sha>^:<path>`) is how the commit-diff
+    /// view gets its old side. Verifies the rev-spec form works end to end.
+    #[test]
+    fn read_blob_reads_parent_revision() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_repo(repo);
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+
+        fs::write(repo.join("a.txt"), "v1\n").expect("write v1");
+        commit(
+            repo_path.clone(),
+            "v1".to_string(),
+            vec![new_file("a.txt")],
+            None,
+        )
+        .expect("commit v1");
+        fs::write(repo.join("a.txt"), "v2\n").expect("write v2");
+        commit(
+            repo_path.clone(),
+            "v2".to_string(),
+            vec![new_file("a.txt")],
+            None,
+        )
+        .expect("commit v2");
+
+        assert_eq!(
+            read_blob(&repo_path, "HEAD^", "a.txt").expect("read parent blob"),
+            "v1\n"
+        );
+        assert_eq!(
+            read_blob(&repo_path, "HEAD", "a.txt").expect("read head blob"),
+            "v2\n"
+        );
     }
 }

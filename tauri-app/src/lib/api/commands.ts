@@ -327,8 +327,24 @@ export interface Token {
 
 export type TokenLine = Token[]
 
+/**
+ * Where the highlighter should read the diff's old/new sides from. syntect is a
+ * stateful, line-sequential parser, so it has to read each side's full blob from
+ * line 1 — the diff's own lines never establish which context a line sits in
+ * (e.g. inside a `<script lang="ts">` block). Mirrors the two views that produce
+ * a diff; Rust owns the rev-spec details.
+ */
+export type BlobSource =
+  /** Uncommitted changes: old side is HEAD, new side is the working tree. */
+  | { kind: 'workingTree'; repoPath: string }
+  /** A committed diff: old side is the commit's first parent, new side the commit. */
+  | { kind: 'commit'; repoPath: string; sha: string }
+
 export const highlightApi = {
-  highlightDiff: (fileDiff: FileDiff) => invoke<TokenLine[]>('highlight_diff', { fileDiff }),
+  /** `source` omitted falls back to a diff-only parse, which is only correct
+   *  when the first hunk starts in the file's top-level context. */
+  highlightDiff: (fileDiff: FileDiff, source?: BlobSource | null) =>
+    invoke<TokenLine[]>('highlight_diff', { fileDiff, source: source ?? null }),
 }
 
 export const ghApi = {

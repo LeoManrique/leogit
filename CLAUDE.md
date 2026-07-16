@@ -35,3 +35,7 @@ For key features in both the frontend and backend, keep meaninful logs that will
 ## Prefer newer versions
 
 If we have to decide between downgrading or updating versions of packages or libraries because of an issue, always choose upgrading. Never downgrade them to fix an issue.
+
+## Visual testing
+
+Do not use screenshots for testing, ask to visually check the result of a change and wait for confirmation to consider it as complete.

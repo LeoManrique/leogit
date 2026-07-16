@@ -5,13 +5,17 @@
     DiffLine,
     TokenLine,
     TokenClassValue,
+    BlobSource,
   } from '$lib/api/commands'
   import { highlightApi, TokenClass } from '$lib/api/commands'
 
   interface Props {
     fileDiff: FileDiff | null
     selection: DiffSelection | null
-    repoPath: string
+    /** Lets the highlighter read each side's full blob so it can parse from
+     *  line 1. Without it, highlighting falls back to a diff-only parse that is
+     *  only correct when the first hunk starts in the file's top-level context. */
+    blobSource?: BlobSource | null
     showSelection?: boolean
     syntaxHighlighting?: boolean
     sideBySide?: boolean
@@ -29,6 +33,7 @@
   let {
     fileDiff = null,
     selection = null,
+    blobSource = null,
     showSelection = false,
     syntaxHighlighting = true,
     sideBySide = false,
@@ -199,10 +204,10 @@
   let lastFileDiff: FileDiff | null = null
   let lastSyntaxHighlighting: boolean | null = null
 
-  async function runHighlight(diff: FileDiff, reqId: number) {
+  async function runHighlight(diff: FileDiff, source: BlobSource | null, reqId: number) {
     if (reqId !== highlightReq) return
     try {
-      const tokens = await highlightApi.highlightDiff(diff)
+      const tokens = await highlightApi.highlightDiff(diff, source)
       if (reqId !== highlightReq) return
       highlightedHtml = buildHtml(diff, tokens)
     } catch (e) {
@@ -223,7 +228,10 @@
     }
     highlightedHtml = buildHtml(fd, null)
     if (!sh) return
-    const t = setTimeout(() => runHighlight(fd, myReq), HIGHLIGHT_DEBOUNCE_MS)
+    // Read `blobSource` only past the guard: the parent builds it inline, so a
+    // fresh object every status poll would otherwise retrigger this effect.
+    const src = blobSource
+    const t = setTimeout(() => runHighlight(fd, src, myReq), HIGHLIGHT_DEBOUNCE_MS)
     return () => clearTimeout(t)
   })
 
