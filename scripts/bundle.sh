@@ -2,8 +2,9 @@
 set -euo pipefail
 
 # Builds the LeoGit app bundle from the Tauri project for the host platform.
-#   macOS → tauri-app/src-tauri/target/release/bundle/macos/leogit.app
-#   Linux → tauri-app/src-tauri/target/release/bundle/appimage/*.AppImage
+#   macOS   → tauri-app/src-tauri/target/release/bundle/macos/leogit.app
+#   Linux   → tauri-app/src-tauri/target/release/bundle/appimage/*.AppImage
+#   Windows → tauri-app/src-tauri/target/release/bundle/nsis/*-setup.exe
 # Usage:  scripts/bundle.sh
 #   Version is read from tauri-app/src-tauri/tauri.conf.json and baked into
 #   the bundle at build time. To release a new version, use
@@ -23,13 +24,17 @@ APP_DIR="$PROJECT_ROOT/tauri-app"
 TAURI_CONF="$APP_DIR/src-tauri/tauri.conf.json"
 cd "$APP_DIR"
 
+# Host kernel drives the per-OS bundle target below. MSYS2/Git-Bash report
+# MINGW*/MSYS*, Cygwin reports CYGWIN* — all mean Windows.
+OS_KERNEL=$(uname -s)
+
 command -v pnpm >/dev/null 2>&1 || error "pnpm is not installed"
 command -v cargo >/dev/null 2>&1 \
   || error "cargo is not installed — install the Rust toolchain (Arch: sudo pacman -S rustup && rustup default stable)"
 
 # Linux AppImage builds link against WebKitGTK and need patchelf. Catch missing
 # system deps here with an actionable message instead of a cryptic build error.
-if [ "$(uname -s)" = "Linux" ]; then
+if [ "$OS_KERNEL" = "Linux" ]; then
   command -v patchelf >/dev/null 2>&1 \
     || warn "patchelf not found — AppImage bundling may fail (Arch: sudo pacman -S patchelf)"
   if command -v pkg-config >/dev/null 2>&1 && ! pkg-config --exists webkit2gtk-4.1; then
@@ -48,56 +53,81 @@ pnpm install --frozen-lockfile >/dev/null
 success "Dependencies installed"
 
 # beforeBuildCommand runs the Vite frontend build; tauri then bundles only the
-# artifact the release pipeline ships, skipping the .dmg/.deb that would
-# otherwise be wasted build time: macOS → app, Linux → appimage.
-if [ "$(uname -s)" = "Darwin" ]; then
-  BUNDLE_TARGET=app
-else
-  BUNDLE_TARGET=appimage
+# artifact the release pipeline ships, skipping the .dmg/.deb/.msi that would
+# otherwise be wasted build time: macOS → app, Linux → appimage, Windows → nsis.
+case "$OS_KERNEL" in
+  Darwin)
+    BUNDLE_TARGET=app
+    ;;
+  MINGW*|MSYS*|CYGWIN*)
+    # NSIS: a per-user installer (no admin) with a WebView2 bootstrapper. Tauri
+    # downloads the NSIS toolchain on first use; nothing else to install here.
+    BUNDLE_TARGET=nsis
+    # Tauri drops one <product>_<version>_<arch>-setup.exe into bundle/nsis per
+    # build and never prunes old ones. Wipe the dir first so the only installer
+    # left afterward is this build's — deploy_releases.sh globs it by version.
+    rm -rf "$APP_DIR/src-tauri/target/release/bundle/nsis"
+    ;;
+  Linux)
+    BUNDLE_TARGET=appimage
 
-  # linuxdeploy (the AppImage tooling Tauri downloads) needs two workarounds on
-  # current Linux. Set them here so release builds are reproducible:
-  #   NO_STRIP — linuxdeploy bundles an old `strip` that aborts on the
-  #     `.relr.dyn` section modern binutils emits ("unknown type [0x13]").
-  #   APPIMAGE_EXTRACT_AND_RUN — run linuxdeploy's nested plugin AppImages by
-  #     extracting rather than FUSE-mounting, which is flaky when nested.
-  export NO_STRIP=true
-  export APPIMAGE_EXTRACT_AND_RUN=1
+    # linuxdeploy (the AppImage tooling Tauri downloads) needs two workarounds on
+    # current Linux. Set them here so release builds are reproducible:
+    #   NO_STRIP — linuxdeploy bundles an old `strip` that aborts on the
+    #     `.relr.dyn` section modern binutils emits ("unknown type [0x13]").
+    #   APPIMAGE_EXTRACT_AND_RUN — run linuxdeploy's nested plugin AppImages by
+    #     extracting rather than FUSE-mounting, which is flaky when nested.
+    export NO_STRIP=true
+    export APPIMAGE_EXTRACT_AND_RUN=1
 
-  # The gtk plugin unconditionally copies gdk-pixbuf's loader dir (path from
-  # pkg-config). On current Arch that dir is gone — gdk-pixbuf has its loaders
-  # built in and librsvg dropped its pixbuf loader — so the copy aborts the
-  # plugin. An empty dir satisfies it; LeoGit only renders PNG icons.
-  PIXBUF_DIR=$(pkg-config --variable=gdk_pixbuf_binarydir gdk-pixbuf-2.0 2>/dev/null || true)
-  if [ -n "$PIXBUF_DIR" ] && [ ! -d "$PIXBUF_DIR" ]; then
-    error "gdk-pixbuf loader dir missing — linuxdeploy's gtk plugin needs it. Create it once (empty is fine):
+    # The gtk plugin unconditionally copies gdk-pixbuf's loader dir (path from
+    # pkg-config). On current Arch that dir is gone — gdk-pixbuf has its loaders
+    # built in and librsvg dropped its pixbuf loader — so the copy aborts the
+    # plugin. An empty dir satisfies it; LeoGit only renders PNG icons.
+    PIXBUF_DIR=$(pkg-config --variable=gdk_pixbuf_binarydir gdk-pixbuf-2.0 2>/dev/null || true)
+    if [ -n "$PIXBUF_DIR" ] && [ ! -d "$PIXBUF_DIR" ]; then
+      error "gdk-pixbuf loader dir missing — linuxdeploy's gtk plugin needs it. Create it once (empty is fine):
     sudo mkdir -p $PIXBUF_DIR/loaders
     gdk-pixbuf-query-loaders | sudo tee $PIXBUF_DIR/loaders.cache >/dev/null"
-  fi
-fi
+    fi
+    ;;
+  *)
+    error "Unsupported OS: $OS_KERNEL (LeoGit bundles on macOS, Linux, and Windows)"
+    ;;
+esac
 echo "==> Building Release configuration (this takes a while)"
 pnpm tauri build --bundles "$BUNDLE_TARGET" >/dev/null
 success "Built Release configuration"
 
-if [ "$(uname -s)" = "Darwin" ]; then
-  APP_PATH="$APP_DIR/src-tauri/target/release/bundle/macos/leogit.app"
-  [ -d "$APP_PATH" ] || error "tauri build did not produce $APP_PATH"
+case "$OS_KERNEL" in
+  Darwin)
+    APP_PATH="$APP_DIR/src-tauri/target/release/bundle/macos/leogit.app"
+    [ -d "$APP_PATH" ] || error "tauri build did not produce $APP_PATH"
 
-  # Ad-hoc sign. No Developer ID — users bypass Gatekeeper via xattr -cr
-  # (install.sh does this automatically) or right-click → Open on first launch.
-  # --force re-signs over Tauri's default signature.
-  if codesign --force --deep --sign - "$APP_PATH" 2>/dev/null; then
-    success "Ad-hoc signed"
-  else
-    warn "codesign failed (continuing — bundle still usable with xattr -cr)"
-  fi
+    # Ad-hoc sign. No Developer ID — users bypass Gatekeeper via xattr -cr
+    # (install.sh does this automatically) or right-click → Open on first launch.
+    # --force re-signs over Tauri's default signature.
+    if codesign --force --deep --sign - "$APP_PATH" 2>/dev/null; then
+      success "Ad-hoc signed"
+    else
+      warn "codesign failed (continuing — bundle still usable with xattr -cr)"
+    fi
 
-  codesign --verify --verbose=2 "$APP_PATH" >/dev/null 2>&1 || warn "codesign --verify failed"
+    codesign --verify --verbose=2 "$APP_PATH" >/dev/null 2>&1 || warn "codesign --verify failed"
 
-  success "Built $APP_PATH"
-else
-  # Linux AppImages are self-contained and need no signing.
-  APPIMAGE=$(ls "$APP_DIR/src-tauri/target/release/bundle/appimage/"*.AppImage 2>/dev/null | head -1 || true)
-  [ -n "$APPIMAGE" ] && [ -f "$APPIMAGE" ] || error "tauri build did not produce an AppImage"
-  success "Built $APPIMAGE"
-fi
+    success "Built $APP_PATH"
+    ;;
+  MINGW*|MSYS*|CYGWIN*)
+    # NSIS produces a self-contained, unsigned setup.exe. The bundle/nsis dir was
+    # wiped before the build, so the single *-setup.exe here is this version's.
+    SETUP=$(ls "$APP_DIR/src-tauri/target/release/bundle/nsis/"*-setup.exe 2>/dev/null | head -1 || true)
+    [ -n "$SETUP" ] && [ -f "$SETUP" ] || error "tauri build did not produce an NSIS installer"
+    success "Built $SETUP"
+    ;;
+  *)
+    # Linux AppImages are self-contained and need no signing.
+    APPIMAGE=$(ls "$APP_DIR/src-tauri/target/release/bundle/appimage/"*.AppImage 2>/dev/null | head -1 || true)
+    [ -n "$APPIMAGE" ] && [ -f "$APPIMAGE" ] || error "tauri build did not produce an AppImage"
+    success "Built $APPIMAGE"
+    ;;
+esac

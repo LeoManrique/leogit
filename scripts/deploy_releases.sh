@@ -8,9 +8,10 @@ set -euo pipefail
 #   4. Bundles the app via scripts/bundle.sh (drives pnpm tauri build)
 #   5. Packages and uploads to GitHub Releases
 #
-# Runs on macOS and Linux. Each platform builds and uploads its own artifact to
-# the shared GitHub Release: macOS ships a zipped .app, Linux ships an AppImage.
-# Run it once per platform to publish a complete release.
+# Runs on macOS, Linux, and Windows (via Git-Bash/MSYS2). Each platform builds
+# and uploads its own artifact to the shared GitHub Release: macOS ships a
+# zipped .app, Linux ships an AppImage, Windows ships an NSIS installer
+# (-setup.exe). Run it once per platform to publish a complete release.
 #
 # Usage: scripts/deploy_releases.sh [x.y.z]
 #   If a version is passed and it's higher than the current one, the script
@@ -48,9 +49,10 @@ read_version() {
 # bump, tagging, gh upload) is shared.
 OS_KERNEL=$(uname -s)
 case "$OS_KERNEL" in
-  Darwin) TARGET_OS="macOS"; ARTIFACT_EXT="zip" ;;
-  Linux)  TARGET_OS="linux"; ARTIFACT_EXT="AppImage" ;;
-  *)      error "Unsupported OS: $OS_KERNEL (LeoGit builds on macOS and Linux)" ;;
+  Darwin)               TARGET_OS="macOS";   ARTIFACT_EXT="zip" ;;
+  Linux)                TARGET_OS="linux";   ARTIFACT_EXT="AppImage" ;;
+  MINGW*|MSYS*|CYGWIN*) TARGET_OS="windows"; ARTIFACT_EXT="exe" ;;
+  *)                    error "Unsupported OS: $OS_KERNEL (LeoGit builds on macOS, Linux, and Windows)" ;;
 esac
 
 # ── Step 1: Validate prerequisites ──
@@ -136,11 +138,24 @@ else
 fi
 
 TAG="v$VERSION"
-ARCH=$(uname -m)
-case "$ARCH" in
-  arm64|aarch64) ARCH="arm64" ;;
-  x86_64)        ARCH="amd64" ;;
-esac
+if [ "$TARGET_OS" = "windows" ]; then
+  # On Windows the Tauri build targets rustc's host triple, which need not match
+  # the shell's reported arch — an x86_64 MSYS2/Git-Bash shell emulated on an
+  # ARM64 host still builds (and NSIS-packages) aarch64-pc-windows-msvc. Label
+  # the artifact by what actually gets built, not by `uname -m`.
+  RUST_HOST=$(rustc -vV | sed -n 's/^host: //p')
+  case "$RUST_HOST" in
+    aarch64-*) ARCH="arm64" ;;
+    x86_64-*)  ARCH="amd64" ;;
+    *)         error "Unsupported Windows build target: ${RUST_HOST:-unknown}" ;;
+  esac
+else
+  ARCH=$(uname -m)
+  case "$ARCH" in
+    arm64|aarch64) ARCH="arm64" ;;
+    x86_64)        ARCH="amd64" ;;
+  esac
+fi
 PLATFORM="$TARGET_OS-$ARCH"
 success "Version: $VERSION (tag: $TAG), platform: $PLATFORM"
 
@@ -162,26 +177,43 @@ step 4 "Bundling LeoGit"
 
 DIST_DIR="$PROJECT_ROOT/dist"
 mkdir -p "$DIST_DIR"
-ARTIFACT="LeoGit-$VERSION-$PLATFORM.$ARTIFACT_EXT"
+# macOS/Linux ship a single file with a plain extension; Windows ships an NSIS
+# installer, conventionally suffixed "-setup.exe".
+if [ "$TARGET_OS" = "windows" ]; then
+  ARTIFACT="LeoGit-$VERSION-$PLATFORM-setup.exe"
+else
+  ARTIFACT="LeoGit-$VERSION-$PLATFORM.$ARTIFACT_EXT"
+fi
 ARTIFACT_PATH="$DIST_DIR/$ARTIFACT"
 rm -f "$ARTIFACT_PATH"
 
-if [ "$TARGET_OS" = "macOS" ]; then
-  APP_PATH="$APP_DIR/src-tauri/target/release/bundle/macos/leogit.app"
-  [ -d "$APP_PATH" ] || error "Bundle script did not produce $APP_PATH"
-  # `ditto -c -k --keepParent` is the macOS-canonical way to zip an .app:
-  # preserves resource forks, xattrs, and symlinks (plain `zip` strips them and
-  # can produce a bundle that Finder refuses to open after extraction).
-  ditto -c -k --keepParent "$APP_PATH" "$ARTIFACT_PATH"
-else
-  # Tauri writes the AppImage under bundle/appimage/ with its own version/arch
-  # naming, so glob for it rather than reconstructing the filename. The AppImage
-  # is already a single self-contained executable — just copy it into dist/.
-  APPIMAGE=$(ls "$APP_DIR/src-tauri/target/release/bundle/appimage/"*.AppImage 2>/dev/null | head -1 || true)
-  [ -n "$APPIMAGE" ] && [ -f "$APPIMAGE" ] || error "Bundle script did not produce an AppImage"
-  cp "$APPIMAGE" "$ARTIFACT_PATH"
-  chmod +x "$ARTIFACT_PATH"
-fi
+case "$TARGET_OS" in
+  macOS)
+    APP_PATH="$APP_DIR/src-tauri/target/release/bundle/macos/leogit.app"
+    [ -d "$APP_PATH" ] || error "Bundle script did not produce $APP_PATH"
+    # `ditto -c -k --keepParent` is the macOS-canonical way to zip an .app:
+    # preserves resource forks, xattrs, and symlinks (plain `zip` strips them and
+    # can produce a bundle that Finder refuses to open after extraction).
+    ditto -c -k --keepParent "$APP_PATH" "$ARTIFACT_PATH"
+    ;;
+  windows)
+    # Tauri names the NSIS installer leogit_<version>_<arch>-setup.exe under
+    # bundle/nsis/. bundle.sh wiped stale installers first, but glob by version
+    # anyway so we never grab a leftover from an earlier version's build.
+    SETUP=$(ls "$APP_DIR/src-tauri/target/release/bundle/nsis/"*_"$VERSION"_*-setup.exe 2>/dev/null | head -1 || true)
+    [ -n "$SETUP" ] && [ -f "$SETUP" ] || error "Bundle script did not produce an NSIS installer for $VERSION"
+    cp "$SETUP" "$ARTIFACT_PATH"
+    ;;
+  *)
+    # Tauri writes the AppImage under bundle/appimage/ with its own version/arch
+    # naming, so glob for it rather than reconstructing the filename. The AppImage
+    # is already a single self-contained executable — just copy it into dist/.
+    APPIMAGE=$(ls "$APP_DIR/src-tauri/target/release/bundle/appimage/"*.AppImage 2>/dev/null | head -1 || true)
+    [ -n "$APPIMAGE" ] && [ -f "$APPIMAGE" ] || error "Bundle script did not produce an AppImage"
+    cp "$APPIMAGE" "$ARTIFACT_PATH"
+    chmod +x "$ARTIFACT_PATH"
+    ;;
+esac
 success "Packaged: $ARTIFACT ($(du -h "$ARTIFACT_PATH" | cut -f1))"
 
 # ── Step 5: Upload to GitHub Release ──
@@ -206,16 +238,19 @@ A fast, native Git client built with Tauri and Svelte.
 curl -fsSL https://raw.githubusercontent.com/$REPO/main/scripts/install.sh | bash
 \`\`\`
 
-The installer auto-detects your platform.
+The installer auto-detects your platform (macOS and Linux).
 
 **macOS** — or download \`LeoGit-$VERSION-macOS-*.zip\` below and drag \`leogit.app\` into \`/Applications\`. The bundle is ad-hoc signed, so on first launch right-click → Open (or run \`xattr -cr /Applications/leogit.app\` — the install script does this for you).
 
 **Linux** — or download \`LeoGit-$VERSION-linux-*.AppImage\` below, \`chmod +x\` it, and run. The install script also drops a launcher in your app menu.
 
+**Windows** — download \`LeoGit-$VERSION-windows-*-setup.exe\` below and run it. It installs per-user (no admin), adds a Start Menu shortcut, and pulls in the WebView2 runtime if it's missing.
+
 ### Requirements
 
 - macOS 14+ (Intel or Apple Silicon)
-- Linux (x86_64) with WebKitGTK 4.1 + FUSE 2 (Arch: \`sudo pacman -S webkit2gtk-4.1 fuse2\`)"
+- Linux (x86_64) with WebKitGTK 4.1 + FUSE 2 (Arch: \`sudo pacman -S webkit2gtk-4.1 fuse2\`)
+- Windows 10/11 (the installer bundles the WebView2 bootstrapper)"
 fi
 success "Uploaded $ARTIFACT to release $TAG"
 
