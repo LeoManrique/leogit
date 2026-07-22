@@ -74,6 +74,13 @@
     [TokenClass.Attribute]: 'syn-attribute',
     [TokenClass.Builtin]: 'syn-builtin',
     [TokenClass.Decorator]: 'syn-decorator',
+    [TokenClass.Heading]: 'syn-heading',
+    [TokenClass.Strong]: 'syn-strong',
+    [TokenClass.Emphasis]: 'syn-emphasis',
+    [TokenClass.Strikethrough]: 'syn-strike',
+    [TokenClass.Link]: 'syn-link',
+    [TokenClass.Raw]: 'syn-raw',
+    [TokenClass.Quote]: 'syn-quote',
   }
 
   function emitSpan(text: string, classes: string): string {

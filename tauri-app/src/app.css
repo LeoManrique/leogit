@@ -69,6 +69,10 @@
   --syn-attribute: #d2a8ff;
   --syn-builtin: #ffa657;
   --syn-decorator: #d2a8ff;
+  --syn-heading: #79c0ff;
+  --syn-link: #79c0ff;
+  --syn-raw: #a5d6ff;
+  --syn-quote: #8b949e;
 }
 
 :root[data-theme='light'] {
@@ -119,6 +123,10 @@
   --syn-attribute: #6f42c1;
   --syn-builtin: #e36209;
   --syn-decorator: #6f42c1;
+  --syn-heading: #005cc5;
+  --syn-link: #0366d6;
+  --syn-raw: #032f62;
+  --syn-quote: #6a737d;
 }
 
 /* Syntax class selectors — applied by DiffViewer's token renderer.
@@ -160,6 +168,35 @@
 }
 .syn-decorator {
   color: var(--syn-decorator);
+}
+
+/* Markup / prose classes — Markdown & friends. Bold/italic/strike carry their
+   own font styling so the diff reads the way the rendered document would; the
+   marker characters (`#`, `**`, `` ` ``) inherit the same class as their body. */
+.syn-heading {
+  color: var(--syn-heading);
+  font-weight: 600;
+}
+.syn-strong {
+  font-weight: 600;
+}
+.syn-emphasis {
+  font-style: italic;
+}
+.syn-strike {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+.syn-link {
+  color: var(--syn-link);
+  text-decoration: underline;
+}
+.syn-raw {
+  color: var(--syn-raw);
+}
+.syn-quote {
+  color: var(--syn-quote);
+  font-style: italic;
 }
 
 html,

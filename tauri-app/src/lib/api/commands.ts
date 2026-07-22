@@ -313,6 +313,14 @@ export const TokenClass = {
   Attribute: 12,
   Builtin: 13,
   Decorator: 14,
+  // Markup / prose classes (Markdown, reStructuredText, …).
+  Heading: 15,
+  Strong: 16,
+  Emphasis: 17,
+  Strikethrough: 18,
+  Link: 19,
+  Raw: 20,
+  Quote: 21,
 } as const
 
 export type TokenClassValue = (typeof TokenClass)[keyof typeof TokenClass]

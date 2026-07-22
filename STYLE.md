@@ -126,6 +126,7 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 - Hunk headers (`@@ -X,Y +A,B @@`): full-width subtle band at `--bg-secondary`, mono text in `--text-muted`. No accent color. One blank line of breathing room before each hunk.
 - Side-by-side mode: same row heights, same colors, just split. A single 1px vertical `--border-inactive` between panes.
 - Syntax highlighting: muted theme. The highlighter's accent should not compete with the add/remove background. Comments at ~`--text-muted` alpha, keywords at full `--text-primary`, strings/numbers slightly tinted but never saturated. The diff color is the primary signal; syntax is secondary.
+- Markdown / prose diffs lean on **weight and style, not saturation** — headings bold, bold/italic/strikethrough carry their real font styling, links underlined, blockquotes muted italic. Colors stay in the same restrained Primer range as code tokens (`--syn-heading`, `--syn-link`, `--syn-raw`, `--syn-quote`), so a `.md` diff reads like the rendered document without shouting over the add/remove tint.
 - Selected line (for line-level staging): `--cursor-bg` background overlaying the add/remove tint. Range selection: same tint extends contiguously.
 
 ### Commit list (History)

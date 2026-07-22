@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_repr::Serialize_repr;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::LazyLock;
-use syntect::parsing::{ParseState, Scope, ScopeStack, SyntaxReference, SyntaxSet};
+use syntect::parsing::{ParseState, Scope, ScopeStack, ScopeStackOp, SyntaxReference, SyntaxSet};
 
 /// Mirrors `MAX_INTRA_LINE_LEN` in diff.rs — skip tokenization for absurd lines
 /// (minified blobs) so the parser never burns time on them.
@@ -57,6 +57,15 @@ pub enum TokenClass {
     Attribute = 12,
     Builtin = 13,
     Decorator = 14,
+    // Markup / prose classes (Markdown, reStructuredText, AsciiDoc, …). Code
+    // languages never emit these; markup languages emit little else.
+    Heading = 15,
+    Strong = 16,
+    Emphasis = 17,
+    Strikethrough = 18,
+    Link = 19,
+    Raw = 20,
+    Quote = 21,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -211,6 +220,14 @@ fn highlight_from_blobs(
 /// recording is nearly free, so `wanted` bounds the returned payload rather
 /// than the work.
 ///
+/// For Markdown, a fenced code block is re-highlighted with its info-string
+/// language (see [`fence_role`] / [`resolve_fence_language`]). Markdown only
+/// *embeds* a fixed subset of languages — Rust/Python/JS get real scopes but
+/// Go/YAML/HTML come back as opaque `markup.raw.code-fence` — so relying on the
+/// grammar's embedding leaves half of all code blocks flat. Resolving the info
+/// string ourselves and running the language's own parser over the body covers
+/// every language uniformly.
+///
 /// Returns `None` for files past `MAX_HIGHLIGHT_FILE_LINES`.
 fn tokenize_file(
     syntax: &SyntaxReference,
@@ -222,8 +239,16 @@ fn tokenize_file(
         return None;
     }
 
+    // Only Markdown emits the code-fence scopes `fence_role` looks for, so the
+    // fence machinery is dead weight (and an extra per-line walk) for source
+    // files — gate it off for them.
+    let is_markdown = MARKDOWN_SCOPE.is_prefix_of(syntax.scope);
+
     let mut parse_state = ParseState::new(syntax);
     let mut scope_stack = ScopeStack::new();
+    // `Some` while inside a ```lang fence whose language resolved: the embedded
+    // language's own parser + scope stack, used to colour the body lines.
+    let mut fence: Option<(ParseState, ScopeStack)> = None;
     let mut out: HashMap<u32, TokenLine> = HashMap::with_capacity(wanted.len());
 
     for (idx, line) in text.lines().enumerate() {
@@ -239,7 +264,7 @@ fn tokenize_file(
         let mut input = line.to_string();
         input.push('\n');
 
-        let Ok(ops) = parse_state.parse_line(&input, &SYNTAX_SET) else {
+        let Ok(md_ops) = parse_state.parse_line(&input, &SYNTAX_SET) else {
             // Malformed line: keep the scope stack as-is and carry on, so one
             // bad line can't desync everything below it.
             continue;
@@ -247,17 +272,149 @@ fn tokenize_file(
 
         // Long lines are still parsed — the parser state below them depends on
         // it — but not recorded, matching `MAX_HIGHLIGHT_LINE_LEN`'s intent.
-        if wanted.contains(&line_no) && line.len() <= MAX_HIGHLIGHT_LINE_LEN {
-            out.insert(line_no, tokens_for_line(line, &ops, &mut scope_stack));
-        } else {
-            // Roll the scope stack forward without building tokens.
-            for (_, op) in &ops {
-                let _ = scope_stack.apply(op);
+        let record = wanted.contains(&line_no) && line.len() <= MAX_HIGHLIGHT_LINE_LEN;
+
+        if !is_markdown {
+            record_or_advance(record, line, &md_ops, &mut scope_stack, line_no, &mut out);
+            continue;
+        }
+
+        let role = fence_role(line, &md_ops, &scope_stack);
+
+        // A fenced body — fence active and this line is neither the opening nor
+        // closing marker — is coloured by the embedded language; the fence
+        // markers and all other lines by Markdown.
+        match (&role, fence.as_mut()) {
+            (FenceRole::None, Some((fence_parse, fence_stack))) => {
+                match fence_parse.parse_line(&input, &SYNTAX_SET) {
+                    Ok(lang_ops) => {
+                        record_or_advance(record, line, &lang_ops, fence_stack, line_no, &mut out);
+                    }
+                    // A bad body line shouldn't blank the row — fall back to plain.
+                    Err(_) if record => {
+                        out.insert(line_no, Vec::new());
+                    }
+                    Err(_) => {}
+                }
+                // Keep the Markdown parser advancing so it still finds the close.
+                for (_, op) in &md_ops {
+                    let _ = scope_stack.apply(op);
+                }
             }
+            _ => record_or_advance(record, line, &md_ops, &mut scope_stack, line_no, &mut out),
+        }
+
+        // Enter/leave the fence *after* its own ``` line is rendered as Markdown.
+        match role {
+            FenceRole::Open(Some(lang)) => {
+                if let Some(lang_syntax) = resolve_fence_language(&lang) {
+                    fence = Some((ParseState::new(lang_syntax), ScopeStack::new()));
+                }
+            }
+            FenceRole::Close => fence = None,
+            FenceRole::Open(None) | FenceRole::None => {}
         }
     }
 
     Some(out)
+}
+
+/// Record `line`'s tokens (from `ops`, against `stack`) when `record`, otherwise
+/// just roll `stack` forward — the two-arm shape both the Markdown and fenced
+/// paths share.
+fn record_or_advance(
+    record: bool,
+    line: &str,
+    ops: &[(usize, ScopeStackOp)],
+    stack: &mut ScopeStack,
+    line_no: u32,
+    out: &mut HashMap<u32, TokenLine>,
+) {
+    if record {
+        out.insert(line_no, tokens_for_line(line, ops, stack));
+    } else {
+        for (_, op) in ops {
+            let _ = stack.apply(op);
+        }
+    }
+}
+
+/// A Markdown line's role in a fenced code block, read from syntect's own scopes
+/// rather than a hand-rolled `CommonMark` fence scanner — the grammar already
+/// resolves indentation, tilde vs backtick fences, and nested fence lengths.
+enum FenceRole {
+    /// An opening code fence, carrying the info-string language when one is
+    /// present (`None` for a bare fence), so the caller can resolve it.
+    Open(Option<String>),
+    /// A closing fence.
+    Close,
+    /// Any other line (prose, or a fenced body).
+    None,
+}
+
+/// Scopes that mark a code fence. `meta.code-fence.definition.begin|end` sit on
+/// the fence markers; `constant.other.language-name` is the info string
+/// (`rust`, `go`, …); `text.html.markdown` gates the fence path to Markdown.
+static FENCE_BEGIN: LazyLock<Scope> =
+    LazyLock::new(|| Scope::new("meta.code-fence.definition.begin").expect("static scope"));
+static FENCE_END: LazyLock<Scope> =
+    LazyLock::new(|| Scope::new("meta.code-fence.definition.end").expect("static scope"));
+static FENCE_LANG: LazyLock<Scope> =
+    LazyLock::new(|| Scope::new("constant.other.language-name").expect("static scope"));
+static MARKDOWN_SCOPE: LazyLock<Scope> =
+    LazyLock::new(|| Scope::new("text.html.markdown").expect("static scope"));
+
+/// True when any scope on `stack` is under `key` (atom-wise prefix).
+fn stack_has(stack: &ScopeStack, key: &Scope) -> bool {
+    stack.scopes.iter().any(|s| key.is_prefix_of(*s))
+}
+
+/// Classify a Markdown line by replaying its parse `ops` over `stack_before`
+/// (the scope stack active at the line's start), watching for the fence marker
+/// scopes and capturing the info-string language token's text.
+fn fence_role(line: &str, ops: &[(usize, ScopeStackOp)], stack_before: &ScopeStack) -> FenceRole {
+    let mut stack = stack_before.clone();
+    let mut cursor = 0usize;
+    let mut is_begin = stack_has(&stack, &FENCE_BEGIN);
+    let mut is_end = stack_has(&stack, &FENCE_END);
+    let mut lang: Option<String> = None;
+
+    for (op_byte, op) in ops {
+        let end = (*op_byte).min(line.len());
+        if end > cursor {
+            // `stack` is the scope stack active for the segment `[cursor, end)`.
+            if lang.is_none() && stack_has(&stack, &FENCE_LANG) {
+                lang = Some(line[cursor..end].trim().to_string());
+            }
+            cursor = end;
+        }
+        let _ = stack.apply(op);
+        is_begin = is_begin || stack_has(&stack, &FENCE_BEGIN);
+        is_end = is_end || stack_has(&stack, &FENCE_END);
+    }
+    if lang.is_none() && cursor < line.len() && stack_has(&stack, &FENCE_LANG) {
+        lang = Some(line[cursor..].trim().to_string());
+    }
+
+    if is_end {
+        FenceRole::Close
+    } else if is_begin {
+        FenceRole::Open(lang)
+    } else {
+        FenceRole::None
+    }
+}
+
+/// Resolve a fence info string (`go`, `ts`, `c++`, …) to a syntax. Uses
+/// syntect's token lookup, which matches a language name OR file extension, so
+/// the usual GitHub aliases resolve. `None` (e.g. `mermaid`, `text`) leaves the
+/// body as plain text rather than mis-highlighting it.
+fn resolve_fence_language(info: &str) -> Option<&'static SyntaxReference> {
+    let token = info.trim();
+    if token.is_empty() {
+        return None;
+    }
+    SYNTAX_SET.find_syntax_by_token(token)
 }
 
 /// Legacy path: parse the diff's own lines with one shared `ParseState`.
@@ -411,6 +568,30 @@ static SCOPE_TABLE: LazyLock<Vec<(Scope, TokenClass)>> = LazyLock::new(|| {
         (s("entity.other.attribute-name"), TokenClass::Attribute),
         (s("entity.name.decorator"), TokenClass::Decorator),
         (s("meta.decorator"), TokenClass::Decorator),
+        // Markup / prose scopes. Markdown (and rST, AsciiDoc, Textile, …) tags
+        // its text with a `markup.*` family instead of the code scopes above, so
+        // without these every Markdown diff falls through to `Plain` and renders
+        // as flat text. Delimiters (`#`, `**`, `` ` ``) sit in `punctuation.*`
+        // ABOVE their `markup.*` container, so the leaf-first descent in
+        // `scope_to_class` colours them with the construct rather than leaving
+        // an uncoloured marker — the same rule that keeps `//` with its comment.
+        (s("markup.heading"), TokenClass::Heading),
+        (s("markup.bold"), TokenClass::Strong),
+        (s("markup.italic"), TokenClass::Emphasis),
+        (s("markup.strikethrough"), TokenClass::Strikethrough),
+        // Only *inline* code (`` `x` ``) takes the Raw tint. A fenced code
+        // BLOCK is `markup.raw.code-fence` / `markup.raw.block` and is left
+        // unmapped: `tokenize_file` re-highlights labelled fences with their own
+        // language, and an unlabelled/unknown fence should read as plain text,
+        // not a wall of one flat colour.
+        (s("markup.raw.inline"), TokenClass::Raw),
+        (s("markup.quote"), TokenClass::Quote),
+        // A link's URL is `markup.underline.link`; its bracketed text and the
+        // whole `[text](url)` / `![alt](url)` construct live under `meta.link` /
+        // `meta.image`, so colouring those keeps the construct visually whole.
+        (s("markup.underline.link"), TokenClass::Link),
+        (s("meta.link"), TokenClass::Link),
+        (s("meta.image"), TokenClass::Link),
         (s("variable"), TokenClass::Variable),
         (s("punctuation"), TokenClass::Punctuation),
     ]
@@ -830,6 +1011,105 @@ mod tests {
                 .iter()
                 .any(|(text, c)| text.contains(',') && matches!(c, TokenClass::Punctuation)),
             "a bare comma has no container and must stay Punctuation, got {classes:?}"
+        );
+    }
+
+    /// Markdown emits a `markup.*` scope family that has nothing to do with the
+    /// code scopes (`keyword`, `string`, …); before those scopes were mapped, a
+    /// `.md` diff came back entirely `Plain`. Each construct must now land on its
+    /// dedicated class, delimiters included.
+    #[test]
+    fn markdown_constructs_get_markup_classes() {
+        let has = |classes: &[(String, TokenClass)], want: TokenClass| {
+            classes.iter().any(|(_, c)| *c as u8 == want as u8)
+        };
+
+        // Heading — the `#` marker inherits the heading class, not Punctuation.
+        let h = classes_for("r.md", "# Title\n", 1);
+        assert!(has(&h, TokenClass::Heading), "heading not classified: {h:?}");
+        assert!(
+            h.iter()
+                .find(|(t, _)| t.contains('#'))
+                .is_some_and(|(_, c)| matches!(c, TokenClass::Heading)),
+            "the `#` marker must colour with the heading, got {h:?}"
+        );
+
+        // Inline emphasis and code on one line.
+        let p = classes_for("r.md", "a **b** _c_ `d` ~~e~~\n", 1);
+        assert!(has(&p, TokenClass::Strong), "bold missing: {p:?}");
+        assert!(has(&p, TokenClass::Emphasis), "italic missing: {p:?}");
+        assert!(has(&p, TokenClass::Raw), "inline code missing: {p:?}");
+        assert!(has(&p, TokenClass::Strikethrough), "strikethrough missing: {p:?}");
+
+        // A link: URL, bracketed text, and delimiters all read as Link.
+        let l = classes_for("r.md", "[text](http://example.com)\n", 1);
+        assert!(has(&l, TokenClass::Link), "link not classified: {l:?}");
+        assert!(
+            l.iter().all(|(_, c)| matches!(c, TokenClass::Link)),
+            "the whole link construct must be Link, got {l:?}"
+        );
+
+        // Blockquote.
+        let q = classes_for("r.md", "> quoted\n", 1);
+        assert!(has(&q, TokenClass::Quote), "blockquote not classified: {q:?}");
+    }
+
+    /// Fenced code blocks must highlight as their info-string language. Markdown
+    /// only *embeds* a subset of grammars, so `tokenize_file` resolves the info
+    /// string itself and re-tokenizes the body — this must hold for a language
+    /// Markdown does NOT embed (`go`) just as for one it does (`python`).
+    #[test]
+    fn markdown_fenced_code_block_highlights_by_info_string() {
+        let has = |classes: &[(String, TokenClass)], want: TokenClass| {
+            classes.iter().any(|(_, c)| *c as u8 == want as u8)
+        };
+
+        // Go — NOT embedded by markdown-gfm; the regression the screenshot showed
+        // (the whole block coming back one flat colour) lives here.
+        let go = "intro\n\n```go\nfunc main() { s := \"hi\" }\n```\n";
+        let code = classes_for("r.md", go, 4);
+        assert!(has(&code, TokenClass::Keyword), "`func` must be Keyword: {code:?}");
+        assert!(has(&code, TokenClass::String), "`\"hi\"` must be String: {code:?}");
+        assert!(
+            !code.iter().all(|(_, c)| matches!(c, TokenClass::Raw | TokenClass::Plain)),
+            "a Go fence must not be one flat Raw/Plain block, got {code:?}"
+        );
+
+        // Python — embedded; must still work through the same path.
+        let py = "intro\n\n```python\ndef f(): return 42  # note\n```\n";
+        let code = classes_for("r.md", py, 4);
+        assert!(has(&code, TokenClass::Keyword), "`def`/`return` must be Keyword: {code:?}");
+        assert!(has(&code, TokenClass::Number), "`42` must be Number: {code:?}");
+        assert!(has(&code, TokenClass::Comment), "`# note` must be Comment: {code:?}");
+
+        // The ``` fence markers themselves stay Markdown, not code.
+        let open = classes_for("r.md", go, 3);
+        assert!(
+            open.iter().any(|(t, _)| t.contains("```")),
+            "opening fence line must be present, got {open:?}"
+        );
+    }
+
+    /// An unlabelled or unknown fence has no language to apply, so its body must
+    /// read as plain text — NOT get painted with the inline-code `Raw` tint,
+    /// which is what turned a whole code block one flat colour before the
+    /// `markup.raw` → `markup.raw.inline` narrowing.
+    #[test]
+    fn markdown_unlabelled_fence_body_stays_plain() {
+        let src = "intro\n\n```\njust some text\n```\n";
+        let body = classes_for("r.md", src, 4);
+        assert!(
+            body.iter().all(|(_, c)| matches!(c, TokenClass::Plain)),
+            "an unlabelled fence body must be Plain, got {body:?}"
+        );
+
+        // A resolvable language name inside `mermaid`-like unknown info strings
+        // also degrades to plain rather than mis-highlighting.
+        let unknown = "intro\n\n```mermaid\ngraph TD; A-->B\n```\n";
+        let body = classes_for("r.md", unknown, 4);
+        assert!(
+            body.iter().all(|(_, c)| matches!(c, TokenClass::Plain)),
+            "an unknown-language fence body must be Plain, got {body:?}"
         );
     }
 
