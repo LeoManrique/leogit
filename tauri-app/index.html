@@ -1,5 +1,11 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<!--
+  autocorrect/autocapitalize/spellcheck are inheritable attributes: setting them
+  on the root disables macOS/WebKit autocorrect pills, inline predictions, and
+  spell squiggles for every descendant input, textarea, and contenteditable —
+  current and future — so individual fields never need to opt out.
+-->
+<html lang="en" data-theme="dark" autocorrect="off" autocapitalize="off" spellcheck="false">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />

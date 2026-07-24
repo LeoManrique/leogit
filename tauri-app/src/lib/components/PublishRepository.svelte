@@ -56,9 +56,6 @@
           type="text"
           bind:value={name}
           disabled={isPublishing}
-          spellcheck="false"
-          autocapitalize="off"
-          autocorrect="off"
           use:autofocus
         />
       </label>
