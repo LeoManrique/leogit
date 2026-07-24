@@ -29,6 +29,7 @@
     term = new Terminal({
       fontFamily: "ui-monospace, 'SF Mono', Menlo, Monaco, monospace",
       fontSize: 12,
+      fontWeight: 500,
       theme: {
         background: '#000000',
         foreground: '#e5e5e5',
