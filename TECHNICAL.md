@@ -32,7 +32,7 @@ leogit/
 │   │   ├── app.css                  # Theme tokens + base element styles
 │   │   └── lib/
 │   │       ├── api/commands.ts      # Typed wrappers over every Tauri command
-│   │       ├── actions/             # Svelte use: actions (autofocus)
+│   │       ├── actions/             # Svelte use: actions (autofocus, listNavigation)
 │   │       ├── stores/              # appState, repoState, config (Svelte writables)
 │   │       ├── components/          # Header, TabBar, FileList, CommitList,
 │   │       │                        # CommitMessage, DiffViewer, Terminal,
@@ -402,6 +402,8 @@ The frontend builds warning-free (`pnpm check` and `vite build` both report 0 a1
 - **`use:autofocus`, never the `autofocus` attribute.** The attribute is flagged (`a11y_autofocus`) and is unreliable for inputs that mount inside `{#if}` blocks. The [autofocus action](tauri-app/src/lib/actions/autofocus.ts) calls `node.focus()` on mount instead.
 - **Autocorrect is disabled once, at the root.** `<html>` in [index.html](tauri-app/index.html) carries `autocorrect="off" autocapitalize="off" spellcheck="false"`. All three are inheritable HTML attributes, so every descendant input/textarea/contenteditable inherits them — no field opts out individually, and WebKit's macOS autocorrect pills, inline predictions, and spell squiggles stay off app-wide. Only add these attributes to a specific field if it needs to *re-enable* the behavior.
 - **Keyboard shortcuts attach to the interactive field, not the container.** The commit composer's Cmd+Enter / Cmd+G handler lives on the summary `<input>` and description `<textarea>`, because Svelte treats `<div>` and `<form>` as non-interactive and warns on listeners attached to them. The container stays a plain `role="form"` landmark. Truly global shortcuts (Cmd+P push/publish in [Header](tauri-app/src/lib/components/Header.svelte), Cmd+R / Cmd+L in [MainLayout](tauri-app/src/lib/views/MainLayout.svelte)) bind a `window` `keydown` listener in `onMount` instead, so they fire regardless of focus.
+- **Searchable repo lists share one keyboard-nav helper.** The startup picker ([RepoPicker](tauri-app/src/lib/views/RepoPicker.svelte)), header switcher ([RepoDropdown](tauri-app/src/lib/views/RepoDropdown.svelte)), and Clone dialog ([CloneOverlay](tauri-app/src/lib/views/CloneOverlay.svelte)) all let you type-then-arrow: ↑/↓ move a keyboard cursor (`activeIndex`, reset to the top match whenever the query changes) and Enter picks the highlighted row (opens it, or in Clone sets the clone target). The two reusable pieces live in [listNavigation.ts](tauri-app/src/lib/actions/listNavigation.ts) — `nextActiveIndex()` (wrapping index math) and the `scrollIntoViewWhenActive` action (`block: 'nearest'`, so already-visible rows never jump). The active row shows a `--border-active` inset ring, distinct from hover/selected fills. MainLayout's global `keydown` never interferes because it early-returns when focus is in a field and only handles Escape + meta-combos.
+- **The Clone dialog list is one tab stop, not one-per-row.** Its repo rows are `role="option" tabindex="-1"` inside a `role="listbox" tabindex="0"` container, so Tab flows filter input → sort button → list → Local path → Browse → Cancel/Clone (rows are reached by arrows, not Tab). The filter input is a `role="combobox"` with `aria-controls`/`aria-activedescendant` pointing at the listbox and its active option, and `handleListKeyDown` is shared by the input and the listbox so arrows/Enter work from either.
 
 ## Notable invariants
 

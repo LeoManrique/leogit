@@ -2,6 +2,7 @@
   import { ghApi, gitApi, type GhRepo } from '$lib/api/commands'
   import { cloneSortMode, setCloneSortMode } from '$lib/stores/reposState'
   import { autofocus } from '$lib/actions/autofocus'
+  import { nextActiveIndex, scrollIntoViewWhenActive } from '$lib/actions/listNavigation'
   import { open } from '@tauri-apps/plugin-dialog'
   import { homeDir } from '@tauri-apps/api/path'
 
@@ -32,6 +33,9 @@
   let reposLoaded = $state(false)
   let ghFilter = $state('')
   let selectedRepo = $state<GhRepo | null>(null)
+  // Keyboard cursor over the filtered repo list (arrow keys move it, Enter
+  // picks it). Reset to the top match whenever the query changes below.
+  let activeIndex = $state(0)
 
   // URL tab state.
   let url = $state('')
@@ -79,6 +83,37 @@
         )
       : list.sort((a, b) => b.pushed_at.localeCompare(a.pushed_at))
   })
+
+  // A new query rebuilds the list; snap the highlight back to the top match.
+  $effect(() => {
+    ghFilter
+    activeIndex = 0
+  })
+
+  // The option the keyboard cursor points at, for aria-activedescendant on both
+  // the filter input and the list (so focus can sit on either).
+  const activeOptionId = $derived(
+    filteredRepos[activeIndex] ? `clone-repo-opt-${activeIndex}` : undefined,
+  )
+
+  // Arrow keys move the cursor; Enter picks the highlighted repo as the clone
+  // target (the destination path/Clone button take it from there). Shared by
+  // the filter input and the list, so it works whether focus sits on either.
+  function handleListKeyDown(e: KeyboardEvent) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      activeIndex = nextActiveIndex(activeIndex, filteredRepos.length, 1)
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      activeIndex = nextActiveIndex(activeIndex, filteredRepos.length, -1)
+    } else if (e.key === 'Enter') {
+      const repo = filteredRepos[activeIndex]
+      if (repo) {
+        e.preventDefault()
+        selectedRepo = repo
+      }
+    }
+  }
 
   /** Strip a trailing `.git`/slash and return the final path segment as a folder name. */
   function repoNameFromUrl(raw: string): string {
@@ -198,6 +233,11 @@
               class="text-input"
               placeholder="Filter your repositories…"
               bind:value={ghFilter}
+              onkeydown={handleListKeyDown}
+              role="combobox"
+              aria-expanded="true"
+              aria-controls="clone-repo-list"
+              aria-activedescendant={activeOptionId}
               use:autofocus
             />
             <button
@@ -228,7 +268,18 @@
               {/if}
             </button>
           </div>
-          <div class="repo-list">
+          <!-- One tab stop for the whole list (rows are tabindex=-1 below), so
+               Tab flows filter → sort → list → path → Browse → actions. Arrow
+               keys and Enter navigate it whether focus is here or in the filter. -->
+          <div
+            id="clone-repo-list"
+            class="repo-list"
+            role="listbox"
+            aria-label="Your repositories"
+            aria-activedescendant={activeOptionId}
+            tabindex="0"
+            onkeydown={handleListKeyDown}
+          >
             {#if reposLoading}
               <div class="list-note">Loading your repositories…</div>
             {:else if reposError}
@@ -239,11 +290,20 @@
             {:else if filteredRepos.length === 0}
               <div class="list-note">No repositories found.</div>
             {:else}
-              {#each filteredRepos as repo (repo.name_with_owner)}
+              {#each filteredRepos as repo, i (repo.name_with_owner)}
                 <button
+                  id="clone-repo-opt-{i}"
                   class="repo-row"
                   class:selected={selectedRepo?.name_with_owner === repo.name_with_owner}
-                  onclick={() => (selectedRepo = repo)}
+                  class:active={i === activeIndex}
+                  role="option"
+                  aria-selected={i === activeIndex}
+                  tabindex="-1"
+                  use:scrollIntoViewWhenActive={i === activeIndex}
+                  onclick={() => {
+                    selectedRepo = repo
+                    activeIndex = i
+                  }}
                 >
                   <span class="repo-nwo">{repo.name_with_owner}</span>
                   {#if repo.is_private}<span class="private-badge">Private</span>{/if}
@@ -468,6 +528,14 @@
     padding: 4px;
   }
 
+  /* Focus ring only when the list itself is tabbed to (not on mouse clicks,
+     which land on a row). Mirrors the text inputs' focus treatment. */
+  .repo-list:focus-visible {
+    outline: none;
+    border-color: var(--border-active);
+    box-shadow: 0 0 0 2px var(--cursor-bg);
+  }
+
   .list-note {
     padding: 16px 12px;
     text-align: center;
@@ -512,6 +580,12 @@
 
   .repo-row.selected {
     background: var(--bg-tertiary);
+  }
+
+  /* Keyboard cursor (arrow-key highlight). A ring, so it layers over the
+     .selected fill: fill = the repo that will be cloned, ring = the cursor. */
+  .repo-row.active {
+    box-shadow: inset 0 0 0 1.5px var(--border-active);
   }
 
   .repo-nwo {

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { autofocus } from '$lib/actions/autofocus'
+  import { nextActiveIndex, scrollIntoViewWhenActive } from '$lib/actions/listNavigation'
 
   interface Props {
     repos: string[]
@@ -31,13 +32,31 @@
     onSelect(repo)
   }
 
+  const filteredRepos = $derived(filterRepos(searchInput))
+
+  // Keyboard cursor over the filtered list; snaps back to the top match each
+  // time the query changes so Enter targets a sensible default.
+  let activeIndex = $state(0)
+  $effect(() => {
+    searchInput
+    activeIndex = 0
+  })
+
   function handleKeyDown(e: KeyboardEvent) {
     if (e.key === 'Escape') {
       searchInput = ''
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      activeIndex = nextActiveIndex(activeIndex, filteredRepos.length, 1)
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      activeIndex = nextActiveIndex(activeIndex, filteredRepos.length, -1)
+    } else if (e.key === 'Enter') {
+      e.preventDefault()
+      const repo = filteredRepos[activeIndex]
+      if (repo) handleSelect(repo)
     }
   }
-
-  const filteredRepos = $derived(filterRepos(searchInput))
 </script>
 
 <div class="repo-picker-overlay">
@@ -65,8 +84,13 @@
           {/if}
         </div>
       {:else}
-        {#each filteredRepos as repo (repo)}
-          <button class="repo-item" onclick={() => handleSelect(repo)}>
+        {#each filteredRepos as repo, i (repo)}
+          <button
+            class="repo-item"
+            class:active={i === activeIndex}
+            use:scrollIntoViewWhenActive={i === activeIndex}
+            onclick={() => handleSelect(repo)}
+          >
             <span class="repo-path">{repo}</span>
           </button>
         {/each}
@@ -160,6 +184,12 @@
 
   .repo-item:active {
     background: var(--bg-tertiary);
+  }
+
+  /* Keyboard cursor (arrow-key highlight); a ring so it reads as "focused"
+     and stays distinct from the hover fill. */
+  .repo-item.active {
+    box-shadow: inset 0 0 0 1.5px var(--border-active);
   }
 
   .repo-path {

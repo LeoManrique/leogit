@@ -6,6 +6,7 @@
   import type { RepoIdentifier } from '$lib/api/commands'
   import RepoTooltip from '$lib/components/RepoTooltip.svelte'
   import { autofocus } from '$lib/actions/autofocus'
+  import { nextActiveIndex, scrollIntoViewWhenActive } from '$lib/actions/listNavigation'
 
   interface Props {
     repos: string[]
@@ -124,10 +125,26 @@
     onSelect(repo)
   }
 
+  // Keyboard cursor over the filtered list. A new query rebuilds the list, so
+  // the highlight snaps back to the top match — Enter then targets a sensible
+  // default without any arrowing.
+  let activeIndex = $state(0)
+  $effect(() => {
+    filter
+    activeIndex = 0
+  })
+
   function handleKeyDown(e: KeyboardEvent) {
-    if (e.key === 'Enter' && filteredRepos.length > 0) {
+    if (e.key === 'ArrowDown') {
       e.preventDefault()
-      handleSelect(filteredRepos[0])
+      activeIndex = nextActiveIndex(activeIndex, filteredRepos.length, 1)
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      activeIndex = nextActiveIndex(activeIndex, filteredRepos.length, -1)
+    } else if (e.key === 'Enter') {
+      e.preventDefault()
+      const repo = filteredRepos[activeIndex]
+      if (repo) handleSelect(repo)
     }
   }
 
@@ -210,7 +227,7 @@
     {#if filteredRepos.length === 0}
       <div class="empty">No repositories</div>
     {:else}
-      {#each filteredRepos as repo (repo)}
+      {#each filteredRepos as repo, i (repo)}
         {@const id = $repoIdentifiers.get(repo)}
         {@const label = primaryLabel(repo, id)}
         {@const prefix = needsDisambiguation(label) && id ? `${id.owner}/` : ''}
@@ -219,6 +236,8 @@
         <button
           class="repo-item"
           class:current={isCurrent}
+          class:active={i === activeIndex}
+          use:scrollIntoViewWhenActive={i === activeIndex}
           onclick={() => handleSelect(repo)}
           onmouseenter={(e) => showTooltip(e, repo)}
           onmouseleave={hideTooltip}
@@ -364,6 +383,12 @@
 
   .repo-item.current {
     background: var(--bg-tertiary);
+  }
+
+  /* Keyboard cursor (arrow-key highlight). A ring rather than a fill so it
+     composes with the .current row's background and reads as "focused". */
+  .repo-item.active {
+    box-shadow: inset 0 0 0 1.5px var(--border-active);
   }
 
   .repo-name {
