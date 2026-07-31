@@ -4,27 +4,50 @@
   import { listen } from '@tauri-apps/api/event'
   import { appState } from '$lib/stores/app'
   import { refreshConfig } from '$lib/stores/config'
-  import { ghApi, gitApi, configApi, appApi } from '$lib/api/commands'
+  import { ghApi, gitApi, configApi, appApi, type LaunchTarget } from '$lib/api/commands'
   import { patchReposState, recordRecentRepo } from '$lib/stores/reposState'
   import { homeDir } from '@tauri-apps/api/path'
   import MainLayout from '$lib/views/MainLayout.svelte'
   import RepoPicker from '$lib/views/RepoPicker.svelte'
+  import InitRepoConfirm from '$lib/components/InitRepoConfirm.svelte'
 
   let unlistenOpenRepo: (() => void) | null = null
+
+  // `leogit <dir>` pointed at a folder that isn't a repository yet. The prompt
+  // lives here rather than in MainLayout because it isn't scoped to the open
+  // repo — it can appear over the picker, over another repo, or at first launch.
+  let initPath = $state<string | null>(null)
+  let isInitializing = $state(false)
+  let initError = $state('')
+
+  // Set while MainLayout is mounted so a repo opened from the prompt can reuse
+  // its live switch (which resets the view state) instead of racing it.
+  let mainLayout = $state<{ openExternalRepo: (path: string) => Promise<void> } | null>(null)
 
   onMount(() => {
     initializeApp()
     // Warm-start `leogit <dir>`: a second invocation focuses this window and
-    // emits `open-repo`. While in 'main', MainLayout owns the live switch (it
-    // must reset its own view state); here we only handle the pre-main phases.
-    listen<string>('open-repo', (e) => handleOpenRepoEvent(e.payload)).then((u) => {
+    // emits `open-repo`. While in 'main', MainLayout owns the live repo switch
+    // (it must reset its own view state); here we handle the pre-main phases —
+    // and, in every phase, a target that isn't a repository yet.
+    listen<LaunchTarget>('open-repo', (e) => handleLaunchTarget(e.payload)).then((u) => {
       unlistenOpenRepo = u
     })
     return () => unlistenOpenRepo?.()
   })
 
-  function handleOpenRepoEvent(path: string) {
-    if (!path || get(appState).phase === 'main') return
+  function handleLaunchTarget(target: LaunchTarget) {
+    if (!target?.path) return
+    if (!target.is_repo) {
+      promptInit(target.path)
+      return
+    }
+    if (get(appState).phase === 'main') return
+    enterRepo(target.path)
+  }
+
+  /** Switch the app into `main` on a repo, adding it if it wasn't discovered. */
+  function enterRepo(path: string) {
     appState.update((s) => ({
       ...s,
       phase: 'main',
@@ -33,6 +56,36 @@
     }))
     patchReposState({ last_opened_repo: path })
     recordRecentRepo(path)
+  }
+
+  function promptInit(path: string) {
+    console.log('[launch] not a repository, offering to create one:', path)
+    initError = ''
+    isInitializing = false
+    initPath = path
+  }
+
+  async function confirmInit() {
+    if (!initPath || isInitializing) return
+    isInitializing = true
+    initError = ''
+    try {
+      // Returns the path to open — the folder itself, or the enclosing repo if
+      // one appeared in the meantime.
+      const repoPath = await gitApi.initRepo(initPath)
+      initPath = null
+      // In 'main' the mounted MainLayout owns switching; otherwise nothing is
+      // showing a repo yet, so move the app into 'main' ourselves.
+      if (get(appState).phase === 'main' && mainLayout) {
+        await mainLayout.openExternalRepo(repoPath)
+      } else {
+        enterRepo(repoPath)
+      }
+    } catch (error) {
+      initError = String(error)
+    } finally {
+      isInitializing = false
+    }
   }
 
   async function initializeApp() {
@@ -61,15 +114,16 @@
       // A repo passed on the cold-start command line (`leogit <dir>`) wins over
       // the remembered/last-opened repo. It may live outside the scan paths, so
       // add it to the list even if discovery didn't surface it.
-      const launchRepo = await appApi.takePendingOpenRepo().catch(() => null)
-      if (launchRepo) {
-        console.log('[launch] opening repo from command line:', launchRepo)
-        const withLaunch = repos.includes(launchRepo) ? repos : [...repos, launchRepo]
-        appState.update((s) => ({ ...s, phase: 'main', repos: withLaunch, repoPath: launchRepo }))
-        patchReposState({ last_opened_repo: launchRepo })
-        recordRecentRepo(launchRepo)
+      const launchTarget = await appApi.takePendingLaunchTarget().catch(() => null)
+      if (launchTarget?.is_repo) {
+        console.log('[launch] opening repo from command line:', launchTarget.path)
+        appState.update((s) => ({ ...s, repos }))
+        enterRepo(launchTarget.path)
         return
       }
+      // Not a repository yet: prompt to create one, and keep resolving so the
+      // prompt lands over the picker (or the last repo) rather than a blank app.
+      if (launchTarget) promptInit(launchTarget.path)
 
       if (state.last_opened_repo && repos.includes(state.last_opened_repo)) {
         appState.update((s) => ({ ...s, phase: 'main', repos, repoPath: state.last_opened_repo! }))
@@ -109,7 +163,17 @@
 {:else if $appState.phase === 'repo-picker'}
   <RepoPicker repos={$appState.repos} onSelect={handleRepoSelect} />
 {:else if $appState.phase === 'main' && $appState.repoPath}
-  <MainLayout />
+  <MainLayout bind:this={mainLayout} />
+{/if}
+
+{#if initPath}
+  <InitRepoConfirm
+    path={initPath}
+    {isInitializing}
+    error={initError}
+    onConfirm={confirmInit}
+    onCancel={() => (initPath = null)}
+  />
 {/if}
 
 <style>

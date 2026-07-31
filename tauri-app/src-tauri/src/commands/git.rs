@@ -2424,9 +2424,72 @@ pub fn is_git_repo_path(path: &Path) -> bool {
     }
 }
 
+/// Absolute path of the git repository containing `path`, or `None` when the
+/// folder isn't in one.
+///
+/// Walks up the way git itself does, so `leogit src/` inside a repo resolves to
+/// the repo root instead of looking like an uninitialised folder. Falls back to
+/// the plain `.git` probe when the toplevel can't be read (a bare repo, or git
+/// missing from PATH) so we never mistake an existing repo for a fresh one and
+/// offer to `git init` on top of it. The result is canonicalized to match the
+/// paths `discover_repos` produces, so the two de-dupe against each other.
+#[must_use]
+pub fn repo_root(path: &Path) -> Option<String> {
+    let dir = path.to_string_lossy().into_owned();
+    if let Ok(out) = run_git(&dir, &["rev-parse", "--show-toplevel"]) {
+        let toplevel = out.trim();
+        if !toplevel.is_empty() {
+            let root = std::fs::canonicalize(toplevel).unwrap_or_else(|_| PathBuf::from(toplevel));
+            return Some(root.to_string_lossy().into_owned());
+        }
+    }
+    is_git_repo_path(path).then_some(dir)
+}
+
 #[tauri::command]
 pub fn is_git_repo(path: &str) -> bool {
     is_git_repo_path(Path::new(path))
+}
+
+/// `git init` a folder so it can be opened as a repository, returning the
+/// absolute path to open. Backs the "this folder isn't a repository yet" prompt
+/// raised by `leogit <dir>`.
+///
+/// Idempotent by design: a folder that already sits in a repo returns that
+/// repo's root instead of nesting a new one inside it, so confirming the prompt
+/// twice — or confirming after the user ran `git init` themselves in a terminal
+/// — opens the repo rather than failing.
+///
+/// # Errors
+/// When the folder can't be created or resolved (permissions, a file in the
+/// way), or when `git init` itself fails.
+#[tauri::command(async)]
+pub fn init_repo(path: &str) -> Result<String, String> {
+    let dir = expand_tilde(path);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Could not create \"{}\": {e}", dir.display()))?;
+    let canonical = std::fs::canonicalize(&dir)
+        .map_err(|e| format!("Could not resolve \"{}\": {e}", dir.display()))?;
+    if let Some(root) = repo_root(&canonical) {
+        return Ok(root);
+    }
+    let dir_str = canonical.to_string_lossy().into_owned();
+    // Git ≥2.28 prints a multi-line hint and falls back to `master` when
+    // `init.defaultBranch` is unset. Name the branch ourselves in that case so a
+    // fresh repo matches what GitHub and `gh` expect; a configured value wins.
+    let configured =
+        run_git(&dir_str, &["config", "--get", "init.defaultBranch"]).unwrap_or_default();
+    let args: &[&str] = if configured.trim().is_empty() {
+        &["-c", "init.defaultBranch=main", "init"]
+    } else {
+        &["init"]
+    };
+    let (ok, combined) = run_git_combined(&dir_str, args)?;
+    if !ok {
+        return Err(combined.trim().to_string());
+    }
+    eprintln!("[git] initialised repository at {dir_str}");
+    Ok(dir_str)
 }
 
 #[tauri::command]
@@ -2447,7 +2510,7 @@ mod tests {
     /// Initialise a throwaway repo with a committer identity. Local config
     /// disables commit signing so the tests don't depend on the developer's
     /// global git setup.
-    fn init_repo(dir: &Path) {
+    fn init_test_repo(dir: &Path) {
         let git = |args: &[&str]| {
             let ok = Command::new("git")
                 .current_dir(dir)
@@ -2483,6 +2546,101 @@ mod tests {
         }
     }
 
+    /// Canonicalize for comparison: macOS resolves /var and /tmp through
+    /// symlinks, so a tempdir's own path never equals what git reports back.
+    fn canonical(path: &Path) -> String {
+        fs::canonicalize(path)
+            .expect("canonicalize")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// A folder with no repo above it has no root — this is what makes the app
+    /// offer to initialise it rather than trying to open it.
+    #[test]
+    fn repo_root_is_none_outside_a_repository() {
+        let tmp = tempdir().expect("tempdir");
+        assert_eq!(repo_root(tmp.path()), None);
+    }
+
+    /// A subdirectory resolves to the repo root, so `leogit src/` opens the repo
+    /// instead of looking like a fresh folder and prompting to nest one inside.
+    #[test]
+    fn repo_root_walks_up_from_a_subdirectory() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_test_repo(repo);
+        let nested = repo.join("src/deep");
+        fs::create_dir_all(&nested).expect("create nested dirs");
+
+        assert_eq!(repo_root(repo), Some(canonical(repo)));
+        assert_eq!(repo_root(&nested), Some(canonical(repo)));
+    }
+
+    #[test]
+    fn init_repo_creates_a_repository_in_a_plain_folder() {
+        let tmp = tempdir().expect("tempdir");
+        let dir = tmp.path().join("project");
+        fs::create_dir(&dir).expect("create dir");
+        assert_eq!(repo_root(&dir), None);
+
+        let opened = init_repo(dir.to_str().expect("utf-8 path")).expect("init");
+
+        assert_eq!(opened, canonical(&dir));
+        assert_eq!(repo_root(&dir), Some(canonical(&dir)));
+    }
+
+    /// Missing folders are created rather than erroring, so the prompt still
+    /// works if the directory disappears between launch and confirmation.
+    #[test]
+    fn init_repo_creates_missing_folders() {
+        let tmp = tempdir().expect("tempdir");
+        let dir = tmp.path().join("a/b/c");
+
+        let opened = init_repo(dir.to_str().expect("utf-8 path")).expect("init");
+
+        assert_eq!(opened, canonical(&dir));
+        assert!(is_git_repo_path(&dir));
+    }
+
+    /// Confirming twice — or after the user ran `git init` themselves — opens the
+    /// existing repo instead of failing or nesting a second one inside it.
+    #[test]
+    fn init_repo_is_idempotent_and_never_nests() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_test_repo(repo);
+        let nested = repo.join("src");
+        fs::create_dir(&nested).expect("create nested dir");
+
+        let reopened = init_repo(repo.to_str().expect("utf-8 path")).expect("re-init");
+        let from_nested = init_repo(nested.to_str().expect("utf-8 path")).expect("init nested");
+
+        assert_eq!(reopened, canonical(repo));
+        assert_eq!(from_nested, canonical(repo));
+        assert!(!is_git_repo_path(&nested), "must not nest a repo in src/");
+    }
+
+    /// A fresh repo lands on `main`, not git's legacy `master` default.
+    #[test]
+    fn init_repo_names_the_default_branch() {
+        let tmp = tempdir().expect("tempdir");
+        let dir = tmp.path().join("project");
+        let path = dir.to_str().expect("utf-8 path");
+        init_repo(path).expect("init");
+
+        // A configured init.defaultBranch wins over ours, so only assert the
+        // fallback when the developer's git has none.
+        let configured = Command::new("git")
+            .args(["config", "--global", "--get", "init.defaultBranch"])
+            .output()
+            .expect("spawn git");
+        if String::from_utf8_lossy(&configured.stdout).trim().is_empty() {
+            let head = run_git(path, &["symbolic-ref", "--short", "HEAD"]).expect("read HEAD");
+            assert_eq!(head, "main");
+        }
+    }
+
     /// Regression: the first commit on a fresh repo (unborn HEAD) must succeed.
     /// It used to fail because the index reset ran `git reset HEAD`, which errors
     /// when HEAD doesn't exist yet. Also verifies the selective-commit guarantee
@@ -2491,7 +2649,7 @@ mod tests {
     fn commit_succeeds_on_fresh_repo_and_only_commits_selected_files() {
         let tmp = tempdir().expect("tempdir");
         let repo = tmp.path();
-        init_repo(repo);
+        init_test_repo(repo);
         fs::write(repo.join("README.md"), "hello\n").expect("write README");
         fs::write(repo.join(".gitignore"), "node_modules\n").expect("write gitignore");
         let repo_path = repo.to_str().expect("utf-8 path").to_string();
@@ -2519,7 +2677,7 @@ mod tests {
     fn commits_embedded_repo_as_gitlink() {
         let tmp = tempdir().expect("tempdir");
         let outer = tmp.path();
-        init_repo(outer);
+        init_test_repo(outer);
         let outer_path = outer.to_str().expect("utf-8 path").to_string();
 
         // Born HEAD on the outer repo keeps the test focused on the gitlink path.
@@ -2535,7 +2693,7 @@ mod tests {
         // A nested repo with its own commit, so the gitlink has a target.
         let nested = outer.join("nested");
         fs::create_dir(&nested).expect("mkdir nested");
-        init_repo(&nested);
+        init_test_repo(&nested);
         fs::write(nested.join("inner.txt"), "inner\n").expect("write inner");
         let nested_path = nested.to_str().expect("utf-8 path").to_string();
         run_git(&nested_path, &["add", "inner.txt"]).expect("stage inner");
@@ -2608,7 +2766,7 @@ mod tests {
     #[test]
     fn get_log_returns_empty_on_fresh_repo() {
         let tmp = tempdir().expect("tempdir");
-        init_repo(tmp.path());
+        init_test_repo(tmp.path());
         let repo_path = tmp.path().to_str().expect("utf-8 path").to_string();
 
         let log = get_log(repo_path, default_log_opts())
@@ -2621,7 +2779,7 @@ mod tests {
     fn has_commits_and_log_reflect_first_commit() {
         let tmp = tempdir().expect("tempdir");
         let repo = tmp.path();
-        init_repo(repo);
+        init_test_repo(repo);
         let repo_path = repo.to_str().expect("utf-8 path").to_string();
 
         assert!(!has_commits(&repo_path), "fresh repo has no commits");
@@ -2650,7 +2808,7 @@ mod tests {
     fn diff_on_fresh_repo_shows_staged_file_as_added() {
         let tmp = tempdir().expect("tempdir");
         let repo = tmp.path();
-        init_repo(repo);
+        init_test_repo(repo);
         let repo_path = repo.to_str().expect("utf-8 path").to_string();
 
         fs::write(repo.join("README.md"), "hello\nworld\n").expect("write README");
@@ -2668,7 +2826,7 @@ mod tests {
     fn status_reports_has_remote() {
         let tmp = tempdir().expect("tempdir");
         let repo = tmp.path();
-        init_repo(repo);
+        init_test_repo(repo);
         let repo_path = repo.to_str().expect("utf-8 path").to_string();
 
         fs::write(repo.join("a.txt"), "x\n").expect("write file");
@@ -2705,7 +2863,7 @@ mod tests {
         let work = tmp.path().join("work");
         let remote = tmp.path().join("remote.git");
         fs::create_dir_all(&work).expect("mkdir work");
-        init_repo(&work);
+        init_test_repo(&work);
         let work_path = work.to_str().expect("utf-8 path").to_string();
 
         fs::write(work.join("a.txt"), "1\n").expect("write file");
@@ -2764,7 +2922,7 @@ mod tests {
         let work = tmp.path().join("work");
         let remote = tmp.path().join("remote.git");
         fs::create_dir_all(&work).expect("mkdir work");
-        init_repo(&work);
+        init_test_repo(&work);
         let work_path = work.to_str().expect("utf-8 path").to_string();
 
         // Base commit, published to origin so a remote-tracking ref exists.
@@ -2812,7 +2970,7 @@ mod tests {
     fn unpushed_shas_empty_without_a_remote() {
         let tmp = tempdir().expect("tempdir");
         let repo = tmp.path();
-        init_repo(repo);
+        init_test_repo(repo);
         let repo_path = repo.to_str().expect("utf-8 path").to_string();
 
         fs::write(repo.join("a.txt"), "1\n").expect("write file");
@@ -2839,7 +2997,7 @@ mod tests {
         let work = tmp.path().join("work");
         let remote = tmp.path().join("remote.git");
         fs::create_dir_all(&work).expect("mkdir work");
-        init_repo(&work);
+        init_test_repo(&work);
         let work_path = work.to_str().expect("utf-8 path").to_string();
 
         fs::write(work.join("a.txt"), "1\n").expect("write file");
@@ -2870,7 +3028,7 @@ mod tests {
     fn get_status_reports_branch_and_head_sha() {
         let tmp = tempdir().expect("tempdir");
         let repo = tmp.path();
-        init_repo(repo);
+        init_test_repo(repo);
         let repo_path = repo.to_str().expect("utf-8 path").to_string();
 
         fs::write(repo.join("a.txt"), "1\n").expect("write file");
@@ -2894,7 +3052,7 @@ mod tests {
     fn checkout_commit_detaches_then_branch_reattaches() {
         let tmp = tempdir().expect("tempdir");
         let repo = tmp.path();
-        init_repo(repo);
+        init_test_repo(repo);
         let repo_path = repo.to_str().expect("utf-8 path").to_string();
 
         // Two commits so there's an older one to detach onto.
@@ -2930,7 +3088,7 @@ mod tests {
     fn checkout_commit_fails_when_local_changes_would_be_overwritten() {
         let tmp = tempdir().expect("tempdir");
         let repo = tmp.path();
-        init_repo(repo);
+        init_test_repo(repo);
         let repo_path = repo.to_str().expect("utf-8 path").to_string();
 
         fs::write(repo.join("a.txt"), "v1\n").expect("write v1");
@@ -2992,7 +3150,7 @@ mod tests {
     fn head_paths_distinguishes_committed_from_new() {
         let tmp = tempdir().expect("tempdir");
         let repo = tmp.path();
-        init_repo(repo);
+        init_test_repo(repo);
         let repo_path = repo.to_str().expect("utf-8 path").to_string();
 
         fs::write(repo.join("tracked.txt"), "x\n").expect("write");
@@ -3017,7 +3175,7 @@ mod tests {
     #[test]
     fn head_paths_empty_on_unborn_head() {
         let tmp = tempdir().expect("tempdir");
-        init_repo(tmp.path());
+        init_test_repo(tmp.path());
         let repo_path = tmp.path().to_str().expect("utf-8 path").to_string();
         assert!(head_paths(&repo_path, &["whatever.txt".to_string()]).is_empty());
     }
@@ -3028,7 +3186,7 @@ mod tests {
     fn discard_reverts_a_modified_tracked_file() {
         let tmp = tempdir().expect("tempdir");
         let repo = tmp.path();
-        init_repo(repo);
+        init_test_repo(repo);
         let repo_path = repo.to_str().expect("utf-8 path").to_string();
 
         fs::write(repo.join("a.txt"), "v1\n").expect("write");
@@ -3057,7 +3215,7 @@ mod tests {
     fn discard_restores_a_deleted_tracked_file() {
         let tmp = tempdir().expect("tempdir");
         let repo = tmp.path();
-        init_repo(repo);
+        init_test_repo(repo);
         let repo_path = repo.to_str().expect("utf-8 path").to_string();
 
         fs::write(repo.join("a.txt"), "keep\n").expect("write");
@@ -3129,7 +3287,7 @@ mod tests {
         // Upstream repo with a `feature` branch the clone won't have locally.
         let upstream = tmp.path().join("upstream");
         fs::create_dir(&upstream).expect("mkdir upstream");
-        init_repo(&upstream);
+        init_test_repo(&upstream);
         let upstream_path = upstream.to_str().expect("utf-8 path").to_string();
         fs::write(upstream.join("README.md"), "hello\n").expect("write README");
         commit(
@@ -3196,7 +3354,7 @@ mod tests {
     fn read_blob_returns_committed_contents_and_working_tree_returns_disk() {
         let tmp = tempdir().expect("tempdir");
         let repo = tmp.path();
-        init_repo(repo);
+        init_test_repo(repo);
         let repo_path = repo.to_str().expect("utf-8 path").to_string();
 
         fs::write(repo.join("a.txt"), "committed\n").expect("write");
@@ -3230,7 +3388,7 @@ mod tests {
     fn read_blob_errors_for_path_absent_at_rev() {
         let tmp = tempdir().expect("tempdir");
         let repo = tmp.path();
-        init_repo(repo);
+        init_test_repo(repo);
         let repo_path = repo.to_str().expect("utf-8 path").to_string();
 
         fs::write(repo.join("a.txt"), "one\n").expect("write");
@@ -3254,7 +3412,7 @@ mod tests {
     fn read_blob_reads_parent_revision() {
         let tmp = tempdir().expect("tempdir");
         let repo = tmp.path();
-        init_repo(repo);
+        init_test_repo(repo);
         let repo_path = repo.to_str().expect("utf-8 path").to_string();
 
         fs::write(repo.join("a.txt"), "v1\n").expect("write v1");

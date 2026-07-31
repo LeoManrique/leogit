@@ -34,11 +34,11 @@ fn main() {
     fix_path_env();
 
     // Resolve a cold-start `leogit <dir>` path before the window exists; the
-    // frontend claims it on mount via `take_pending_open_repo`. Warm starts go
-    // through the single-instance callback below instead.
+    // frontend claims it on mount via `take_pending_launch_target`. Warm starts
+    // go through the single-instance callback below instead.
     let args: Vec<String> = std::env::args().collect();
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    launch::set_pending_open_repo(launch::resolve_repo_arg(&args, &cwd));
+    launch::set_pending_launch_target(launch::resolve_launch_target(&args, &cwd));
 
     tauri::Builder::default()
         // single-instance must be registered first (plugins run in registration
@@ -92,6 +92,7 @@ fn main() {
             git::count_commits_to_merge,
             git::discover_repos,
             git::is_git_repo,
+            git::init_repo,
             git::get_repo_name,
             git::clone_repo,
             git::get_last_commit_timestamp,
@@ -109,7 +110,7 @@ fn main() {
             terminal::write_terminal,
             terminal::resize_terminal,
             terminal::close_terminal,
-            launch::take_pending_open_repo,
+            launch::take_pending_launch_target,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

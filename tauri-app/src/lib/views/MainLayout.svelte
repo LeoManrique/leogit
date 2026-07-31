@@ -19,6 +19,7 @@
     configApi,
     type FileEntry,
     type CommitInfo,
+    type LaunchTarget,
   } from '$lib/api/commands'
   import * as fileActions from '$lib/services/fileActions'
   import type { FileContextActions } from '$lib/services/fileActions'
@@ -973,11 +974,14 @@
   }
 
   // A `leogit <dir>` invocation reached the already-running app (forwarded by
-  // the single-instance plugin as an `open-repo` event). Make the repo
-  // selectable — it may live outside the scan paths — then switch to it.
-  // Re-running `leogit .` on the open repo is a no-op beyond the window focus
-  // the backend already did.
-  async function openExternalRepo(path: string) {
+  // the single-instance plugin as an `open-repo` event), or a folder was just
+  // initialised from App's prompt. Make the repo selectable — it may live
+  // outside the scan paths — then switch to it. Re-running `leogit .` on the
+  // open repo is a no-op beyond the window focus the backend already did.
+  //
+  // Exported so App can hand off a freshly created repo: only this component
+  // can reset the open repo's view state, and it is already mounted.
+  export async function openExternalRepo(path: string) {
     if (!path) return
     console.log('[launch] open-repo event — switching to:', path)
     if (!$appState.repos.includes(path)) {
@@ -1205,11 +1209,13 @@
   onMount(() => {
     initialize().catch(console.error)
     // Live `leogit <dir>` switches while the app is open (see openExternalRepo).
-    listen<string>('open-repo', (e) => openExternalRepo(e.payload).catch(console.error)).then(
-      (u) => {
-        unlistenOpenRepo = u
-      }
-    )
+    // A target that isn't a repository yet is App's to handle — it owns the
+    // "create a repository here?" prompt for every phase.
+    listen<LaunchTarget>('open-repo', (e) => {
+      if (e.payload?.is_repo) openExternalRepo(e.payload.path).catch(console.error)
+    }).then((u) => {
+      unlistenOpenRepo = u
+    })
     document.addEventListener('visibilitychange', handleVisibilityChange)
     window.addEventListener('focus', handleWindowFocus)
     document.addEventListener('focusin', handleFocusEvent)

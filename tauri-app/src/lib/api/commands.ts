@@ -186,12 +186,23 @@ export const configApi = {
   saveState: (state: ReposState) => invoke<void>('save_state', { state }),
 }
 
+/** Where a `leogit <dir>` invocation points. Payload of the `open-repo` event. */
+export interface LaunchTarget {
+  /** Absolute path — the repository root when `is_repo`, else the folder itself. */
+  path: string
+  /**
+   * False when the folder exists but isn't inside a git repository. The app
+   * offers to create one there rather than opening it.
+   */
+  is_repo: boolean
+}
+
 export const appApi = {
   /**
-   * Claim a repo path passed on a cold-start `leogit <dir>` command line (null
+   * Claim the folder passed on a cold-start `leogit <dir>` command line (null
    * for a bare launch). Warm starts arrive via the `open-repo` event instead.
    */
-  takePendingOpenRepo: () => invoke<string | null>('take_pending_open_repo'),
+  takePendingLaunchTarget: () => invoke<LaunchTarget | null>('take_pending_launch_target'),
 }
 
 export const gitApi = {
@@ -264,6 +275,11 @@ export const gitApi = {
   discoverRepos: (scanPaths: string[], maxDepth: number) =>
     invoke<string[]>('discover_repos', { scanPaths, maxDepth }),
   isGitRepo: (path: string) => invoke<boolean>('is_git_repo', { path }),
+  /**
+   * `git init` a folder so it can be opened, returning the path to open.
+   * Idempotent — a folder already inside a repo returns that repo's root.
+   */
+  initRepo: (path: string) => invoke<string>('init_repo', { path }),
   getRepoName: (path: string) => invoke<string>('get_repo_name', { path }),
   cloneRepo: (url: string, targetPath: string) => invoke<string>('clone_repo', { url, targetPath }),
   getLastCommitTimestamp: (repoPath: string) =>
