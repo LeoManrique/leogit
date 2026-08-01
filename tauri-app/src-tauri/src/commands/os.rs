@@ -1,7 +1,8 @@
-//! OS integration for the Changes-tab context menu: reveal a working-tree file
-//! in the platform file manager and open it with its default application.
+//! OS hand-off commands: reveal a working-tree file in the platform file
+//! manager, open it with its default application, and open an `https://` URL
+//! in the default browser.
 //!
-//! Both commands hand the file off to another program (Finder / Explorer /
+//! All three hand their argument off to another program (Finder / Explorer /
 //! `xdg-open` / the registered handler), so they're `async` (worker thread, no
 //! UI block) and bounded by [`process::run_timed`] — a wedged file manager or
 //! handler can't hang the app. The launchers are treated as fire-and-forget:
@@ -56,6 +57,51 @@ pub fn reveal_path(repo_path: String, rel_path: String) -> Result<(), String> {
     }
     process::hide_console(&mut cmd);
     launch(cmd, "reveal in file manager")
+}
+
+/// Open an `https://` URL in the user's default browser (e.g. the GitHub
+/// release page from the update chip).
+///
+/// The scheme allowlist plus the metacharacter rejection keep the argument
+/// inert for `cmd /c start` on Windows, whose parser treats `&`, `^`, `<`,
+/// `>`, `|` as syntax even inside an unquoted argument. Our own URLs are
+/// plain `https://github.com/...` paths, so the checks never bite in practice.
+///
+/// # Errors
+/// Returns `Err` for a non-`https` URL or one containing shell
+/// metacharacters, or if the browser launcher can't be spawned or doesn't
+/// return within the timeout.
+#[tauri::command(async)]
+pub fn open_url(url: String) -> Result<(), String> {
+    if !url.starts_with("https://") {
+        return Err(format!("refusing to open non-https URL: {url}"));
+    }
+    if url
+        .chars()
+        .any(|c| c.is_whitespace() || "&^<>|\"'`".contains(c))
+    {
+        return Err(format!("refusing to open URL with unsafe characters: {url}"));
+    }
+    let mut cmd;
+    #[cfg(target_os = "macos")]
+    {
+        cmd = Command::new("open");
+        cmd.arg(url);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Same `start` shape as `open_path` below — the empty "" is the
+        // window-title argument.
+        cmd = Command::new("cmd");
+        cmd.arg("/c").arg("start").arg("").arg(url);
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        cmd = Command::new("xdg-open");
+        cmd.arg(url);
+    }
+    process::hide_console(&mut cmd);
+    launch(cmd, "open URL in browser")
 }
 
 /// Open `rel_path` (relative to `repo_path`) with the OS's default application

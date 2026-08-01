@@ -29,6 +29,8 @@ curl -fsSL https://raw.githubusercontent.com/LeoManrique/leogit/main/scripts/ins
 
 Auto-detects your platform: installs `leogit.app` into `/Applications` on macOS, or the AppImage into `~/.local/bin` with an app-menu launcher on Linux (x86_64; needs WebKitGTK 4.1 + FUSE 2 — on Arch, `sudo pacman -S webkit2gtk-4.1 fuse2`). Or grab a `.zip` / `.AppImage` from the [latest release](https://github.com/LeoManrique/leogit/releases/latest).
 
+Re-run the same command to upgrade. leogit checks GitHub Releases at launch and, when a newer version exists, shows an **Update** chip in the header that hands you that command (or the installer download on Windows) — nothing downloads or restarts itself.
+
 The installer also adds a `leogit [dir]` shell command to your shell config (zsh / bash / fish auto-detected). Run `leogit` to open the current repo or `leogit <path>` for another — it focuses the running window and switches repos instead of opening a duplicate, and running it from a subfolder opens the repo that contains it. Point it at a folder that isn't under version control yet and it offers to `git init` there and open the result. Open a new terminal (or `source` your shell rc) after installing to pick it up.
 
 ## Quick start

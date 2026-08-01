@@ -6,6 +6,7 @@
   import { refreshConfig } from '$lib/stores/config'
   import { ghApi, gitApi, configApi, appApi, type LaunchTarget } from '$lib/api/commands'
   import { patchReposState, recordRecentRepo } from '$lib/stores/reposState'
+  import { updateChecker } from '$lib/services/updateChecker'
   import { homeDir } from '@tauri-apps/api/path'
   import MainLayout from '$lib/views/MainLayout.svelte'
   import RepoPicker from '$lib/views/RepoPicker.svelte'
@@ -26,6 +27,9 @@
 
   onMount(() => {
     initializeApp()
+    // Once-per-session release check — lives here, not in MainLayout, so it
+    // also runs while the app sits in the repo picker.
+    updateChecker.start()
     // Warm-start `leogit <dir>`: a second invocation focuses this window and
     // emits `open-repo`. While in 'main', MainLayout owns the live repo switch
     // (it must reset its own view state); here we handle the pre-main phases —
@@ -33,7 +37,10 @@
     listen<LaunchTarget>('open-repo', (e) => handleLaunchTarget(e.payload)).then((u) => {
       unlistenOpenRepo = u
     })
-    return () => unlistenOpenRepo?.()
+    return () => {
+      updateChecker.stop()
+      unlistenOpenRepo?.()
+    }
   })
 
   function handleLaunchTarget(target: LaunchTarget) {

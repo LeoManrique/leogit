@@ -304,9 +304,9 @@ export const gitApi = {
 }
 
 /**
- * OS-shell integration for working-tree files. Paths are repo-relative; the
- * backend joins them onto the repo path so a Windows backslash vs. git's
- * forward-slash mismatch never reaches the file system.
+ * OS hand-off commands. File paths are repo-relative; the backend joins them
+ * onto the repo path so a Windows backslash vs. git's forward-slash mismatch
+ * never reaches the file system.
  */
 export const osApi = {
   /** Reveal a file in the platform file manager (Finder / Explorer / file manager). */
@@ -314,6 +314,8 @@ export const osApi = {
     invoke<void>('reveal_path', { repoPath, relPath }),
   /** Open a file with the OS's default application for its type. */
   openPath: (repoPath: string, relPath: string) => invoke<void>('open_path', { repoPath, relPath }),
+  /** Open an https:// URL in the default browser. */
+  openUrl: (url: string) => invoke<void>('open_url', { url }),
 }
 
 export const diffApi = {
@@ -409,4 +411,21 @@ export const aiApi = {
     invoke<CommitMessage>('generate_commit_message', { diff, provider, config }),
   checkProviderAvailable: (provider: string, config: AiProviderConfig) =>
     invoke<boolean>('check_provider_available', { provider, config }),
+}
+
+/** A newer leogit release on GitHub, as reported by `check_for_update`. */
+export interface UpdateInfo {
+  /** Latest released version, without the leading `v`. */
+  version: string
+  /** The GitHub release page (download assets + notes). */
+  url: string
+  /** Terminal one-liner that upgrades in place; null on Windows, where the
+   * release-page download is the path instead. */
+  install_command: string | null
+}
+
+export const updateApi = {
+  /** Ask GitHub Releases for a version newer than this build; null when
+   * current. Rejects when the check itself fails, so callers can retry. */
+  checkForUpdate: () => invoke<UpdateInfo | null>('check_for_update'),
 }

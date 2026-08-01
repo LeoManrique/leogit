@@ -4,6 +4,8 @@ What's shipped lives in [DESIGN.md](DESIGN.md). This file tracks **what's next**
 
 ## Recently completed
 
+- [x] **In-app update check.** leogit knew how to *ship* releases but never told anyone one existed — users had to re-run `install.sh` on a hunch. Ported LeoSync's updater: one unauthenticated `releases/latest` request per launch, a three-part numeric compare against `CARGO_PKG_VERSION`, and a tinted header chip offering the `install.sh` one-liner (macOS/Linux, copied to the clipboard) or the release-page download (Windows) — see TECHNICAL.md → *In-app update check*. Deliberately not Tauri's updater plugin: that needs a signed release feed we don't have, and nothing here downloads or restarts anything. Failures are silent and retried; the check gates on the existing connectivity breaker but doesn't feed it, since a rate-limited GitHub API says nothing about git remotes. Needed a new `os::open_url` (a sibling of `open_path`, no opener plugin) with an https allowlist plus metacharacter rejection for Windows' `cmd /c start`. `LEOGIT_FAKE_UPDATE=<ver>` exercises the chip in debug builds without publishing a release. Covered by `version_compare_is_numeric_not_lexicographic`, `malformed_versions_compare_low_and_never_panic`, and `install_command_matches_platform`.
+
 - [x] **Dirty dot in the repo switcher.** Repo rows already showed `↓/↑` for pending pulls/pushes; now a small dot before them marks uncommitted changes, with the hard invariant "dot ⟺ that repo's Changes tab would list files". The old ahead/behind status call used `-uno`, which would have missed untracked-only repos — the mechanics of the `-unormal` swap and the record scan live in TECHNICAL.md → *Git status parsing*. The active repo's dot is fed from the 2 s poll's own file list rather than the background command, and the `repoSync` store's change-equality guard learned to compare the new field (it would otherwise silently swallow every dirty transition). An adversarial review of the invariant surfaced two freshness gaps, both fixed: offline/backoff used to skip background syncs entirely (right for fetches, wrong for a locally-computed dot — they now downgrade to fetch-less recomputes), and repos outside the ~19 tiered recents never got an entry at all (the dropdown now runs a fetch-less sweep of its visible rows). Covered by `repo_sync_status_dirty_matches_changes_tab`.
 
 - [x] **Live push/pull/clone progress + no more mid-transfer freezes.** Two symptoms from one big first push (11 939 objects): the window could stop responding while a transfer ran, and nothing showed how far along it was. The freeze was *not* the push itself (already `(async)`): ~35 commands — `get_status`, `get_head_sha`, `is_merging`, every diff/branch/merge/commit command — were plain `#[tauri::command]`, which Tauri runs **inline on the main thread**, so the 2 s poll spawned 4–6 git processes on the UI thread every tick; a push saturates the repo's disk with pack compression, those normally-instant calls turn slow, and the window stalls for the whole transfer. Every subprocess/filesystem command is now `(async)` (only the pure `format_commit_message` stays sync), the poll gained an in-flight guard, and the new [stores/networkOps.ts](tauri-app/src/lib/stores/networkOps.ts) pauses the poll / auto-fetch / refocus resync / tier scheduler while a user transfer runs — which also makes Push/Pull mutually exclusive. Progress: `process::run_timed_streaming` reads git's stderr incrementally (splitting on `\r` — git repaints its meter with bare carriage returns; unit-tested), [commands/progress.rs](tauri-app/src-tauri/src/commands/progress.rs) ports GitHub Desktop's step/weight parser (8 unit tests), and `push` / `pull` (which gained `--progress`) / `clone_repo` emit throttled `git-progress` events. The UI mirrors GitHub Desktop: the button label flips to `Pushing…`/`Pulling…`, a full-height fill wipes across the button tracking the aggregate percentage, git's raw progress line (`Writing objects:  53% (…), 19.06 MiB | 1.38 MiB/s`) renders in the header's status area, and URL-tab clones get a bar + line in the Clone dialog (GitHub-tab clones go through `gh`, which reports nothing).
@@ -101,7 +103,7 @@ What's shipped lives in [DESIGN.md](DESIGN.md). This file tracks **what's next**
 - [ ] "Open in WSL" entry on Windows for `\\wsl$\` repos.
 - [ ] Reveal in Finder / Show in Explorer from menus + context menus.
 - [ ] Custom window controls on Windows / Linux with full-screen / zoom-in / zoom-out / reset-zoom.
-- [ ] Auto-updater UI: Update Available banner, Installing Update view, Move-to-Applications prompt on macOS.
+- [ ] Installing-Update view + Move-to-Applications prompt on macOS (only meaningful once auto-update lands — the update *check* itself shipped, see Recently completed).
 - [ ] OS-no-longer-supported banner.
 - [ ] Accounts tab in Settings (sign in/out of dotcom and Enterprise; list signed-in accounts).
 - [ ] Integrations tab in Settings (editor + shell + custom-integration override).
@@ -119,7 +121,7 @@ What's shipped lives in [DESIGN.md](DESIGN.md). This file tracks **what's next**
 - [ ] "Show Keyboard Shortcuts" menu entry (richer than current Help overlay).
 - [ ] Show Logs / User Guides / Report Issue / Contact Support menu items.
 - [ ] Crash window (separate process) with friendly error + Report Issue when the renderer dies.
-- [ ] About dialog with version, architecture, check-for-updates, release-notes link.
+- [ ] About dialog with version, architecture, and a manual "check for updates" (the automatic check already ships — this would add the on-demand button and a release-notes link).
 - [ ] Release Notes dialog rendered from a JSON changelog, grouped New / Fixed / Improved.
 - [ ] Aria-live status region announcing async results ("Pulled 3 commits", "Force-push complete").
 - [ ] "Don't ask again" checkboxes on destructive confirms, backed by the Prompts preferences tab.
@@ -133,7 +135,7 @@ What's shipped lives in [DESIGN.md](DESIGN.md). This file tracks **what's next**
 - [ ] Resizable toolbar buttons (e.g. `Cmd-8/9` widens push/pull and branch dropdown).
 - [x] **Linux packaging + install.** `deploy_releases.sh` builds an AppImage and `install.sh` installs it to `~/.local/bin` with a `.desktop` launcher; macOS ships a zipped `.app`. One AppImage covers GNOME / COSMIC (same WebKitGTK runtime).
 - [ ] **App signing + notarization (macOS).** Configure in `src-tauri/tauri.conf.json` for distributable DMGs.
-- [ ] **Auto-update.** Tauri's updater plugin needs a signed release feed.
+- [ ] **Auto-update (download + apply in-app).** Tauri's updater plugin needs a signed release feed; today we only *detect* a new release and hand over the install command / download link.
 - [ ] **CI build matrix.** macOS / Linux / Windows on push.
 - [ ] **Crash reporting.** Opt-in only; route through a privacy-respecting endpoint.
 - [ ] **Release versioning.** Currently `0.0.1`. Bump to `0.1.0` once P0 items are clear and the PR view ships.

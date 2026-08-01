@@ -9,6 +9,7 @@ pub mod highlight;
 pub mod process;
 pub mod os;
 pub mod progress;
+pub mod update;
 
 pub use config::*;
 pub use git::*;
@@ -18,3 +19,4 @@ pub use ai::*;
 pub use terminal::*;
 pub use highlight::*;
 pub use os::*;
+pub use update::*;

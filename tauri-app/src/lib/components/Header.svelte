@@ -9,7 +9,8 @@
     beginNetworkOp,
     endNetworkOp,
   } from '$lib/stores/networkOps'
-  import { gitApi, ghApi, type GitProgressEvent } from '$lib/api/commands'
+  import { gitApi, ghApi, osApi, type GitProgressEvent } from '$lib/api/commands'
+  import { availableUpdate, updateDismissed } from '$lib/stores/update'
   import { ensureRepoIdentifiers, repoIdentifiers } from '$lib/stores/repoIdentifiers'
   import ContextMenu, { type ContextMenuItem } from './ContextMenu.svelte'
   import ForcePushConfirm from './ForcePushConfirm.svelte'
@@ -241,6 +242,49 @@
     pushMenu = { x: rect.right - 200, y: rect.bottom + 4 }
   }
 
+  // Update chip (a newer release exists). The chip opens a small menu: copy
+  // the terminal one-liner where the installer runs (macOS/Linux), or open
+  // the release page (Windows, and as release notes everywhere).
+  let updateMenu = $state<{ x: number; y: number } | null>(null)
+  // Transient "copied" confirmation shown on the chip itself after copying.
+  let updateCopied = $state(false)
+  let updateCopiedTimer: ReturnType<typeof setTimeout> | null = null
+
+  function openUpdateMenu(e: MouseEvent) {
+    e.preventDefault()
+    e.stopPropagation()
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    updateMenu = { x: rect.right - 200, y: rect.bottom + 4 }
+  }
+
+  async function copyInstallCommand(cmd: string) {
+    try {
+      await navigator.clipboard.writeText(cmd)
+      updateCopied = true
+      if (updateCopiedTimer) clearTimeout(updateCopiedTimer)
+      updateCopiedTimer = setTimeout(() => (updateCopied = false), 2500)
+    } catch (error) {
+      console.error('[update] clipboard write failed:', error)
+    }
+  }
+
+  const updateMenuItems = $derived.by<ContextMenuItem[]>(() => {
+    const info = $availableUpdate
+    if (!info) return []
+    const cmd = info.install_command
+    return [
+      cmd
+        ? { label: 'Copy update command', action: () => void copyInstallCommand(cmd) }
+        : { label: 'Download from GitHub', action: () => void osApi.openUrl(info.url) },
+      // With a command the release page is still worth a link (notes, assets);
+      // without one it IS the download item above, so don't repeat it.
+      ...(cmd
+        ? [{ label: 'View release on GitHub', action: () => void osApi.openUrl(info.url) }]
+        : []),
+      { label: 'Dismiss for this session', action: () => updateDismissed.set(true) },
+    ]
+  })
+
   // Cache the remote name passively so the confirm dialog has it ready.
   $effect(() => {
     const repoPath = $appState.repoPath
@@ -282,6 +326,7 @@
     return () => {
       window.removeEventListener('keydown', handleGlobalKeyDown)
       unlistenProgress?.()
+      if (updateCopiedTimer) clearTimeout(updateCopiedTimer)
     }
   })
 
@@ -370,6 +415,23 @@
   </div>
 
   <div class="right">
+    <!-- A newer release exists. Deliberately quiet — a small chip, dismissable
+         for the session, that never blocks or interrupts work. -->
+    {#if $availableUpdate && !$updateDismissed}
+      <button
+        class="update-chip"
+        onclick={openUpdateMenu}
+        title={$availableUpdate.install_command
+          ? `leogit v${$availableUpdate.version} is available — copy the update command`
+          : `leogit v${$availableUpdate.version} is available — download the installer`}
+      >
+        <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <line x1="8" y1="12.5" x2="8" y2="4" />
+          <polyline points="4.5,7.5 8,4 11.5,7.5" />
+        </svg>
+        <span>{updateCopied ? 'Copied — run it in a terminal' : `Update v${$availableUpdate.version}`}</span>
+      </button>
+    {/if}
     <!-- Pull only makes sense once the branch tracks a remote. Before that the
          primary button is "Publish branch" (or "Publish" with no remote), and a
          Pull button would have nothing to pull from — so hide it, matching
@@ -502,6 +564,15 @@
     path={$appState.repoPath}
     x={chipTooltip.x}
     y={chipTooltip.y}
+  />
+{/if}
+
+{#if updateMenu !== null}
+  <ContextMenu
+    x={updateMenu.x}
+    y={updateMenu.y}
+    items={updateMenuItems}
+    onClose={() => (updateMenu = null)}
   />
 {/if}
 
@@ -749,6 +820,26 @@
     border-radius: 999px;
     padding: 1px 6px;
     font-variant-numeric: tabular-nums;
+  }
+
+  /* Update availability is informational, not an action the user owes us — so
+     the chip is tinted rather than solid, sitting a step below Pull/Push in
+     the bar's visual hierarchy while still reading as "new". */
+  .update-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 9px;
+    color: var(--status-blue);
+    border-color: color-mix(in srgb, var(--status-blue) 40%, transparent);
+    background: color-mix(in srgb, var(--status-blue) 12%, transparent);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  .update-chip:hover:not(:disabled) {
+    color: var(--status-blue);
+    background: color-mix(in srgb, var(--status-blue) 20%, transparent);
   }
 
   .split-button {

@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use leogit_lib::commands::{ai, config, diff, gh, git, highlight, launch, os, terminal};
+use leogit_lib::commands::{ai, config, diff, gh, git, highlight, launch, os, terminal, update};
 
 // macOS/Linux apps launched from Finder/.desktop inherit a minimal PATH
 // (e.g. /usr/bin:/bin:/usr/sbin:/sbin) and miss user-installed binaries like
@@ -76,6 +76,8 @@ fn main() {
             git::append_to_gitignore,
             os::reveal_path,
             os::open_path,
+            os::open_url,
+            update::check_for_update,
             git::format_commit_message,
             git::repo_sync_status,
             git::fetch,
