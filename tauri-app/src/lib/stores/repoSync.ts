@@ -13,6 +13,10 @@ export interface SyncCounts {
   behind: number
   /** Repos with no remote can't be ahead/behind; the picker shows no badge. */
   hasRemote: boolean
+  /** Uncommitted working-tree changes — mirrors "Changes tab non-empty".
+   * For the active repo it IS `status.files.length > 0`, so the dot can
+   * never disagree with the tab the user is looking at. */
+  dirty: boolean
 }
 
 const cache = new Map<string, SyncCounts>()
@@ -27,7 +31,13 @@ function publish(): void {
 }
 
 function sameCounts(a: SyncCounts | undefined, b: SyncCounts): boolean {
-  return !!a && a.ahead === b.ahead && a.behind === b.behind && a.hasRemote === b.hasRemote
+  return (
+    !!a &&
+    a.ahead === b.ahead &&
+    a.behind === b.behind &&
+    a.hasRemote === b.hasRemote &&
+    a.dirty === b.dirty
+  )
 }
 
 /**
@@ -54,14 +64,15 @@ export function setRepoSync(path: string, counts: SyncCounts): void {
  */
 export async function syncRepo(path: string, doFetch: boolean, background = false): Promise<void> {
   if (inflight.has(path)) return
-  // Skip background fetches when offline / in a backoff window. The non-fetch
-  // recompute is local and harmless, but if we're not fetching there's nothing
-  // new to compute, so just bail.
-  if (doFetch && background && !shouldAttemptBackground()) return
+  // A background *fetch* is pointless while offline / in a backoff window —
+  // but the dirty flag is computed locally, so downgrade to a fetch-less
+  // recompute instead of bailing: the dot keeps tracking working trees that
+  // are edited while the network is down.
+  if (doFetch && background && !shouldAttemptBackground()) doFetch = false
   inflight.add(path)
   try {
     const s = await gitApi.repoSyncStatus(path, doFetch)
-    setRepoSync(path, { ahead: s.ahead, behind: s.behind, hasRemote: s.has_remote })
+    setRepoSync(path, { ahead: s.ahead, behind: s.behind, hasRemote: s.has_remote, dirty: s.dirty })
     // Only a real network attempt (fetch requested, remote exists) is a
     // connectivity signal; a no-remote repo says nothing about the link.
     if (doFetch && s.has_remote) recordResult(s.fetched)

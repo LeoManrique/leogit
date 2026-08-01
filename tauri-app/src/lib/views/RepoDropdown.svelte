@@ -2,6 +2,7 @@
   import { ensureRepoIdentifiers, repoIdentifiers } from '$lib/stores/repoIdentifiers'
   import { ensureRepoActivity, repoActivity } from '$lib/stores/repoActivity'
   import { repoSync } from '$lib/stores/repoSync'
+  import { repoSyncScheduler } from '$lib/services/repoSyncScheduler'
   import { repoSortMode, setRepoSortMode } from '$lib/stores/reposState'
   import type { RepoIdentifier } from '$lib/api/commands'
   import RepoTooltip from '$lib/components/RepoTooltip.svelte'
@@ -53,6 +54,9 @@
   $effect(() => {
     ensureRepoIdentifiers(repos)
     ensureRepoActivity(repos)
+    // Badges + dirty dot for rows the tiered scheduler never reaches: a
+    // fetch-less local sweep, run while the list is actually on screen.
+    void repoSyncScheduler.syncVisibleRepos(repos)
   })
 
   /** GitHub repo name when known, else folder basename. The primary row label. */
@@ -247,6 +251,11 @@
           <span class="repo-name">
             {#if prefix}<span class="repo-owner">{prefix}</span>{/if}{label}
           </span>
+          <!-- Dirty dot: uncommitted changes — shown exactly when that repo's
+               Changes tab would list at least one file. -->
+          {#if sync?.dirty}
+            <span class="dirty-dot" title="Uncommitted changes"></span>
+          {/if}
           <!-- Behind (pull / down arrow) then ahead (push / up arrow), matching
                the header's Pull/Push glyphs. Shown only when non-zero. -->
           {#if sync && sync.behind > 0}
@@ -438,6 +447,25 @@
   .repo-item:hover .sync-badge,
   .repo-item.current .sync-badge {
     color: var(--text-secondary);
+  }
+
+  /*
+    Dirty dot: uncommitted changes in that repo's working tree — the picker's
+    miniature of the Changes tab, shown iff the tab would list files. Same
+    muted-then-brighten treatment as the sync badges so a scan still reads
+    names first, indicators second.
+  */
+  .dirty-dot {
+    flex: 0 0 auto;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--text-muted);
+  }
+
+  .repo-item:hover .dirty-dot,
+  .repo-item.current .dirty-dot {
+    background: var(--text-secondary);
   }
 
 </style>

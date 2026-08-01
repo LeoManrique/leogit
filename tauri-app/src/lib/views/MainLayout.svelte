@@ -268,11 +268,14 @@
         }
       })
       // Keep the picker's badge for the active repo live off the same counts
-      // the 2s poll already computed — no extra fetch needed for the open repo.
+      // the 2s poll already computed — no extra fetch needed for the open
+      // repo. `dirty` comes straight from the file list the Changes tab
+      // renders, so for the visible repo dot and tab agree by construction.
       setRepoSync(repoPath, {
         ahead: status.ahead,
         behind: status.behind,
         hasRemote: status.has_remote,
+        dirty: status.files.length > 0,
       })
     } catch (error) {
       if (!opts.silent) {

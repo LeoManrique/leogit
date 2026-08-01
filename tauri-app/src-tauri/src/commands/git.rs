@@ -109,6 +109,11 @@ pub struct RepoSync {
     /// feeds this to its connectivity circuit breaker so a run of failed
     /// background fetches backs off instead of hammering an unreachable remote.
     pub fetched: bool,
+    /// Whether the working tree has uncommitted changes — i.e. whether the
+    /// Changes tab (`get_status`) would list at least one file. Drives the repo
+    /// picker's dirty dot; derived from the same porcelain records with the
+    /// same untracked/ignored semantics so the two can never disagree.
+    pub dirty: bool,
 }
 
 /// Full status payload returned by `get_status`.
@@ -1957,12 +1962,31 @@ pub fn format_commit_message(
 // Fetch / pull / push / ahead-behind / remote
 // ---------------------------------------------------------------------------
 
-/// Background sync for the repo picker's pull/push badges. Optionally fetches
-/// the repo's first remote (best-effort — network errors are swallowed so a
-/// stale-but-known ahead/behind still comes back), then computes the current
-/// branch's ahead/behind. Deliberately lighter than `get_status`: it skips the
-/// untracked-file scan (`-uno`) and never lists files, since the picker only
-/// needs the two counts for many repos at a time.
+/// Whether a porcelain-v2 record is a change entry that `get_status` would
+/// turn into a Changes-tab row: untracked (`? `), ordinary change (`1 `),
+/// rename/copy (`2 `), or unmerged (`u `). The UTF-8 check mirrors
+/// `get_status`, which skips records whose paths don't decode — the dot must
+/// skip them too or it would show on a repo whose Changes tab is empty.
+/// (One unreachable-on-macOS/Windows corner: a directory whose files *all*
+/// have non-UTF-8 names collapses under `-unormal` to a UTF-8 `dir/` record,
+/// so on Linux the dot could show where the tab, which enumerates and skips
+/// each file, stays empty.)
+fn is_change_record(record: &[u8]) -> bool {
+    (record.starts_with(b"? ")
+        || record.starts_with(b"1 ")
+        || record.starts_with(b"2 ")
+        || record.starts_with(b"u "))
+        && std::str::from_utf8(record).is_ok()
+}
+
+/// Background sync for the repo picker's pull/push badges and dirty dot.
+/// Optionally fetches the repo's first remote (best-effort — network errors
+/// are swallowed so a stale-but-known ahead/behind still comes back), then
+/// computes the current branch's ahead/behind and whether the working tree is
+/// dirty. Deliberately lighter than `get_status`: `-unormal` reports an
+/// untracked directory as one `dir/` record instead of enumerating its files
+/// (same emptiness answer as `get_status`'s `-uall`, cheaper walk), and no
+/// file list is built — the picker only needs counts and a yes/no per repo.
 #[tauri::command(async)]
 pub fn repo_sync_status(repo_path: String, do_fetch: bool) -> Result<RepoSync, String> {
     let remote = first_remote(&repo_path);
@@ -1996,15 +2020,18 @@ pub fn repo_sync_status(repo_path: String, do_fetch: bool) -> Result<RepoSync, S
         behind: 0,
         has_remote: remote.is_some(),
         fetched,
+        dirty: false,
     };
 
-    // Headers only: branch.head, branch.upstream, branch.ab. `-uno` skips the
-    // potentially expensive untracked-file walk we don't need here.
+    // Headers (branch.head, branch.upstream, branch.ab) plus change records
+    // for the dirty dot. `-unormal` collapses each untracked directory into a
+    // single `dir/` record — non-empty exactly when get_status's `-uall`
+    // output is — while skipping the per-file enumeration inside it.
     let bytes = run_git_raw(
         &repo_path,
         &[
             "status",
-            "--untracked-files=no",
+            "--untracked-files=normal",
             "--branch",
             "--porcelain=2",
             "-z",
@@ -2018,8 +2045,15 @@ pub fn repo_sync_status(repo_path: String, do_fetch: bool) -> Result<RepoSync, S
     let mut rest: &[u8] = &bytes;
     while let Some(sep) = rest.iter().position(|&b| b == b'\0') {
         let record = &rest[..sep];
+        rest = &rest[sep + 1..];
         if !record.starts_with(b"# ") {
-            break;
+            // Headers come first; everything after is change entries. One
+            // record get_status would list is all the dot needs — stop there.
+            if is_change_record(record) {
+                sync.dirty = true;
+                break;
+            }
+            continue;
         }
         let line_str = String::from_utf8_lossy(record);
         if let Some(rem) = line_str.strip_prefix("# branch.head ") {
@@ -2038,7 +2072,6 @@ pub fn repo_sync_status(repo_path: String, do_fetch: bool) -> Result<RepoSync, S
                 sync.behind = parts[1].trim_start_matches('-').parse().unwrap_or(0);
             }
         }
-        rest = &rest[sep + 1..];
     }
 
     // Same no-upstream fallback as get_status: a branch never `push -u`'d emits
@@ -3062,6 +3095,69 @@ mod tests {
         assert_eq!(sync.ahead, 1, "repo_sync_status must parse ahead from header");
         assert_eq!(sync.behind, 0);
         assert!(sync.has_remote);
+        assert!(!sync.dirty, "everything is committed — no dirty dot");
+    }
+
+    /// The repo picker's dirty dot must agree with the Changes tab: `dirty`
+    /// flips exactly when `get_status` would list at least one file. Covers
+    /// untracked files specifically — `-unormal` reports an untracked
+    /// directory as a single `dir/` record, which must still count — since a
+    /// `-uno` status call (what the ahead/behind parse used to run) misses
+    /// untracked-only repos entirely.
+    #[test]
+    fn repo_sync_status_dirty_matches_changes_tab() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_test_repo(repo);
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+
+        fs::write(repo.join("a.txt"), "1\n").expect("write file");
+        commit(
+            repo_path.clone(),
+            "first".to_string(),
+            vec![new_file("a.txt")],
+            None,
+        )
+        .expect("commit");
+
+        let clean = repo_sync_status(repo_path.clone(), false).expect("repo_sync_status");
+        assert!(!clean.dirty, "freshly committed repo is clean");
+        assert!(
+            get_status(repo_path.clone()).expect("get_status").files.is_empty(),
+            "Changes tab agrees: nothing listed"
+        );
+
+        // A directory containing only ignored files must NOT set dirty:
+        // `-unormal` emits no record for it, matching the empty Changes tab
+        // (pins the false-positive side of the collapse the dot relies on).
+        fs::write(repo.join(".gitignore"), "logs/\n").expect("write gitignore");
+        commit(
+            repo_path.clone(),
+            "ignore logs".to_string(),
+            vec![new_file(".gitignore")],
+            None,
+        )
+        .expect("commit gitignore");
+        fs::create_dir_all(repo.join("logs")).expect("mkdir logs");
+        fs::write(repo.join("logs/app.log"), "x\n").expect("write ignored file");
+        let ignored_only = repo_sync_status(repo_path.clone(), false).expect("repo_sync_status");
+        assert!(!ignored_only.dirty, "ignored-only dir must stay clean");
+
+        // Unstaged modification of a tracked file → dirty.
+        fs::write(repo.join("a.txt"), "2\n").expect("modify file");
+        let modified = repo_sync_status(repo_path.clone(), false).expect("repo_sync_status");
+        assert!(modified.dirty, "unstaged modification must set dirty");
+
+        // Discard it, then drop a file inside an untracked directory.
+        run_git(&repo_path, &["checkout", "--", "a.txt"]).expect("discard change");
+        fs::create_dir_all(repo.join("newdir")).expect("mkdir");
+        fs::write(repo.join("newdir/inner.txt"), "x\n").expect("write untracked");
+        let untracked = repo_sync_status(repo_path.clone(), false).expect("repo_sync_status");
+        assert!(untracked.dirty, "untracked dir must set dirty");
+        assert!(
+            !get_status(repo_path).expect("get_status").files.is_empty(),
+            "Changes tab agrees: it lists the untracked file"
+        );
     }
 
     /// Regression: on a branch with no upstream — cloned a base, branched off,

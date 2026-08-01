@@ -2,7 +2,7 @@ import { get } from 'svelte/store'
 import { appState } from '$lib/stores/app'
 import { recentRepos } from '$lib/stores/reposState'
 import { activeNetworkOp } from '$lib/stores/networkOps'
-import { syncRepo } from '$lib/stores/repoSync'
+import { repoSync, syncRepo } from '$lib/stores/repoSync'
 
 /**
  * Tiered background refresh of every repo's pull/push badge. The more recently
@@ -15,7 +15,9 @@ import { syncRepo } from '$lib/stores/repoSync'
  *   tier1  next 4   ("top 5")  → every 2 min  + on app refocus (throttled)
  *   tier2  next 5   ("top 10") → every 5 min
  *   tier3  next 10  ("top 20") → every 10 min
- *   rest                       → only when switched to (see syncOnSwitch)
+ *   rest                       → when switched to (see syncOnSwitch) and via
+ *                                the fetch-less sweep while the repo list is
+ *                                on screen (see syncVisibleRepos)
  *
  * On-switch sync lives in the caller (MainLayout) so every repo — including the
  * untiered tail — refreshes the moment you open it.
@@ -107,4 +109,28 @@ function syncOnSwitch(path: string): void {
   void syncRepo(path, true)
 }
 
-export const repoSyncScheduler = { start, stop, refocusSync, syncOnSwitch }
+// Full-list sweeps re-run at most once per window; rows with no cached entry
+// (which the tiers never cover) are always filled in regardless.
+const LIST_SWEEP_THROTTLE_MS = 30_000
+let lastListSweep = 0
+
+/** Fetch-less recompute of the repos currently shown in the repo list.
+ * The dropdown lists every discovered repo, but the tiers only keep the ~19
+ * most recent fresh — so when the list is actually on screen, sweep the rest
+ * (and, throttled, the whole list) with local `git status` recomputes. No
+ * network is involved, so this also works offline, where the tier fetches go
+ * quiet. Sequential like the tiers to keep the disk polite; dots and badges
+ * pop in row by row as results land. */
+async function syncVisibleRepos(repos: string[]): Promise<void> {
+  const active = get(appState).repoPath
+  const cached = get(repoSync)
+  const refreshAll = Date.now() - lastListSweep >= LIST_SWEEP_THROTTLE_MS
+  if (refreshAll) lastListSweep = Date.now()
+  const targets = repos.filter((p) => p !== active && (refreshAll || !cached.has(p)))
+  for (const repo of targets) {
+    if (get(activeNetworkOp)) return
+    await syncRepo(repo, false)
+  }
+}
+
+export const repoSyncScheduler = { start, stop, refocusSync, syncOnSwitch, syncVisibleRepos }

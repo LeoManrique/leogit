@@ -37,7 +37,8 @@ fn build_prompt(diff: &str) -> String {
          }}\n\n\
          Rules:\n\
          - The title MUST be 50 characters or less and use the imperative mood (e.g. \"Add\", \"Fix\", \"Update\")\n\
-         - The description should explain what changed and why, not how\n\
+         - The description should explain what changed and why, but keep it concise and high level\n\
+         - If multiple unrelated things have changed, divide them with bulletpoints\n\
          - Write the description in third person and omit articles (\"a\", \"an\", \"the\")\n\
          - Return ONLY the JSON object, no markdown fences, no extra text\n\n\
          Git diff:\n\

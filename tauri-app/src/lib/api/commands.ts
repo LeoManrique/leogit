@@ -88,6 +88,9 @@ export interface RepoSync {
   /** Whether a requested background fetch actually reached the remote (true
    * when none was requested / no remote). Feeds the connectivity breaker. */
   fetched: boolean
+  /** Whether the working tree has uncommitted changes (what the Changes tab
+   * would list). Drives the picker's dirty dot. */
+  dirty: boolean
 }
 
 export interface RepoIdentifier {
