@@ -587,43 +587,55 @@
     max-width: 200px;
   }
 
+  /* Takes exactly the space left over between the chips and the action
+     cluster (flex-basis 0), so however long the progress line gets it can
+     only truncate — it never squeezes the chips or the buttons. */
   .status-info {
     display: flex;
     gap: 10px;
     align-items: center;
     font-size: 11px;
     font-variant-numeric: tabular-nums;
+    flex: 1;
     min-width: 0;
     overflow: hidden;
   }
 
   /* Git's raw progress line during a push/pull — phase, counts, throughput,
      exactly as a terminal would show them. Mono keeps the numbers from
-     jittering; ellipsis keeps a long line from squeezing the chips. */
+     jittering; min-width lets flex shrink it so the ellipsis can kick in. */
   .net-progress {
     font-family: var(--font-mono);
     color: var(--text-muted);
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
+  /* State badges keep their full width — the progress line is the only
+     status-info child allowed to give way. */
   .merging {
     color: var(--status-yellow);
     font-weight: 500;
     letter-spacing: 0.02em;
+    flex-shrink: 0;
   }
 
   .detached {
     color: var(--status-yellow);
     font-weight: 500;
     letter-spacing: 0.02em;
+    flex-shrink: 0;
   }
 
   .right {
     display: flex;
     gap: 6px;
     align-items: center;
+    /* The action cluster never shrinks — the progress text truncates instead
+       of squeezing the buttons. */
+    flex-shrink: 0;
   }
 
   button {
