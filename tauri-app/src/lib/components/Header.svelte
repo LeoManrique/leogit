@@ -430,7 +430,7 @@
         class="update-chip"
         onclick={openUpdateMenu}
         title={updateCopied
-          ? 'Command copied — paste it into a terminal to update'
+          ? 'Command copied'
           : $availableUpdate.install_command
             ? `leogit v${$availableUpdate.version} is available — copy the update command`
             : `leogit v${$availableUpdate.version} is available — download the installer`}
