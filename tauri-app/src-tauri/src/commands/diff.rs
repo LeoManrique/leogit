@@ -88,7 +88,7 @@ impl DiffSelection {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn parse_diff(raw: String) -> Option<FileDiff> {
     if raw.trim().is_empty() {
         return None;
@@ -456,7 +456,7 @@ fn parse_range(range: &str) -> Option<(i32, i32)> {
     Some((start, count))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn generate_patch(
     repo_path: String,
     file_diff: FileDiff,
@@ -470,7 +470,7 @@ pub fn generate_patch(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn generate_inverse_patch(
     repo_path: String,
     file_diff: FileDiff,

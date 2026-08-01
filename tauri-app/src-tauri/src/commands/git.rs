@@ -146,12 +146,17 @@ pub struct RepoStatus {
 
 /// Build a Command for `git` with the standard env vars set.
 /// TERM=dumb suppresses pagers/color; GIT_TERMINAL_PROMPT=0 prevents credential prompts
-/// from blocking the process indefinitely.
+/// from blocking the process indefinitely. GIT_OPTIONAL_LOCKS=0 (as GitHub
+/// Desktop sets globally) keeps read-only commands like `status`/`diff` from
+/// opportunistically refreshing the index under `index.lock` — commands now run
+/// concurrently on worker threads, so a poll-time `diff` taking that lock could
+/// otherwise make a simultaneous `commit` fail with "index.lock exists".
 fn git_cmd(repo_path: &str, args: &[&str]) -> Command {
     let mut cmd = Command::new("git");
     cmd.current_dir(repo_path)
         .env("TERM", "dumb")
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .args(args);
     super::process::hide_console(&mut cmd);
     cmd
@@ -241,6 +246,7 @@ fn git_net_cmd(
     }
     cmd.env("TERM", "dumb")
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .env(
             "GIT_SSH_COMMAND",
             format!("ssh -o ConnectTimeout={connect_secs} -o BatchMode=yes"),
@@ -252,6 +258,20 @@ fn git_net_cmd(
         .args(args);
     super::process::hide_console(&mut cmd);
     cmd
+}
+
+/// Merge a finished child's stdout+stderr into `(succeeded, combined_output)`,
+/// keeping only the final repaint of any `\r`-overwritten progress frames so
+/// error text reads the way a terminal rendered it — not as pages of
+/// accumulated `Writing objects: N%` meter spew.
+fn combine_output(out: &std::process::Output) -> (bool, String) {
+    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+    combined.push_str(&String::from_utf8_lossy(&out.stderr));
+    let collapsed: Vec<&str> = combined
+        .split('\n')
+        .map(|line| line.rsplit('\r').next().unwrap_or(line))
+        .collect();
+    (out.status.success(), collapsed.join("\n"))
 }
 
 /// Run a network git op with both the transport timeouts of [`git_net_cmd`] and
@@ -266,9 +286,88 @@ fn run_git_net(
 ) -> Result<(bool, String), String> {
     let cmd = git_net_cmd(current_dir, args, connect_secs, stall_secs);
     let out = super::process::run_timed(cmd, &format!("git {}", args.join(" ")), timeout)?;
-    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
-    combined.push_str(&String::from_utf8_lossy(&out.stderr));
-    Ok((out.status.success(), combined))
+    Ok(combine_output(&out))
+}
+
+/// [`run_git_net`], but each stderr line reaches `on_line` as it arrives — the
+/// transport for live `--progress` output (git writes the meter to stderr).
+fn run_git_net_streaming(
+    current_dir: Option<&str>,
+    args: &[&str],
+    connect_secs: u64,
+    stall_secs: u64,
+    timeout: Duration,
+    on_line: impl FnMut(&str) + Send + 'static,
+) -> Result<(bool, String), String> {
+    let cmd = git_net_cmd(current_dir, args, connect_secs, stall_secs);
+    let out = super::process::run_timed_streaming(
+        cmd,
+        &format!("git {}", args.join(" ")),
+        timeout,
+        on_line,
+    )?;
+    Ok(combine_output(&out))
+}
+
+/// Event carrying live transfer progress to the frontend, one stream for every
+/// operation; the payload's `op` + `path` let listeners pick out their own.
+pub const GIT_PROGRESS_EVENT: &str = "git-progress";
+
+/// Payload of [`GIT_PROGRESS_EVENT`].
+#[derive(Clone, Serialize)]
+struct GitProgressPayload {
+    /// Which operation is reporting: `"push"`, `"pull"`, or `"clone"`.
+    op: &'static str,
+    /// Repo path (clone target for `"clone"`), so listeners can filter.
+    path: String,
+    /// Aggregate progress across the operation's phases, 0–100.
+    percent: f32,
+    /// Raw git progress line, e.g. `"Writing objects:  53% (531/1000), 1.2 MiB | 500 KiB/s"`.
+    text: String,
+}
+
+/// Build the stderr-line callback for a user-facing network op: parses git's
+/// `--progress` stream and forwards it to the window as [`GIT_PROGRESS_EVENT`]s.
+///
+/// Emission is throttled — a whole-percent move or ~150 ms elapsed — so the
+/// throughput text stays live without flooding the IPC bridge; git repaints the
+/// meter far faster than a human can read it.
+fn progress_forwarder(
+    app: tauri::AppHandle,
+    op: &'static str,
+    path: String,
+    git_op: super::progress::GitOp,
+) -> impl FnMut(&str) + Send + 'static {
+    use tauri::Emitter;
+    const EMIT_INTERVAL: Duration = Duration::from_millis(150);
+    let mut parser = super::progress::GitProgressParser::new(git_op);
+    let mut last_emit: Option<std::time::Instant> = None;
+    let mut last_percent = f32::MIN;
+    move |line: &str| {
+        let Some(progress) = parser.parse_line(line) else {
+            return;
+        };
+        let percent = progress.fraction * 100.0;
+        let moved = (percent - last_percent).abs() >= 1.0;
+        let due = last_emit.is_none_or(|t| t.elapsed() >= EMIT_INTERVAL);
+        // Never swallow the finish: a 99→100 step is < 1 whole percent and can
+        // land inside the interval, but it's the frame the bar completes on.
+        let finished = percent >= 100.0 && last_percent < 100.0;
+        if !moved && !due && !finished {
+            return;
+        }
+        last_percent = percent;
+        last_emit = Some(std::time::Instant::now());
+        let _ = app.emit(
+            GIT_PROGRESS_EVENT,
+            GitProgressPayload {
+                op,
+                path: path.clone(),
+                percent,
+                text: progress.text,
+            },
+        );
+    }
 }
 
 /// Returns true if the repository has at least one commit (HEAD resolves to a
@@ -469,13 +568,17 @@ fn parse_unmerged_entry(seg: &str) -> Option<FileEntry> {
     })
 }
 
-#[tauri::command]
+// Every command in this file that spawns a process or touches the filesystem
+// is `#[tauri::command(async)]`: a plain `#[tauri::command]` runs inline on the
+// main thread, so a slow `git` spawn — or a disk saturated by a large push —
+// would freeze the whole window (see the longer note on `highlight_diff`).
+// Only pure in-memory commands (`format_commit_message`) stay sync.
+#[tauri::command(async)]
 pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
     // Get raw bytes — DO NOT trim or convert until we've split on NUL.
     let bytes = run_git_raw(
         &repo_path,
         &[
-            "--no-optional-locks",
             "status",
             "--untracked-files=all",
             "--branch",
@@ -792,7 +895,7 @@ fn run_diff(repo_path: &str, file: &FileEntry, ignore_ws: bool) -> Result<String
     Err(format!("git diff failed: {}", stderr.trim()))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_head_sha(repo_path: String) -> Result<String, String> {
     match run_git(&repo_path, &["rev-parse", "HEAD"]) {
         Ok(sha) => Ok(sha),
@@ -802,17 +905,17 @@ pub fn get_head_sha(repo_path: String) -> Result<String, String> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_diff(repo_path: String, file: FileEntry) -> Result<String, String> {
     run_diff(&repo_path, &file, false)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_diff_whitespace_ignored(repo_path: String, file: FileEntry) -> Result<String, String> {
     run_diff(&repo_path, &file, true)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_commit_diff(
     repo_path: String,
     sha: String,
@@ -881,7 +984,7 @@ pub(crate) fn read_working_tree_file(repo_path: &str, path: &str) -> Result<Stri
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_selected_diff(repo_path: String, files: Vec<FileEntry>) -> Result<String, String> {
     if files.is_empty() {
         return Ok(String::new());
@@ -906,7 +1009,7 @@ pub fn get_selected_diff(repo_path: String, files: Vec<FileEntry>) -> Result<Str
 
 const LOG_FORMAT: &str = "%H%x01%h%x01%s%x01%b%x01%an%x01%ae%x01%ad%x01%cn%x01%ce%x01%cd%x01%P%x01%(trailers:unfold,only)%x01%D%x00";
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_log(repo_path: String, opts: LogOptions) -> Result<Vec<CommitInfo>, String> {
     // A fresh repo with an unborn HEAD has no commits to show; `git log` would
     // fail with "does not have any commits yet" (exit 128). Treat it as an empty
@@ -1086,7 +1189,7 @@ fn civil_from_unix(unix: i64) -> (i64, u32, u32, u32, u32, u32) {
 // Commit files
 // ---------------------------------------------------------------------------
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_commit_files(repo_path: String, sha: String) -> Result<Vec<FileEntry>, String> {
     // `git log --first-parent` (not `diff-tree`) so merge commits diff against
     // their first parent and show their files — `diff-tree` emits nothing for a
@@ -1167,7 +1270,7 @@ pub fn get_commit_files(repo_path: String, sha: String) -> Result<Vec<FileEntry>
 /// `-` in both columns and are skipped. Like `get_commit_files`, it goes through
 /// `git log --first-parent` so merge commits report their first-parent totals
 /// rather than the empty output `diff-tree` gives for merges.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_commit_stats(repo_path: String, sha: String) -> Result<CommitStats, String> {
     let output = run_git(
         &repo_path,
@@ -1230,7 +1333,7 @@ fn sort_file_entries(files: &mut [FileEntry]) {
 // Branches
 // ---------------------------------------------------------------------------
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_branches(repo_path: String) -> Result<Vec<BranchInfo>, String> {
     // Use for-each-ref so we can compute is_remote precisely from the full refname
     // and detect HEAD pointers via the "->" substring in the short refname.
@@ -1277,7 +1380,7 @@ pub fn list_branches(repo_path: String) -> Result<Vec<BranchInfo>, String> {
     Ok(branches)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_branch(repo_path: String, name: String, start_point: String) -> Result<(), String> {
     let mut args: Vec<&str> = vec!["branch", &name];
     if !start_point.is_empty() {
@@ -1307,7 +1410,7 @@ fn remote_branch_exists(repo_path: &str, name: &str) -> bool {
     .is_ok()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn switch_branch(repo_path: String, branch: String) -> Result<(), String> {
     // A remote-only branch (e.g. `origin/feature`) has to become a local tracking
     // branch — `git checkout origin/feature --` would otherwise treat the ref as a
@@ -1357,7 +1460,7 @@ fn checkout_tracking_branch(repo_path: &str, remote_branch: &str) -> Result<(), 
 /// Returns `Err` if `git checkout` fails — most commonly when uncommitted
 /// changes would be overwritten by the target commit; git's message is surfaced
 /// verbatim so the user can commit or stash first.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn checkout_commit(repo_path: &str, sha: &str) -> Result<(), String> {
     let (ok, combined) = run_git_combined(repo_path, &["checkout", sha])?;
     if !ok {
@@ -1366,33 +1469,40 @@ pub fn checkout_commit(repo_path: &str, sha: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_branch(repo_path: String, name: String) -> Result<(), String> {
     run_git(&repo_path, &["branch", "-D", &name])?;
     Ok(())
 }
 
-#[tauri::command(async)]
-pub fn delete_remote_branch(
+/// Delete `branch` on `remote` (`git push <remote> :<branch>`).
+///
+/// # Errors
+/// When the process can't start or the remote refuses the deletion.
+#[tauri::command]
+pub async fn delete_remote_branch(
     repo_path: String,
     remote: String,
     branch: String,
 ) -> Result<(), String> {
-    let refspec = format!(":{}", branch);
-    let (ok, combined) = run_git_net(
-        Some(&repo_path),
-        &["push", &remote, &refspec],
-        NET_UI_CONNECT_SECS,
-        NET_UI_STALL_SECS,
-        NET_UI_TIMEOUT,
-    )?;
-    if !ok {
-        return Err(format!("git push failed: {}", combined.trim()));
-    }
-    Ok(())
+    super::process::run_blocking(move || {
+        let refspec = format!(":{}", branch);
+        let (ok, combined) = run_git_net(
+            Some(&repo_path),
+            &["push", &remote, &refspec],
+            NET_UI_CONNECT_SECS,
+            NET_UI_STALL_SECS,
+            NET_UI_TIMEOUT,
+        )?;
+        if !ok {
+            return Err(format!("git push failed: {}", combined.trim()));
+        }
+        Ok(())
+    })
+    .await?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn rename_branch(repo_path: String, old_name: String, new_name: String) -> Result<(), String> {
     let mut args: Vec<&str> = vec!["branch", "-m"];
     if !old_name.is_empty() {
@@ -1536,7 +1646,7 @@ fn git_add(repo_path: &str, paths: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn commit(
     repo_path: String,
     message: String,
@@ -1618,7 +1728,7 @@ pub fn commit(
 /// Refuses to undo the initial commit (no parent to reset to) — that path
 /// requires `git update-ref -d HEAD` plus an index rebuild, which we don't
 /// support yet.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn undo_last_commit(repo_path: String) -> Result<(), String> {
     // Verify HEAD has a parent before attempting the reset. `rev-parse HEAD~1`
     // fails on the initial commit with a clear error message we can surface.
@@ -1636,7 +1746,7 @@ pub fn undo_last_commit(repo_path: String) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn has_staged_changes(repo_path: String) -> Result<bool, String> {
     // `git diff --cached --quiet` exits 0 when there are no staged changes,
     // 1 when there are. Any other exit code is a real error.
@@ -1698,7 +1808,7 @@ fn head_paths(repo_path: &str, paths: &[String]) -> HashSet<String> {
 /// Returns `Err` if the underlying `git reset` / `git checkout` fails. A file
 /// that can't be moved to the trash (already gone, permissions) is logged and
 /// skipped rather than aborting the whole operation.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn discard_files(repo_path: &str, files: Vec<FileEntry>) -> Result<(), String> {
     if files.is_empty() {
         return Ok(());
@@ -1777,7 +1887,7 @@ pub fn discard_files(repo_path: &str, files: Vec<FileEntry>) -> Result<(), Strin
 ///
 /// # Errors
 /// Returns `Err` if the `.gitignore` file can't be written.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn append_to_gitignore(repo_path: &str, patterns: Vec<String>) -> Result<(), String> {
     if patterns.is_empty() {
         return Ok(());
@@ -1893,7 +2003,6 @@ pub fn repo_sync_status(repo_path: String, do_fetch: bool) -> Result<RepoSync, S
     let bytes = run_git_raw(
         &repo_path,
         &[
-            "--no-optional-locks",
             "status",
             "--untracked-files=no",
             "--branch",
@@ -1948,73 +2057,104 @@ pub fn repo_sync_status(repo_path: String, do_fetch: bool) -> Result<RepoSync, S
     Ok(sync)
 }
 
-#[tauri::command(async)]
-pub fn fetch(repo_path: String, remote: String) -> Result<(), String> {
-    let (ok, combined) = run_git_net(
-        Some(&repo_path),
-        &[
-            "fetch",
-            "--prune",
-            "--recurse-submodules=on-demand",
-            &remote,
-        ],
-        NET_UI_CONNECT_SECS,
-        NET_UI_STALL_SECS,
-        NET_UI_TIMEOUT,
-    )?;
-    if !ok {
-        return Err(format!("git fetch failed: {}", combined.trim()));
-    }
-    Ok(())
+/// Fetch `remote` (`--prune`, on-demand submodules) — the auto-fetch path.
+///
+/// Like every command below that can legitimately run for minutes, this is an
+/// `async fn` delegating to [`process::run_blocking`] so the transfer sits on
+/// tokio's blocking pool instead of pinning a core worker (see that helper).
+///
+/// # Errors
+/// When the process can't start or `git fetch` exits non-zero.
+#[tauri::command]
+pub async fn fetch(repo_path: String, remote: String) -> Result<(), String> {
+    super::process::run_blocking(move || {
+        let (ok, combined) = run_git_net(
+            Some(&repo_path),
+            &["fetch", "--prune", "--recurse-submodules=on-demand", &remote],
+            NET_UI_CONNECT_SECS,
+            NET_UI_STALL_SECS,
+            NET_UI_TIMEOUT,
+        )?;
+        if !ok {
+            return Err(format!("git fetch failed: {}", combined.trim()));
+        }
+        Ok(())
+    })
+    .await?
 }
 
-#[tauri::command(async)]
-pub fn pull(repo_path: String, remote: String) -> Result<(), String> {
-    let (ok, combined) = run_git_net(
-        Some(&repo_path),
-        &["pull", "--ff", "--recurse-submodules", &remote],
-        NET_UI_CONNECT_SECS,
-        NET_UI_STALL_SECS,
-        NET_UI_TIMEOUT,
-    )?;
-    if !ok {
-        return Err(format!("git pull failed: {}", combined.trim()));
-    }
-    Ok(())
+/// Pull the current branch from `remote` (`--ff` only), streaming git's live
+/// `--progress` output to the window as `git-progress` events.
+///
+/// # Errors
+/// When the process can't start or `git pull` exits non-zero (diverged
+/// history, conflicts, unreachable remote).
+#[tauri::command]
+pub async fn pull(app: tauri::AppHandle, repo_path: String, remote: String) -> Result<(), String> {
+    super::process::run_blocking(move || {
+        let forward =
+            progress_forwarder(app, "pull", repo_path.clone(), super::progress::GitOp::Pull);
+        let (ok, combined) = run_git_net_streaming(
+            Some(&repo_path),
+            &["pull", "--ff", "--progress", "--recurse-submodules", &remote],
+            NET_UI_CONNECT_SECS,
+            NET_UI_STALL_SECS,
+            NET_UI_TIMEOUT,
+            forward,
+        )?;
+        if !ok {
+            return Err(format!("git pull failed: {}", combined.trim()));
+        }
+        Ok(())
+    })
+    .await?
 }
 
-#[tauri::command(async)]
-pub fn push(
+/// Push `branch` to `remote`, streaming git's live `--progress` output to the
+/// window as `git-progress` events.
+///
+/// # Errors
+/// When the process can't start or `git push` exits non-zero (rejected,
+/// stale lease, no permission, unreachable remote).
+#[tauri::command]
+pub async fn push(
+    app: tauri::AppHandle,
     repo_path: String,
     remote: String,
     branch: String,
     set_upstream: bool,
     force_with_lease: bool,
 ) -> Result<(), String> {
-    let mut args: Vec<&str> = vec!["push", "--progress"];
-    if set_upstream {
-        args.push("--set-upstream");
-    }
-    if force_with_lease {
-        args.push("--force-with-lease");
-    }
-    args.push(&remote);
-    args.push(&branch);
+    super::process::run_blocking(move || {
+        let mut args: Vec<&str> = vec!["push", "--progress"];
+        if set_upstream {
+            args.push("--set-upstream");
+        }
+        if force_with_lease {
+            args.push("--force-with-lease");
+        }
+        args.push(&remote);
+        args.push(&branch);
 
-    let (ok, combined) = run_git_net(
-        Some(&repo_path),
-        &args,
-        NET_UI_CONNECT_SECS,
-        NET_UI_STALL_SECS,
-        NET_UI_TIMEOUT,
-    )?;
-    if !ok {
-        return Err(format!("git push failed: {}", combined.trim()));
-    }
-    Ok(())
+        let forward =
+            progress_forwarder(app, "push", repo_path.clone(), super::progress::GitOp::Push);
+        let (ok, combined) = run_git_net_streaming(
+            Some(&repo_path),
+            &args,
+            NET_UI_CONNECT_SECS,
+            NET_UI_STALL_SECS,
+            NET_UI_TIMEOUT,
+            forward,
+        )?;
+        if !ok {
+            return Err(format!("git push failed: {}", combined.trim()));
+        }
+        Ok(())
+    })
+    .await?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_ahead_behind(repo_path: String, upstream: String) -> Result<AheadBehind, String> {
     if upstream.is_empty() {
         return Ok(AheadBehind { ahead: 0, behind: 0 });
@@ -2038,7 +2178,7 @@ pub fn get_ahead_behind(repo_path: String, upstream: String) -> Result<AheadBehi
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_remote(repo_path: String) -> Result<String, String> {
     // Return the NAME of the first remote, not the URL.
     let out = run_git(&repo_path, &["remote"])?;
@@ -2105,7 +2245,7 @@ fn parse_owner_repo(url: &str) -> Option<RepoIdentifier> {
 /// Returns the owner/name pair parsed from `remote.origin.url`, or null when
 /// the repo has no `origin` remote or the URL can't be parsed as `owner/repo`.
 /// Falls back through the first available remote if `origin` is missing.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_repo_identifier(repo_path: String) -> Option<RepoIdentifier> {
     // Try origin first — that's the convention.
     if let Ok(url) = run_git(&repo_path, &["config", "--get", "remote.origin.url"]) {
@@ -2156,7 +2296,7 @@ fn ls_files_unmerged(repo_path: &str) -> Vec<String> {
     ordered
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn merge_branch(repo_path: String, branch: String) -> Result<MergeResult, String> {
     let (ok, combined) = run_git_combined(&repo_path, &["merge", "--no-edit", &branch])?;
     if ok {
@@ -2178,7 +2318,7 @@ pub fn merge_branch(repo_path: String, branch: String) -> Result<MergeResult, St
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn merge_squash(repo_path: String, branch: String) -> Result<MergeResult, String> {
     let (ok, combined) = run_git_combined(&repo_path, &["merge", "--squash", &branch])?;
     if ok {
@@ -2198,7 +2338,7 @@ pub fn merge_squash(repo_path: String, branch: String) -> Result<MergeResult, St
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn commit_squash_merge(repo_path: String) -> Result<(), String> {
     // --no-edit keeps the auto-generated MERGE_MSG (preserves the "Squashed commit
     // of the following:" body); --cleanup=strip trims trailing whitespace.
@@ -2210,7 +2350,7 @@ pub fn commit_squash_merge(repo_path: String) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn merge_abort(repo_path: String) -> Result<(), String> {
     let (ok, combined) = run_git_combined(&repo_path, &["merge", "--abort"])?;
     if !ok {
@@ -2219,7 +2359,7 @@ pub fn merge_abort(repo_path: String) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn is_merging(repo_path: String) -> Result<bool, String> {
     // Use rev-parse --git-dir to handle both regular .git directories AND
     // .git files used by worktrees (where .git is a text file pointing to
@@ -2238,7 +2378,7 @@ pub fn is_merging(repo_path: String) -> Result<bool, String> {
     Ok(git_dir_path.join("MERGE_HEAD").exists())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn count_commits_to_merge(repo_path: String, target_branch: String) -> Result<i32, String> {
     let base = run_git(&repo_path, &["merge-base", "HEAD", &target_branch])?;
     let range = format!("{}..{}", base.trim(), target_branch);
@@ -2291,28 +2431,42 @@ pub fn prepare_clone_target(target_path: &str) -> Result<String, String> {
 /// Clone an arbitrary git URL into `target_path`. The URL tab of the Clone
 /// dialog uses this; `GIT_TERMINAL_PROMPT=0` keeps a private/unauthenticated
 /// clone from hanging on a credential prompt and instead surfaces the error.
-/// Returns the absolute path of the freshly cloned repo so the UI can open it.
-#[tauri::command(async)]
-pub fn clone_repo(url: String, target_path: String) -> Result<String, String> {
-    let target = prepare_clone_target(&target_path)?;
-    // No `current_dir` — the repo doesn't exist yet; clone writes to `target`.
-    let (ok, combined) = run_git_net(
-        None,
-        &["clone", "--progress", &url, &target],
-        NET_UI_CONNECT_SECS,
-        NET_UI_STALL_SECS,
-        NET_UI_TIMEOUT,
-    )?;
-    if !ok {
-        return Err(combined.trim().to_string());
-    }
-    Ok(target)
+/// Streams live `--progress` output as `git-progress` events, and returns the
+/// absolute path of the freshly cloned repo so the UI can open it.
+///
+/// # Errors
+/// When the destination can't be prepared or `git clone` exits non-zero.
+#[tauri::command]
+pub async fn clone_repo(
+    app: tauri::AppHandle,
+    url: String,
+    target_path: String,
+) -> Result<String, String> {
+    super::process::run_blocking(move || {
+        let target = prepare_clone_target(&target_path)?;
+        let forward =
+            progress_forwarder(app, "clone", target.clone(), super::progress::GitOp::Clone);
+        // No `current_dir` — the repo doesn't exist yet; clone writes to `target`.
+        let (ok, combined) = run_git_net_streaming(
+            None,
+            &["clone", "--progress", &url, &target],
+            NET_UI_CONNECT_SECS,
+            NET_UI_STALL_SECS,
+            NET_UI_TIMEOUT,
+            forward,
+        )?;
+        if !ok {
+            return Err(combined.trim().to_string());
+        }
+        Ok(target)
+    })
+    .await?
 }
 
 /// Unix timestamp (seconds) of a repo's most recent commit, or 0 when it has
 /// none / isn't readable. Powers the repo picker's "recently modified" sort;
 /// returns 0 rather than erroring so one bad repo never breaks the sort.
-#[tauri::command]
+#[tauri::command(async)]
 #[must_use]
 pub fn get_last_commit_timestamp(repo_path: String) -> i64 {
     run_git(&repo_path, &["log", "-1", "--format=%ct"])
@@ -2382,7 +2536,7 @@ fn scan_for_repos(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn discover_repos(scan_paths: Vec<String>, max_depth: u32) -> Result<Vec<String>, String> {
     let mut repos: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -2446,7 +2600,7 @@ pub fn repo_root(path: &Path) -> Option<String> {
     is_git_repo_path(path).then_some(dir)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn is_git_repo(path: &str) -> bool {
     is_git_repo_path(Path::new(path))
 }
@@ -2492,7 +2646,7 @@ pub fn init_repo(path: &str) -> Result<String, String> {
     Ok(dir_str)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_repo_name(path: &str) -> String {
     Path::new(path)
         .file_name()

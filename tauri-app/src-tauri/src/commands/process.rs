@@ -49,6 +49,28 @@ pub fn hide_console_async(
 /// Small enough to react promptly, large enough not to busy-spin.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Callback fed each stderr line as it arrives (see [`run_timed_streaming`]).
+type StderrLineFn = Box<dyn FnMut(&str) + Send>;
+
+/// Run a fully blocking task on tokio's dedicated blocking pool and await it.
+///
+/// A `#[tauri::command(async)]` sync fn runs inline inside a spawned future on
+/// a tokio *core* worker (one of ~num-cpus) — fine for a quick subprocess, but
+/// a transfer that can legitimately run for minutes (push, pull, clone) would
+/// pin a core worker for its whole duration and, on a low-core machine, starve
+/// every other command. The blocking pool exists precisely for such tasks, so
+/// the long-running network commands are `async fn`s that delegate here.
+///
+/// # Errors
+/// When the blocking task panics or the runtime is shutting down.
+pub async fn run_blocking<T: Send + 'static>(
+    task: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(task)
+        .await
+        .map_err(|e| format!("background task failed: {e}"))
+}
+
 /// Run `cmd` to completion or until `timeout` elapses, whichever comes first,
 /// returning its [`Output`] (status + captured stdout/stderr).
 ///
@@ -65,7 +87,36 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Returns `Err` if the process fails to spawn, can't be waited on, or exceeds
 /// `timeout` (in which case it is killed first). A non-zero exit is *not* an
 /// error — inspect [`Output::status`] for that.
-pub fn run_timed(mut cmd: Command, label: &str, timeout: Duration) -> Result<Output, String> {
+pub fn run_timed(cmd: Command, label: &str, timeout: Duration) -> Result<Output, String> {
+    run_timed_inner(cmd, label, timeout, None)
+}
+
+/// [`run_timed`], but each line the child writes to stderr is also handed to
+/// `on_stderr_line` as it arrives — the transport for live `git --progress`
+/// output. Git repaints its progress meter with carriage returns, so "lines"
+/// are split on `\r` as well as `\n`; the full stderr is still captured in the
+/// returned [`Output`] for error reporting.
+///
+/// The callback runs on the stderr reader thread, so it must not block: a slow
+/// callback would stall the pipe drain this function exists to guarantee.
+///
+/// # Errors
+/// Same contract as [`run_timed`].
+pub fn run_timed_streaming(
+    cmd: Command,
+    label: &str,
+    timeout: Duration,
+    on_stderr_line: impl FnMut(&str) + Send + 'static,
+) -> Result<Output, String> {
+    run_timed_inner(cmd, label, timeout, Some(Box::new(on_stderr_line)))
+}
+
+fn run_timed_inner(
+    mut cmd: Command,
+    label: &str,
+    timeout: Duration,
+    on_stderr_line: Option<StderrLineFn>,
+) -> Result<Output, String> {
     let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -82,12 +133,44 @@ pub fn run_timed(mut cmd: Command, label: &str, timeout: Duration) -> Result<Out
         }
         buf
     });
-    let err_reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(p) = err_pipe.as_mut() {
-            let _ = p.read_to_end(&mut buf);
+    let err_reader = std::thread::spawn(move || match on_stderr_line {
+        None => {
+            let mut buf = Vec::new();
+            if let Some(p) = err_pipe.as_mut() {
+                let _ = p.read_to_end(&mut buf);
+            }
+            buf
         }
-        buf
+        Some(mut on_line) => {
+            // Incremental drain: accumulate everything (the caller still gets
+            // full stderr on failure) while feeding each complete line to the
+            // callback the moment its terminator arrives.
+            let mut all = Vec::new();
+            let mut line_start = 0usize;
+            let mut chunk = [0u8; 8192];
+            if let Some(p) = err_pipe.as_mut() {
+                loop {
+                    match p.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            all.extend_from_slice(&chunk[..n]);
+                            while let Some(rel) = all[line_start..]
+                                .iter()
+                                .position(|&b| b == b'\n' || b == b'\r')
+                            {
+                                let end = line_start + rel;
+                                on_line(&String::from_utf8_lossy(&all[line_start..end]));
+                                line_start = end + 1;
+                            }
+                        }
+                    }
+                }
+                if line_start < all.len() {
+                    on_line(&String::from_utf8_lossy(&all[line_start..]));
+                }
+            }
+            all
+        }
     });
 
     let start = Instant::now();
@@ -138,6 +221,25 @@ mod tests {
         let out = run_timed(cmd, "git --version", Duration::from_secs(10)).expect("git --version");
         assert!(out.status.success());
         assert!(String::from_utf8_lossy(&out.stdout).contains("git version"));
+    }
+
+    // Git repaints its progress meter with bare carriage returns, so the
+    // streaming reader must treat `\r` as a line break, deliver the trailing
+    // unterminated chunk, and still hand back the byte-exact stderr capture.
+    #[cfg(unix)]
+    #[test]
+    fn run_timed_streaming_splits_stderr_on_cr_and_lf() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "printf 'a\\rb\\nc' 1>&2"]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let out = run_timed_streaming(cmd, "sh", Duration::from_secs(10), move |line| {
+            let _ = tx.send(line.to_string());
+        })
+        .expect("sh must run");
+        assert!(out.status.success());
+        let lines: Vec<String> = rx.try_iter().collect();
+        assert_eq!(lines, ["a", "b", "c"]);
+        assert_eq!(String::from_utf8_lossy(&out.stderr), "a\rb\nc");
     }
 
     // The whole point of run_timed: a child that outlives its budget is killed

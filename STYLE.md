@@ -197,6 +197,7 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 
 - **Connection / sync status** (ahead/behind in header): tabular-num count + a small word (`ahead 3`, `behind 1`), color from `--status-*` tokens, no background pill. A single 6px dot in `--status-green` for "in sync" — no pulse unless a fetch is in flight, in which case a brief opacity pulse is acceptable.
 - **Inline counts in tabs / nav** (e.g. "Changes (12)"): 10–11px mono number, slightly muted, NOT in a pill background. The parens carry the bracketing.
+- **Transfer progress (push / pull / clone):** progress lives *inside the control that started it*, GitHub-Desktop style — no toasts, banners, or floating progress windows. The Pull/Push button gets a full-height `--surface-hover` fill scaled with `transform: scaleX(fraction)` (`transform-origin: left`, 0.3 s ease-out so git's phase jumps glide instead of teleporting); button content layers above via `position: relative`, and the usual `:disabled` dimming is cancelled while the fill shows (the spinner already signals "busy" — graying the progress out would defeat it). Git's raw progress line renders in the header status area in 11px mono `--text-muted`, ellipsized. The Clone dialog uses a 4px rounded bar (`--border-active` fill on `--bg-secondary`) above the same mono line.
 
 ### Icons
 

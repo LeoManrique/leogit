@@ -112,66 +112,82 @@ pub fn gh_repo_list(limit: u32) -> Result<Vec<GhRepo>, String> {
 ///
 /// `name` is the GitHub repository name (may be `owner/name` to target an org).
 /// An empty `description` is omitted rather than sent as a blank value.
-#[tauri::command(async)]
-pub fn gh_publish_repo(
+///
+/// A transfer that can run for minutes, so it delegates to
+/// [`process::run_blocking`] rather than pinning a tokio core worker.
+///
+/// # Errors
+/// When `gh` is missing/unauthenticated or `gh repo create` fails.
+#[tauri::command]
+pub async fn gh_publish_repo(
     repo_path: String,
     name: String,
     description: String,
     is_private: bool,
 ) -> Result<(), String> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err("Repository name is required.".to_string());
-    }
-    let visibility = if is_private { "--private" } else { "--public" };
-    let description = description.trim();
-    let mut args: Vec<&str> = vec![
-        "repo",
-        "create",
-        name,
-        "--source",
-        &repo_path,
-        "--remote",
-        "origin",
-        "--push",
-        visibility,
-    ];
-    if !description.is_empty() {
-        args.push("--description");
-        args.push(description);
-    }
+    super::process::run_blocking(move || {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("Repository name is required.".to_string());
+        }
+        let visibility = if is_private { "--private" } else { "--public" };
+        let description = description.trim();
+        let mut args: Vec<&str> = vec![
+            "repo",
+            "create",
+            name,
+            "--source",
+            &repo_path,
+            "--remote",
+            "origin",
+            "--push",
+            visibility,
+        ];
+        if !description.is_empty() {
+            args.push("--description");
+            args.push(description);
+        }
 
-    let mut cmd = Command::new("gh");
-    cmd.args(&args);
-    super::process::hide_console(&mut cmd);
-    let output = super::process::run_timed(cmd, "gh repo create", GH_TRANSFER_TIMEOUT)
-        .map_err(|e| gh_unavailable(&e))?;
-    if !output.status.success() {
-        // gh writes its diagnostics (auth, name collision, etc.) to stderr.
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stderr = stderr.trim();
-        return Err(if stderr.is_empty() {
-            "gh repo create failed. Is `gh` authenticated? Run `gh auth login`.".to_string()
-        } else {
-            stderr.to_string()
-        });
-    }
-    Ok(())
+        let mut cmd = Command::new("gh");
+        cmd.args(&args);
+        super::process::hide_console(&mut cmd);
+        let output = super::process::run_timed(cmd, "gh repo create", GH_TRANSFER_TIMEOUT)
+            .map_err(|e| gh_unavailable(&e))?;
+        if !output.status.success() {
+            // gh writes its diagnostics (auth, name collision, etc.) to stderr.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = stderr.trim();
+            return Err(if stderr.is_empty() {
+                "gh repo create failed. Is `gh` authenticated? Run `gh auth login`.".to_string()
+            } else {
+                stderr.to_string()
+            });
+        }
+        Ok(())
+    })
+    .await?
 }
 
 /// Clone a GitHub repo by `owner/name` into `target_path` using `gh repo clone`
 /// so it inherits the user's `gh` auth (private repos work without a prompt).
-/// Returns the absolute path of the cloned repo.
-#[tauri::command(async)]
-pub fn gh_clone(name_with_owner: String, target_path: String) -> Result<String, String> {
-    let target = super::git::prepare_clone_target(&target_path)?;
-    let mut cmd = Command::new("gh");
-    cmd.args(["repo", "clone", &name_with_owner, &target]);
-    super::process::hide_console(&mut cmd);
-    let output = super::process::run_timed(cmd, "gh repo clone", GH_TRANSFER_TIMEOUT)
-        .map_err(|e| gh_unavailable(&e))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-    }
-    Ok(target)
+/// Returns the absolute path of the cloned repo. Runs on the blocking pool —
+/// see [`process::run_blocking`].
+///
+/// # Errors
+/// When `gh` is missing, the destination can't be prepared, or the clone fails.
+#[tauri::command]
+pub async fn gh_clone(name_with_owner: String, target_path: String) -> Result<String, String> {
+    super::process::run_blocking(move || {
+        let target = super::git::prepare_clone_target(&target_path)?;
+        let mut cmd = Command::new("gh");
+        cmd.args(["repo", "clone", &name_with_owner, &target]);
+        super::process::hide_console(&mut cmd);
+        let output = super::process::run_timed(cmd, "gh repo clone", GH_TRANSFER_TIMEOUT)
+            .map_err(|e| gh_unavailable(&e))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+        Ok(target)
+    })
+    .await?
 }

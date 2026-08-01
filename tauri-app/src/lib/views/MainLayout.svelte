@@ -7,6 +7,7 @@
   import { config, refreshConfig } from '$lib/stores/config'
   import { hydrateReposState, patchReposState, recordRecentRepo } from '$lib/stores/reposState'
   import { setRepoSync } from '$lib/stores/repoSync'
+  import { activeNetworkOp } from '$lib/stores/networkOps'
   import { repoSyncScheduler } from '$lib/services/repoSyncScheduler'
   import {
     shouldAttemptBackground,
@@ -46,6 +47,9 @@
   let terminalSessionId = $state(0) // 0 = no active PTY; >0 = key for the mounted Terminal
   let showRepos = $state(false)
   let showClone = $state(false)
+  // Instance handle so the global Escape handler can ask whether a clone is
+  // in flight before dismissing the dialog.
+  let cloneOverlay = $state<{ isBusy: () => boolean } | null>(null)
   // Destination pre-filled into the Clone dialog: last-used folder, else the
   // first configured scan path, else ~/Dev (the backend expands the leading ~).
   let cloneDefaultDir = $state('~/Dev')
@@ -663,12 +667,26 @@
     await refreshStatus({ silent: true })
   }
 
+  // In-flight guard for the 2 s poll: a cycle that outlives the interval (repo
+  // under heavy load, e.g. a big push compressing objects) must not stack a
+  // second cycle on top of it — each one spawns several git processes.
+  let statusPollInFlight = false
+
   function startStatusPolling(): void {
     if (statusInterval) clearInterval(statusInterval)
-    statusInterval = setInterval(() => {
+    statusInterval = setInterval(async () => {
       if ($appState.phase !== 'main') return
-      refreshStatus({ silent: true })
-      pollHeadSha()
+      // Pause while a push/pull/publish runs: polling mid-transfer only adds
+      // git processes that contend with it for the repo's disk and locks. The
+      // op's own handler refreshes status when it completes.
+      if ($activeNetworkOp || statusPollInFlight) return
+      statusPollInFlight = true
+      try {
+        await refreshStatus({ silent: true })
+        await pollHeadSha()
+      } finally {
+        statusPollInFlight = false
+      }
     }, 2000)
   }
 
@@ -676,7 +694,7 @@
     if (fetchInterval) clearInterval(fetchInterval)
     if (intervalMs <= 0) return
     fetchInterval = setInterval(() => {
-      if ($appState.phase !== 'main' || userTyping) return
+      if ($appState.phase !== 'main' || userTyping || $activeNetworkOp) return
       performAutoFetch()
     }, intervalMs)
   }
@@ -688,7 +706,9 @@
   // `visibilitychange` can both fire on a single window activation.
   let resyncing = false
   async function resyncOnActive(): Promise<void> {
-    if (resyncing || $appState.phase !== 'main') return
+    // Skipped during a network op for the same reason the poll pauses; the
+    // op's completion refresh covers whatever this resync would have found.
+    if (resyncing || $activeNetworkOp || $appState.phase !== 'main') return
     resyncing = true
     try {
       // Coming back to the app: fetch the active repo so a remote that moved
@@ -1114,9 +1134,13 @@
     const meta = e.ctrlKey || e.metaKey
 
     if (e.key === 'Escape') {
-      if (showRepos || showClone || showBranches || showSettings || showHelp || showMerge) {
+      // Escape never dismisses a clone in flight — hiding the dialog wouldn't
+      // cancel the clone, just orphan its progress bar and eventual error.
+      const cloneDismissable = showClone && !(cloneOverlay?.isBusy() ?? false)
+      if (showRepos || cloneDismissable || showBranches || showSettings || showHelp || showMerge) {
         e.preventDefault()
-        showRepos = showClone = showBranches = showSettings = showHelp = showMerge = false
+        showRepos = showBranches = showSettings = showHelp = showMerge = false
+        if (cloneDismissable) showClone = false
         return
       }
     }
@@ -1507,6 +1531,7 @@
   {/if}
 
   <CloneOverlay
+    bind:this={cloneOverlay}
     isOpen={showClone}
     defaultDir={cloneDefaultDir}
     onClose={() => (showClone = false)}

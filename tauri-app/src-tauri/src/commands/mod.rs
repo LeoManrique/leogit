@@ -8,6 +8,7 @@ pub mod terminal;
 pub mod highlight;
 pub mod process;
 pub mod os;
+pub mod progress;
 
 pub use config::*;
 pub use git::*;

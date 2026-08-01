@@ -186,6 +186,20 @@ export const configApi = {
   saveState: (state: ReposState) => invoke<void>('save_state', { state }),
 }
 
+/**
+ * Payload of the `git-progress` event: live transfer progress emitted by the
+ * backend while a push, pull, or clone streams git's `--progress` output.
+ */
+export interface GitProgressEvent {
+  op: 'push' | 'pull' | 'clone'
+  /** Repo path the op runs against (the target folder for a clone). */
+  path: string
+  /** Aggregate 0–100 across the operation's phases. */
+  percent: number
+  /** Raw git progress line, e.g. "Writing objects:  53% (531/1000), 1.2 MiB | 500 KiB/s". */
+  text: string
+}
+
 /** Where a `leogit <dir>` invocation points. Payload of the `open-repo` event. */
 export interface LaunchTarget {
   /** Absolute path — the repository root when `is_repo`, else the folder itself. */

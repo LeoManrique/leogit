@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { ghApi, gitApi, type GhRepo } from '$lib/api/commands'
+  import { onMount } from 'svelte'
+  import { listen } from '@tauri-apps/api/event'
+  import { ghApi, gitApi, type GhRepo, type GitProgressEvent } from '$lib/api/commands'
   import { cloneSortMode, setCloneSortMode } from '$lib/stores/reposState'
   import { autofocus } from '$lib/actions/autofocus'
   import { nextActiveIndex, scrollIntoViewWhenActive } from '$lib/actions/listNavigation'
@@ -25,6 +27,25 @@
   let destDir = $state('')
   let isCloning = $state(false)
   let cloneError = $state('')
+
+  /** Whether a clone is in flight — MainLayout's global Escape handler asks
+      before dismissing the dialog, so progress/errors aren't orphaned. */
+  export function isBusy(): boolean {
+    return isCloning
+  }
+
+  // Live `git clone --progress` output, streamed from the backend. Only the
+  // URL tab produces it (the GitHub tab clones through `gh`, which reports
+  // nothing) — the bar simply stays hidden until the first event arrives.
+  let cloneProgress = $state<GitProgressEvent | null>(null)
+  onMount(() => {
+    let unlisten: (() => void) | null = null
+    listen<GitProgressEvent>('git-progress', (e) => {
+      if (e.payload.op !== 'clone' || !isCloning) return
+      cloneProgress = e.payload
+    }).then((u) => (unlisten = u))
+    return () => unlisten?.()
+  })
 
   // GitHub tab state.
   let repos = $state<GhRepo[]>([])
@@ -169,6 +190,7 @@
     if (!canClone) return
     isCloning = true
     cloneError = ''
+    cloneProgress = null
     const parentDir = destDir.replace(/\/+$/, '')
     try {
       const repoPath =
@@ -180,6 +202,7 @@
       cloneError = String(e)
     } finally {
       isCloning = false
+      cloneProgress = null
     }
   }
 </script>
@@ -334,6 +357,20 @@
 
         {#if cloneError}
           <div class="clone-error">{cloneError}</div>
+        {/if}
+
+        {#if isCloning && cloneProgress}
+          <div class="clone-progress">
+            <div class="clone-progress-bar">
+              <div
+                class="clone-progress-fill"
+                style:transform="scaleX({cloneProgress.percent / 100})"
+              ></div>
+            </div>
+            <div class="clone-progress-text" title={cloneProgress.text}>
+              {cloneProgress.text}
+            </div>
+          </div>
         {/if}
       </div>
 
@@ -654,6 +691,36 @@
     font-size: 12px;
     color: var(--status-red);
     word-break: break-word;
+  }
+
+  /* Aggregate transfer bar + git's raw progress line during a URL clone. */
+  .clone-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .clone-progress-bar {
+    height: 4px;
+    border-radius: 999px;
+    background: var(--bg-secondary);
+    overflow: hidden;
+  }
+
+  .clone-progress-fill {
+    height: 100%;
+    background: var(--border-active);
+    transform-origin: left;
+    transition: transform 0.3s ease-out;
+  }
+
+  .clone-progress-text {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .modal-footer {

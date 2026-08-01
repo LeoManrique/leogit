@@ -1,8 +1,15 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import { listen } from '@tauri-apps/api/event'
   import { repoState } from '$lib/stores/repo'
   import { appState } from '$lib/stores/app'
-  import { gitApi, ghApi } from '$lib/api/commands'
+  import {
+    activeNetworkOp,
+    networkProgress,
+    beginNetworkOp,
+    endNetworkOp,
+  } from '$lib/stores/networkOps'
+  import { gitApi, ghApi, type GitProgressEvent } from '$lib/api/commands'
   import { ensureRepoIdentifiers, repoIdentifiers } from '$lib/stores/repoIdentifiers'
   import ContextMenu, { type ContextMenuItem } from './ContextMenu.svelte'
   import ForcePushConfirm from './ForcePushConfirm.svelte'
@@ -67,13 +74,19 @@
   }
 
   let isRefreshing = $state(false)
-  let isPushing = $state(false)
-  let isPulling = $state(false)
+  // Push/pull/publish in-flight state lives in the shared `activeNetworkOp`
+  // store — not local $state — so the 2 s status poll and auto-fetch can pause
+  // while a transfer runs. It also makes the ops mutually exclusive: every
+  // handler guards on the store, so Pull is inert while a Push is in flight.
+  const isPushing = $derived($activeNetworkOp === 'push')
+  const isPulling = $derived($activeNetworkOp === 'pull')
+  const isPublishing = $derived($activeNetworkOp === 'publish')
+  // 0–1 fill for the in-button progress bar, GitHub-Desktop style.
+  const transferFraction = $derived(($networkProgress?.percent ?? 0) / 100)
 
   let pushMenu = $state<{ x: number; y: number } | null>(null)
   let showForcePushConfirm = $state(false)
   let showPublish = $state(false)
-  let isPublishing = $state(false)
   // Cache the remote name so the confirm dialog can show it without re-querying.
   let cachedRemote = $state('origin')
 
@@ -137,10 +150,10 @@
   }
 
   async function handlePull() {
-    if (isPulling) return
+    if ($activeNetworkOp) return
     const repoPath = $appState.repoPath
     if (!repoPath) return
-    isPulling = true
+    beginNetworkOp('pull')
     try {
       const remote = await gitApi.getRemote(repoPath)
       await gitApi.pull(repoPath, remote)
@@ -148,16 +161,16 @@
     } catch (error) {
       repoState.update((s) => ({ ...s, error: String(error) }))
     } finally {
-      isPulling = false
+      endNetworkOp()
     }
   }
 
   async function handlePush() {
-    if (isPushing) return
+    if ($activeNetworkOp) return
     const repoPath = $appState.repoPath
     const branch = $repoState.status.branch
     if (!repoPath || !branch) return
-    isPushing = true
+    beginNetworkOp('push')
     try {
       const remote = await gitApi.getRemote(repoPath)
       cachedRemote = remote
@@ -167,16 +180,16 @@
     } catch (error) {
       repoState.update((s) => ({ ...s, error: String(error) }))
     } finally {
-      isPushing = false
+      endNetworkOp()
     }
   }
 
   async function handleForcePush() {
-    if (isPushing) return
+    if ($activeNetworkOp) return
     const repoPath = $appState.repoPath
     const branch = $repoState.status.branch
     if (!repoPath || !branch) return
-    isPushing = true
+    beginNetworkOp('push')
     try {
       const remote = await gitApi.getRemote(repoPath)
       cachedRemote = remote
@@ -188,7 +201,7 @@
     } catch (error) {
       repoState.update((s) => ({ ...s, error: String(error) }))
     } finally {
-      isPushing = false
+      endNetworkOp()
     }
   }
 
@@ -205,10 +218,10 @@
   }
 
   async function handlePublish(name: string, description: string, isPrivate: boolean) {
-    if (isPublishing) return
+    if ($activeNetworkOp) return
     const repoPath = $appState.repoPath
     if (!repoPath) return
-    isPublishing = true
+    beginNetworkOp('publish')
     try {
       await ghApi.publishRepo(repoPath, name, description, isPrivate)
       showPublish = false
@@ -216,7 +229,7 @@
     } catch (error) {
       repoState.update((s) => ({ ...s, error: String(error) }))
     } finally {
-      isPublishing = false
+      endNetworkOp()
     }
   }
 
@@ -235,6 +248,14 @@
     gitApi.getRemote(repoPath).then((r) => (cachedRemote = r)).catch(() => {})
   })
 
+  // A repo switch mid-transfer must not carry the old repo's progress into the
+  // new repo's header — the listener already drops foreign-path events, so
+  // without this the last line/fill would just freeze there until the op ends.
+  $effect(() => {
+    void $appState.repoPath
+    networkProgress.set(null)
+  })
+
   // Ctrl/Cmd+P triggers the primary split-button action — push, or publish when
   // the branch has no remote yet — mirroring the button's own enabled state.
   // Registered globally (not gated on focus) so it works while composing a
@@ -249,7 +270,19 @@
 
   onMount(() => {
     window.addEventListener('keydown', handleGlobalKeyDown)
-    return () => window.removeEventListener('keydown', handleGlobalKeyDown)
+    // Live `--progress` output while a push/pull runs. Clone progress belongs
+    // to the Clone dialog, and events that straggle in after the op resolved
+    // (or for another repo) are dropped so an idle button never twitches.
+    let unlistenProgress: (() => void) | null = null
+    listen<GitProgressEvent>('git-progress', (e) => {
+      const p = e.payload
+      if (p.op === 'clone' || p.path !== $appState.repoPath || !$activeNetworkOp) return
+      networkProgress.set({ percent: p.percent, text: p.text })
+    }).then((u) => (unlistenProgress = u))
+    return () => {
+      window.removeEventListener('keydown', handleGlobalKeyDown)
+      unlistenProgress?.()
+    }
   })
 
   const pushMenuItems = $derived<ContextMenuItem[]>(
@@ -328,6 +361,11 @@
       {#if $repoState.status.isMerging}
         <span class="merging">MERGING</span>
       {/if}
+      {#if $networkProgress}
+        <!-- Git's own progress line, verbatim — phase, counts, and throughput
+             exactly as a terminal would show them. -->
+        <span class="net-progress" title={$networkProgress.text}>{$networkProgress.text}</span>
+      {/if}
     </div>
   </div>
 
@@ -339,10 +377,14 @@
     {#if hasUpstream}
       <button
         class="count-button"
+        class:in-progress={isPulling}
         onclick={handlePull}
-        disabled={isPulling}
+        disabled={$activeNetworkOp !== null}
         title={behind > 0 ? `Pull ${behind} commit${behind === 1 ? '' : 's'} from remote` : 'Pull from remote'}
       >
+        {#if isPulling}
+          <div class="btn-progress" style:transform="scaleX({transferFraction})"></div>
+        {/if}
         {#if isPulling}
           <svg class="icon spinning" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
             <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" />
@@ -354,15 +396,16 @@
             <polyline points="4,8 8,12 12,8" />
           </svg>
         {/if}
-        <span>Pull</span>
-        {#if behind > 0}<span class="count-badge">{behind}</span>{/if}
+        <span>{isPulling ? 'Pulling…' : 'Pull'}</span>
+        {#if behind > 0 && !isPulling}<span class="count-badge">{behind}</span>{/if}
       </button>
     {/if}
     <div class="split-button">
       <button
         class="count-button split-main"
+        class:in-progress={isPushing || isPublishing}
         onclick={handlePushButton}
-        disabled={isPushing || isPublishing || detached}
+        disabled={$activeNetworkOp !== null || detached}
         title={detached
           ? 'Detached HEAD — check out a branch to push'
           : noRemote
@@ -373,6 +416,9 @@
                 ? `Push ${ahead} commit${ahead === 1 ? '' : 's'} to remote (Ctrl+P)`
                 : 'Push to remote (Ctrl+P)'}
       >
+        {#if isPushing}
+          <div class="btn-progress" style:transform="scaleX({transferFraction})"></div>
+        {/if}
         {#if isPushing || isPublishing}
           <svg class="icon spinning" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
             <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" />
@@ -396,13 +442,23 @@
             <polyline points="4,8 8,4 12,8" />
           </svg>
         {/if}
-        <span>{noRemote ? 'Publish' : publishBranch ? 'Publish branch' : 'Push'}</span>
-        {#if !noRemote && !publishBranch && ahead > 0}<span class="count-badge">{ahead}</span>{/if}
+        <span>
+          {isPushing
+            ? 'Pushing…'
+            : isPublishing
+              ? 'Publishing…'
+              : noRemote
+                ? 'Publish'
+                : publishBranch
+                  ? 'Publish branch'
+                  : 'Push'}
+        </span>
+        {#if !noRemote && !publishBranch && ahead > 0 && !isPushing}<span class="count-badge">{ahead}</span>{/if}
       </button>
       <button
         class="split-chevron"
         onclick={openPushMenu}
-        disabled={isPushing || isPublishing || detached}
+        disabled={$activeNetworkOp !== null || detached}
         aria-label="More push options"
         title="More push options"
       >
@@ -537,6 +593,19 @@
     align-items: center;
     font-size: 11px;
     font-variant-numeric: tabular-nums;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  /* Git's raw progress line during a push/pull — phase, counts, throughput,
+     exactly as a terminal would show them. Mono keeps the numbers from
+     jittering; ellipsis keeps a long line from squeezing the chips. */
+  .net-progress {
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .merging {
@@ -597,11 +666,40 @@
     background: var(--bg-elevated);
     border-color: var(--border-strong);
     color: var(--text-primary);
+    /* Anchor + clip the in-button progress fill. */
+    position: relative;
+    overflow: hidden;
   }
 
   .count-button:hover:not(:disabled) {
     background: var(--surface-hover);
     color: var(--text-primary);
+  }
+
+  /* Content paints above the fill — an absolutely-positioned sibling would
+     otherwise cover the (non-positioned) icon and label. */
+  .count-button > .icon,
+  .count-button > span {
+    position: relative;
+  }
+
+  /* GitHub-Desktop-style progress: a full-height fill that wipes across the
+     button, scaled to the aggregate transfer fraction. The transition smooths
+     the jumps between git's phases. */
+  .btn-progress {
+    position: absolute;
+    inset: 0;
+    transform-origin: left;
+    transform: scaleX(0);
+    background: var(--surface-hover);
+    transition: transform 0.3s ease-out;
+    pointer-events: none;
+  }
+
+  /* Keep the label legible while the op runs — the fill + spinner already say
+     "busy", so the usual disabled dimming would only gray out the progress. */
+  .count-button.in-progress:disabled {
+    opacity: 1;
   }
 
   .icon {

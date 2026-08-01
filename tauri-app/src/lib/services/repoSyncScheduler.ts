@@ -1,6 +1,7 @@
 import { get } from 'svelte/store'
 import { appState } from '$lib/stores/app'
 import { recentRepos } from '$lib/stores/reposState'
+import { activeNetworkOp } from '$lib/stores/networkOps'
 import { syncRepo } from '$lib/stores/repoSync'
 
 /**
@@ -62,9 +63,12 @@ function computeTiers(): Tiers {
 
 /** Fetch + recompute each repo in a tier sequentially, to keep the number of
  * concurrent `git fetch` processes low. Marked `background` so the whole tier
- * goes quiet while offline / backing off (each `syncRepo` self-skips). */
+ * goes quiet while offline / backing off (each `syncRepo` self-skips). Also
+ * pauses while a user push/pull is in flight — badge fetches would steal
+ * bandwidth from the transfer; the next tier interval picks the repos up. */
 async function syncTier(repos: string[]): Promise<void> {
   for (const repo of repos) {
+    if (get(activeNetworkOp)) return
     await syncRepo(repo, true, true)
   }
 }
