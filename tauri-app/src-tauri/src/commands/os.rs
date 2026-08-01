@@ -64,8 +64,12 @@ pub fn reveal_path(repo_path: String, rel_path: String) -> Result<(), String> {
 ///
 /// The scheme allowlist plus the metacharacter rejection keep the argument
 /// inert for `cmd /c start` on Windows, whose parser treats `&`, `^`, `<`,
-/// `>`, `|` as syntax even inside an unquoted argument. Our own URLs are
-/// plain `https://github.com/...` paths, so the checks never bite in practice.
+/// `>`, `|` as syntax even inside an unquoted argument — and expands `%VAR%`
+/// *before* that, so a `%` could smuggle those characters back in after this
+/// check. `%` is therefore rejected too, which also rules out percent-encoded
+/// URLs; together with the `&` rejection that means query strings don't pass.
+/// Every URL we open is a plain `https://github.com/...` path, so this is a
+/// deliberately narrow door rather than a general-purpose opener.
 ///
 /// # Errors
 /// Returns `Err` for a non-`https` URL or one containing shell
@@ -78,7 +82,7 @@ pub fn open_url(url: String) -> Result<(), String> {
     }
     if url
         .chars()
-        .any(|c| c.is_whitespace() || "&^<>|\"'`".contains(c))
+        .any(|c| c.is_whitespace() || "&^<>|\"'`%".contains(c))
     {
         return Err(format!("refusing to open URL with unsafe characters: {url}"));
     }

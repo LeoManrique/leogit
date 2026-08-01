@@ -36,14 +36,21 @@ async function attempt(): Promise<void> {
   }
 }
 
+/** Retry the moment the OS says we're back online rather than waiting out the
+ *  30-minute window — launching offline (a plane, a captive portal) is exactly
+ *  when the first attempt is skipped. */
+const handleOnline = (): void => void attempt()
+
 /** Kick the startup check; retries keep running until one check completes. */
 function start(): void {
   if (timer || checked) return
   void attempt()
   timer = setInterval(() => void attempt(), RETRY_INTERVAL_MS)
+  window.addEventListener('online', handleOnline)
 }
 
 function stop(): void {
+  window.removeEventListener('online', handleOnline)
   if (timer) {
     clearInterval(timer)
     timer = null

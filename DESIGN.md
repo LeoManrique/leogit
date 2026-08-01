@@ -127,9 +127,9 @@ A modal overlay grouped into Appearance / Diff / Git / AI / Repository discovery
 
 ### 12. Update available
 
-leogit checks GitHub Releases once per launch (silently — a failed check never surfaces). When a newer version exists, a tinted **Update v0.1.27** chip appears at the left of the header's action cluster; clicking it opens a small menu:
+leogit checks GitHub Releases once per launch (silently — a failed check never surfaces). The chip only appears once the new release actually carries a build **for your platform**: releases are uploaded one platform at a time, so for a while a release exists that you can't yet install — offering it would just dead-end you. When a usable one exists, a tinted **Update v0.1.27** chip appears at the left of the header's action cluster; clicking it opens a small menu:
 
-- **macOS / Linux** — *Copy update command* puts the `install.sh` one-liner on the clipboard (the chip confirms with "Copied — run it in a terminal"), plus *View release on GitHub* for the notes.
+- **macOS / Linux** — *Copy update command* puts the `install.sh` one-liner on the clipboard (the chip's arrow briefly becomes a checkmark), plus *View release on GitHub* for the notes.
 - **Windows** — *Download from GitHub* opens the release page, which carries the installer.
 
 *Dismiss for this session* hides the chip until the next launch. Nothing installs itself and nothing blocks work — the app never restarts or interrupts you.

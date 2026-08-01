@@ -268,6 +268,16 @@
     }
   }
 
+  // Opening the browser can fail (no `xdg-open`, a wedged handler). Surface it
+  // the way every other OS hand-off in the app does rather than letting the
+  // menu close with nothing happening.
+  function openReleasePage(url: string) {
+    osApi.openUrl(url).catch((error) => {
+      console.error('[update] could not open the release page:', error)
+      repoState.update((s) => ({ ...s, error: String(error) }))
+    })
+  }
+
   const updateMenuItems = $derived.by<ContextMenuItem[]>(() => {
     const info = $availableUpdate
     if (!info) return []
@@ -275,12 +285,10 @@
     return [
       cmd
         ? { label: 'Copy update command', action: () => void copyInstallCommand(cmd) }
-        : { label: 'Download from GitHub', action: () => void osApi.openUrl(info.url) },
+        : { label: 'Download from GitHub', action: () => openReleasePage(info.url) },
       // With a command the release page is still worth a link (notes, assets);
       // without one it IS the download item above, so don't repeat it.
-      ...(cmd
-        ? [{ label: 'View release on GitHub', action: () => void osApi.openUrl(info.url) }]
-        : []),
+      ...(cmd ? [{ label: 'View release on GitHub', action: () => openReleasePage(info.url) }] : []),
       { label: 'Dismiss for this session', action: () => updateDismissed.set(true) },
     ]
   })
@@ -421,15 +429,26 @@
       <button
         class="update-chip"
         onclick={openUpdateMenu}
-        title={$availableUpdate.install_command
-          ? `leogit v${$availableUpdate.version} is available — copy the update command`
-          : `leogit v${$availableUpdate.version} is available — download the installer`}
+        title={updateCopied
+          ? 'Command copied — paste it into a terminal to update'
+          : $availableUpdate.install_command
+            ? `leogit v${$availableUpdate.version} is available — copy the update command`
+            : `leogit v${$availableUpdate.version} is available — download the installer`}
       >
-        <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <line x1="8" y1="12.5" x2="8" y2="4" />
-          <polyline points="4.5,7.5 8,4 11.5,7.5" />
-        </svg>
-        <span>{updateCopied ? 'Copied — run it in a terminal' : `Update v${$availableUpdate.version}`}</span>
+        <!-- The label stays put while the icon swaps to a checkmark: a text
+             swap here would resize the chip and shove the whole action cluster
+             sideways for the duration. -->
+        {#if updateCopied}
+          <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="3,8.5 6.5,12 13,4.5" />
+          </svg>
+        {:else}
+          <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="8" y1="12.5" x2="8" y2="4" />
+            <polyline points="4.5,7.5 8,4 11.5,7.5" />
+          </svg>
+        {/if}
+        <span>Update v{$availableUpdate.version}</span>
       </button>
     {/if}
     <!-- Pull only makes sense once the branch tracks a remote. Before that the
