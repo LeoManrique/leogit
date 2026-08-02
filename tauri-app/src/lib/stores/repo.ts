@@ -5,7 +5,7 @@ import type {
   CommitStats,
   BranchInfo,
   DiffSelection,
-  FileDiff,
+  ParsedDiff,
 } from '$lib/api/commands'
 
 export type ActiveTab = 'changes' | 'history'
@@ -46,7 +46,7 @@ export interface RepoState {
   userDeselected: Set<string>
   diffSelection: Map<string, DiffSelection>
   activeFile: FileEntry | null
-  activeFileDiff: FileDiff | null
+  activeFileDiff: ParsedDiff | null
   isDiffLoading: boolean
   /**
    * Flips true once a diff fetch has been pending for ≥150 ms. The viewer keeps
@@ -61,7 +61,7 @@ export interface RepoState {
   /** Aggregate +adds/-dels for the active commit; null until fetched. */
   activeCommitStats: CommitStats | null
   activeCommitFile: FileEntry | null
-  activeCommitFileDiff: FileDiff | null
+  activeCommitFileDiff: ParsedDiff | null
   isCommitDiffLoading: boolean
   isCommitDiffLoadingSlow: boolean
   isLoading: boolean

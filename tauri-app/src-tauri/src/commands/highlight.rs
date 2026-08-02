@@ -1,7 +1,6 @@
 use crate::commands::diff::{FileDiff, LineType};
 use crate::commands::git;
-use serde::{Deserialize, Serialize};
-use serde_repr::Serialize_repr;
+use serde::Deserialize;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::LazyLock;
 use syntect::parsing::{ParseState, Scope, ScopeStack, ScopeStackOp, SyntaxReference, SyntaxSet};
@@ -37,38 +36,38 @@ pub enum BlobSource {
 /// matching the breadth of `shiki/bundle/full` we replaced.
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_newlines);
 
-/// Compact enum index emitted per token. Frontend resolves the actual color via
-/// CSS variables on `[data-theme]`, so theme swap costs zero work here.
-#[repr(u8)]
-#[derive(Serialize_repr, Clone, Copy, Debug)]
+/// Semantic class per token. `render.rs` maps each to its `.syn-*` CSS class;
+/// the frontend resolves the actual colours via CSS variables on
+/// `[data-theme]`, so a theme swap re-tokenizes nothing.
+#[derive(Clone, Copy, Debug)]
 pub enum TokenClass {
-    Plain = 0,
-    Keyword = 1,
-    String = 2,
-    Comment = 3,
-    Function = 4,
-    Type = 5,
-    Variable = 6,
-    Number = 7,
-    Constant = 8,
-    Operator = 9,
-    Punctuation = 10,
-    Tag = 11,
-    Attribute = 12,
-    Builtin = 13,
-    Decorator = 14,
+    Plain,
+    Keyword,
+    String,
+    Comment,
+    Function,
+    Type,
+    Variable,
+    Number,
+    Constant,
+    Operator,
+    Punctuation,
+    Tag,
+    Attribute,
+    Builtin,
+    Decorator,
     // Markup / prose classes (Markdown, reStructuredText, AsciiDoc, …). Code
     // languages never emit these; markup languages emit little else.
-    Heading = 15,
-    Strong = 16,
-    Emphasis = 17,
-    Strikethrough = 18,
-    Link = 19,
-    Raw = 20,
-    Quote = 21,
+    Heading,
+    Strong,
+    Emphasis,
+    Strikethrough,
+    Link,
+    Raw,
+    Quote,
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct Token {
     /// Code-point index into the line content (matches `IntraLineRange`).
     pub start: u32,
@@ -79,11 +78,15 @@ pub struct Token {
 
 pub type TokenLine = Vec<Token>;
 
-/// Tokenize every `Context | Add | Delete` line in `file_diff` so the frontend
-/// can render syntax-coloured spans without re-tokenizing on theme swap.
+/// Tokenize every `Context | Add | Delete` line in `file_diff` and return each
+/// line's render-ready HTML (`render.rs` lays the token spans over the same
+/// intra-line backplate as the phase-1 HTML `parse_diff` ships). Returning the
+/// finished HTML keeps the `WebView` main thread out of the span-building work
+/// and pins both render phases to one implementation.
 ///
-/// Hunk-header / `NoNewline` rows always return an empty `TokenLine`, preserving
-/// 1:1 correspondence with the flattened `hunks[].lines[]` array on the JS side.
+/// Hunk-header / `NoNewline` rows tokenize to an empty `TokenLine` (rendering
+/// as plain text), preserving 1:1 correspondence with the flattened
+/// `hunks[].lines[]` array on the JS side.
 ///
 /// When `source` is supplied, the old and new blobs are each tokenized from
 /// line 1 and the tokens mapped onto diff rows by line number. That is the only
@@ -108,7 +111,14 @@ pub type TokenLine = Vec<Token>;
 // arrive by value even though everything below only reads it.
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command(async)]
-pub fn highlight_diff(file_diff: FileDiff, source: Option<BlobSource>) -> Vec<TokenLine> {
+pub fn highlight_diff(file_diff: FileDiff, source: Option<BlobSource>) -> Vec<String> {
+    let tokens = tokenize_diff(&file_diff, source.as_ref());
+    super::render::highlighted_html(&file_diff, &tokens)
+}
+
+/// The tokenization behind `highlight_diff`: one `TokenLine` per flattened
+/// diff line, empty where the tokenizer has nothing to say.
+fn tokenize_diff(file_diff: &FileDiff, source: Option<&BlobSource>) -> Vec<TokenLine> {
     let path = if file_diff.new_path.is_empty() {
         file_diff.old_path.as_str()
     } else {
@@ -119,7 +129,7 @@ pub fn highlight_diff(file_diff: FileDiff, source: Option<BlobSource>) -> Vec<To
     let total_lines: usize = file_diff.hunks.iter().map(|h| h.lines.len()).sum();
 
     // No syntax match (binary, unknown extension): return empty token lines so
-    // the frontend falls back to plain escaped text + intra-line overlay only.
+    // every line renders as plain escaped text + intra-line overlay only.
     let Some(syntax) = syntax else {
         let mut out: Vec<TokenLine> = Vec::with_capacity(total_lines);
         out.resize_with(total_lines, Vec::new);
@@ -127,12 +137,12 @@ pub fn highlight_diff(file_diff: FileDiff, source: Option<BlobSource>) -> Vec<To
     };
 
     if let Some(source) = source {
-        if let Some(out) = highlight_from_blobs(&file_diff, syntax, &source) {
+        if let Some(out) = highlight_from_blobs(file_diff, syntax, source) {
             return out;
         }
     }
 
-    highlight_from_diff_lines(&file_diff, syntax)
+    highlight_from_diff_lines(file_diff, syntax)
 }
 
 /// Tokenize the old and new blobs from line 1 and map their tokens onto diff
@@ -711,9 +721,26 @@ mod tests {
     }
 
     #[test]
-    fn highlight_diff_emits_keyword_tokens_for_rust() {
+    fn highlight_diff_returns_span_tagged_html_per_line() {
+        let lines = highlight_diff(rust_diff(), None);
+        assert_eq!(lines.len(), 3, "one HTML line per diff row");
+        assert_eq!(lines[0], "@@ -1 +1,2 @@", "hunk header renders as plain escaped text");
+        assert!(
+            lines[1].contains("<span class=\"syn-keyword\">fn</span>"),
+            "expected a keyword span in `fn main()`, got {}",
+            lines[1]
+        );
+        assert!(
+            lines[2].contains("&quot;") || lines[2].contains("\"hi\""),
+            "string content must survive into the HTML, got {}",
+            lines[2]
+        );
+    }
+
+    #[test]
+    fn tokenize_diff_emits_keyword_tokens_for_rust() {
         let diff = rust_diff();
-        let lines = highlight_diff(diff, None);
+        let lines = tokenize_diff(&diff, None);
         assert_eq!(lines.len(), 3, "one token line per diff row");
         assert!(lines[0].is_empty(), "hunk header has no tokens");
         let has_keyword = lines[1]
@@ -731,11 +758,11 @@ mod tests {
     }
 
     #[test]
-    fn highlight_diff_unknown_extension_returns_empty_token_lines() {
+    fn tokenize_diff_unknown_extension_returns_empty_token_lines() {
         let mut diff = rust_diff();
         diff.new_path = "data.bin".into();
         diff.old_path = "data.bin".into();
-        let lines = highlight_diff(diff, None);
+        let lines = tokenize_diff(&diff, None);
         assert_eq!(lines.len(), 3);
         assert!(lines.iter().all(Vec::is_empty));
     }
@@ -791,7 +818,9 @@ mod tests {
             .output()
             .expect("git diff");
         let raw = String::from_utf8_lossy(&out.stdout).to_string();
-        crate::commands::diff::parse_diff(raw).expect("diff must parse")
+        crate::commands::diff::parse_diff(raw)
+            .expect("diff must parse")
+            .file_diff
     }
 
     /// The regression that motivated blob-sourced highlighting: a hunk landing
@@ -825,7 +854,7 @@ mod tests {
         };
 
         // Legacy diff-only path: the parser never sees `<script lang="ts">`.
-        let legacy = highlight_diff(diff.clone(), None);
+        let legacy = tokenize_diff(&diff, None);
         let legacy_comment = added_comment(&legacy, &diff);
         assert!(
             !legacy_comment
@@ -835,9 +864,9 @@ mod tests {
         );
 
         // Blob-sourced path: parsed from line 1, so the script context is live.
-        let fixed = highlight_diff(
-            diff.clone(),
-            Some(BlobSource::WorkingTree {
+        let fixed = tokenize_diff(
+            &diff,
+            Some(&BlobSource::WorkingTree {
                 repo_path: repo_path.clone(),
             }),
         );
@@ -883,10 +912,7 @@ mod tests {
 
         let diff = real_diff(repo, "a.ts");
         let repo_path = repo.to_str().expect("utf-8 path").to_string();
-        let lines = highlight_diff(
-            diff.clone(),
-            Some(BlobSource::WorkingTree { repo_path }),
-        );
+        let lines = tokenize_diff(&diff, Some(&BlobSource::WorkingTree { repo_path }));
 
         let flat: Vec<_> = diff.hunks.iter().flat_map(|h| &h.lines).collect();
         let later_idx = flat
@@ -918,7 +944,7 @@ mod tests {
 
         let diff = real_diff(repo, "b.ts");
         let repo_path = repo.to_str().expect("utf-8 path").to_string();
-        let lines = highlight_diff(diff, Some(BlobSource::WorkingTree { repo_path }));
+        let lines = tokenize_diff(&diff, Some(&BlobSource::WorkingTree { repo_path }));
         assert!(
             lines.iter().flatten().any(|t| matches!(t.class, TokenClass::Keyword)),
             "an added file must still highlight from its new-side blob"
@@ -1118,9 +1144,9 @@ mod tests {
     #[test]
     fn unreadable_blob_falls_back_to_diff_only_highlighting() {
         let diff = rust_diff();
-        let lines = highlight_diff(
-            diff,
-            Some(BlobSource::WorkingTree {
+        let lines = tokenize_diff(
+            &diff,
+            Some(&BlobSource::WorkingTree {
                 repo_path: "/nonexistent/repo/path".to_string(),
             }),
         );

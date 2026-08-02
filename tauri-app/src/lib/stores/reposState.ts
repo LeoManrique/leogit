@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store'
-import { configApi, type ReposState } from '$lib/api/commands'
+import { configApi, type ReposStatePatch } from '$lib/api/commands'
 
 export type SortMode = 'recent' | 'name'
 
@@ -11,10 +11,9 @@ export const cloneSortMode = writable<SortMode>('recent')
 
 // Repo paths in most-recently-opened-first order. Drives the picker's tiered
 // background sync (the more recently you used a repo, the more often we refresh
-// its pull/push badge). Persisted to repos-state.json so the tiering survives
-// restarts. Capped so the file can't grow without bound.
+// its pull/push badge). The backend owns the list (move-to-front, de-dupe,
+// cap); this store mirrors the copy it returns.
 export const recentRepos = writable<string[]>([])
-const MAX_RECENTS = 50
 
 function isSortMode(v: unknown): v is SortMode {
   return v === 'recent' || v === 'name'
@@ -37,31 +36,18 @@ export async function hydrateReposState(): Promise<void> {
   } catch {}
 }
 
-// Serializes all repos-state writes. patchReposState is a non-atomic
-// read-modify-write spanning two IPC calls (loadState then saveState), and the
-// backend file I/O takes no lock — so without this, two concurrent patches
-// (e.g. rapid repo switches firing last_opened_repo + recent_repos updates)
-// could both read the same on-disk state and the later save would drop the
-// earlier field. Chaining every patch through one promise tail guarantees each
-// load+save runs to completion before the next patch reads.
-let writeTail: Promise<void> = Promise.resolve()
-
 /**
- * Read-modify-write the persisted repos state so updating one field (a sort
- * mode, last_opened_repo, last_clone_dir, recent_repos) never clobbers another.
- * The single, serialized writer for everything in repos-state.json. The returned
- * promise resolves once this specific patch has been written.
+ * Merge the given fields into the persisted repos state. The backend applies
+ * the patch as one atomic read-modify-write under a lock, so a patch can never
+ * clobber another writer's fields. Never rejects — persistence failures are
+ * logged, not surfaced, since losing a remembered sort mode isn't actionable.
  */
-export function patchReposState(patch: Partial<ReposState>): Promise<void> {
-  // The .then callback swallows its own errors so writeTail never rejects —
-  // a rejected tail would break serialization for every subsequent patch.
-  writeTail = writeTail.then(async () => {
-    try {
-      const current = await configApi.loadState().catch(() => ({}) as ReposState)
-      await configApi.saveState({ ...current, ...patch })
-    } catch {}
-  })
-  return writeTail
+export async function patchReposState(patch: ReposStatePatch): Promise<void> {
+  try {
+    await configApi.patchState(patch)
+  } catch (error) {
+    console.error('[repos-state] patch failed:', error)
+  }
 }
 
 export function setRepoSortMode(mode: SortMode): void {
@@ -75,17 +61,18 @@ export function setCloneSortMode(mode: SortMode): void {
 }
 
 /**
- * Mark a repo as just-opened: move it to the front of the recents list (most
- * recent first), de-duplicating and capping length, then persist. Called on
- * every repo open/switch so the sync scheduler always tiers off fresh usage.
- * Returns the persistence promise so callers can await the write if they need to.
+ * Mark a repo as just-opened. The backend moves it to the front of the
+ * persisted MRU list (de-duplicating and capping) and returns the
+ * authoritative list, which reseeds the store — so the sync scheduler always
+ * tiers off fresh usage. Called on every repo open/switch; resolves once the
+ * write has landed, and never rejects (failures are logged).
  */
-export function recordRecentRepo(path: string): Promise<void> {
-  if (!path) return Promise.resolve()
-  let next: string[] = []
-  recentRepos.update((list) => {
-    next = [path, ...list.filter((p) => p !== path)].slice(0, MAX_RECENTS)
-    return next
-  })
-  return patchReposState({ recent_repos: next })
+export async function recordRecentRepo(path: string): Promise<void> {
+  if (!path) return
+  try {
+    const state = await configApi.recordRecentRepo(path)
+    if (Array.isArray(state.recent_repos)) recentRepos.set(state.recent_repos)
+  } catch (error) {
+    console.error('[repos-state] recording recent repo failed:', error)
+  }
 }

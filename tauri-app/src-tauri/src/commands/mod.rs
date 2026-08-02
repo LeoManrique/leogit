@@ -7,6 +7,7 @@ pub mod ai;
 pub mod terminal;
 pub mod highlight;
 pub mod process;
+pub mod render;
 pub mod os;
 pub mod progress;
 pub mod update;

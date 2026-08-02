@@ -28,23 +28,15 @@ export function openWithDefault(repoPath: string, file: FileEntry): Promise<void
   return osApi.openPath(repoPath, file.path)
 }
 
-/** Add a single file's exact path to .gitignore (its glob metacharacters escaped). */
+/** Add a single file's exact path to .gitignore (the backend escapes its glob
+ * metacharacters so the rule matches the file verbatim). */
 export function ignoreFile(repoPath: string, file: FileEntry): Promise<void> {
-  return gitApi.appendToGitignore(repoPath, [escapeGitignorePath(file.path)])
+  return gitApi.ignorePaths(repoPath, [file.path])
 }
 
 /** Add a `*.<ext>` rule to .gitignore so every file of that type is ignored. */
 export function ignoreExtension(repoPath: string, ext: string): Promise<void> {
   return gitApi.appendToGitignore(repoPath, [`*${ext}`])
-}
-
-/**
- * Escape the glob metacharacters in a literal path so .gitignore matches it
- * verbatim rather than as a pattern. Mirrors GitHub Desktop's
- * `escapeGitSpecialCharacters` — the set is `[ ] ! * # ?`.
- */
-export function escapeGitignorePath(path: string): string {
-  return path.replace(/[[\]!*#?]/g, (m) => `\\${m}`)
 }
 
 /**

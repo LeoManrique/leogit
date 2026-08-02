@@ -63,7 +63,17 @@ pub struct CommitInfo {
     pub committer_date: String,
     pub parents: Vec<String>,
     pub trailers: Vec<String>,
-    pub refs: Vec<String>,
+    /// Values of `Co-Authored-By:` trailers (e.g. "Jane Doe <jane@x.com>"),
+    /// pre-parsed off `trailers` so the composer can re-apply them via
+    /// `format_commit_message` when amending or restoring an undone commit.
+    pub co_authors: Vec<String>,
+    /// `body` with its `Co-Authored-By:` lines removed — what the composer
+    /// pre-fills, since co-authors travel separately (see `co_authors`).
+    pub body_without_coauthors: String,
+    /// Names of tags pointing at this commit, parsed from git's `%D`
+    /// decorations (e.g. "v0.1.0"). Branch/HEAD decorations are dropped —
+    /// the UI only renders tag pills.
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1093,13 +1103,11 @@ pub fn get_log(repo_path: String, opts: LogOptions) -> Result<Vec<CommitInfo>, S
             Vec::new()
         };
 
-        let refs: Vec<String> = if fields.len() > 12 {
-            let r = fields[12].trim();
-            if r.is_empty() {
-                Vec::new()
-            } else {
-                r.split(',').map(|s| s.trim().to_string()).collect()
-            }
+        let co_authors = extract_co_authors(&trailers);
+        let body_without_coauthors = strip_co_author_lines(&body);
+
+        let tags = if fields.len() > 12 {
+            tags_from_decorations(fields[12])
         } else {
             Vec::new()
         };
@@ -1116,11 +1124,60 @@ pub fn get_log(repo_path: String, opts: LogOptions) -> Result<Vec<CommitInfo>, S
             committer_date,
             parents,
             trailers,
-            refs,
+            co_authors,
+            body_without_coauthors,
+            tags,
         });
     }
 
     Ok(commits)
+}
+
+const CO_AUTHOR_PREFIX: &str = "co-authored-by:";
+
+/// The trailer's value when `line` is a `Co-Authored-By:` trailer (any case),
+/// e.g. "Jane Doe <jane@example.com>"; `None` otherwise. `str::get` returns
+/// `None` off a non-boundary index, so multi-byte text can't panic the slice.
+fn co_author_value(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    trimmed
+        .get(..CO_AUTHOR_PREFIX.len())
+        .filter(|head| head.eq_ignore_ascii_case(CO_AUTHOR_PREFIX))
+        .map(|_| trimmed[CO_AUTHOR_PREFIX.len()..].trim())
+}
+
+/// Values of the `Co-Authored-By:` trailers among `trailers`. Only co-author
+/// trailers are preserved for re-application on amend; anything else
+/// (Signed-off-by, Reviewed-by, …) is left for the user to re-add manually.
+fn extract_co_authors(trailers: &[String]) -> Vec<String> {
+    trailers
+        .iter()
+        .filter_map(|t| co_author_value(t))
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// `body` with its `Co-Authored-By:` lines removed, for pre-filling the
+/// composer — the trailers are re-applied via `format_commit_message` instead.
+fn strip_co_author_lines(body: &str) -> String {
+    body.lines()
+        .filter(|line| co_author_value(line).is_none())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_string()
+}
+
+/// Tag names among git's `%D` decorations — the comma-separated symbolic refs
+/// pointing at a commit, e.g. `HEAD -> main, tag: v0.1.0, origin/main`.
+/// Branch/HEAD entries are dropped; the `tag: ` prefix is stripped.
+fn tags_from_decorations(decorations: &str) -> Vec<String> {
+    decorations
+        .split(',')
+        .filter_map(|r| r.trim().strip_prefix("tag: "))
+        .map(str::to_string)
+        .collect()
 }
 
 /// Format a git raw date (`<unix> <tz>`) as an ISO-8601 string.
@@ -1882,13 +1939,40 @@ pub fn discard_files(repo_path: &str, files: Vec<FileEntry>) -> Result<(), Strin
     Ok(())
 }
 
+/// Escape the glob metacharacters in a literal path so `.gitignore` matches it
+/// verbatim rather than as a pattern. Mirrors GitHub Desktop's
+/// `escapeGitSpecialCharacters` — the set is `[ ] ! * # ?`.
+fn escape_gitignore_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        if matches!(c, '[' | ']' | '!' | '*' | '#' | '?') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Add literal file paths to the repo's root `.gitignore`, escaping each
+/// path's glob metacharacters so the rule matches that file verbatim. The
+/// "Ignore File" path of the Changes-tab context menu.
+///
+/// # Errors
+/// Returns `Err` if the `.gitignore` file can't be written.
+#[tauri::command(async)]
+pub fn ignore_paths(repo_path: &str, paths: Vec<String>) -> Result<(), String> {
+    let patterns = paths.iter().map(|p| escape_gitignore_path(p)).collect();
+    append_to_gitignore(repo_path, patterns)
+}
+
 /// Append `patterns` to the repo's root `.gitignore`, one per line, creating
 /// the file if absent. Lines already present (compared trimmed) are skipped so
 /// repeated "Ignore" clicks don't pile up duplicates.
 ///
-/// Callers pass ready-to-write patterns: a literal file path (with its glob
-/// metacharacters escaped) or a glob like `*.log`. A trailing newline is
-/// ensured before appending so existing rules aren't joined onto.
+/// Callers pass ready-to-write patterns — globs like `*.log`. Literal file
+/// paths go through `ignore_paths`, which escapes their glob metacharacters
+/// first. A trailing newline is ensured before appending so existing rules
+/// aren't joined onto.
 ///
 /// # Errors
 /// Returns `Err` if the `.gitignore` file can't be written.
@@ -2571,6 +2655,15 @@ fn scan_for_repos(
 
 #[tauri::command(async)]
 pub fn discover_repos(scan_paths: Vec<String>, max_depth: u32) -> Result<Vec<String>, String> {
+    // An empty list (config cleared, or config load failed upstream) falls
+    // back to the stock scan folders rather than discovering nothing. `~` in
+    // each path is expanded below, so callers pass paths exactly as configured.
+    let scan_paths = if scan_paths.is_empty() {
+        super::config::default_scan_paths()
+    } else {
+        scan_paths
+    };
+
     let mut repos: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
@@ -3522,6 +3615,73 @@ mod tests {
             "foo\nbar\n",
             "must not join onto the last rule"
         );
+    }
+
+    /// `ignore_paths` escapes glob metacharacters so a literal path is ignored
+    /// verbatim, while plain paths pass through untouched.
+    #[test]
+    fn ignore_paths_escapes_glob_metacharacters() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+
+        ignore_paths(
+            &repo_path,
+            vec!["src/[id]/what?.txt".into(), "plain/file.txt".into()],
+        )
+        .expect("ignore");
+        let content = fs::read_to_string(repo.join(".gitignore")).expect("read");
+        assert!(
+            content.contains("src/\\[id\\]/what\\?.txt"),
+            "metacharacters must be escaped: {content}"
+        );
+        assert!(content.contains("plain/file.txt"), "plain path kept: {content}");
+    }
+
+    /// The full GitHub-Desktop escape set — `[ ] ! * # ?` — and nothing else.
+    #[test]
+    fn escape_gitignore_path_covers_the_full_set() {
+        assert_eq!(escape_gitignore_path("a[b]c!d*e#f?g"), "a\\[b\\]c\\!d\\*e\\#f\\?g");
+        assert_eq!(escape_gitignore_path("src/ordinary-path_1.txt"), "src/ordinary-path_1.txt");
+    }
+
+    /// Co-author extraction matches the trailer name case-insensitively,
+    /// skips other trailers, and drops a co-author trailer with no value.
+    #[test]
+    fn co_authors_extracted_case_insensitively() {
+        let trailers = vec![
+            "Co-Authored-By: Jane Doe <jane@example.com>".to_string(),
+            "co-authored-by: Ada <ada@example.com>".to_string(),
+            "Signed-off-by: Someone Else <else@example.com>".to_string(),
+            "Co-Authored-By:".to_string(),
+        ];
+        assert_eq!(
+            extract_co_authors(&trailers),
+            ["Jane Doe <jane@example.com>", "Ada <ada@example.com>"]
+        );
+    }
+
+    /// Stripping removes co-author lines wherever they sit in the body, keeps
+    /// everything else byte-for-byte, and trims the trailing blank tail left
+    /// behind when the stripped lines were the body's last block.
+    #[test]
+    fn strip_co_author_lines_removes_only_co_author_lines() {
+        let body = "Explains the change.\n\nCo-Authored-By: Jane <j@x.com>\nco-authored-by: Ada <a@x.com>";
+        assert_eq!(strip_co_author_lines(body), "Explains the change.");
+
+        let no_coauthors = "Multi-byte prefix — ünïcode line.\nSecond line.";
+        assert_eq!(strip_co_author_lines(no_coauthors), no_coauthors);
+    }
+
+    /// `%D` decorations mix branches, HEAD, and tags; only tag names survive.
+    #[test]
+    fn tags_from_decorations_keeps_only_tags() {
+        assert_eq!(
+            tags_from_decorations("HEAD -> main, tag: v0.1.0, origin/main, tag: stable"),
+            ["v0.1.0", "stable"]
+        );
+        assert!(tags_from_decorations("HEAD -> main, origin/main").is_empty());
+        assert!(tags_from_decorations("").is_empty());
     }
 
     /// Regression: selecting a branch from the dropdown's *Remote Branches*

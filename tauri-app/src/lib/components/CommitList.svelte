@@ -107,7 +107,7 @@
           {
             label: 'Copy Tag',
             // Only meaningful when the commit actually carries a tag.
-            enabled: contextMenu.commit.refs.some((ref) => ref.startsWith('tag: ')),
+            enabled: contextMenu.commit.tags.length > 0,
             action: () => {
               if (contextMenu) copyTag(contextMenu.commit)
             },
@@ -200,27 +200,19 @@
     }
   }
 
-  // `refs` carries every symbolic ref pointing at the commit (branches, HEAD,
-  // tags) as git's %D emits them — e.g. "tag: v0.1.0". Keep only tags and strip
-  // the "tag: " prefix so we can render them as GitHub-Desktop-style pills.
-  function tagsFor(commit: CommitInfo): string[] {
-    return commit.refs
-      .filter((ref) => ref.startsWith('tag: '))
-      .map((ref) => ref.slice(5))
-  }
-
   async function copySha(commit: CommitInfo) {
     try {
       await navigator.clipboard.writeText(commit.sha)
     } catch {}
   }
 
+  // `commit.tags` comes pre-split from the backend's %D parsing, so the rows
+  // render tag pills straight off the payload.
   async function copyTag(commit: CommitInfo) {
-    const tags = tagsFor(commit)
-    if (tags.length === 0) return
+    if (commit.tags.length === 0) return
     try {
       // Space-separate when a commit carries more than one tag.
-      await navigator.clipboard.writeText(tags.join(' '))
+      await navigator.clipboard.writeText(commit.tags.join(' '))
     } catch {}
   }
 
@@ -282,7 +274,7 @@
   <div class="virtual-scroll" style="height: {commits.length * ROW_HEIGHT}px">
     <div class="visible-items" style="transform: translateY({offsetPx}px)">
       {#each visibleCommits as commit, i (commit.sha)}
-        {@const tags = tagsFor(commit)}
+        {@const tags = commit.tags}
         {@const isUnpushed = unpushedShas.has(commit.sha)}
         <div
           class="commit-row"

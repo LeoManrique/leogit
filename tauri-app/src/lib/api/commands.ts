@@ -53,7 +53,14 @@ export interface CommitInfo {
   committer_date: string
   parents: string[]
   trailers: string[]
-  refs: string[]
+  /** Values of `Co-Authored-By:` trailers (e.g. "Jane <jane@x.com>"), pre-parsed
+   * by the backend for re-application on amend / undo-commit restore. */
+  co_authors: string[]
+  /** `body` with its `Co-Authored-By:` lines removed — what the composer
+   * pre-fills, since co-authors are re-applied via `format_commit_message`. */
+  body_without_coauthors: string
+  /** Names of tags pointing at this commit (from `%D`, `tag: ` prefix stripped). */
+  tags: string[]
 }
 
 /** Aggregate line-change totals for a commit, summed across all its files. */
@@ -132,6 +139,36 @@ export interface FileDiff {
   is_binary: boolean
 }
 
+/**
+ * One row of the side-by-side layout: old-side and new-side lines referenced
+ * by flat/global index into the hunks' concatenated `lines` arrays (the same
+ * indexing the per-line HTML and the selection map use). `null` renders an
+ * empty filler cell.
+ */
+export interface SbsPair {
+  left: number | null
+  right: number | null
+  is_hunk_header: boolean
+}
+
+/**
+ * Everything the viewer needs from one `parse_diff` round trip. `file_diff`
+ * stays lean because it round-trips back into `highlight_diff` /
+ * `generate_patch`; the derived render artifacts ride alongside.
+ */
+export interface ParsedDiff {
+  file_diff: FileDiff
+  /** Phase-1 HTML per flattened line (plain escaped text + intra-line
+   * backplate), ready for `{@html}` the same frame the diff mounts. */
+  html: string[]
+  /** Precomputed rows for the side-by-side layout. */
+  sbs_pairs: SbsPair[]
+  /** Added-line total for the header badge (0 for binary diffs). */
+  additions: number
+  /** Deleted-line total for the header badge (0 for binary diffs). */
+  deletions: number
+}
+
 export interface DiffSelection {
   default_selected: boolean
   diverging_lines: Record<number, boolean>
@@ -168,8 +205,22 @@ export interface ReposState {
   repo_sort_mode?: string
   /** Persisted sort mode for the Clone dialog's GitHub repo list ('recent' | 'name'). */
   clone_sort_mode?: string
-  /** Repo paths, most-recently-opened first. Drives the picker's tiered sync. */
+  /** Repo paths, most-recently-opened first. Drives the picker's tiered sync.
+   * Owned by the backend's `record_recent_repo` (de-dupes, caps at 50). */
   recent_repos?: string[]
+}
+
+/**
+ * Field-wise patch for `ReposState`: absent fields are left as they are on
+ * disk. The backend applies it as one atomic read-modify-write under a lock.
+ * `recent_repos` is deliberately not patchable — `record_recent_repo` is the
+ * MRU list's only writer.
+ */
+export interface ReposStatePatch {
+  last_opened_repo?: string
+  last_clone_dir?: string
+  repo_sort_mode?: string
+  clone_sort_mode?: string
 }
 
 /** A repository surfaced in the GitHub tab of the Clone dialog (`gh repo list`). */
@@ -186,7 +237,11 @@ export const configApi = {
   loadConfig: () => invoke<Config>('load_config'),
   saveConfig: (cfg: Config) => invoke<void>('save_config', { cfg }),
   loadState: () => invoke<ReposState>('load_state'),
-  saveState: (state: ReposState) => invoke<void>('save_state', { state }),
+  /** Atomically merge the given fields into repos-state.json; returns the new state. */
+  patchState: (patch: ReposStatePatch) => invoke<ReposState>('patch_state', { patch }),
+  /** Move a repo to the front of the persisted MRU list; returns the new state,
+   * whose `recent_repos` is the authoritative list to reseed the store from. */
+  recordRecentRepo: (path: string) => invoke<ReposState>('record_recent_repo', { path }),
 }
 
 /**
@@ -259,9 +314,12 @@ export const gitApi = {
   /** Discard working-tree changes for the given files (revert tracked, trash untracked). */
   discardFiles: (repoPath: string, files: FileEntry[]) =>
     invoke<void>('discard_files', { repoPath, files }),
-  /** Append the given ready-to-write patterns to the repo's root .gitignore. */
+  /** Append ready-to-write glob patterns (e.g. `*.log`) to the repo's root .gitignore. */
   appendToGitignore: (repoPath: string, patterns: string[]) =>
     invoke<void>('append_to_gitignore', { repoPath, patterns }),
+  /** Ignore literal file paths — the backend escapes their glob metacharacters. */
+  ignorePaths: (repoPath: string, paths: string[]) =>
+    invoke<void>('ignore_paths', { repoPath, paths }),
   formatCommitMessage: (summary: string, description: string, coAuthors: string[] = []) =>
     invoke<string>('format_commit_message', { summary, description, coAuthors }),
   repoSyncStatus: (repoPath: string, doFetch: boolean) =>
@@ -319,56 +377,12 @@ export const osApi = {
 }
 
 export const diffApi = {
-  parseDiff: (raw: string) => invoke<FileDiff | null>('parse_diff', { raw }),
+  parseDiff: (raw: string) => invoke<ParsedDiff | null>('parse_diff', { raw }),
   generatePatch: (repoPath: string, fileDiff: FileDiff, selection: DiffSelection) =>
     invoke<void>('generate_patch', { repoPath, fileDiff, selection }),
   generateInversePatch: (repoPath: string, fileDiff: FileDiff, selection: DiffSelection) =>
     invoke<void>('generate_inverse_patch', { repoPath, fileDiff, selection }),
 }
-
-/**
- * Token classes emitted by the Rust syntect tokenizer (`highlight_diff`).
- * The numeric values MUST stay in sync with `TokenClass` in
- * `src-tauri/src/commands/highlight.rs` — Rust serialises the enum as its
- * `#[repr(u8)]` index, so re-ordering breaks the wire format.
- */
-export const TokenClass = {
-  Plain: 0,
-  Keyword: 1,
-  String: 2,
-  Comment: 3,
-  Function: 4,
-  Type: 5,
-  Variable: 6,
-  Number: 7,
-  Constant: 8,
-  Operator: 9,
-  Punctuation: 10,
-  Tag: 11,
-  Attribute: 12,
-  Builtin: 13,
-  Decorator: 14,
-  // Markup / prose classes (Markdown, reStructuredText, …).
-  Heading: 15,
-  Strong: 16,
-  Emphasis: 17,
-  Strikethrough: 18,
-  Link: 19,
-  Raw: 20,
-  Quote: 21,
-} as const
-
-export type TokenClassValue = (typeof TokenClass)[keyof typeof TokenClass]
-
-export interface Token {
-  /** Code-point index into the line `content` (matches `IntraLineRange`). */
-  start: number
-  /** Code-point index (exclusive) into the line `content`. */
-  end: number
-  class: TokenClassValue
-}
-
-export type TokenLine = Token[]
 
 /**
  * Where the highlighter should read the diff's old/new sides from. syntect is a
@@ -384,10 +398,12 @@ export type BlobSource =
   | { kind: 'commit'; repoPath: string; sha: string }
 
 export const highlightApi = {
-  /** `source` omitted falls back to a diff-only parse, which is only correct
-   *  when the first hunk starts in the file's top-level context. */
+  /** Returns render-ready HTML per flattened diff line — syntect token spans
+   *  laid over the same intra-line backplate as `ParsedDiff.html`, replacing
+   *  it wholesale. `source` omitted falls back to a diff-only parse, which is
+   *  only correct when the first hunk starts in the file's top-level context. */
   highlightDiff: (fileDiff: FileDiff, source?: BlobSource | null) =>
-    invoke<TokenLine[]>('highlight_diff', { fileDiff, source: source ?? null }),
+    invoke<string[]>('highlight_diff', { fileDiff, source: source ?? null }),
 }
 
 export const ghApi = {

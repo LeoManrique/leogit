@@ -7,7 +7,6 @@
   import { ghApi, gitApi, configApi, appApi, type LaunchTarget } from '$lib/api/commands'
   import { patchReposState, recordRecentRepo } from '$lib/stores/reposState'
   import { updateChecker } from '$lib/services/updateChecker'
-  import { homeDir } from '@tauri-apps/api/path'
   import MainLayout from '$lib/views/MainLayout.svelte'
   import RepoPicker from '$lib/views/RepoPicker.svelte'
   import InitRepoConfirm from '$lib/components/InitRepoConfirm.svelte'
@@ -102,20 +101,11 @@
         appState.update((s) => ({ ...s, ghAuthed: authed }))
       }).catch(() => {})
 
-      // Load config + state (shared store so settings updates propagate)
+      // Load config + state (shared store so settings updates propagate).
+      // Scan-path resolution (~ expansion, stock folders when the list is
+      // empty) lives in discover_repos, next to the walker that uses it.
       const cfg = await refreshConfig()
-      const scanPaths = cfg?.scan_paths ?? []
-      const scanDepth = cfg?.scan_depth ?? 3
-
-      // Resolve scan paths: replace ~ with home, fallback to defaults if empty
-      const home = await homeDir().catch(() => '')
-      const resolved = scanPaths.length > 0
-        ? scanPaths.map((p) => p.startsWith('~') ? p.replace(/^~/, home) : p)
-        : home
-          ? [`${home}/Dev`, `${home}/dev`, `${home}/code`, `${home}/Code`, `${home}/Projects`, `${home}/src`]
-          : []
-
-      const repos = await gitApi.discoverRepos(resolved, scanDepth)
+      const repos = await gitApi.discoverRepos(cfg?.scan_paths ?? [], cfg?.scan_depth ?? 3)
       const state = await configApi.loadState().catch(() => ({ last_opened_repo: undefined }))
 
       // A repo passed on the cold-start command line (`leogit <dir>`) wins over

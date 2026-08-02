@@ -71,40 +71,19 @@
   // Uses effectiveSummary so a one-file commit can submit with a blank input.
   const canSubmit = $derived(effectiveSummary.length > 0 && (isAmending || $canCommit))
 
-  // Parse Co-Authored-By trailers out of `commit.trailers`. The trailers list
-  // comes from `%(trailers:unfold,only)` in git's log format, one trailer per
-  // line. We only preserve co-author trailers; anything else (Signed-off-by,
-  // Reviewed-by, etc.) is left for the user to re-add manually if they care.
-  function extractCoAuthors(trailers: string[]): string[] {
-    const out: string[] = []
-    for (const raw of trailers) {
-      const m = raw.match(/^\s*Co-Authored-By:\s*(.+?)\s*$/i)
-      if (m && m[1]) out.push(m[1])
-    }
-    return out
-  }
-
-  // Strip Co-Authored-By lines from a commit body when pre-filling the
-  // description, since the trailers will be re-applied via format_commit_message.
-  function stripCoAuthorLines(body: string): string {
-    return body
-      .split('\n')
-      .filter((line) => !/^\s*Co-Authored-By:/i.test(line))
-      .join('\n')
-      .trimEnd()
-  }
-
   // When entering amend mode, pre-fill the composer from the target commit.
-  // When leaving (commit-to-amend → null), clear the composer back to empty so
-  // the user doesn't accidentally re-submit the amended message as a new commit.
+  // The backend pre-parses `co_authors` / `body_without_coauthors` off the
+  // commit's trailers, so no trailer parsing happens here. When leaving
+  // (commit-to-amend → null), clear the composer back to empty so the user
+  // doesn't accidentally re-submit the amended message as a new commit.
   let lastAmendSha = $state<string | null>(null)
   $effect(() => {
     const target = $repoState.commitToAmend
     if (target !== null && target.sha !== lastAmendSha) {
       lastAmendSha = target.sha
-      amendCoAuthors = extractCoAuthors(target.trailers)
+      amendCoAuthors = target.co_authors
       summary = target.summary
-      description = stripCoAuthorLines(target.body)
+      description = target.body_without_coauthors
     } else if (target === null && lastAmendSha !== null) {
       lastAmendSha = null
       amendCoAuthors = []

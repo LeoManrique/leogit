@@ -1,16 +1,16 @@
 <script lang="ts">
   import type {
+    ParsedDiff,
     FileDiff,
     DiffSelection,
     DiffLine,
-    TokenLine,
-    TokenClassValue,
+    SbsPair,
     BlobSource,
   } from '$lib/api/commands'
-  import { highlightApi, TokenClass } from '$lib/api/commands'
+  import { highlightApi } from '$lib/api/commands'
 
   interface Props {
-    fileDiff: FileDiff | null
+    diff: ParsedDiff | null
     selection: DiffSelection | null
     /** Lets the highlighter read each side's full blob so it can parse from
      *  line 1. Without it, highlighting falls back to a diff-only parse that is
@@ -31,7 +31,7 @@
   }
 
   let {
-    fileDiff = null,
+    diff = null,
     selection = null,
     blobSource = null,
     showSelection = false,
@@ -43,202 +43,73 @@
     onHunkToggle = () => {},
   }: Props = $props()
 
+  // The lean diff structure — what the template's line lookups and the
+  // highlight round trip use. The render artifacts (html, sbs_pairs, counts)
+  // live on `diff` itself.
+  const fileDiff = $derived(diff?.file_diff ?? null)
+
+  // Flat view of the diff's lines in global-index order — the indexing shared
+  // by `highlightedHtml`, the selection map, and `diff.sbs_pairs`.
+  const flatLines = $derived.by((): DiffLine[] => {
+    const out: DiffLine[] = []
+    if (fileDiff) {
+      for (const h of fileDiff.hunks) for (const l of h.lines) out.push(l)
+    }
+    return out
+  })
+
   /*
     `highlightedHtml[i]` is the pre-escaped HTML for the i-th flattened diff
-    line, ready to drop into `{@html}`. The renderer fills it in two phases:
-      Phase 1 (sync): plain escaped text + intra-line backplate only.
-      Phase 2 (debounced async): syntect-tokenized spans with `.syn-*`
-                                  classes laid over the same backplate.
-    Theme swap is pure CSS now (no `theme` reactive read), so toggling
-    light/dark doesn't re-fetch or re-render.
+    line, ready to drop into `{@html}`. Both phases come from Rust
+    (`render.rs`), so they can never drift apart:
+      Phase 1 (sync): `diff.html` ships in the parse_diff payload — plain
+                      escaped text + intra-line backplate, painted the same
+                      frame the diff mounts.
+      Phase 2 (debounced async): `highlight_diff` returns the same lines with
+                      syntect `.syn-*` spans laid over the same backplate.
+    Theme swap is pure CSS (no `theme` reactive read), so toggling light/dark
+    doesn't re-fetch or re-render.
   */
   let highlightedHtml = $state<string[]>([])
 
-  function escapeHtml(s: string): string {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  }
-
-  const TOKEN_CLASS_NAME: Record<TokenClassValue, string> = {
-    [TokenClass.Plain]: '',
-    [TokenClass.Keyword]: 'syn-keyword',
-    [TokenClass.String]: 'syn-string',
-    [TokenClass.Comment]: 'syn-comment',
-    [TokenClass.Function]: 'syn-function',
-    [TokenClass.Type]: 'syn-type',
-    [TokenClass.Variable]: '',
-    [TokenClass.Number]: 'syn-number',
-    [TokenClass.Constant]: 'syn-constant',
-    [TokenClass.Operator]: 'syn-operator',
-    [TokenClass.Punctuation]: '',
-    [TokenClass.Tag]: 'syn-tag',
-    [TokenClass.Attribute]: 'syn-attribute',
-    [TokenClass.Builtin]: 'syn-builtin',
-    [TokenClass.Decorator]: 'syn-decorator',
-    [TokenClass.Heading]: 'syn-heading',
-    [TokenClass.Strong]: 'syn-strong',
-    [TokenClass.Emphasis]: 'syn-emphasis',
-    [TokenClass.Strikethrough]: 'syn-strike',
-    [TokenClass.Link]: 'syn-link',
-    [TokenClass.Raw]: 'syn-raw',
-    [TokenClass.Quote]: 'syn-quote',
-  }
-
-  function emitSpan(text: string, classes: string): string {
-    if (!text) return ''
-    if (!classes) return escapeHtml(text)
-    return `<span class="${classes}">${escapeHtml(text)}</span>`
-  }
-
-  /**
-   * Walks `content`'s code points and emits class-tagged spans for each token.
-   * If `intra` is set, the overlapping slice gets the `intra-add`/`intra-remove`
-   * backplate class layered on top of the syntax class — preserving the
-   * Relay→Metrics highlight underneath the syntax colour.
-   *
-   * Indices are code points, matching the Rust tokenizer and `IntraLineRange`.
-   */
-  function renderTokenLine(
-    content: string,
-    tokens: TokenLine | null,
-    intra: { start: number; length: number } | null,
-    intraClass: string | null,
-  ): string {
-    const chars = [...content]
-    const intraStart = intra ? intra.start : -1
-    const intraEnd = intra ? intra.start + intra.length : -1
-
-    // No tokens (no language match, very long line, or Phase 1) — treat the
-    // whole line as one Plain "token" so the intra-line overlay still applies.
-    const tokenList: TokenLine =
-      tokens && tokens.length > 0
-        ? tokens
-        : [{ start: 0, end: chars.length, class: TokenClass.Plain }]
-
-    let result = ''
-    let cursor = 0
-    for (const tok of tokenList) {
-      // Defensive clamping: a malformed Rust response shouldn't ever leak
-      // past the line bounds, but pinning to `chars.length` keeps the
-      // renderer safe regardless.
-      const tokStart = Math.max(cursor, Math.min(tok.start, chars.length))
-      const tokEnd = Math.max(tokStart, Math.min(tok.end, chars.length))
-      if (tokStart > cursor) {
-        // Gap between tokens — render as plain (rarely happens; insurance).
-        result += renderSlice(chars, cursor, tokStart, '', intraStart, intraEnd, intraClass)
-      }
-      const baseClass = TOKEN_CLASS_NAME[tok.class] ?? ''
-      result += renderSlice(chars, tokStart, tokEnd, baseClass, intraStart, intraEnd, intraClass)
-      cursor = tokEnd
-    }
-    if (cursor < chars.length) {
-      result += renderSlice(chars, cursor, chars.length, '', intraStart, intraEnd, intraClass)
-    }
-    return result
-  }
-
-  /** Renders `chars[start..end]` split around the intra-line range so the
-   *  overlap gets `intraClass` layered on top of `baseClass`. */
-  function renderSlice(
-    chars: string[],
-    start: number,
-    end: number,
-    baseClass: string,
-    intraStart: number,
-    intraEnd: number,
-    intraClass: string | null,
-  ): string {
-    if (end <= start) return ''
-    if (!intraClass || intraStart < 0 || intraEnd <= intraStart) {
-      return emitSpan(chars.slice(start, end).join(''), baseClass)
-    }
-    const overlapStart = Math.max(start, intraStart)
-    const overlapEnd = Math.min(end, intraEnd)
-    if (overlapStart >= overlapEnd) {
-      return emitSpan(chars.slice(start, end).join(''), baseClass)
-    }
-    const merged = baseClass ? `${baseClass} ${intraClass}` : intraClass
-    let out = ''
-    if (overlapStart > start) {
-      out += emitSpan(chars.slice(start, overlapStart).join(''), baseClass)
-    }
-    out += emitSpan(chars.slice(overlapStart, overlapEnd).join(''), merged)
-    if (end > overlapEnd) {
-      out += emitSpan(chars.slice(overlapEnd, end).join(''), baseClass)
-    }
-    return out
-  }
-
-  function buildHtml(diff: FileDiff, tokensByLine: TokenLine[] | null): string[] {
-    const out: string[] = []
-    let i = 0
-    for (const h of diff.hunks) {
-      for (const line of h.lines) {
-        const tokens = tokensByLine ? tokensByLine[i] ?? null : null
-        const intra = line.intra_line_diff && line.intra_line_diff.length > 0
-          ? line.intra_line_diff
-          : null
-        const intraClass = !intra
-          ? null
-          : line.line_type === 'Add'
-            ? 'diff-intra-add'
-            : line.line_type === 'Delete'
-              ? 'diff-intra-remove'
-              : null
-        out.push(renderTokenLine(line.content, tokens, intra, intraClass))
-        i++
-      }
-    }
-    return out
-  }
-
-  /*
-    Two-phase render pipeline.
-      Phase 1 (sync): paint plain escaped text + intra-line backplate, same
-                      frame as the diff mount. ~5 ms for 10K lines.
-      Phase 2 (debounced async, 80 ms): invoke `highlight_diff` in Rust,
-                      then rebuild the HTML with syntax classes layered on.
-    `highlightReq` epoch counter guards against a slow tokenize stomping a
-    fresher one. Same shape as the prior Shiki pipeline minus the WebView
-    grammar cost.
-  */
   const HIGHLIGHT_DEBOUNCE_MS = 80
   let highlightReq = 0
   // Re-run guard: the parent's `repoState` writable fires every 2 s on status
   // poll, which propagates through the store chain and re-evaluates
-  // `fileDiff={$repoState.activeFileDiff}` in the template even when the
+  // `diff={$repoState.activeFileDiff}` in the template even when the
   // reference is unchanged. Without this guard, every poll would re-tokenize
   // and produce a visible "highlighting flash" on the static viewer.
-  let lastFileDiff: FileDiff | null = null
+  let lastDiff: ParsedDiff | null = null
   let lastSyntaxHighlighting: boolean | null = null
 
-  async function runHighlight(diff: FileDiff, source: BlobSource | null, reqId: number) {
+  async function runHighlight(fd: FileDiff, source: BlobSource | null, reqId: number) {
     if (reqId !== highlightReq) return
     try {
-      const tokens = await highlightApi.highlightDiff(diff, source)
+      const html = await highlightApi.highlightDiff(fd, source)
       if (reqId !== highlightReq) return
-      highlightedHtml = buildHtml(diff, tokens)
+      highlightedHtml = html
     } catch (e) {
       console.error('[DiffViewer] highlight_diff failed', e)
     }
   }
 
   $effect(() => {
-    const fd = fileDiff
+    const pd = diff
     const sh = syntaxHighlighting
-    if (fd === lastFileDiff && sh === lastSyntaxHighlighting) return
-    lastFileDiff = fd
+    if (pd === lastDiff && sh === lastSyntaxHighlighting) return
+    lastDiff = pd
     lastSyntaxHighlighting = sh
     const myReq = ++highlightReq
-    if (!fd) {
+    if (!pd) {
       highlightedHtml = []
       return
     }
-    highlightedHtml = buildHtml(fd, null)
+    highlightedHtml = pd.html
     if (!sh) return
     // Read `blobSource` only past the guard: the parent builds it inline, so a
     // fresh object every status poll would otherwise retrigger this effect.
     const src = blobSource
-    const t = setTimeout(() => runHighlight(fd, src, myReq), HIGHLIGHT_DEBOUNCE_MS)
+    const t = setTimeout(() => runHighlight(pd.file_diff, src, myReq), HIGHLIGHT_DEBOUNCE_MS)
     return () => clearTimeout(t)
   })
 
@@ -268,104 +139,6 @@
     if (line.line_type === 'Hunk') return '@'
     return ' '
   }
-
-  function flatIndex(hunkIdx: number, lineIdx: number): number {
-    if (!fileDiff) return 0
-    let idx = 0
-    for (let i = 0; i < hunkIdx; i++) idx += fileDiff.hunks[i].lines.length
-    return idx + lineIdx
-  }
-
-  // Build paired rows for side-by-side: { left, right, leftIdx, rightIdx }
-  type Pair = {
-    left: DiffLine | null
-    right: DiffLine | null
-    leftGlobalIdx: number | null
-    rightGlobalIdx: number | null
-    isHunkHeader: boolean
-    hunkIdx: number
-  }
-
-  function buildPairs(): Pair[] {
-    if (!fileDiff) return []
-    const pairs: Pair[] = []
-
-    for (let hunkIdx = 0; hunkIdx < fileDiff.hunks.length; hunkIdx++) {
-      const hunk = fileDiff.hunks[hunkIdx]
-      // Collect runs of deletes and adds within the hunk and pair them
-      let i = 0
-      while (i < hunk.lines.length) {
-        const line = hunk.lines[i]
-        const globalI = flatIndex(hunkIdx, i)
-
-        if (line.line_type === 'Hunk') {
-          pairs.push({ left: line, right: line, leftGlobalIdx: globalI, rightGlobalIdx: globalI, isHunkHeader: true, hunkIdx })
-          i++
-          continue
-        }
-
-        if (line.line_type === 'Context') {
-          pairs.push({ left: line, right: line, leftGlobalIdx: globalI, rightGlobalIdx: globalI, isHunkHeader: false, hunkIdx })
-          i++
-          continue
-        }
-
-        if (line.line_type === 'NoNewline') {
-          // Attach to last row
-          const last = pairs[pairs.length - 1]
-          if (last) {
-            if (last.left && last.left.line_type !== 'Add') last.left = { ...last.left, text: last.left.text + ' (no newline)' }
-            if (last.right && last.right.line_type !== 'Delete') last.right = { ...last.right, text: last.right.text + ' (no newline)' }
-          }
-          i++
-          continue
-        }
-
-        // Collect a delete run and an add run
-        const deletes: { line: DiffLine; idx: number }[] = []
-        const adds: { line: DiffLine; idx: number }[] = []
-        while (i < hunk.lines.length && hunk.lines[i].line_type === 'Delete') {
-          deletes.push({ line: hunk.lines[i], idx: flatIndex(hunkIdx, i) })
-          i++
-        }
-        while (i < hunk.lines.length && hunk.lines[i].line_type === 'Add') {
-          adds.push({ line: hunk.lines[i], idx: flatIndex(hunkIdx, i) })
-          i++
-        }
-
-        const max = Math.max(deletes.length, adds.length)
-        for (let k = 0; k < max; k++) {
-          pairs.push({
-            left: deletes[k]?.line ?? null,
-            right: adds[k]?.line ?? null,
-            leftGlobalIdx: deletes[k]?.idx ?? null,
-            rightGlobalIdx: adds[k]?.idx ?? null,
-            isHunkHeader: false,
-            hunkIdx,
-          })
-        }
-      }
-    }
-    return pairs
-  }
-
-  let pairs = $derived(sideBySide ? buildPairs() : [])
-
-  // Per-file added/deleted line totals for the header badge. Binary files have
-  // no line-by-line diff, so the counters are suppressed (left at 0).
-  const lineCounts = $derived.by(() => {
-    let adds = 0
-    let dels = 0
-    if (fileDiff && !fileDiff.is_binary) {
-      for (const h of fileDiff.hunks) {
-        for (const line of h.lines) {
-          if (line.line_type === 'Add') adds++
-          else if (line.line_type === 'Delete') dels++
-        }
-      }
-    }
-    return { adds, dels }
-  })
 
   /*
     Virtualization. The diff body keeps only the visible window in the DOM
@@ -428,14 +201,13 @@
   })
   const totalHeight = $derived(rowOffsets[rowOffsets.length - 1] ?? 0)
 
-  type SbsRow = { pair: Pair; pairIdx: number; height: number; key: string }
+  type SbsRow = { pair: SbsPair; height: number; key: string }
 
   const sbsRows = $derived.by((): SbsRow[] => {
-    if (!sideBySide) return []
-    return pairs.map((p, i) => ({
+    if (!sideBySide || !diff) return []
+    return diff.sbs_pairs.map((p, i) => ({
       pair: p,
-      pairIdx: i,
-      height: p.isHunkHeader ? HEADER_HEIGHT : ROW_HEIGHT,
+      height: p.is_hunk_header ? HEADER_HEIGHT : ROW_HEIGHT,
       key: `S-${i}`,
     }))
   })
@@ -517,10 +289,10 @@
         <span class="arrow">→</span>
       {/if}
       <span class="new-path">{fileDiff.new_path || fileDiff.old_path}</span>
-      {#if lineCounts.adds > 0 || lineCounts.dels > 0}
+      {#if diff && (diff.additions > 0 || diff.deletions > 0)}
         <span class="line-counts">
-          {#if lineCounts.adds > 0}<span class="add-count">+{lineCounts.adds}</span>{/if}
-          {#if lineCounts.dels > 0}<span class="del-count">-{lineCounts.dels}</span>{/if}
+          {#if diff.additions > 0}<span class="add-count">+{diff.additions}</span>{/if}
+          {#if diff.deletions > 0}<span class="del-count">-{diff.deletions}</span>{/if}
         </span>
       {/if}
     </div>
@@ -540,31 +312,33 @@
         <div class="diff-virtual" style:height={wrapLongLines ? 'auto' : `${sbsTotal}px`}>
           <div class="diff-visible" style:transform={wrapLongLines ? 'none' : `translateY(${sbsOffsetPx}px)`}>
             {#each renderedSbsRows as row (row.key)}
-              {#if row.pair.isHunkHeader && row.pair.left}
+              {@const left = row.pair.left !== null ? flatLines[row.pair.left] : null}
+              {@const right = row.pair.right !== null ? flatLines[row.pair.right] : null}
+              {#if row.pair.is_hunk_header && left}
                 <div class="hunk-header sbs-hunk-header" style:height={wrapLongLines ? null : `${HEADER_HEIGHT}px`}>
-                  <span class="hunk-text">{row.pair.left.text}</span>
+                  <span class="hunk-text">{left.text}</span>
                 </div>
               {:else}
                 <div class="sbs-row" style:height={wrapLongLines ? null : `${ROW_HEIGHT}px`}>
-                  <div class="sbs-side sbs-left {row.pair.left ? lineTypeClass(row.pair.left.line_type) : 'sbs-empty'}">
-                    <span class="line-number">{row.pair.left?.old_line_no ?? ''}</span>
-                    <span class="line-prefix">{row.pair.left ? linePrefix(row.pair.left) : ' '}</span>
+                  <div class="sbs-side sbs-left {left ? lineTypeClass(left.line_type) : 'sbs-empty'}">
+                    <span class="line-number">{left?.old_line_no ?? ''}</span>
+                    <span class="line-prefix">{left ? linePrefix(left) : ' '}</span>
                     <span class="line-content">
-                      {#if row.pair.left && row.pair.leftGlobalIdx !== null && highlightedHtml[row.pair.leftGlobalIdx]}
-                        {@html highlightedHtml[row.pair.leftGlobalIdx]}
-                      {:else if row.pair.left}
-                        {row.pair.left.content}
+                      {#if left && row.pair.left !== null && highlightedHtml[row.pair.left]}
+                        {@html highlightedHtml[row.pair.left]}
+                      {:else if left}
+                        {left.content}
                       {/if}
                     </span>
                   </div>
-                  <div class="sbs-side sbs-right {row.pair.right ? lineTypeClass(row.pair.right.line_type) : 'sbs-empty'}">
-                    <span class="line-number">{row.pair.right?.new_line_no ?? ''}</span>
-                    <span class="line-prefix">{row.pair.right ? linePrefix(row.pair.right) : ' '}</span>
+                  <div class="sbs-side sbs-right {right ? lineTypeClass(right.line_type) : 'sbs-empty'}">
+                    <span class="line-number">{right?.new_line_no ?? ''}</span>
+                    <span class="line-prefix">{right ? linePrefix(right) : ' '}</span>
                     <span class="line-content">
-                      {#if row.pair.right && row.pair.rightGlobalIdx !== null && highlightedHtml[row.pair.rightGlobalIdx]}
-                        {@html highlightedHtml[row.pair.rightGlobalIdx]}
-                      {:else if row.pair.right}
-                        {row.pair.right.content}
+                      {#if right && row.pair.right !== null && highlightedHtml[row.pair.right]}
+                        {@html highlightedHtml[row.pair.right]}
+                      {:else if right}
+                        {right.content}
                       {/if}
                     </span>
                   </div>

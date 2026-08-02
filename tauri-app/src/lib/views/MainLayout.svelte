@@ -800,41 +800,22 @@
     if (!isCheckingOut) checkoutTarget = null
   }
 
-  // Parse the Co-Authored-By trailers off a commit and split the body.
-  // Mirrors CommitMessage.svelte's helpers — kept local to avoid coupling.
-  function splitCoAuthors(commit: CommitInfo): {
-    body: string
-    coAuthors: string[]
-  } {
-    const coAuthors: string[] = []
-    for (const raw of commit.trailers) {
-      const m = raw.match(/^\s*Co-Authored-By:\s*(.+?)\s*$/i)
-      if (m && m[1]) coAuthors.push(m[1])
-    }
-    const body = commit.body
-      .split('\n')
-      .filter((line) => !/^\s*Co-Authored-By:/i.test(line))
-      .join('\n')
-      .trimEnd()
-    return { body, coAuthors }
-  }
-
   async function handleUndoCommit(commit: CommitInfo): Promise<void> {
     const repoPath = $appState.repoPath
     if (!repoPath) return
     try {
       await gitApi.undoLastCommit(repoPath)
-      const { body, coAuthors } = splitCoAuthors(commit)
       // Set the seed BEFORE refresh so the composer prefills as soon as the
-      // tab switches over. Also defensively clear amend mode in case the
-      // undone commit happened to be the one the user was amending.
+      // tab switches over. The backend pre-parses the co-authors / stripped
+      // body off the commit's trailers. Also defensively clear amend mode in
+      // case the undone commit happened to be the one the user was amending.
       repoState.update((s) => ({
         ...s,
         commitToAmend: null,
         restoreMessage: {
           summary: commit.summary,
-          description: body,
-          coAuthors,
+          description: commit.body_without_coauthors,
+          coAuthors: commit.co_authors,
         },
         activeTab: 'changes',
       }))
@@ -1364,7 +1345,7 @@
           </div>
         {:else if $repoState.activeFileDiff}
           <DiffViewer
-            fileDiff={$repoState.activeFileDiff}
+            diff={$repoState.activeFileDiff}
             selection={null}
             blobSource={{ kind: 'workingTree', repoPath: $appState.repoPath }}
             showSelection={false}
@@ -1415,7 +1396,7 @@
               <div class="diff-empty">Loading diff…</div>
             {:else if $repoState.activeCommitFileDiff}
               <DiffViewer
-                fileDiff={$repoState.activeCommitFileDiff}
+                diff={$repoState.activeCommitFileDiff}
                 selection={null}
                 blobSource={$repoState.activeCommit
                   ? {

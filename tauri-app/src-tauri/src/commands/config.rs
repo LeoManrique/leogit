@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -50,13 +51,28 @@ pub struct ReposState {
     #[serde(default)]
     pub clone_sort_mode: Option<String>,
     /// Repo paths in most-recently-opened-first order. Drives the picker's
-    /// tiered background sync (recently used repos get fetched more often) and
-    /// is capped client-side. `None` on first run / pre-migration state files.
+    /// tiered background sync (recently used repos get fetched more often).
+    /// Owned entirely by `record_recent_repo` (which de-dupes and caps it).
+    /// `None` on first run / pre-migration state files.
     #[serde(default)]
     pub recent_repos: Option<Vec<String>>,
 }
 
-fn default_scan_paths() -> Vec<String> {
+/// Field-wise patch for [`ReposState`]: `None` leaves a field as it is on
+/// disk. No caller ever needs to clear a field back to "unset", so a single
+/// `Option` layer is enough. `recent_repos` is deliberately absent — the MRU
+/// list has exactly one writer, `record_recent_repo`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ReposStatePatch {
+    pub last_opened_repo: Option<String>,
+    pub last_clone_dir: Option<String>,
+    pub repo_sort_mode: Option<String>,
+    pub clone_sort_mode: Option<String>,
+}
+
+/// Folders repo discovery falls back to when the configured `scan_paths` list
+/// is empty. Also `discover_repos`'s fallback, so the default lives once.
+pub(crate) fn default_scan_paths() -> Vec<String> {
     vec![
         "~/Dev".to_string(),
         "~/dev".to_string(),
@@ -158,8 +174,15 @@ pub fn save_config(cfg: Config) -> Result<(), String> {
     fs::write(&path, content).map_err(|e| format!("Failed to write config file: {}", e))
 }
 
-#[tauri::command]
-pub fn load_state() -> Result<ReposState, String> {
+/// Cap on `recent_repos` so repos-state.json can't grow without bound.
+const MAX_RECENT_REPOS: usize = 50;
+
+/// Serializes every read-modify-write of repos-state.json. Tauri runs
+/// commands concurrently, and two interleaved load+save cycles would silently
+/// drop the slower writer's fields.
+static STATE_LOCK: Mutex<()> = Mutex::new(());
+
+fn read_state() -> Result<ReposState, String> {
     let path = state_file()?;
     if !path.exists() {
         return Ok(ReposState::default());
@@ -171,11 +194,149 @@ pub fn load_state() -> Result<ReposState, String> {
     serde_json::from_str(&content).map_err(|e| format!("Failed to parse state: {}", e))
 }
 
-#[tauri::command]
-pub fn save_state(state: ReposState) -> Result<(), String> {
+fn write_state(state: &ReposState) -> Result<(), String> {
     let path = state_file()?;
-    let content =
-        serde_json::to_string_pretty(&state).map_err(|e| format!("Failed to serialize state: {}", e))?;
+    let content = serde_json::to_string_pretty(state)
+        .map_err(|e| format!("Failed to serialize state: {}", e))?;
 
     fs::write(&path, content).map_err(|e| format!("Failed to write state file: {}", e))
+}
+
+/// Apply `mutate` to the on-disk state as one atomic read-modify-write and
+/// return the resulting state (the authoritative copy callers reseed from).
+fn update_state(mutate: impl FnOnce(&mut ReposState)) -> Result<ReposState, String> {
+    // A poisoned lock only means another update panicked mid-write; the guard
+    // protects no in-memory data, so continuing is safe.
+    let _guard = STATE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // A corrupt state file self-heals: start from defaults and let the save
+    // below rewrite it, rather than wedging every future update on the same
+    // parse error. Matches the frontend's historical fallback behaviour.
+    let mut state = read_state().unwrap_or_else(|e| {
+        eprintln!("[state] could not read repos-state.json, rewriting it: {e}");
+        ReposState::default()
+    });
+    mutate(&mut state);
+    write_state(&state)?;
+    Ok(state)
+}
+
+fn apply_patch(state: &mut ReposState, patch: ReposStatePatch) {
+    if let Some(v) = patch.last_opened_repo {
+        state.last_opened_repo = Some(v);
+    }
+    if let Some(v) = patch.last_clone_dir {
+        state.last_clone_dir = Some(v);
+    }
+    if let Some(v) = patch.repo_sort_mode {
+        state.repo_sort_mode = Some(v);
+    }
+    if let Some(v) = patch.clone_sort_mode {
+        state.clone_sort_mode = Some(v);
+    }
+}
+
+/// Move `path` to the front of the MRU list, de-duplicating and capping length.
+fn prepend_recent(list: &mut Vec<String>, path: String) {
+    list.retain(|p| *p != path);
+    list.insert(0, path);
+    list.truncate(MAX_RECENT_REPOS);
+}
+
+#[tauri::command]
+pub fn load_state() -> Result<ReposState, String> {
+    read_state()
+}
+
+/// Merge the given fields into repos-state.json atomically, so updating one
+/// field (a sort mode, `last_opened_repo`, `last_clone_dir`) can never clobber
+/// another writer's field, and return the new state.
+///
+/// # Errors
+/// Returns `Err` when the state file can't be written.
+#[tauri::command]
+pub fn patch_state(patch: ReposStatePatch) -> Result<ReposState, String> {
+    update_state(|state| apply_patch(state, patch))
+}
+
+/// Mark a repo as just-opened: move it to the front of the persisted MRU list
+/// (most recent first) and return the new state, whose `recent_repos` is the
+/// authoritative list the frontend reseeds its store from.
+///
+/// # Errors
+/// Returns `Err` when the state file can't be written.
+#[tauri::command]
+pub fn record_recent_repo(path: String) -> Result<ReposState, String> {
+    update_state(|state| {
+        let mut list = state.recent_repos.take().unwrap_or_default();
+        prepend_recent(&mut list, path);
+        state.recent_repos = Some(list);
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_with_recents(recents: &[&str]) -> ReposState {
+        ReposState {
+            recent_repos: Some(recents.iter().map(ToString::to_string).collect()),
+            ..ReposState::default()
+        }
+    }
+
+    #[test]
+    fn prepend_recent_moves_to_front_and_dedupes() {
+        let mut list = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        prepend_recent(&mut list, "b".to_string());
+        assert_eq!(list, ["b", "a", "c"]);
+    }
+
+    #[test]
+    fn prepend_recent_caps_the_list() {
+        let mut list: Vec<String> = (0..MAX_RECENT_REPOS).map(|i| format!("repo-{i}")).collect();
+        prepend_recent(&mut list, "new".to_string());
+        assert_eq!(list.len(), MAX_RECENT_REPOS);
+        assert_eq!(list[0], "new");
+        assert!(!list.contains(&format!("repo-{}", MAX_RECENT_REPOS - 1)));
+    }
+
+    #[test]
+    fn apply_patch_leaves_absent_fields_untouched() {
+        let mut state = state_with_recents(&["kept"]);
+        state.last_opened_repo = Some("old-repo".to_string());
+        state.repo_sort_mode = Some("name".to_string());
+
+        apply_patch(
+            &mut state,
+            ReposStatePatch {
+                last_clone_dir: Some("/tmp/clones".to_string()),
+                ..ReposStatePatch::default()
+            },
+        );
+
+        assert_eq!(state.last_clone_dir.as_deref(), Some("/tmp/clones"));
+        assert_eq!(state.last_opened_repo.as_deref(), Some("old-repo"));
+        assert_eq!(state.repo_sort_mode.as_deref(), Some("name"));
+        assert_eq!(state.recent_repos, Some(vec!["kept".to_string()]));
+    }
+
+    #[test]
+    fn patch_fields_all_apply() {
+        let mut state = ReposState::default();
+        apply_patch(
+            &mut state,
+            ReposStatePatch {
+                last_opened_repo: Some("r".to_string()),
+                last_clone_dir: Some("d".to_string()),
+                repo_sort_mode: Some("recent".to_string()),
+                clone_sort_mode: Some("name".to_string()),
+            },
+        );
+        assert_eq!(state.last_opened_repo.as_deref(), Some("r"));
+        assert_eq!(state.last_clone_dir.as_deref(), Some("d"));
+        assert_eq!(state.repo_sort_mode.as_deref(), Some("recent"));
+        assert_eq!(state.clone_sort_mode.as_deref(), Some("name"));
+    }
 }

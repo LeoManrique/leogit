@@ -88,8 +88,54 @@ impl DiffSelection {
     }
 }
 
+/// One row of the side-by-side layout: an old-side line paired with a
+/// new-side line, referenced by flat/global line index into the hunks'
+/// concatenated `lines` arrays — the same indexing the per-line HTML and the
+/// selection map use. `None` renders an empty filler cell; a context or
+/// hunk-header row carries the same index on both sides.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct SbsPair {
+    pub left: Option<usize>,
+    pub right: Option<usize>,
+    pub is_hunk_header: bool,
+}
+
+/// Everything the viewer needs from one `parse_diff` round trip. `file_diff`
+/// stays a lean, standalone struct because the frontend round-trips it back
+/// into `highlight_diff` / `generate_patch` — the derived render artifacts
+/// (per-line HTML, side-by-side pairing, +/- totals) ride alongside instead of
+/// on it so they're never echoed back over IPC.
+#[derive(Debug, Clone, Serialize)]
+pub struct ParsedDiff {
+    pub file_diff: FileDiff,
+    /// Phase-1 HTML per flattened line: plain escaped text + intra-line
+    /// backplate, ready for `{@html}` the same frame the diff mounts.
+    /// `highlight_diff` later replaces the whole array with tokenized spans.
+    pub html: Vec<String>,
+    /// Precomputed rows for the side-by-side layout.
+    pub sbs_pairs: Vec<SbsPair>,
+    /// Added-line total for the header badge (0 for binary diffs).
+    pub additions: u32,
+    /// Deleted-line total for the header badge (0 for binary diffs).
+    pub deletions: u32,
+}
+
 #[tauri::command(async)]
-pub fn parse_diff(raw: String) -> Option<FileDiff> {
+pub fn parse_diff(raw: String) -> Option<ParsedDiff> {
+    let file_diff = parse_file_diff(&raw)?;
+    let html = super::render::plain_html(&file_diff);
+    let sbs_pairs = build_sbs_pairs(&file_diff.hunks);
+    let (additions, deletions) = count_changes(&file_diff.hunks);
+    Some(ParsedDiff {
+        file_diff,
+        html,
+        sbs_pairs,
+        additions,
+        deletions,
+    })
+}
+
+fn parse_file_diff(raw: &str) -> Option<FileDiff> {
     if raw.trim().is_empty() {
         return None;
     }
@@ -285,6 +331,82 @@ pub fn parse_diff(raw: String) -> Option<FileDiff> {
         hunks,
         is_binary,
     })
+}
+
+/// Builds the side-by-side rows: context and hunk-header lines span both
+/// columns; each run of deletes is zipped against the add run that follows it,
+/// with `None` filling the shorter side. `NoNewline` markers get no row of
+/// their own — the unified view shows them, side-by-side omits them.
+fn build_sbs_pairs(hunks: &[Hunk]) -> Vec<SbsPair> {
+    let mut pairs = Vec::new();
+    // Flat index of the current hunk's first line; each hunk's `lines` array
+    // includes its `@@` header, so the running total accounts for it.
+    let mut base = 0usize;
+    for hunk in hunks {
+        let lines = &hunk.lines;
+        let mut i = 0usize;
+        while i < lines.len() {
+            let g = base + i;
+            match lines[i].line_type {
+                LineType::Hunk => {
+                    pairs.push(SbsPair {
+                        left: Some(g),
+                        right: Some(g),
+                        is_hunk_header: true,
+                    });
+                    i += 1;
+                }
+                LineType::Context => {
+                    pairs.push(SbsPair {
+                        left: Some(g),
+                        right: Some(g),
+                        is_hunk_header: false,
+                    });
+                    i += 1;
+                }
+                LineType::NoNewline => {
+                    i += 1;
+                }
+                LineType::Delete | LineType::Add => {
+                    let del_start = i;
+                    while i < lines.len() && lines[i].line_type == LineType::Delete {
+                        i += 1;
+                    }
+                    let del_end = i;
+                    while i < lines.len() && lines[i].line_type == LineType::Add {
+                        i += 1;
+                    }
+                    let deletes = del_end - del_start;
+                    let adds = i - del_end;
+                    for k in 0..deletes.max(adds) {
+                        pairs.push(SbsPair {
+                            left: (k < deletes).then(|| base + del_start + k),
+                            right: (k < adds).then(|| base + del_end + k),
+                            is_hunk_header: false,
+                        });
+                    }
+                }
+            }
+        }
+        base += lines.len();
+    }
+    pairs
+}
+
+/// Added/deleted line totals for the viewer's header badge.
+fn count_changes(hunks: &[Hunk]) -> (u32, u32) {
+    let mut additions = 0u32;
+    let mut deletions = 0u32;
+    for hunk in hunks {
+        for line in &hunk.lines {
+            match line.line_type {
+                LineType::Add => additions += 1,
+                LineType::Delete => deletions += 1,
+                _ => {}
+            }
+        }
+    }
+    (additions, deletions)
 }
 
 /// Pairs up consecutive delete/add runs within each hunk and tags each pair
@@ -711,4 +833,74 @@ fn apply_patch(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(raw: &str) -> ParsedDiff {
+        parse_diff(raw.to_string()).expect("diff should parse")
+    }
+
+    const HEADER: &str = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n";
+
+    /// Context/header rows span both columns; a delete run is zipped against
+    /// the add run that follows it, `None` filling the shorter side.
+    #[test]
+    fn sbs_pairs_zip_delete_and_add_runs() {
+        let raw = format!("{HEADER}@@ -1,4 +1,3 @@\n ctx\n-old1\n-old2\n+new1\n tail\n");
+        let parsed = parse(&raw);
+        let rows: Vec<(Option<usize>, Option<usize>, bool)> = parsed
+            .sbs_pairs
+            .iter()
+            .map(|p| (p.left, p.right, p.is_hunk_header))
+            .collect();
+        // Flat lines: 0=@@ 1=ctx 2=-old1 3=-old2 4=+new1 5=tail, plus 6 = the
+        // empty context line the parser materialises from the diff's trailing
+        // newline (split('\n') yields a final "").
+        assert_eq!(
+            rows,
+            [
+                (Some(0), Some(0), true),
+                (Some(1), Some(1), false),
+                (Some(2), Some(4), false),
+                (Some(3), None, false),
+                (Some(5), Some(5), false),
+                (Some(6), Some(6), false),
+            ]
+        );
+        assert_eq!((parsed.additions, parsed.deletions), (1, 2));
+    }
+
+    /// The `\ No newline at end of file` marker keeps its flat line (and html
+    /// slot) but gets no side-by-side row of its own.
+    #[test]
+    fn no_newline_marker_gets_no_side_by_side_row() {
+        // Flat lines: 0=@@ 1=-old 2=+new 3=NoNewline 4=trailing empty context.
+        let raw = format!("{HEADER}@@ -1 +1 @@\n-old\n+new\n\\ No newline at end of file\n");
+        let parsed = parse(&raw);
+        assert_eq!(
+            parsed.sbs_pairs.len(),
+            3,
+            "header row + one zipped pair + trailing context; no NoNewline row"
+        );
+        assert_eq!(parsed.html.len(), 5, "html stays 1:1 with flattened lines");
+    }
+
+    /// The phase-1 HTML is escaped and carries the intra-line backplate the
+    /// annotator computed for a paired single-line edit.
+    #[test]
+    fn phase1_html_carries_escaping_and_intra_line_backplate() {
+        let raw = format!("{HEADER}@@ -1 +1 @@\n-if a < 1 {{}}\n+if b < 1 {{}}\n");
+        let parsed = parse(&raw);
+        assert_eq!(
+            parsed.html[1],
+            "if <span class=\"diff-intra-remove\">a</span> &lt; 1 {}"
+        );
+        assert_eq!(
+            parsed.html[2],
+            "if <span class=\"diff-intra-add\">b</span> &lt; 1 {}"
+        );
+    }
 }
