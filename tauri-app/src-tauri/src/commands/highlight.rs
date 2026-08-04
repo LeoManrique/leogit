@@ -259,6 +259,9 @@ fn tokenize_file(
     // `Some` while inside a ```lang fence whose language resolved: the embedded
     // language's own parser + scope stack, used to colour the body lines.
     let mut fence: Option<(ParseState, ScopeStack)> = None;
+    // Carries an open single-tilde strikethrough across lines (see
+    // `single_tilde_strikes`).
+    let mut open_strike_run = false;
     let mut out: HashMap<u32, TokenLine> = HashMap::with_capacity(wanted.len());
 
     for (idx, line) in text.lines().enumerate() {
@@ -312,6 +315,15 @@ fn tokenize_file(
                 }
             }
             _ => record_or_advance(record, line, &md_ops, &mut scope_stack, line_no, &mut out),
+        }
+
+        // Runs are tracked on every line, recorded or not, so a run that opens
+        // above the recorded window still resolves correctly.
+        let bogus_strikes = single_tilde_strikes(line, &md_ops, &mut open_strike_run);
+        if !bogus_strikes.is_empty() {
+            if let Some(tokens) = out.get_mut(&line_no) {
+                drop_strikethrough(line, &bogus_strikes, tokens);
+            }
         }
 
         // Enter/leave the fence *after* its own ``` line is rendered as Markdown.
@@ -374,6 +386,15 @@ static FENCE_LANG: LazyLock<Scope> =
 static MARKDOWN_SCOPE: LazyLock<Scope> =
     LazyLock::new(|| Scope::new("text.html.markdown").expect("static scope"));
 
+/// The tilde runs that open and close a strikethrough. The grammar scopes them
+/// separately from the struck text, which is what lets [`single_tilde_strikes`]
+/// measure a delimiter without re-scanning the line.
+static STRIKE_BEGIN: LazyLock<Scope> = LazyLock::new(|| {
+    Scope::new("punctuation.definition.strikethrough.begin").expect("static scope")
+});
+static STRIKE_END: LazyLock<Scope> =
+    LazyLock::new(|| Scope::new("punctuation.definition.strikethrough.end").expect("static scope"));
+
 /// True when any scope on `stack` is under `key` (atom-wise prefix).
 fn stack_has(stack: &ScopeStack, key: &Scope) -> bool {
     stack.scopes.iter().any(|s| key.is_prefix_of(*s))
@@ -412,6 +433,77 @@ fn fence_role(line: &str, ops: &[(usize, ScopeStackOp)], stack_before: &ScopeSta
         FenceRole::Open(lang)
     } else {
         FenceRole::None
+    }
+}
+
+/// Byte ranges on `line` that the grammar struck through but no real Markdown
+/// renderer would, so the caller can put them back to plain.
+///
+/// Sublime's grammar opens a strikethrough on a run of ONE or two tildes, while
+/// `GitHub` (cmark-gfm) and markdown-it (`VS` Code's preview) both require two —
+/// markdown-it bails outright on a run shorter than two. With one tilde the
+/// grammar closes on the next stray `~`, or, finding none, strikes the rest of
+/// the paragraph, so ordinary prose like `~25 min · ~2 h` or `~/leogit` renders
+/// struck through. The syntax set ships pre-compiled, so the grammar itself is
+/// not ours to correct — its own delimiter scopes are, and a run whose opener
+/// measures a single tilde is dropped here.
+///
+/// `open_run` carries "inside a single-tilde run" across lines, because a run
+/// may open on a line the caller never records; it is updated in place. Runs
+/// opened by two tildes are left entirely alone, including multi-line ones.
+fn single_tilde_strikes(
+    line: &str,
+    ops: &[(usize, ScopeStackOp)],
+    open_run: &mut bool,
+) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut start = open_run.then_some(0usize);
+
+    for (i, (op_byte, op)) in ops.iter().enumerate() {
+        let ScopeStackOp::Push(scope) = op else {
+            continue;
+        };
+        // Ops are positioned against the newline-terminated line the parser saw,
+        // so both ends need clamping back to the real line.
+        let delimiter_start = (*op_byte).min(line.len());
+        // The delimiter ends where the scope pops, i.e. at the next op.
+        let delimiter_end = ops
+            .get(i + 1)
+            .map_or(line.len(), |(next, _)| *next)
+            .min(line.len())
+            .max(delimiter_start);
+        if STRIKE_BEGIN.is_prefix_of(*scope) {
+            start = (delimiter_end - delimiter_start < 2).then_some(delimiter_start);
+        } else if STRIKE_END.is_prefix_of(*scope) {
+            if let Some(from) = start.take() {
+                ranges.push((from, delimiter_end));
+            }
+        }
+    }
+
+    // An unclosed run keeps striking on the lines below it.
+    *open_run = start.is_some();
+    if let Some(from) = start {
+        ranges.push((from, line.len()));
+    }
+    ranges
+}
+
+/// Put every strikethrough token overlapping `ranges` back to plain. Tokens
+/// nested inside the run (a bold span, a link) carry their own class and are
+/// left as they are — only the bogus decoration goes.
+fn drop_strikethrough(line: &str, ranges: &[(usize, usize)], tokens: &mut TokenLine) {
+    let char_index = |byte: usize| {
+        u32::try_from(line.char_indices().take_while(|(b, _)| *b < byte).count())
+            .unwrap_or(u32::MAX)
+    };
+    for (start_byte, end_byte) in ranges {
+        let (start, end) = (char_index(*start_byte), char_index(*end_byte));
+        for token in tokens.iter_mut().filter(|t| {
+            t.start < end && t.end > start && matches!(t.class, TokenClass::Strikethrough)
+        }) {
+            token.class = TokenClass::Plain;
+        }
     }
 }
 
@@ -1078,6 +1170,71 @@ mod tests {
         // Blockquote.
         let q = classes_for("r.md", "> quoted\n", 1);
         assert!(has(&q, TokenClass::Quote), "blockquote not classified: {q:?}");
+    }
+
+    /// Sublime's Markdown grammar strikes through a run opened by a SINGLE
+    /// tilde; GitHub and VS Code both require two, so prose full of `~25 min`
+    /// and `~/paths` came back struck through and muted. Only a `~~` run may
+    /// survive `single_tilde_strikes`.
+    #[test]
+    fn single_tilde_does_not_strike_through() {
+        let struck = |classes: &[(String, TokenClass)]| {
+            classes
+                .iter()
+                .filter(|(_, c)| matches!(c, TokenClass::Strikethrough))
+                .map(|(t, _)| t.clone())
+                .collect::<Vec<_>>()
+        };
+
+        // The reported line: the second tilde closed a strikethrough the first
+        // one should never have opened.
+        let approx = classes_for("r.md", "**Time:** ~25 min reading · ~2 h building\n", 1);
+        assert!(
+            struck(&approx).is_empty(),
+            "single tildes must not strike, got {approx:?}"
+        );
+        // The bold that shares the line is untouched.
+        assert!(
+            approx
+                .iter()
+                .any(|(t, c)| t == "**Time:**" && matches!(c, TokenClass::Strong)),
+            "bold on the same line must survive, got {approx:?}"
+        );
+
+        // Unclosed, the grammar struck through the rest of the paragraph.
+        let path = classes_for("r.md", "Config lives in ~/leogit today.\n", 1);
+        assert!(
+            struck(&path).is_empty(),
+            "an unpaired tilde must not strike the rest of the line, got {path:?}"
+        );
+        let leaked = classes_for("r.md", "Takes ~2 h.\nSecond line of the paragraph.\n", 2);
+        assert!(
+            struck(&leaked).is_empty(),
+            "an unpaired tilde must not leak onto the next line, got {leaked:?}"
+        );
+
+        // Two tildes still strike, and a single-tilde run beside one is dropped
+        // without taking the real one with it.
+        let mixed = classes_for("r.md", "~~yes~~ and ~no~ here\n", 1);
+        assert_eq!(
+            struck(&mixed),
+            vec!["~~yes~~".to_string()],
+            "only the `~~` run may strike, got {mixed:?}"
+        );
+    }
+
+    /// A `~~` run may span lines, and it may open above the recorded window —
+    /// the diff viewer records only the lines a hunk touches. Validity is
+    /// therefore carried by the line walk, not read off the recorded tokens.
+    #[test]
+    fn double_tilde_run_survives_across_lines() {
+        let classes = classes_for("r.md", "a ~~struck\nstill struck~~ b\n", 2);
+        assert!(
+            classes
+                .iter()
+                .any(|(t, c)| t.contains("still struck") && matches!(c, TokenClass::Strikethrough)),
+            "a `~~` run opened on an unrecorded line must keep striking, got {classes:?}"
+        );
     }
 
     /// Fenced code blocks must highlight as their info-string language. Markdown
