@@ -5,9 +5,14 @@
   interface Props {
     repos: string[]
     onSelect: (repo: string) => void
+    /** Opens Settings, for the empty state's call to action. The app header
+     *  above carries the persistent entry point; this is the contextual one. */
+    onOpenSettings: () => void
+    /** Folders discovery actually searched, shown when nothing was found. */
+    scannedPaths?: string[]
   }
 
-  let { repos = [], onSelect }: Props = $props()
+  let { repos = [], onSelect, onOpenSettings, scannedPaths = [] }: Props = $props()
 
   let searchInput = $state('')
 
@@ -78,9 +83,20 @@
       {#if filteredRepos.length === 0}
         <div class="empty-repos">
           {#if repos.length === 0}
-            <p>No repositories found</p>
+            <p class="empty-title">No repositories found</p>
+            {#if scannedPaths.length > 0}
+              <p class="empty-detail">Searched these folders:</p>
+              <ul class="scanned-paths">
+                {#each scannedPaths as path (path)}
+                  <li>{path}</li>
+                {/each}
+              </ul>
+            {/if}
+            <button class="empty-action" onclick={onOpenSettings}>
+              Choose folders to search
+            </button>
           {:else}
-            <p>No matching repositories</p>
+            <p class="empty-title">No matching repositories</p>
           {/if}
         </div>
       {:else}
@@ -100,17 +116,17 @@
 </div>
 
 <style>
+  /* Fills its container rather than the viewport: the app header sits above
+     it in the pre-main phases, and a fixed overlay would cover the Settings
+     and Help buttons that are the only way out of an empty picker. */
   .repo-picker-overlay {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
+    position: absolute;
+    inset: 0;
     background: rgba(0, 0, 0, 0.4);
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 1000;
+    z-index: 1;
   }
 
   .repo-picker-modal {
@@ -158,11 +174,58 @@
   .empty-repos {
     flex: 1;
     display: flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
+    gap: 8px;
     color: var(--text-faint);
-    padding: 40px 20px;
+    padding: 32px 20px;
     text-align: center;
+  }
+
+  .empty-title {
+    margin: 0;
+  }
+
+  .empty-detail {
+    margin: 0;
+    font-size: 11px;
+  }
+
+  /* The folders discovery actually walked. Mono because these are paths, and
+     seeing them is what turns "found nothing" into something the user can act
+     on — usually "that's not where my code lives". */
+  .scanned-paths {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    font-family: ui-monospace, 'SF Mono', Menlo, Monaco, 'Cascadia Mono', monospace;
+    font-size: 11px;
+    color: var(--text-muted);
+    max-height: 120px;
+    overflow-y: auto;
+  }
+
+  .scanned-paths li {
+    line-height: 1.6;
+    word-break: break-all;
+  }
+
+  .empty-action {
+    margin-top: 4px;
+    padding: 5px 12px;
+    font-size: 12px;
+    font-family: inherit;
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 100ms ease;
+  }
+
+  .empty-action:hover {
+    background: var(--surface-hover);
   }
 
   .repo-item {

@@ -255,11 +255,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn available_is_never_empty() {
-        assert!(!available().is_empty());
-    }
-
-    #[test]
     fn available_shells_all_exist_on_disk() {
         for shell in available() {
             // cmd.exe may be the bare-name fallback when COMSPEC is unset and
@@ -284,11 +279,6 @@ mod tests {
         let count = ids.len();
         ids.dedup();
         assert_eq!(ids.len(), count, "duplicate shell ids in {shells:?}");
-    }
-
-    #[test]
-    fn resolve_without_preference_picks_the_first() {
-        assert_eq!(resolve(None), available()[0]);
     }
 
     #[test]

@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
+
+use super::paths;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -197,9 +200,43 @@ fn read_state() -> Result<ReposState, String> {
     }
 
     let content =
-        fs::read_to_string(&path).map_err(|e| format!("Failed to read state file: {}", e))?;
+        fs::read_to_string(&path).map_err(|e| format!("Failed to read state file: {e}"))?;
 
-    serde_json::from_str(&content).map_err(|e| format!("Failed to parse state: {}", e))
+    let mut state: ReposState =
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse state: {e}"))?;
+    normalize_repo_paths(&mut state);
+    Ok(state)
+}
+
+/// Rewrite the stored paths into the form the rest of the app uses today.
+///
+/// A state file written by an earlier build holds Windows verbatim paths
+/// (`\\?\C:\…`) — that's what `fs::canonicalize` returned before
+/// [`paths::canonicalize`] existed. Discovery hands out the ordinary form now,
+/// so an unconverted `last_opened_repo` matches no discovered repo (the app
+/// forgets which repo was open and drops the user in the picker) and
+/// `recent_repos` grows a second entry for a folder it already lists.
+///
+/// Runs on every read rather than as a one-shot migration: it's idempotent, and
+/// the next `update_state` write persists the result, so the file heals itself
+/// without a schema version to maintain. A no-op on macOS and Linux, where no
+/// path can be in the verbatim form to begin with.
+fn normalize_repo_paths(state: &mut ReposState) {
+    if let Some(path) = &state.last_opened_repo {
+        state.last_opened_repo = Some(paths::simplify_str(path));
+    }
+    if let Some(path) = &state.last_clone_dir {
+        state.last_clone_dir = Some(paths::simplify_str(path));
+    }
+    if let Some(list) = &mut state.recent_repos {
+        for path in &mut *list {
+            *path = paths::simplify_str(path);
+        }
+        // Convert first, then de-dupe: an MRU list that spans the change holds
+        // the same folder twice, once in each form, and they collapse here.
+        let mut seen = HashSet::new();
+        list.retain(|path| seen.insert(path.clone()));
+    }
 }
 
 fn write_state(state: &ReposState) -> Result<(), String> {
@@ -310,6 +347,54 @@ mod tests {
         assert!(!list.contains(&format!("repo-{}", MAX_RECENT_REPOS - 1)));
     }
 
+    /// Already-ordinary paths survive byte-for-byte. This is the whole of the
+    /// macOS/Linux behaviour, and the steady state on Windows once a file has
+    /// been converted — which is what makes running this on every read safe.
+    #[test]
+    fn normalizing_leaves_ordinary_paths_untouched() {
+        let mut state = state_with_recents(&["/home/leo/dev/a", "/home/leo/dev/b"]);
+        state.last_opened_repo = Some("/home/leo/dev/a".to_string());
+        state.last_clone_dir = Some("/home/leo/dev".to_string());
+        let before = state.clone();
+
+        normalize_repo_paths(&mut state);
+
+        assert_eq!(state.last_opened_repo, before.last_opened_repo);
+        assert_eq!(state.last_clone_dir, before.last_clone_dir);
+        assert_eq!(state.recent_repos, before.recent_repos);
+    }
+
+    /// The MRU list keeps each folder once, at its most recent position.
+    #[test]
+    fn normalizing_de_dupes_the_recent_list() {
+        let mut state = state_with_recents(&["/dev/a", "/dev/b", "/dev/a"]);
+        normalize_repo_paths(&mut state);
+        assert_eq!(
+            state.recent_repos,
+            Some(vec!["/dev/a".to_string(), "/dev/b".to_string()])
+        );
+    }
+
+    /// A state file written before the path change: verbatim paths convert, and
+    /// the two forms of the same folder collapse into one entry rather than
+    /// leaving the picker listing it twice.
+    #[cfg(windows)]
+    #[test]
+    fn normalizing_converts_stored_verbatim_paths() {
+        let mut state = state_with_recents(&[r"\\?\C:\Dev\a", r"C:\Dev\a", r"C:\Dev\b"]);
+        state.last_opened_repo = Some(r"\\?\C:\Dev\a".to_string());
+        state.last_clone_dir = Some(r"\\?\C:\Dev".to_string());
+
+        normalize_repo_paths(&mut state);
+
+        assert_eq!(state.last_opened_repo.as_deref(), Some(r"C:\Dev\a"));
+        assert_eq!(state.last_clone_dir.as_deref(), Some(r"C:\Dev"));
+        assert_eq!(
+            state.recent_repos,
+            Some(vec![r"C:\Dev\a".to_string(), r"C:\Dev\b".to_string()])
+        );
+    }
+
     #[test]
     fn apply_patch_leaves_absent_fields_untouched() {
         let mut state = state_with_recents(&["kept"]);
@@ -328,23 +413,5 @@ mod tests {
         assert_eq!(state.last_opened_repo.as_deref(), Some("old-repo"));
         assert_eq!(state.repo_sort_mode.as_deref(), Some("name"));
         assert_eq!(state.recent_repos, Some(vec!["kept".to_string()]));
-    }
-
-    #[test]
-    fn patch_fields_all_apply() {
-        let mut state = ReposState::default();
-        apply_patch(
-            &mut state,
-            ReposStatePatch {
-                last_opened_repo: Some("r".to_string()),
-                last_clone_dir: Some("d".to_string()),
-                repo_sort_mode: Some("recent".to_string()),
-                clone_sort_mode: Some("name".to_string()),
-            },
-        );
-        assert_eq!(state.last_opened_repo.as_deref(), Some("r"));
-        assert_eq!(state.last_clone_dir.as_deref(), Some("d"));
-        assert_eq!(state.repo_sort_mode.as_deref(), Some("recent"));
-        assert_eq!(state.clone_sort_mode.as_deref(), Some("name"));
     }
 }

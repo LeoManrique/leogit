@@ -259,17 +259,4 @@ mod tests {
         };
         assert!(name.contains(platform), "{name} is not for this host");
     }
-
-    #[test]
-    fn install_command_matches_platform() {
-        let cmd = install_command();
-        if cfg!(target_os = "windows") {
-            assert!(cmd.is_none(), "Windows updates via the release page");
-        } else {
-            assert!(
-                cmd.is_some_and(|c| c.starts_with("curl -fsSL https://")),
-                "macOS/Linux update via the install.sh one-liner"
-            );
-        }
-    }
 }

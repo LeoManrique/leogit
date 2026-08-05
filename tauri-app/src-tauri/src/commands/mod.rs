@@ -10,6 +10,7 @@ pub mod process;
 pub mod render;
 pub mod shell;
 pub mod os;
+pub mod paths;
 pub mod progress;
 pub mod update;
 

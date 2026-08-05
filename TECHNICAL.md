@@ -33,6 +33,7 @@ leogit/
 │   │   └── lib/
 │   │       ├── api/commands.ts      # Typed wrappers over every Tauri command
 │   │       ├── actions/             # Svelte use: actions (autofocus, listNavigation)
+│   │       ├── utils/path.ts        # basename for OS paths (either separator)
 │   │       ├── stores/              # appState, repoState, config (Svelte writables)
 │   │       ├── components/          # Header, TabBar, FileList, CommitList,
 │   │       │                        # CommitMessage, DiffViewer, Terminal,
@@ -55,6 +56,7 @@ leogit/
 │   │   │       ├── terminal.rs      # portable-pty session pool
 │   │   │       ├── highlight.rs     # syntect diff tokenizer
 │   │   │       ├── os.rs            # reveal-in-file-manager + open-with-default-app
+│   │   │       ├── paths.rs         # the app's canonicalizer (never verbatim)
 │   │   │       └── process.rs       # CREATE_NO_WINDOW spawn + run_timed helpers
 │   │   ├── capabilities/default.json
 │   │   ├── tauri.conf.json
@@ -79,6 +81,15 @@ All work flows through Tauri's IPC. There are no HTTP servers, no sidecars, and 
 
 `main.rs::fix_path_env` runs once before the Tauri builder. On macOS/Linux it spawns `$SHELL -ilc 'echo -n "$PATH"'` and replaces the process PATH with the result. Without this, apps launched from Finder or a `.desktop` entry inherit a minimal PATH (e.g. `/usr/bin:/bin:/usr/sbin:/sbin`) and miss user-installed tools like `claude`, `gh`, or Homebrew binaries. No-op on Windows.
 
+### Path normalisation
+
+[commands/paths.rs](tauri-app/src-tauri/src/commands/paths.rs) owns the form every path takes once it's inside the app, and **`std::fs::canonicalize` must not be called anywhere else**. On Windows it always answers with a *verbatim* (extended-length) path — `\\?\C:\Users\Leo\Dev\leogit` — which names the right folder but leaks everywhere: the repo tooltip and the picker's empty state rendered the prefix literally, and PowerShell, unable to map a verbatim path onto a `PSDrive`, dropped to a provider-qualified prompt (`PS Microsoft.PowerShell.Core\FileSystem::\\?\C:\…`) that also breaks any script doing string work on `$PWD`.
+
+- `paths::canonicalize` replaces `fs::canonicalize` at every site: `discover_repos` (scan roots and each hit), `repo_root`, `init_repo`, `resolve_launch_target`. Backed by [`dunce`](https://lib.rs/crates/dunce), which strips the prefix only when the legacy namespace can express the same path — never over `MAX_PATH`, never for a reserved DOS name (`CON`, `COM1`), never for a network share — so nothing that genuinely needs the prefix loses it.
+- `paths::simplify_str` does the same conversion without touching the filesystem, for paths that arrive already-absolute from elsewhere: `config::normalize_repo_paths` (see below) and `start_terminal`'s cwd, the boundary where a third-party shell reads the path.
+- **macOS and Linux are untouched by construction**, not by a platform branch of ours: `dunce`'s strip check is a `const fn` returning `false` off Windows and its `canonicalize` is a re-export of `std::fs::canonicalize` there.
+- The frontend has the matching rule in [lib/utils/path.ts](tauri-app/src/lib/utils/path.ts): `basename` splits on **either** separator. Four components had their own `/`-only copy, so on Windows the whole path counted as one segment and a repo without a GitHub remote to name it was labelled `C:\Users\Leo\Dev\ryubing\Ryubing`. Deliberately not used for git's own paths (`PathText`, `fileActions`) — git reports forward slashes on every platform, and a separator-agnostic split there would cut a filename that legitimately contains a backslash on Linux or macOS.
+
 ### Command-line repo opening
 
 The `leogit [dir]` shell command (installed by `install.sh`, see *Release pipeline*) opens a repo straight from a terminal. All the app-side logic lives in [commands/launch.rs](tauri-app/src-tauri/src/commands/launch.rs):
@@ -87,6 +98,17 @@ The `leogit [dir]` shell command (installed by `install.sh`, see *Release pipeli
 - **Cold start** (app not running): `main.rs` calls `resolve_launch_target` *before* the builder and stashes the result in a process-global via `set_pending_launch_target`. The frontend claims it once on mount through the `take_pending_launch_target` command (`appApi.takePendingLaunchTarget`), which clears it so a reload won't re-open. In `App.svelte` a repo target wins over the remembered `last_opened_repo` and is added to the repo list even if it lives outside the scan paths; a non-repo target raises the init prompt and lets normal resolution continue behind it.
 - **Warm start** (app already running): `tauri-plugin-single-instance` — registered **first** in `main.rs`, as the plugin requires — detects the second launch, hands its argv/cwd to `handle_second_instance`, which focuses the window and emits an `open-repo` event carrying the `LaunchTarget`. The plugin keys on the app identifier via a `/tmp/<identifier>_si.sock` Unix socket (the second process connects, forwards, and `exit(0)`s). The frontend splits the event three ways: a **non-repo** target always goes to `App.svelte` (the prompt isn't scoped to the open repo, so `MainLayout` ignores those); a **repo** target goes to `MainLayout` in phase `main` (reusing `handleSwitchRepo` via `openExternalRepo`) and to `App.svelte` in the pre-`main` phases. The repo listeners stay mutually exclusive — `App` ignores repo targets while phase is `main`, and `MainLayout` is only mounted then.
 - **Initialising a non-repo folder.** `App.svelte` owns the prompt ([InitRepoConfirm.svelte](tauri-app/src/lib/components/InitRepoConfirm.svelte)) in every phase, so it can render over the picker, over another open repo, or at first launch. Confirming calls `git::init_repo`, which creates the folder if needed, runs `git init` (naming the branch `main` unless the user configured `init.defaultBranch`), and returns the path to open. It is **idempotent** — a folder already inside a repo returns that repo's root instead of nesting a new one — so a double-confirm, or confirming after the user ran `git init` themselves, opens the repo rather than failing. `App` then routes the result: `MainLayout.openExternalRepo` (bound via `bind:this`) when one is mounted, since only it can reset the open repo's view state; otherwise it moves the app into `main` itself. Unborn HEAD is already handled downstream, so the fresh repo renders immediately.
+
+### Repo-less phases
+
+`loading`, `repo-picker` and `error` render `<Header>` above the phase content. `Header` derives `hasRepo` from `$appState.repoPath` rather than taking a prop — `repoPath` is the single source of truth and a separate flag could disagree with it — and hides the repo chip, branch chip, status area, Pull, the Push split-button and Refresh when it is false. Settings, Help and the update chip remain, so they are reachable in every phase. `onOpenRepos`/`onOpenBranches` are therefore optional props: only the hidden chips call them. Header's effects already no-op without a repo (each guards on `repoPath`), so mounting it costs nothing.
+
+Two consequences worth knowing:
+
+- `RepoPicker`'s overlay is `position: absolute; inset: 0` inside `.pre-main-body`, **not** `position: fixed`. A viewport-fixed overlay would sit on top of the header and swallow the only controls that can rescue an empty picker.
+- `App.svelte` binds `Escape` / `Ctrl+,` / `?` only while the phase isn't `main`; `MainLayout` owns those keys otherwise, and binding in both would double-handle them. `?` is ignored while a text field has focus, since the picker autofocuses its search box.
+
+`effective_scan_paths` (git.rs) reports the folders discovery would walk, so the empty state can list them. It and `discover_repos` both route through `resolve_scan_paths`, the sole owner of the "empty config → stock defaults" rule, so the folders shown can't drift from the folders searched — pinned by `effective_scan_paths_matches_the_resolution_discovery_uses`.
 
 ### Windows console suppression
 
@@ -128,7 +150,7 @@ Every command is registered in [src-tauri/src/main.rs](tauri-app/src-tauri/src/m
 
 The three core writable Svelte stores, all in [src/lib/stores](tauri-app/src/lib/stores):
 
-- **`appState`** — top-level phase machine (`loading` / `repo-picker` / `main` / `error`), the discovered repo list, the chosen repo path, and whether `gh` is authenticated.
+- **`appState`** — top-level phase machine (`loading` / `repo-picker` / `main` / `error`), the discovered repo list, the chosen repo path, and whether `gh` is authenticated. `App.svelte` renders `MainLayout` for `main` and, for every other phase, a `.pre-main` column of `<Header>` + the phase's content — so app-level chrome exists in all of them (see *Repo-less phases*).
 - **`repoState`** — everything tied to the currently open repo: status (branch, upstream, ahead/behind, files, isMerging), log pagination, branches, the user's selection sets (`selectedFiles`, `userDeselected`), per-file diff selection (`Map<path, DiffSelection>`), active file/diff, active commit/files/diff, loading flags, last error.
 - **`config`** — the live Config object. `refreshConfig()` reloads from disk and also calls `applyTheme()` which flips `document.documentElement.dataset.theme`.
 
@@ -248,7 +270,7 @@ The same `has_commits` check guards diffs. `run_diff` anchors a tracked file's d
 
 ### Discovery
 
-`discover_repos` expands `~`, canonicalizes each scan root, and recursively walks up to `max_depth` levels. An empty `scan_paths` list (config cleared, or config load failed upstream) falls back to `config::default_scan_paths()` — the same stock folders a fresh config gets — so the frontend passes the configured list through verbatim with no path resolution of its own. A directory is a repo if it contains a `.git` file or directory (handles worktrees). Hidden directories are skipped, and the scan does not descend into a discovered repo.
+`discover_repos` expands `~`, canonicalizes each scan root through `paths::canonicalize` (never `fs::` — see [Path normalisation](#path-normalisation)), and recursively walks up to `max_depth` levels. An empty `scan_paths` list (config cleared, or config load failed upstream) falls back to `config::default_scan_paths()` — the same stock folders a fresh config gets — so the frontend passes the configured list through verbatim with no path resolution of its own. A directory is a repo if it contains a `.git` file or directory (handles worktrees). Hidden directories are skipped, and the scan does not descend into a discovered repo.
 
 ## AI layer
 
@@ -339,6 +361,7 @@ Defined in [src-tauri/src/commands/config.rs](tauri-app/src-tauri/src/commands/c
 - Config dir is resolved via `directories::BaseDirs::config_dir().join("leogit")` (`~/.config/leogit` on Linux, `~/Library/Application Support/leogit` on macOS, `%APPDATA%\leogit` on Windows). It's created if missing.
 - `config.toml` — every field on the `Config` struct. New fields carry `#[serde(default = "…")]` so users on older configs keep working. Defaults are written to disk on first run so the file is discoverable.
 - `repos-state.json` — `last_opened_repo`, `last_clone_dir`, the two sort-toggle preferences (`repo_sort_mode`, `clone_sort_mode`), and `recent_repos` (MRU order, capped at `MAX_RECENT_REPOS = 50`). Every field is `Option`/`#[serde(default)]` so older state files load fine. JSON instead of TOML to keep it cheap to extend.
+- Every read runs `normalize_repo_paths`, which converts the stored paths (see [Path normalisation](#path-normalisation)) and de-dupes `recent_repos` afterwards. A file written before that change holds Windows verbatim paths, which no longer match anything `discover_repos` returns — `last_opened_repo` would silently stop resolving (the app forgets the open repo and lands in the picker) and the MRU list would grow a second entry per folder. It runs on every read rather than as a one-shot migration because it's idempotent and the next write persists it, so the file heals itself with no schema version to carry.
 - Writes go through two commands that each run one read-modify-write under a process-wide `STATE_LOCK` (Tauri runs commands concurrently; two interleaved load+save cycles would drop the slower writer's fields): `patch_state(ReposStatePatch)` merges the supplied fields (`None` = leave as-is; `recent_repos` is deliberately not patchable), and `record_recent_repo(path)` owns the MRU move-to-front/de-dupe/cap. Both return the resulting state so the frontend reseeds from the authoritative copy. A corrupt state file self-heals inside `update_state`: it logs, starts from defaults, and lets the save rewrite it, instead of wedging every future patch on the same parse error. Covered by the `prepend_recent_*` / `apply_patch_*` tests.
 
 ## Tauri capabilities
@@ -461,5 +484,6 @@ These are easy to break and hard to debug; respect them when touching the releva
 - **`git status` uses porcelain v2 `-z` (NUL-delimited).** Plain `--porcelain` will silently corrupt paths with spaces or unicode. If you change the args, make sure the parser stays NUL-aware.
 - **The remote name is the NAME, not the URL.** `get_remote` returns the first line of `git remote` (typically `origin`), not the fetch URL. The Pull/Push/Fetch commands feed this directly to `git`. Note `get_remote` falls back to the literal `"origin"` when there are **no** remotes, so it can't be used to detect "no remote" — `RepoStatus.has_remote` (computed in `get_status` from a single `git remote` call, reused by the ahead/behind fallback) is the real signal, and the Header switches Push → "Publish to GitHub" on it.
 - **Publishing uses `gh repo create`, not our own API.** `gh_publish_repo` shells out to `gh repo create <name> --source <repo_path> --remote origin --push [--private|--public] [--description ...]`, inheriting the user's `gh` auth. It's the one-shot equivalent of GitHub Desktop's "Publish Repository": creates the remote repo, adds `origin`, and pushes. `gh`'s stderr (missing auth, name collision) is surfaced verbatim to the error modal.
+- **A repo path is whatever `paths::canonicalize` returns.** Discovery, `repo_root`, `init_repo` and `resolve_launch_target` must all produce the identical string for the same folder — they feed one de-dupe set, the `last_opened_repo` comparison, and the `repoIdentifiers` / `repoActivity` / `repoSync` cache keys, so a path only one of them can produce shows up as a duplicate repo with no badges. Calling `fs::canonicalize` directly re-introduces the Windows verbatim prefix and breaks exactly that. Pinned by `repo_paths_are_ordinary_and_agree_across_producers`.
 - **Terminal sessions die with the repo.** When `appState.repoPath` changes, `MainLayout`'s effect resets `terminalSessionId = 0`, which keys the `<Terminal>` component to unmount and call `close_terminal`. Don't try to "carry" a session across repos.
 - **Diff content `\n` round-trip.** Empty diff lines come through as `""` from `String::split('\n')` but in real unified diff format are ` ` (a single space). `parse_diff` reconstructs the leading space so the patch builder generates valid unified diffs.

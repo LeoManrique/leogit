@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use super::paths;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FileStatus {
     New,
@@ -2614,7 +2616,7 @@ fn scan_for_repos(
     }
 
     if depth > 0 && is_git_repo_path(dir) {
-        if let Ok(abs) = std::fs::canonicalize(dir) {
+        if let Ok(abs) = paths::canonicalize(dir) {
             let abs_str = abs.to_string_lossy().to_string();
             if seen.insert(abs_str.clone()) {
                 repos.push(abs_str);
@@ -2653,23 +2655,40 @@ fn scan_for_repos(
     }
 }
 
-#[tauri::command(async)]
-pub fn discover_repos(scan_paths: Vec<String>, max_depth: u32) -> Result<Vec<String>, String> {
-    // An empty list (config cleared, or config load failed upstream) falls
-    // back to the stock scan folders rather than discovering nothing. `~` in
-    // each path is expanded below, so callers pass paths exactly as configured.
-    let scan_paths = if scan_paths.is_empty() {
+/// The folders discovery will actually walk: the configured list, or the stock
+/// folders when it's empty (config cleared, or a config load that failed
+/// upstream) so we never silently discover nothing. `~` is left unexpanded —
+/// callers pass paths exactly as configured, and `discover_repos` expands them.
+///
+/// Sole owner of that fallback rule, so the repo picker's empty state can tell
+/// the user where we looked without re-deriving it.
+fn resolve_scan_paths(scan_paths: Vec<String>) -> Vec<String> {
+    if scan_paths.is_empty() {
         super::config::default_scan_paths()
     } else {
         scan_paths
-    };
+    }
+}
+
+/// The scan folders discovery would use for this configuration. Backs the
+/// "no repositories found" state, which names the folders it searched so an
+/// empty result is diagnosable rather than a dead end.
+#[tauri::command(async)]
+#[must_use]
+pub fn effective_scan_paths(scan_paths: Vec<String>) -> Vec<String> {
+    resolve_scan_paths(scan_paths)
+}
+
+#[tauri::command(async)]
+pub fn discover_repos(scan_paths: Vec<String>, max_depth: u32) -> Result<Vec<String>, String> {
+    let scan_paths = resolve_scan_paths(scan_paths);
 
     let mut repos: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
     for scan_path in scan_paths {
         let expanded = expand_tilde(&scan_path);
-        let abs = match std::fs::canonicalize(&expanded) {
+        let abs = match paths::canonicalize(&expanded) {
             Ok(p) => p,
             Err(_) => continue,
         };
@@ -2719,7 +2738,7 @@ pub fn repo_root(path: &Path) -> Option<String> {
     if let Ok(out) = run_git(&dir, &["rev-parse", "--show-toplevel"]) {
         let toplevel = out.trim();
         if !toplevel.is_empty() {
-            let root = std::fs::canonicalize(toplevel).unwrap_or_else(|_| PathBuf::from(toplevel));
+            let root = paths::canonicalize(toplevel).unwrap_or_else(|_| PathBuf::from(toplevel));
             return Some(root.to_string_lossy().into_owned());
         }
     }
@@ -2748,7 +2767,7 @@ pub fn init_repo(path: &str) -> Result<String, String> {
     let dir = expand_tilde(path);
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("Could not create \"{}\": {e}", dir.display()))?;
-    let canonical = std::fs::canonicalize(&dir)
+    let canonical = paths::canonicalize(&dir)
         .map_err(|e| format!("Could not resolve \"{}\": {e}", dir.display()))?;
     if let Some(root) = repo_root(&canonical) {
         return Ok(root);
@@ -2841,8 +2860,11 @@ mod tests {
 
     /// Canonicalize for comparison: macOS resolves /var and /tmp through
     /// symlinks, so a tempdir's own path never equals what git reports back.
+    /// Deliberately the app's own canonicalizer rather than `fs::`, so these
+    /// assertions compare against the exact form the commands hand the UI —
+    /// including the Windows verbatim-prefix strip.
     fn canonical(path: &Path) -> String {
-        fs::canonicalize(path)
+        paths::canonicalize(path)
             .expect("canonicalize")
             .to_string_lossy()
             .into_owned()
@@ -2868,6 +2890,40 @@ mod tests {
 
         assert_eq!(repo_root(repo), Some(canonical(repo)));
         assert_eq!(repo_root(&nested), Some(canonical(repo)));
+    }
+
+    /// Every producer of a repo path — discovery, `repo_root`, `init_repo` —
+    /// must agree, and must hand back the platform's ordinary path form.
+    ///
+    /// On Windows `fs::canonicalize` answers `\\?\C:\…`; the picker's tooltip
+    /// showed that verbatim and a shell started there got a
+    /// `Microsoft.PowerShell.Core\FileSystem::` prompt instead of a directory.
+    /// Agreement matters just as much as the form: these three feed the same
+    /// de-dupe set and the same `last_opened_repo` comparison, so a path that
+    /// only one of them produces would silently duplicate a repo. Off Windows
+    /// the strip can't apply, which is exactly the no-op this asserts there.
+    #[test]
+    fn repo_paths_are_ordinary_and_agree_across_producers() {
+        let tmp = tempdir().expect("tempdir");
+        let scan_root = tmp.path().join("scan");
+        let repo = scan_root.join("project");
+        fs::create_dir_all(&repo).expect("create dirs");
+        init_test_repo(&repo);
+
+        let scan = vec![scan_root.to_str().expect("utf-8 path").to_string()];
+        let discovered = discover_repos(scan, 3).expect("discover");
+        assert_eq!(discovered.len(), 1, "seeded repo is found: {discovered:?}");
+        let opened = init_repo(repo.to_str().expect("utf-8 path")).expect("init");
+        let walked = repo_root(&repo).expect("repo root");
+
+        for path in [&discovered[0], &opened, &walked] {
+            assert!(
+                !path.starts_with(r"\\?\"),
+                "a verbatim path must never reach the UI or a shell: {path}"
+            );
+        }
+        assert_eq!(discovered[0], opened, "discovery and init must agree");
+        assert_eq!(opened, walked, "init and repo_root must agree");
     }
 
     #[test]
@@ -2912,6 +2968,18 @@ mod tests {
         assert_eq!(reopened, canonical(repo));
         assert_eq!(from_nested, canonical(repo));
         assert!(!is_git_repo_path(&nested), "must not nest a repo in src/");
+    }
+
+    /// An empty configured list must fall back to the stock folders, not to
+    /// "search nowhere" — otherwise discovery silently finds zero repos and the
+    /// picker strands the user with no explanation.
+    #[test]
+    fn empty_scan_paths_fall_back_to_the_defaults() {
+        assert_eq!(
+            resolve_scan_paths(Vec::new()),
+            super::super::config::default_scan_paths()
+        );
+        assert!(!resolve_scan_paths(Vec::new()).is_empty());
     }
 
     /// A fresh repo lands on `main`, not git's legacy `master` default.

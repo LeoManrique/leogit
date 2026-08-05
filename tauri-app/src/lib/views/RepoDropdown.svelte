@@ -8,6 +8,7 @@
   import RepoTooltip from '$lib/components/RepoTooltip.svelte'
   import { autofocus } from '$lib/actions/autofocus'
   import { nextActiveIndex, scrollIntoViewWhenActive } from '$lib/actions/listNavigation'
+  import { basename } from '$lib/utils/path'
 
   interface Props {
     repos: string[]
@@ -32,11 +33,6 @@
   // Show only after a brief dwell so quick scans don't flash tooltips.
   const TOOLTIP_DELAY_MS = 500
   let tooltipTimer: ReturnType<typeof setTimeout> | null = null
-
-  function basename(path: string): string {
-    const parts = path.split('/').filter(Boolean)
-    return parts[parts.length - 1] || path
-  }
 
   function fuzzyMatch(query: string, target: string): boolean {
     const q = query.toLowerCase()

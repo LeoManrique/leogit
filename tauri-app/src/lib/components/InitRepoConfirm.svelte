@@ -1,5 +1,6 @@
 <script lang="ts">
   import { autofocus } from '$lib/actions/autofocus'
+  import { basename } from '$lib/utils/path'
 
   interface Props {
     /** Absolute path of the folder `leogit <dir>` pointed at. */
@@ -13,7 +14,7 @@
 
   let { path, isInitializing, error, onConfirm, onCancel }: Props = $props()
 
-  const folderName = $derived(path.replace(/\/+$/, '').split('/').pop() || path)
+  const folderName = $derived(basename(path))
 
   // Enter is left to the autofocused primary button's native activation, so it
   // can't fire the confirm twice.

@@ -118,6 +118,7 @@ fn main() {
             terminal::resize_terminal,
             terminal::close_terminal,
             shell::list_shells,
+            git::effective_scan_paths,
             launch::take_pending_launch_target,
         ])
         .run(tauri::generate_context!())

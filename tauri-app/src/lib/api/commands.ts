@@ -351,6 +351,13 @@ export const gitApi = {
     invoke<number>('count_commits_to_merge', { repoPath, targetBranch }),
   discoverRepos: (scanPaths: string[], maxDepth: number) =>
     invoke<string[]>('discover_repos', { scanPaths, maxDepth }),
+  /**
+   * The folders `discoverRepos` would actually walk for this config — the
+   * configured list, or the stock defaults when it's empty. Lets the picker's
+   * empty state name where it searched instead of just saying "none found".
+   */
+  effectiveScanPaths: (scanPaths: string[]) =>
+    invoke<string[]>('effective_scan_paths', { scanPaths }),
   isGitRepo: (path: string) => invoke<boolean>('is_git_repo', { path }),
   /**
    * `git init` a folder so it can be opened, returning the path to open.

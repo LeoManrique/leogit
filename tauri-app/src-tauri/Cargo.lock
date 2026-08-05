@@ -2058,6 +2058,7 @@ name = "leogit"
 version = "0.1.30"
 dependencies = [
  "directories",
+ "dunce",
  "portable-pty",
  "reqwest",
  "serde",

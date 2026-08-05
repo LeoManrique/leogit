@@ -3,15 +3,27 @@
   import { get } from 'svelte/store'
   import { listen } from '@tauri-apps/api/event'
   import { appState } from '$lib/stores/app'
-  import { refreshConfig } from '$lib/stores/config'
+  import { config, refreshConfig } from '$lib/stores/config'
   import { ghApi, gitApi, configApi, appApi, type LaunchTarget } from '$lib/api/commands'
   import { patchReposState, recordRecentRepo } from '$lib/stores/reposState'
   import { updateChecker } from '$lib/services/updateChecker'
   import MainLayout from '$lib/views/MainLayout.svelte'
   import RepoPicker from '$lib/views/RepoPicker.svelte'
+  import SettingsOverlay from '$lib/views/SettingsOverlay.svelte'
+  import HelpOverlay from '$lib/views/HelpOverlay.svelte'
+  import Header from '$lib/components/Header.svelte'
   import InitRepoConfirm from '$lib/components/InitRepoConfirm.svelte'
 
   let unlistenOpenRepo: (() => void) | null = null
+
+  // Settings for the pre-main phases. MainLayout owns its own instance (it's
+  // part of that view's Escape stack); this one exists because the picker and
+  // error screens are otherwise a dead end — a user whose scan paths match
+  // nothing can't reach the setting that would fix it.
+  let showSettings = $state(false)
+  let showHelp = $state(false)
+  // Folders discovery searched, surfaced by the picker's empty state.
+  let scannedPaths = $state<string[]>([])
 
   // `leogit <dir>` pointed at a folder that isn't a repository yet. The prompt
   // lives here rather than in MainLayout because it isn't scoped to the open
@@ -133,6 +145,11 @@
         return
       }
 
+      // Only needed for the empty state; a failure here must not block the
+      // picker, which still works — it just can't say where it looked.
+      scannedPaths = await gitApi
+        .effectiveScanPaths(cfg?.scan_paths ?? [])
+        .catch(() => [] as string[])
       appState.update((s) => ({ ...s, phase: 'repo-picker', repos }))
     } catch (error) {
       appState.update((s) => ({ ...s, phase: 'error', error: String(error) }))
@@ -144,23 +161,101 @@
     // Read-modify-write so we don't clobber sort modes / recent_repos.
     patchReposState({ last_opened_repo: repo })
   }
+
+  /**
+   * Re-run discovery after Settings closes so a scan-path change takes effect
+   * without a restart — otherwise the user fixes the setting and still faces
+   * "No repositories found", which is the same dead end one step later.
+   *
+   * Deliberately stays on the picker even if exactly one repo now matches:
+   * auto-entering a repo the user never chose would be a surprising way for a
+   * settings dialog to end. Cold start still auto-enters; this isn't that.
+   */
+  async function rediscoverRepos() {
+    const cfg = get(config)
+    try {
+      const [repos, paths] = await Promise.all([
+        gitApi.discoverRepos(cfg?.scan_paths ?? [], cfg?.scan_depth ?? 3),
+        gitApi.effectiveScanPaths(cfg?.scan_paths ?? []).catch(() => [] as string[]),
+      ])
+      scannedPaths = paths
+      appState.update((s) => ({ ...s, repos }))
+    } catch (error) {
+      console.error('[repos] rediscovery after settings failed', error)
+    }
+  }
+
+  function closeSettings() {
+    showSettings = false
+    if (get(appState).phase === 'repo-picker') rediscoverRepos()
+  }
+
+  // Mirrors MainLayout's shortcuts so the two phases behave the same. Only
+  // bound outside `main`, where MainLayout owns these keys — binding in both
+  // would double-handle them.
+  function handlePreMainKeyDown(e: KeyboardEvent) {
+    if (get(appState).phase === 'main') return
+    const target = e.target as HTMLElement | null
+    const inField = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement
+
+    if (e.key === 'Escape') {
+      if (showSettings) {
+        e.preventDefault()
+        closeSettings()
+      } else if (showHelp) {
+        e.preventDefault()
+        showHelp = false
+      }
+    } else if (e.key === ',' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault()
+      showSettings = true
+    } else if (e.key === '?' && !inField) {
+      // The picker's search box is autofocused, so an unguarded '?' would
+      // swallow the character the user meant to type into it.
+      e.preventDefault()
+      showHelp = true
+    }
+  }
 </script>
 
-{#if $appState.phase === 'loading'}
-  <div class="loading-screen">
-    <div class="spinner"></div>
-    <p>Discovering repositories…</p>
-  </div>
-{:else if $appState.phase === 'error'}
-  <div class="error-screen">
-    <h1>Something went wrong</h1>
-    <pre>{$appState.error}</pre>
-    <button onclick={() => { appState.update((s) => ({ ...s, phase: 'loading', error: '' })); initializeApp() }}>Retry</button>
-  </div>
-{:else if $appState.phase === 'repo-picker'}
-  <RepoPicker repos={$appState.repos} onSelect={handleRepoSelect} />
-{:else if $appState.phase === 'main' && $appState.repoPath}
+<svelte:window onkeydown={handlePreMainKeyDown} />
+
+{#if $appState.phase === 'main' && $appState.repoPath}
   <MainLayout bind:this={mainLayout} />
+{:else}
+  <!-- Same header bar as the main view, minus everything that acts on a repo.
+       Without it the picker is a dead end: a user whose scan paths match
+       nothing has no route to the setting that would fix it. -->
+  <div class="pre-main">
+    <Header
+      onOpenSettings={() => (showSettings = true)}
+      onOpenHelp={() => (showHelp = true)}
+    />
+    <div class="pre-main-body">
+      {#if $appState.phase === 'loading'}
+        <div class="loading-screen">
+          <div class="spinner"></div>
+          <p>Discovering repositories…</p>
+        </div>
+      {:else if $appState.phase === 'error'}
+        <div class="error-screen">
+          <h1>Something went wrong</h1>
+          <pre>{$appState.error}</pre>
+          <button onclick={() => { appState.update((s) => ({ ...s, phase: 'loading', error: '' })); initializeApp() }}>Retry</button>
+        </div>
+      {:else if $appState.phase === 'repo-picker'}
+        <RepoPicker
+          repos={$appState.repos}
+          onSelect={handleRepoSelect}
+          onOpenSettings={() => (showSettings = true)}
+          {scannedPaths}
+        />
+      {/if}
+    </div>
+  </div>
+
+  <SettingsOverlay isOpen={showSettings} onClose={closeSettings} />
+  <HelpOverlay isOpen={showHelp} onClose={() => (showHelp = false)} />
 {/if}
 
 {#if initPath}
@@ -174,6 +269,22 @@
 {/if}
 
 <style>
+  /* Header on top, phase content filling the rest. The body is the positioning
+     context for the picker, which fills it rather than the viewport so the
+     header's controls stay clickable. */
+  .pre-main {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    background: var(--bg-primary);
+  }
+
+  .pre-main-body {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+  }
+
   .loading-screen,
   .error-screen {
     display: flex;
@@ -181,7 +292,7 @@
     align-items: center;
     justify-content: center;
     width: 100%;
-    height: 100vh;
+    height: 100%;
     gap: 14px;
     color: var(--text-secondary);
     background: var(--bg-primary);

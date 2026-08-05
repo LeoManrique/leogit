@@ -19,6 +19,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::commands::git::repo_root;
+use crate::commands::paths;
 
 /// Where a `leogit <dir>` invocation points.
 #[derive(Debug, Clone, Serialize)]
@@ -61,7 +62,7 @@ pub fn resolve_launch_target(args: &[String], cwd: &Path) -> Option<LaunchTarget
             cwd.join(p)
         }
     };
-    let canonical = std::fs::canonicalize(&candidate).ok()?;
+    let canonical = paths::canonicalize(&candidate).ok()?;
     if !canonical.is_dir() {
         return None;
     }
@@ -135,8 +136,10 @@ mod tests {
         vec!["leogit".to_string(), arg.to_string()]
     }
 
+    /// The app's own canonicalizer, not `fs::`, so these assertions compare
+    /// against the exact form `resolve_launch_target` hands the frontend.
     fn canonical(path: &Path) -> String {
-        std::fs::canonicalize(path)
+        paths::canonicalize(path)
             .expect("canonicalize")
             .to_string_lossy()
             .into_owned()

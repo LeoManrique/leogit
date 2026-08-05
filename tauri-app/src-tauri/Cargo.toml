@@ -21,6 +21,10 @@ tauri-plugin-single-instance = "2.4.2"
 # Recoverable deletes for the Changes-tab "Discard" action: never-committed
 # files go to the OS trash rather than being unlinked outright.
 trash = "5"
+# Windows path normalisation: `fs::canonicalize` returns verbatim paths
+# (`\\?\C:\…`) that neither the UI nor PowerShell renders sensibly. See
+# `commands::paths`. A no-op re-export of `std::fs` on macOS and Linux.
+dunce = "1.0.5"
 
 # Windows shell discovery and build-number lookup: Git for Windows records its
 # install root under HKLM\SOFTWARE\GitForWindows, and the OS build number

@@ -4,6 +4,7 @@
   import { appState } from '$lib/stores/app'
   import { gitApi, aiApi, configApi, type AiProviderConfig, type FileEntry } from '$lib/api/commands'
   import { config } from '$lib/stores/config'
+  import { basename } from '$lib/utils/path'
   import EmbeddedRepoConfirm from './EmbeddedRepoConfirm.svelte'
 
   interface Props {
@@ -33,7 +34,7 @@
   const pendingEmbedded = $derived(pendingFiles.filter((f) => f.embedded))
   // Outer repo name (repoPath basename) for the warning copy.
   const outerRepoName = $derived(
-    $appState.repoPath.split('/').filter(Boolean).pop() ?? 'this repository',
+    $appState.repoPath ? basename($appState.repoPath) : 'this repository',
   )
 
   // Co-author trailers preserved from the commit being amended, re-applied via

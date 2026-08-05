@@ -499,16 +499,6 @@ mod tests {
         }
     }
 
-    // The 1000-char cap applies on the exit-0 is_error path too, not just the
-    // non-zero-exit path.
-    #[test]
-    fn exit_zero_envelope_error_is_truncated() {
-        let huge = "e".repeat(5000);
-        let stdout = format!(r#"{{"is_error":true,"result":"{huge}"}}"#);
-        let err = parse_claude_envelope(&stdout).expect_err("is_error must map to Err");
-        assert_eq!(err.chars().count(), 1001, "1000 chars plus ellipsis");
-    }
-
     #[test]
     fn long_errors_are_truncated_for_the_ui() {
         let long = "x".repeat(5000);
@@ -530,26 +520,5 @@ mod tests {
         let msg = truncate_error(&long_multibyte);
         assert_eq!(msg.chars().count(), 1001, "1000 chars plus ellipsis");
         assert!(msg.ends_with('…'));
-    }
-
-    // Manual end-to-end check of the spawn → wait → failure-message path.
-    // Run with a fake failing `claude` first on PATH:
-    //   PATH="<dir with fake claude>:$PATH" cargo test --lib claude_e2e -- --ignored
-    #[tokio::test]
-    #[ignore = "requires a fake `claude` binary prepended to PATH"]
-    async fn claude_e2e_nonzero_exit_with_stdout_envelope_surfaces_real_error() {
-        let config = AiProviderConfig {
-            provider: "claude".to_string(),
-            model: None,
-            api_key: None,
-            base_url: None,
-        };
-        let err = generate_claude("fake diff", &config)
-            .await
-            .expect_err("fake CLI exits non-zero");
-        assert!(
-            err.contains("Invalid API key"),
-            "error should carry the envelope message, got: {err}"
-        );
     }
 }

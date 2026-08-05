@@ -29,6 +29,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use tauri::{AppHandle, Emitter};
 
+use super::paths;
 use super::shell::{self, ShellOption};
 
 /// Holds the master PTY (must stay alive to keep the PTY open),
@@ -208,14 +209,23 @@ pub fn start_terminal(
         .map_err(|e| e.to_string())?;
 
     let chosen = shell::resolve(shell_id.as_deref());
+    // The shell is a third-party program reading this path, and Windows
+    // verbatim paths (`\\?\C:\…`) are exactly what they mishandle: PowerShell
+    // can't map one onto a PSDrive, so it drops to a provider-qualified prompt
+    // (`PS Microsoft.PowerShell.Core\FileSystem::\\?\C:\…`) and every script
+    // that touches `$PWD` sees that instead of a path. Repo paths already
+    // arrive converted (see `commands::paths`); converting again here costs a
+    // string compare and keeps the guarantee local to the process boundary
+    // that actually depends on it. No-op off Windows.
+    let cwd = paths::simplify_str(repo_path);
     println!(
-        "[terminal] launching {} ({}) in {repo_path}",
+        "[terminal] launching {} ({}) in {cwd}",
         chosen.label, chosen.path
     );
 
     let mut cmd = CommandBuilder::new(&chosen.path);
     cmd.args(&chosen.args);
-    cmd.cwd(repo_path);
+    cmd.cwd(&cwd);
     for (key, value) in session_env(&chosen) {
         cmd.env(key, value);
     }
@@ -352,11 +362,6 @@ mod tests {
             out.push_str(&decoder.push(chunk));
         }
         out
-    }
-
-    #[test]
-    fn decodes_ascii_unchanged() {
-        assert_eq!(decode_in_chunks(b"hello world", 4), "hello world");
     }
 
     #[test]

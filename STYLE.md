@@ -194,6 +194,16 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 - **Active shell name** sits beside the prompt glyph in the header at 10px, muted. It reports what actually launched (which can differ from the configured preference when that shell isn't installed), so it's an observation, not a control — no chevron, no pill, and it stays muted even while the label button is hovered. Hidden when no session is running.
 - No scrollbar styling — let the platform draw it.
 
+### Empty states
+
+- **An empty state that a setting can fix must carry the fix.** "No repositories found" alone is a dead end; name what was searched, then offer the action. Pattern: a plain title in `--text-faint`, an 11px explanatory line inheriting it, the searched values as an 11px mono list in `--text-muted` (paths are data — mono), then a single tertiary button. Left-aligned text would fight the centred modal, so the whole stack stays centred.
+- Don't stack more than one action. The contextual button and the persistent header control are enough; a third route reads as uncertainty about which one works.
+
+### Repo-less chrome
+
+- The header bar is **the same component** in every phase, not a reduced copy. When no repository is open it simply drops everything that acts on one (repo/branch chips, status area, Pull, Push, Refresh) and keeps Settings, Help, and the update chip. Never build a second, simpler header — the two would drift, and the user would notice the app "changing shape" between launch and main view.
+- App-level chrome (Settings, Help, update availability) is reachable in *every* phase. A phase that can't be escaped without restarting the app is a bug, not a layout.
+
 ### Status indicators
 
 - **Connection / sync status** (ahead/behind in header): tabular-num count + a small word (`ahead 3`, `behind 1`), color from `--status-*` tokens, no background pill. A single 6px dot in `--status-green` for "in sync" — no pulse unless a fetch is in flight, in which case a brief opacity pulse is acceptable.
