@@ -197,7 +197,7 @@
                   config.scan_paths = (e.currentTarget.value || '').split('\n').map((s) => s.trim()).filter(Boolean)
                 }
               }}
-              rows="4"
+              rows="6"
             ></textarea>
           </div>
         {/if}
@@ -356,12 +356,17 @@
     flex: 1;
     padding: 6px 8px;
     font-size: 12px;
+    line-height: 1.5;
     background: var(--bg-primary);
     color: var(--text-primary);
     border: 1px solid var(--border-strong);
     border-radius: 6px;
     font-family: var(--font-mono);
+    /* Only vertical, and never below four rows plus padding: the handle used
+       to collapse the box to a sliver that hid every configured path. The
+       `rows` attribute sets the taller starting height. */
     resize: vertical;
+    min-height: 88px;
   }
 
   .modal-footer {
