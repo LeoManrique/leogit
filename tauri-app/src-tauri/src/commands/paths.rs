@@ -24,6 +24,9 @@
 //! `const fn` returning `false` off Windows and its `canonicalize` is a
 //! re-export of `std::fs::canonicalize` there, so both functions below are the
 //! std behaviour verbatim on those platforms.
+//!
+//! [`expand_tilde`] lives here for the same reason: `~` is the other notation
+//! the app has to turn into a real path before anything can open it.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -56,6 +59,59 @@ pub fn simplify_str(path: &str) -> String {
     dunce::simplified(Path::new(path))
         .to_string_lossy()
         .into_owned()
+}
+
+/// Expand a leading `~` to the user's home directory. Any other path — and a
+/// `~` that isn't the whole first component, like `~backup/notes` — is returned
+/// as written.
+///
+/// The home directory comes from the *OS*, never from `$HOME` alone. That
+/// variable isn't part of the environment Windows hands a program: Explorer and
+/// the Start menu don't set it, and only POSIX-flavoured shells (Git Bash,
+/// MSYS) do. Reading it directly therefore made `~` resolve or silently fail
+/// depending on how the app happened to be launched — scan paths worked under
+/// `tauri dev` from such a shell and found nothing at all in an installed
+/// build, where discovery skipped every root it couldn't resolve.
+///
+/// [`directories`] asks for `FOLDERID_Profile` on Windows, which no
+/// environment can misreport, and reads `$HOME` on macOS and Linux exactly as
+/// before (falling back to the passwd entry), so the fix is Windows-only in
+/// effect without a `cfg` of ours.
+#[must_use]
+pub fn expand_tilde(path: &str) -> PathBuf {
+    expand_tilde_from(path, home_dir().as_deref())
+}
+
+fn home_dir() -> Option<PathBuf> {
+    directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf())
+}
+
+/// The rule itself, split out so it can be tested against a known home
+/// directory instead of mutating the process environment.
+fn expand_tilde_from(path: &str, home: Option<&Path>) -> PathBuf {
+    let literal = || PathBuf::from(path);
+    let Some(rest) = path.strip_prefix('~') else {
+        return literal();
+    };
+    // `~` alone or `~` followed by a separator names the home directory;
+    // `~user` and a folder actually called `~snapshots` do not.
+    if !rest.is_empty() && !rest.starts_with(std::path::is_separator) {
+        return literal();
+    }
+    let Some(home) = home else {
+        return literal();
+    };
+    // Push component by component rather than joining the remainder wholesale:
+    // that accepts either separator (a Windows user may well type `~\Dev`) and
+    // emits the platform's own, so the result doesn't come out half `\` and
+    // half `/` — a form that reads as broken and, worse, compares unequal to
+    // the same folder discovered any other way.
+    let mut expanded = home.to_path_buf();
+    expanded.extend(
+        rest.split(std::path::is_separator)
+            .filter(|component| !component.is_empty()),
+    );
+    expanded
 }
 
 #[cfg(test)]
@@ -115,6 +171,81 @@ mod tests {
         // Over MAX_PATH, the prefix is the only way to name it.
         let long = format!(r"\\?\C:\{}", "a".repeat(300));
         assert_eq!(simplify_str(&long), long);
+    }
+
+    /// `~` is the notation the settings dialog and the stock scan paths are
+    /// written in, so it has to land on the home directory in the platform's
+    /// own separators.
+    #[test]
+    fn tilde_expands_to_the_home_directory() {
+        let home = Path::new(if cfg!(windows) {
+            r"C:\Users\Leo"
+        } else {
+            "/Users/leo"
+        });
+        let expand = |path: &str| expand_tilde_from(path, Some(home));
+
+        assert_eq!(expand("~"), home);
+        assert_eq!(
+            expand("~/Dev/LeoManrique"),
+            home.join("Dev").join("LeoManrique")
+        );
+        // Trailing and doubled separators are typos the settings textarea will
+        // see; neither should produce an empty component.
+        assert_eq!(expand("~/Dev/"), home.join("Dev"));
+        assert_eq!(expand("~//Dev"), home.join("Dev"));
+    }
+
+    /// A Windows user types the separator their OS uses, and the result must
+    /// still be one consistent path rather than `C:\Users\Leo\Dev/sub`.
+    #[cfg(windows)]
+    #[test]
+    fn tilde_expansion_accepts_and_emits_windows_separators() {
+        let home = Path::new(r"C:\Users\Leo");
+        assert_eq!(
+            expand_tilde_from(r"~\Dev\LeoManrique", Some(home)),
+            Path::new(r"C:\Users\Leo\Dev\LeoManrique")
+        );
+        assert_eq!(
+            expand_tilde_from("~/Dev/LeoManrique", Some(home)).to_string_lossy(),
+            r"C:\Users\Leo\Dev\LeoManrique"
+        );
+    }
+
+    /// Only a whole leading component counts. `~user` is another user's home,
+    /// which we don't resolve, and a folder may simply be named with a `~`.
+    #[test]
+    fn other_uses_of_a_tilde_are_left_alone() {
+        let home = Path::new("/Users/leo");
+        for path in ["~backup/notes", "~user", "/Dev/~snapshots", "Dev/~", ""] {
+            assert_eq!(
+                expand_tilde_from(path, Some(home)),
+                PathBuf::from(path),
+                "must not expand {path:?}"
+            );
+        }
+    }
+
+    /// With no home directory to expand against, the path stays literal rather
+    /// than becoming an absolute path rooted at nothing.
+    #[test]
+    fn tilde_without_a_home_directory_stays_literal() {
+        assert_eq!(expand_tilde_from("~/Dev", None), PathBuf::from("~/Dev"));
+    }
+
+    /// The wiring, not just the rule: the OS lookup has to actually answer, or
+    /// every `~` scan path silently expands to nothing — which is precisely
+    /// what an installed Windows build did while reading `$HOME`.
+    #[test]
+    fn tilde_expands_against_the_real_home_directory() {
+        let expanded = expand_tilde("~/Dev");
+
+        assert!(
+            expanded.is_absolute(),
+            "`~` must resolve from the OS, not the environment: {}",
+            expanded.display()
+        );
+        assert!(expanded.ends_with("Dev"), "{}", expanded.display());
     }
 
     /// The resolver behind every repo path the app hands out: it still resolves

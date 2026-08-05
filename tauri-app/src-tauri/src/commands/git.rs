@@ -2512,31 +2512,13 @@ pub fn count_commits_to_merge(repo_path: String, target_branch: String) -> Resul
 // Discovery
 // ---------------------------------------------------------------------------
 
-/// Expand a leading `~` to the user's home directory.
-fn expand_tilde(path: &str) -> PathBuf {
-    if !path.starts_with('~') {
-        return PathBuf::from(path);
-    }
-    let home = match std::env::var_os("HOME") {
-        Some(h) => PathBuf::from(h),
-        None => return PathBuf::from(path),
-    };
-    if path == "~" {
-        return home;
-    }
-    if let Some(rest) = path.strip_prefix("~/") {
-        return home.join(rest);
-    }
-    PathBuf::from(path)
-}
-
 /// Resolve a clone destination: expand a leading `~`, reject a path that
 /// already exists (git/gh would fail anyway, but we give a friendlier error),
 /// and create the parent folder so the clone has somewhere to land. Returns the
 /// absolute target path the clone should write to. Shared by `clone_repo`
 /// (URL clones) and `gh::gh_clone` (GitHub clones) so both behave identically.
 pub fn prepare_clone_target(target_path: &str) -> Result<String, String> {
-    let target = expand_tilde(target_path);
+    let target = paths::expand_tilde(target_path);
     if target.exists() {
         return Err(format!("\"{}\" already exists.", target.display()));
     }
@@ -2673,32 +2655,40 @@ fn resolve_scan_paths(scan_paths: Vec<String>) -> Vec<String> {
 /// The scan folders discovery would use for this configuration. Backs the
 /// "no repositories found" state, which names the folders it searched so an
 /// empty result is diagnosable rather than a dead end.
+///
+/// Expanded, unlike the configured form: the point of that list is to be
+/// checked against reality, and `~/Dev` tells the reader nothing about which
+/// folder was actually walked.
 #[tauri::command(async)]
 #[must_use]
 pub fn effective_scan_paths(scan_paths: Vec<String>) -> Vec<String> {
     resolve_scan_paths(scan_paths)
+        .iter()
+        .map(|path| paths::expand_tilde(path).to_string_lossy().into_owned())
+        .collect()
 }
 
 #[tauri::command(async)]
 pub fn discover_repos(scan_paths: Vec<String>, max_depth: u32) -> Result<Vec<String>, String> {
     let scan_paths = resolve_scan_paths(scan_paths);
+    let searched = scan_paths.len();
 
     let mut repos: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
+    let mut skipped: Vec<String> = Vec::new();
 
     for scan_path in scan_paths {
-        let expanded = expand_tilde(&scan_path);
-        let abs = match paths::canonicalize(&expanded) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        let meta = match std::fs::metadata(&abs) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if !meta.is_dir() {
+        let expanded = paths::expand_tilde(&scan_path);
+        let Some(abs) = paths::canonicalize(&expanded)
+            .ok()
+            .filter(|abs| std::fs::metadata(abs).is_ok_and(|meta| meta.is_dir()))
+        else {
+            // Record what `~` became rather than what was configured: a `~`
+            // still showing in this line means the home lookup came up empty,
+            // which is a different problem from a folder that isn't there.
+            skipped.push(expanded.to_string_lossy().into_owned());
             continue;
-        }
+        };
         // If the scan path itself is a git repo, include it.
         if is_git_repo_path(&abs) {
             let abs_str = abs.to_string_lossy().to_string();
@@ -2711,6 +2701,16 @@ pub fn discover_repos(scan_paths: Vec<String>, max_depth: u32) -> Result<Vec<Str
     }
 
     repos.sort();
+    // Discovery failing quietly is what an empty picker looks like from the
+    // outside, so say what was walked and what wasn't. A folder that can't be
+    // resolved was previously skipped in complete silence.
+    println!(
+        "[discover] {} repo(s) across {searched} folder(s), depth {max_depth}",
+        repos.len()
+    );
+    if !skipped.is_empty() {
+        println!("[discover] not searched (missing or not a folder): {skipped:?}");
+    }
     Ok(repos)
 }
 
@@ -2764,7 +2764,7 @@ pub fn is_git_repo(path: &str) -> bool {
 /// way), or when `git init` itself fails.
 #[tauri::command(async)]
 pub fn init_repo(path: &str) -> Result<String, String> {
-    let dir = expand_tilde(path);
+    let dir = paths::expand_tilde(path);
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("Could not create \"{}\": {e}", dir.display()))?;
     let canonical = paths::canonicalize(&dir)
@@ -2980,6 +2980,23 @@ mod tests {
             super::super::config::default_scan_paths()
         );
         assert!(!resolve_scan_paths(Vec::new()).is_empty());
+    }
+
+    /// The picker's "searched these folders" list is meant to be checked
+    /// against the disk, so it names the folders discovery actually walked. A
+    /// `~` left in it says nothing about where we looked — and hid the fact
+    /// that an installed Windows build couldn't expand one at all.
+    #[test]
+    fn effective_scan_paths_are_reported_expanded() {
+        let reported = effective_scan_paths(vec!["~/Dev".into(), "/tmp/code".into()]);
+
+        assert!(
+            !reported[0].starts_with('~'),
+            "must name the folder searched, not the shorthand: {}",
+            reported[0]
+        );
+        assert!(reported[0].ends_with("Dev"), "{}", reported[0]);
+        assert_eq!(reported[1], "/tmp/code", "an ordinary path is untouched");
     }
 
     /// A fresh repo lands on `main`, not git's legacy `master` default.
