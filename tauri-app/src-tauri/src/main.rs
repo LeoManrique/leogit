@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use leogit_lib::commands::{ai, config, diff, gh, git, highlight, launch, os, terminal, update};
+use leogit_lib::commands::{
+    ai, config, diff, gh, git, highlight, launch, os, shell, terminal, update,
+};
 
 // macOS/Linux apps launched from Finder/.desktop inherit a minimal PATH
 // (e.g. /usr/bin:/bin:/usr/sbin:/sbin) and miss user-installed binaries like
@@ -110,10 +112,12 @@ fn main() {
             gh::gh_publish_repo,
             ai::generate_commit_message,
             ai::check_provider_available,
+            terminal::terminal_pty_info,
             terminal::start_terminal,
             terminal::write_terminal,
             terminal::resize_terminal,
             terminal::close_terminal,
+            shell::list_shells,
             launch::take_pending_launch_target,
         ])
         .run(tauri::generate_context!())

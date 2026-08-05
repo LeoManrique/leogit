@@ -3,15 +3,25 @@
   import { Terminal } from '@xterm/xterm'
   import { FitAddon } from '@xterm/addon-fit'
   import { WebLinksAddon } from '@xterm/addon-web-links'
-  import { invoke } from '@tauri-apps/api/core'
   import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+  import { terminalApi } from '$lib/api/commands'
   import '@xterm/xterm/css/xterm.css'
 
   let {
     repoPath,
+    shellId,
     expanded = true,
     onExit,
-  }: { repoPath: string; expanded?: boolean; onExit?: () => void } = $props()
+    onShellResolved,
+  }: {
+    repoPath: string
+    /** Persisted shell preference; the backend falls back if it's uninstalled. */
+    shellId?: string
+    expanded?: boolean
+    onExit?: () => void
+    /** Reports the shell that actually launched, so the panel can label itself. */
+    onShellResolved?: (label: string) => void
+  } = $props()
 
   let container: HTMLDivElement | undefined = $state()
   let term: Terminal | null = null
@@ -19,12 +29,62 @@
   let pid: number | null = null
   let unlisteners: UnlistenFn[] = []
   let resizeObserver: ResizeObserver | null = null
+  let resizeTimer: ReturnType<typeof setTimeout> | null = null
   // Flips true once xterm is open so the focus effect never runs before `term`
   // exists. Stays false on a fresh remount ({#key}) until that instance mounts.
   let mounted = $state(false)
+  // Set once teardown starts so async setup steps bail instead of resurrecting
+  // a PTY for a component that is already gone.
+  let disposed = false
+
+  // A panel drag fires ResizeObserver every frame. Each fit() that changes the
+  // grid pushes a ResizePseudoConsole down to the shell, and PSReadLine repaints
+  // its whole edit buffer per resize — so an unthrottled observer turns one drag
+  // into hundreds of repaints and a visibly corrupted prompt. Coalesce to the
+  // final size instead; Windows Terminal debounces for the same reason.
+  const RESIZE_DEBOUNCE_MS = 80
 
   onMount(() => {
+    void init()
+
+    return () => {
+      disposed = true
+      if (resizeTimer !== null) clearTimeout(resizeTimer)
+      resizeTimer = null
+      resizeObserver?.disconnect()
+      resizeObserver = null
+      unlisteners.forEach((fn) => fn())
+      unlisteners = []
+      if (pid !== null) {
+        const closingPid = pid
+        pid = null
+        terminalApi.close(closingPid).catch(() => {})
+      }
+      term?.dispose()
+      term = null
+      fitAddon = null
+    }
+  })
+
+  async function init() {
     if (!container) return
+
+    // Must be fetched before constructing Terminal: xterm reads `windowsPty`
+    // when it builds the buffer, so setting it afterwards has no effect.
+    let windowsPty: { backend: 'conpty' | 'winpty'; buildNumber: number } | undefined
+    try {
+      const info = await terminalApi.ptyInfo()
+      if (info.backend && info.build_number) {
+        windowsPty = {
+          backend: info.backend as 'conpty' | 'winpty',
+          buildNumber: info.build_number,
+        }
+      }
+    } catch (e) {
+      // Non-fatal: xterm falls back to its heuristic wrapping mode.
+      console.warn('[terminal] pty info unavailable, reflow disabled', e)
+    }
+    if (disposed || !container) return
 
     term = new Terminal({
       fontFamily: "ui-monospace, 'SF Mono', Menlo, Monaco, monospace",
@@ -35,6 +95,7 @@
         foreground: '#e5e5e5',
       },
       cursorBlink: true,
+      windowsPty,
     })
 
     fitAddon = new FitAddon()
@@ -43,36 +104,30 @@
     term.open(container)
 
     // Defer fit() until the container has its real size.
-    setTimeout(() => fitAddon?.fit(), 0)
+    setTimeout(() => safeFit(), 0)
 
-    initBackend()
+    await initBackend()
+    if (disposed) return
 
     resizeObserver = new ResizeObserver(() => {
-      try {
-        fitAddon?.fit()
-      } catch {
-        // fit can throw if container is unmounted mid-frame; ignore.
-      }
+      if (resizeTimer !== null) clearTimeout(resizeTimer)
+      resizeTimer = setTimeout(() => {
+        resizeTimer = null
+        safeFit()
+      }, RESIZE_DEBOUNCE_MS)
     })
     resizeObserver.observe(container)
 
     mounted = true
+  }
 
-    return () => {
-      resizeObserver?.disconnect()
-      resizeObserver = null
-      unlisteners.forEach((fn) => fn())
-      unlisteners = []
-      if (pid !== null) {
-        const closingPid = pid
-        pid = null
-        invoke('close_terminal', { pid: closingPid }).catch(() => {})
-      }
-      term?.dispose()
-      term = null
-      fitAddon = null
+  function safeFit() {
+    try {
+      fitAddon?.fit()
+    } catch {
+      // fit can throw if the container is unmounted mid-frame; ignore.
     }
-  })
+  }
 
   // Focus the terminal whenever the section is showing: on first open, on a new
   // session (remounted via {#key}), and when re-expanded from minimized. Guard on
@@ -87,7 +142,14 @@
   async function initBackend() {
     if (!term) return
     try {
-      pid = await invoke<number>('start_terminal', { repoPath })
+      const started = await terminalApi.start(repoPath, shellId)
+      if (disposed) {
+        // Unmounted while the shell was starting; don't leak the PTY.
+        terminalApi.close(started.pid).catch(() => {})
+        return
+      }
+      pid = started.pid
+      onShellResolved?.(started.shell_label)
 
       const u1 = await listen<string>(`terminal-output-${pid}`, (e) => {
         term?.write(e.payload)
@@ -103,24 +165,20 @@
 
       term.onData((data) => {
         if (pid !== null) {
-          invoke('write_terminal', { pid, data }).catch(console.error)
+          terminalApi.write(pid, data).catch(console.error)
         }
       })
 
       term.onResize(({ cols, rows }) => {
         if (pid !== null) {
-          invoke('resize_terminal', { pid, cols, rows }).catch(console.error)
+          terminalApi.resize(pid, cols, rows).catch(console.error)
         }
       })
 
       // Push the initial size down to the PTY in case xterm settled
       // before the backend session was ready.
       if (pid !== null) {
-        invoke('resize_terminal', {
-          pid,
-          cols: term.cols,
-          rows: term.rows,
-        }).catch(console.error)
+        terminalApi.resize(pid, term.cols, term.rows).catch(console.error)
       }
     } catch (e) {
       term?.writeln(`\r\n\x1b[31mTerminal error: ${e}\x1b[0m`)

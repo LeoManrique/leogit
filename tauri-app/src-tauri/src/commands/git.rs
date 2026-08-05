@@ -2757,8 +2757,21 @@ pub fn init_repo(path: &str) -> Result<String, String> {
     // Git ≥2.28 prints a multi-line hint and falls back to `master` when
     // `init.defaultBranch` is unset. Name the branch ourselves in that case so a
     // fresh repo matches what GitHub and `gh` expect; a configured value wins.
-    let configured =
-        run_git(&dir_str, &["config", "--get", "init.defaultBranch"]).unwrap_or_default();
+    //
+    // `GIT_CONFIG_NOSYSTEM` restricts the probe to the global and local scopes,
+    // which are the ones a *user* sets. Git for Windows ships
+    // `init.defaultBranch = master` in its system config
+    // (`C:/Program Files/Git/etc/gitconfig`), so without this every repo created
+    // on Windows silently landed on `master` — a vendor default was being read
+    // as a deliberate choice.
+    let mut probe = git_cmd(&dir_str, &["config", "--get", "init.defaultBranch"]);
+    probe.env("GIT_CONFIG_NOSYSTEM", "1");
+    let configured = probe
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .unwrap_or_default();
     let args: &[&str] = if configured.trim().is_empty() {
         &["-c", "init.defaultBranch=main", "init"]
     } else {
@@ -2910,7 +2923,9 @@ mod tests {
         init_repo(path).expect("init");
 
         // A configured init.defaultBranch wins over ours, so only assert the
-        // fallback when the developer's git has none.
+        // fallback when the developer's git has none. Deliberately `--global`,
+        // not all scopes: Git for Windows ships `master` in its *system*
+        // config, and treating that as configured is the bug this guards.
         let configured = Command::new("git")
             .args(["config", "--global", "--get", "init.defaultBranch"])
             .output()

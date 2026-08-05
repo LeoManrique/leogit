@@ -33,6 +33,13 @@ pub struct Config {
     pub claude_timeout_secs: u32,
     #[serde(default = "default_ollama_url")]
     pub ollama_server_url: String,
+    /// Shell id the embedded terminal launches (see `commands::shell`).
+    /// `None` — the default — means "best available for this machine", which
+    /// is what every existing config file deserializes to. An id whose shell
+    /// has since been uninstalled falls back the same way, so this can never
+    /// wedge the terminal.
+    #[serde(default)]
+    pub terminal_shell: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -121,6 +128,7 @@ impl Default for Config {
             tab_size: default_tab_size(),
             claude_timeout_secs: default_claude_timeout(),
             ollama_server_url: default_ollama_url(),
+            terminal_shell: None,
         }
     }
 }

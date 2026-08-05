@@ -2058,7 +2058,6 @@ name = "leogit"
 version = "0.1.29"
 dependencies = [
  "directories",
- "lazy_static",
  "portable-pty",
  "reqwest",
  "serde",
@@ -2073,6 +2072,7 @@ dependencies = [
  "toml 1.1.2+spec-1.1.0",
  "trash",
  "two-face",
+ "winreg 0.55.0",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { configApi, type Config } from '$lib/api/commands'
+  import { configApi, terminalApi, type Config, type ShellOption } from '$lib/api/commands'
   import { refreshConfig } from '$lib/stores/config'
 
   interface Props {
@@ -12,10 +12,32 @@
   let config = $state<Config | null>(null)
   let isSaving = $state(false)
   let error = $state('')
+  /** Shells probed on this machine, best-first. Empty until loaded. */
+  let shells = $state<ShellOption[]>([])
+  /** Bound to the picker; `''` is the "Automatic" sentinel the <select> needs
+   *  in place of `Config.terminal_shell`'s absent value. */
+  let shellChoice = $state('')
+
+  /** What "Automatic" resolves to, so the choice isn't a mystery. */
+  let autoShellLabel = $derived(shells[0]?.label ?? '')
 
   async function loadConfig() {
     try {
-      config = await configApi.loadConfig()
+      const [cfg, available] = await Promise.all([
+        configApi.loadConfig(),
+        // Non-fatal: an empty list just leaves the picker with "Automatic".
+        terminalApi.listShells().catch((e) => {
+          console.warn('[settings] shell discovery failed', e)
+          return [] as ShellOption[]
+        }),
+      ])
+      config = cfg
+      shells = available
+      // A preference whose shell is no longer installed shows as Automatic,
+      // matching what the backend would actually launch.
+      shellChoice = available.some((s) => s.id === cfg.terminal_shell)
+        ? (cfg.terminal_shell ?? '')
+        : ''
       error = ''
     } catch (e) {
       error = String(e)
@@ -27,6 +49,7 @@
     isSaving = true
     error = ''
     try {
+      config.terminal_shell = shellChoice || undefined
       await configApi.saveConfig(config)
       await refreshConfig()
       onClose()
@@ -109,6 +132,20 @@
           <div class="setting-group">
             <label for="tab-size">Tab size</label>
             <input id="tab-size" type="number" bind:value={config.tab_size} min="1" max="16" />
+          </div>
+
+          <h3>Terminal</h3>
+          <div class="setting-group">
+            <label for="terminal-shell">Shell</label>
+            <select id="terminal-shell" bind:value={shellChoice}>
+              <option value="">Automatic{autoShellLabel ? ` (${autoShellLabel})` : ''}</option>
+              {#each shells as shell (shell.id)}
+                <option value={shell.id}>{shell.label}</option>
+              {/each}
+            </select>
+            <p class="setting-hint">
+              Only shells found on this machine are listed. Applies to new terminal sessions.
+            </p>
           </div>
 
           <h3>Git</h3>
@@ -265,6 +302,17 @@
     display: flex;
     align-items: center;
     gap: 12px;
+    /* Lets a full-width hint drop onto its own line under its control
+       instead of competing with it for horizontal space. */
+    flex-wrap: wrap;
+  }
+
+  .setting-hint {
+    flex-basis: 100%;
+    margin: 2px 0 0;
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--text-muted);
   }
 
   .setting-group label:not(.checkbox-label) {

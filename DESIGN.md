@@ -108,13 +108,15 @@ Two-column layout: a resizable sidebar on the left and a content area on the rig
 - Docked at the bottom of the main content area, ~280 px tall when expanded.
 - Toggle with the backtick key (`` ` ``) or the header chevron. A separate `+` button spawns additional sessions; the X button kills the current PTY.
 - Whenever the section is shown — first open, a new session, or re-expanding from minimized — the terminal grabs keyboard focus so you can type immediately without clicking into it.
-- Spawns a shell with the repo path as cwd. On Unix it uses the user's `$SHELL` (`/bin/zsh` fallback); on Windows it ignores `$SHELL` (a Unix artifact that can hold a non-resolvable POSIX path when launched from Git Bash) and prefers `pwsh.exe` → `powershell.exe` → `cmd.exe`, mirroring Windows Terminal's default. Parent env is forwarded plus `TERM=xterm-256color`.
-- xterm.js handles rendering; FitAddon syncs cols/rows to the backend on resize. Output is streamed back via per-pid Tauri events (`terminal-output-<pid>`); `terminal-closed-<pid>` fires when the shell exits.
+- Spawns a shell with the repo path as cwd. The shell is the user's choice (Settings → Terminal), defaulting to the best one found on the machine: on Windows **Git Bash** → PowerShell 7 → Windows PowerShell → Command Prompt; on Unix `$SHELL`. Only shells that actually exist are offered, and a preference whose shell was uninstalled silently falls back rather than failing to open.
+- The shell that actually launched is named in the panel header, so what you get is never a guess.
+- The child inherits the real Windows `PATH` (the system+user registry merge, same as any other app gets) rather than whatever environment happened to launch LeoGit — which is what previously made most commands fail when the app was started from Git Bash.
+- xterm.js handles rendering; FitAddon syncs cols/rows to the backend on resize (debounced, so dragging the panel doesn't corrupt the prompt). Output is streamed back via per-pid Tauri events (`terminal-output-<pid>`); `terminal-closed-<pid>` fires when the shell exits. Non-ASCII output — box drawing, accents, emoji — survives intact regardless of where it lands in the byte stream.
 - Switching repos kills the active terminal session so we never leak shells from a prior repo.
 
 ### 10. Settings
 
-A modal overlay grouped into Appearance / Diff / Git / AI / Repository discovery. Saves to `~/.config/leogit/config.toml`. Theme changes apply immediately on save; diff settings (`hide_whitespace`, `syntax_highlighting`, `side_by_side_diff`, `tab_size`) re-render the active diff; `fetch_interval_ms` and `auto_fetch` are read on startup (see ROADMAP — live re-arming).
+A modal overlay grouped into Appearance / Diff / Terminal / Git / AI / Repository discovery. Saves to `~/.config/leogit/config.toml`. Theme changes apply immediately on save; diff settings (`hide_whitespace`, `syntax_highlighting`, `side_by_side_diff`, `tab_size`) re-render the active diff; `fetch_interval_ms` and `auto_fetch` are read on startup (see ROADMAP — live re-arming).
 
 ### 11. Cloning a repository
 

@@ -45,6 +45,10 @@
 
   let terminalExpanded = $state(false)
   let terminalSessionId = $state(0) // 0 = no active PTY; >0 = key for the mounted Terminal
+  // Shell the running session actually launched, reported by the backend. May
+  // differ from the configured preference when that shell isn't installed, so
+  // the header shows what's really running rather than what was asked for.
+  let activeShellLabel = $state('')
   let showRepos = $state(false)
   let showClone = $state(false)
   // Instance handle so the global Escape handler can ask whether a clone is
@@ -1103,11 +1107,15 @@
   }
 
   function newTerminalSession() {
+    // Clear the old label so the header can't show the previous session's
+    // shell while the new one is still starting.
+    activeShellLabel = ''
     terminalSessionId += 1
     terminalExpanded = true
   }
 
   function killTerminalSession() {
+    activeShellLabel = ''
     terminalSessionId = 0
     terminalExpanded = false
   }
@@ -1206,6 +1214,7 @@
     }
     if (path !== lastTerminalRepoPath) {
       lastTerminalRepoPath = path
+      activeShellLabel = ''
       terminalSessionId = 0
       terminalExpanded = false
     }
@@ -1437,6 +1446,9 @@
               <polyline points="4,6 7,8 4,10" />
               <line x1="8.5" y1="11" x2="12" y2="11" />
             </svg>
+            {#if terminalSessionId > 0 && activeShellLabel}
+              <span class="shell-name">{activeShellLabel}</span>
+            {/if}
           </button>
           <div class="terminal-controls">
             <button
@@ -1485,8 +1497,10 @@
             {#key `${$appState.repoPath}:${terminalSessionId}`}
               <Terminal
                 repoPath={$appState.repoPath}
+                shellId={$config?.terminal_shell}
                 expanded={terminalExpanded}
                 onExit={killTerminalSession}
+                onShellResolved={(label) => (activeShellLabel = label)}
               />
             {/key}
           </div>
@@ -1831,6 +1845,14 @@
   .terminal-label:hover {
     background: var(--surface-hover);
     color: var(--text-primary);
+  }
+
+  /* Which shell is running. Secondary to the panel controls, so it stays at
+     the muted weight even while the label button is hovered. */
+  .shell-name {
+    font-size: 10px;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
   }
 
   .terminal-controls {

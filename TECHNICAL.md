@@ -120,7 +120,7 @@ The frontend never touches Tauri's raw `invoke` API directly; every backend call
 | `ghApi` | `checkAuth`, `repoList`, `clone` | `commands/gh.rs` |
 | `aiApi` | `generateCommitMessage`, `checkProviderAvailable` | `commands/ai.rs` |
 | `appApi` | `takePendingLaunchTarget` | `commands/launch.rs` |
-| Terminal | `start_terminal`, `write_terminal`, `resize_terminal`, `close_terminal` (called via `invoke` directly from `Terminal.svelte`) | `commands/terminal.rs` |
+| `terminalApi` | `listShells`, `ptyInfo`, `start`, `write`, `resize`, `close` | `commands/terminal.rs`, `commands/shell.rs` |
 
 Every command is registered in [src-tauri/src/main.rs](tauri-app/src-tauri/src/main.rs) via `tauri::generate_handler![…]`. **Adding a new command requires three edits**: implement it in `commands/<module>.rs`, register it in `main.rs`, wrap it in `api/commands.ts`.
 
@@ -279,14 +279,38 @@ Both providers run with a 120 s timeout (`DEFAULT_TIMEOUT_SECS`). Diff caps: 20 
 
 `start_terminal`:
 1. Opens a PTY at 24×80 via `portable-pty`.
-2. Picks the shell via `default_shell()`: on Unix `$SHELL` (`/bin/zsh` fallback); on Windows `$SHELL` is ignored (it may hold a non-resolvable POSIX path when launched from Git Bash) and the first of `pwsh.exe` → `powershell.exe` → `cmd.exe` found on `PATH` is used, mirroring Windows Terminal's default shell.
-3. Forwards the parent env plus `TERM=xterm-256color`.
-4. Spawns the shell with cwd = repo path.
-5. Stores the session, then spawns a reader thread that loops on `read()` and emits `terminal-output-<pid>` events with the UTF-8 lossy payload. On EOF the session is removed and `terminal-closed-<pid>` is emitted.
+2. Resolves the shell via `shell::resolve(shell_id)` — see *Shell discovery* below.
+3. Spawns it with cwd = repo path, adding only `TERM=xterm-256color`, `COLORTERM=truecolor`, and (Git Bash only) `CHERE_INVOKING=1`.
+4. Stores the session, then spawns a reader thread that loops on `read()`, feeds bytes through a `Utf8Decoder`, and emits `terminal-output-<pid>` events. On EOF the session is removed and `terminal-closed-<pid>` is emitted.
 
-`write_terminal` / `resize_terminal` / `close_terminal` lock the session map, clone the `Arc`, drop the map lock, then operate on the session. `close_terminal` calls `child.kill()` and removes the entry.
+It returns `StartedTerminal { pid, shell_id, shell_label }` — the label is resolved backend-side because the stored preference may name an uninstalled shell, and the panel header shows what actually launched.
 
-The frontend mounts `<Terminal>` keyed by `${repoPath}:${terminalSessionId}` so swapping repos or hitting "New session" forces a fresh component, which in turn dispatches a new `start_terminal`. The previous component's cleanup invokes `close_terminal` on its tracked pid.
+`write_terminal` / `resize_terminal` / `close_terminal` go through `session_for(pid)`, which locks the session map, clones the `Arc`, and drops the map lock before the caller touches the session. `close_terminal` calls `child.kill()` and removes the entry.
+
+### Child environment — do not forward the parent env
+
+`CommandBuilder::new` already assembles the right environment. On Windows it seeds from the current process, then overlays `HKLM\…\Session Manager\Environment` and merges `HKCU\Environment`, so `PATH` becomes the same system+user merge Explorer and Windows Terminal hand their children.
+
+`start_terminal` used to copy `std::env::vars()` over the top of that, which broke the terminal two ways on Windows:
+
+- **Launched from Git Bash** (the `leogit` shell function), the inherited `PATH` is MSYS-style (`/usr/bin`, `/c/Program Files/...`). Win32 cannot resolve a single entry, so essentially every command failed.
+- **Launched from Explorer**, the inherited `PATH` is a login-time snapshot that misses anything installed since.
+
+Only deliberate additions go on top now. `session_env` is a pure function returning those additions, and `session_env_never_overrides_path` is the regression test.
+
+### UTF-8 across read boundaries
+
+PTY reads split wherever the 4 KiB buffer fills, so multi-byte characters routinely straddle two reads. Decoding each chunk with `String::from_utf8_lossy` turned every such split into a permanent U+FFFD — stray marks through box-drawing, accented text and emoji. `Utf8Decoder` holds the truncated tail (bounded at 3 bytes) until its continuation bytes arrive, which is what conhost does. Invalid bytes still collapse to one replacement character and decoding resumes.
+
+### Shell discovery
+
+[commands/shell.rs](tauri-app/src-tauri/src/commands/shell.rs) probes for shells rather than naming them, so the picker can never offer one that fails to spawn. Windows, best-first: **Git Bash** (install root from `HKLM\SOFTWARE\GitForWindows\InstallPath`, falling back to the default dirs then `git.exe`'s grandparent; launched `--login -i` so `/etc/profile` populates the MSYS `PATH`), **PowerShell** (`pwsh.exe`), **Windows PowerShell** (`powershell.exe`), **Command Prompt**. Git Bash leads because it is the shell git workflows assume; pwsh beats 5.1, whose in-box PSReadLine 2.0 repaints badly under ConPTY. Unix: `$SHELL` first, then zsh/bash/fish/sh de-duplicated by path.
+
+`resolve` falls back to the best available shell when the stored id is unknown or uninstalled — the terminal opening with the wrong shell beats it not opening. `available()` is total and never empty, so neither function can panic.
+
+The frontend mounts `<Terminal>` keyed by `${repoPath}:${terminalSessionId}` so swapping repos or hitting "New session" forces a fresh component, which in turn dispatches a new `start_terminal`. The previous component's cleanup invokes `close_terminal` on its tracked pid. Changing the shell preference applies to new sessions, not running ones.
+
+`terminal_pty_info` reports `{backend, build_number}` and must be called *before* the xterm instance is constructed — xterm reads `windowsPty` when it builds its buffer, so setting it afterwards does nothing. Declaring ConPTY on a build ≥ 21376 is what enables reflow on resize; without it xterm assumes any line whose last cell is non-blank is wrapped, which is what smears a resized prompt. The `ResizeObserver` is debounced 80 ms because an undebounced panel drag pushes a `ResizePseudoConsole` per frame and PSReadLine repaints its whole edit buffer on each one.
 
 ## GitHub layer
 

@@ -160,8 +160,8 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 
 - Label-on-left layout with right-aligned labels at a fixed column width (~140px for Settings — slightly wider than LeoSync's 96–112px because leogit's labels run longer: "Auto-fetch interval", "Syntax highlighting"). Inputs flex into the remaining width.
 - Inputs use `--bg-primary` (recessed against `--bg-secondary` settings container), 1px `--border-strong`, 6px radius, 2px accent focus ring (no glow).
-- Group related fields without dividers — vertical rhythm carries the structure. Use a single section header + thin 1px `--border-inactive` rule only between top-level sections (Appearance / Diff / AI / Git).
-- Don't use floating labels, helper text under every input, or asterisks for required fields.
+- Group related fields without dividers — vertical rhythm carries the structure. Use a single section header + thin 1px `--border-inactive` rule only between top-level sections (Appearance / Diff / Terminal / Git / AI).
+- Don't use floating labels, helper text under every input, or asterisks for required fields. A single 11px `--text-muted` hint on its own full-width line under a control is allowed only where the option's scope isn't self-evident (e.g. the shell picker: "Applies to new terminal sessions") — never as a routine caption.
 - **Toggles** for booleans (auto-fetch, hide whitespace, syntax highlighting): flat solid accent fill when on, white knob, no gradient.
 - **Segmented controls** for 2–4 mutually exclusive options (theme: System/Light/Dark; AI provider: Claude/Ollama). A single rounded container with sub-buttons; selected segment gets `--bg-elevated` fill + `--text-primary`, unselected segments stay transparent + `--text-muted`.
 - Numeric inputs (fetch interval, tab size, context lines) are plain inputs with mono input value and tabular nums. No stepper arrows.
@@ -191,6 +191,7 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 
 - Background `#000` (or `--bg-primary` in light, but real terminals are dark — `#000` is fine on both themes). Mono font, 12–13px.
 - Header strip ~28px: `Terminal — /path/to/repo` in 11px `--text-secondary` on `--bg-secondary`, X close button on the right.
+- **Active shell name** sits beside the prompt glyph in the header at 10px, muted. It reports what actually launched (which can differ from the configured preference when that shell isn't installed), so it's an observation, not a control — no chevron, no pill, and it stays muted even while the label button is hovered. Hidden when no session is running.
 - No scrollbar styling — let the platform draw it.
 
 ### Status indicators

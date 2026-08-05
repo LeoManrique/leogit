@@ -195,6 +195,8 @@ export interface Config {
   tab_size: number
   claude_timeout_secs: number
   ollama_server_url: string
+  /** Shell id the embedded terminal launches; absent = best available. */
+  terminal_shell?: string
 }
 
 export interface ReposState {
@@ -374,6 +376,50 @@ export const osApi = {
   openPath: (repoPath: string, relPath: string) => invoke<void>('open_path', { repoPath, relPath }),
   /** Open an https:// URL in the default browser. */
   openUrl: (url: string) => invoke<void>('open_url', { url }),
+}
+
+/** A shell the embedded terminal can launch, as probed on this machine. */
+export interface ShellOption {
+  /** Stable id persisted in `Config.terminal_shell` (e.g. `git-bash`). */
+  id: string
+  /** Human-readable name for the picker. */
+  label: string
+  /** Absolute path to the executable. */
+  path: string
+  args: string[]
+}
+
+/**
+ * PTY backend description, needed to configure xterm.js *before* it builds a
+ * buffer. Telling xterm it's on ConPTY with a build >= 21376 enables reflow on
+ * resize; without it xterm guesses that any line whose last cell is non-blank
+ * is wrapped, which is what smears a resized prompt on Windows.
+ */
+export interface PtyInfo {
+  /** `'conpty'` on Windows, `null` elsewhere. */
+  backend: string | null
+  build_number: number | null
+}
+
+/** Result of starting a session: the handle, plus the shell actually launched. */
+export interface StartedTerminal {
+  pid: number
+  shell_id: string
+  shell_label: string
+}
+
+export const terminalApi = {
+  /** Shells launchable on this machine, best-first. Never empty. */
+  listShells: () => invoke<ShellOption[]>('list_shells'),
+  /** Describe the PTY backend; call before constructing the xterm instance. */
+  ptyInfo: () => invoke<PtyInfo>('terminal_pty_info'),
+  /** Start a shell with cwd=repoPath. `shellId` absent = best available. */
+  start: (repoPath: string, shellId?: string) =>
+    invoke<StartedTerminal>('start_terminal', { repoPath, shellId: shellId ?? null }),
+  write: (pid: number, data: string) => invoke<void>('write_terminal', { pid, data }),
+  resize: (pid: number, cols: number, rows: number) =>
+    invoke<void>('resize_terminal', { pid, cols, rows }),
+  close: (pid: number) => invoke<void>('close_terminal', { pid }),
 }
 
 export const diffApi = {
