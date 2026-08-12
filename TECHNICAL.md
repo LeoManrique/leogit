@@ -166,6 +166,24 @@ synchronous `Result<T, String>`. The multi-call sequences are the Tauri handlers
 `GitError`. `rename_branch` and `delete_remote_branch` exist in core but stay unexported —
 no client has UI for them yet, and the bridge doesn't carry dead surface.
 
+Sync (`get_remote`, `fetch`, `pull`, `push`) is the first flow to cross **async** and the
+first to cross the **callback seam**. The network functions are exported with
+`async_runtime = "tokio"` — core runs them through `tokio::spawn_blocking`, which panics
+without a live runtime context; the attribute wraps the future in `async_compat` so
+UniFFI-driven polls enter one (this is why the `uniffi` dependency gains its `tokio`
+feature) — and they surface in Swift as native `async throws` functions. Progress streams
+back through core's `EventSink` seam: the bridge declares `SyncProgressListener` with
+`#[uniffi::export(foreign)]` (a Swift-implemented protocol, the UniFFI analogue of
+`TauriEventSink`), and a private `ProgressSink` adapter implements `EventSink`, translating
+core's `GitProgress` — whose `op` label is a `&'static str` that cannot cross the FFI — into
+a flat `SyncProgress` record: the core-computed aggregate percent (0–100, weighted per step
+in `core/src/progress.rs`) plus git's raw progress line. Ticks are invoked on core's
+stderr-reader thread, so the Swift side hops to the main actor itself and drops stragglers
+by generation; there is no completion event — an operation is over when its `await` returns.
+`repo_sync_status`, `get_ahead_behind`, `clone_repo`, and the `gh` surface stay unexported:
+the native client reads ahead/behind from `get_status` and has no repo picker, clone, or
+gh-publish UI yet.
+
 `scripts/build-rust.sh` builds the static lib and regenerates the bindings, and Xcode runs it as
 a pre-build phase — so the Swift API can never be stale relative to the Rust it calls.
 `ffi/generated/` is gitignored for the same reason. Three things there are load-bearing and

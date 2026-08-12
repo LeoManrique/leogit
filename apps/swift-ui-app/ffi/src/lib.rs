@@ -16,9 +16,14 @@
 //!
 //! # Threading
 //!
-//! Every function below is blocking: it shells out to `git` and waits. Swift must
-//! call these off the main actor (see `Sources/LeoGit/IPC/`), exactly as the Tauri
-//! host runs them on worker threads.
+//! Most functions below are blocking: they shell out to `git` and wait. Swift
+//! must call these off the main actor (see `Sources/LeoGit/IPC/`), exactly as
+//! the Tauri host runs them on worker threads. The network operations
+//! (`fetch` / `pull` / `push`) are exported async instead — core drives them
+//! through `spawn_blocking`, which needs a live tokio context, hence
+//! `async_runtime = "tokio"` — and surface in Swift as native `async` calls.
+//! Progress callbacks arrive on core's stderr-reader thread, never the main
+//! one; Swift listeners must hop to the main actor themselves.
 
 // Exported signatures are dictated by UniFFI, not by Rust ergonomics: arguments
 // arrive as owned values across the FFI boundary, so taking `String` by value is
@@ -26,7 +31,9 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use std::path::Path;
+use std::sync::Arc;
 
+use leogit_core::events::{CoreEvent, EventSink};
 use leogit_core::{diff, git, highlight};
 
 // Re-exported so Swift sees the real core types. Names are used by the
@@ -560,6 +567,142 @@ pub fn count_commits_to_merge(repo_path: String, target_branch: String) -> Resul
     git::count_commits_to_merge(repo_path, target_branch).map_err(GitError::from)
 }
 
+// ---------------------------------------------------------------------------
+// Exported functions — sync (fetch / pull / push)
+// ---------------------------------------------------------------------------
+//
+// The first async exports and the first foreign callback interface in the
+// bridge. Core streams network progress through its `EventSink` seam;
+// `ProgressSink` adapts that seam to a Swift-implemented
+// `SyncProgressListener`, translating core's event into the flat
+// `SyncProgress` record. There is no completion event — the operation's end
+// is the awaited return value — so the UI drives its busy state off the
+// `await`, exactly as the Tauri client wraps the invoke in try/finally.
+
+/// One git network-progress tick.
+///
+/// A purpose-built record rather than a `#[uniffi::remote]` mirror of core's
+/// [`leogit_core::events::GitProgress`]: that struct's `op` label is a
+/// `&'static str`, which cannot cross the FFI, and `op`/`path` exist so
+/// listeners on a process-wide sink can filter — here each listener is scoped
+/// to a single operation, so only what the UI renders crosses.
+#[derive(uniffi::Record)]
+pub struct SyncProgress {
+    /// Aggregate progress across the operation's phases, 0–100. Monotonically
+    /// non-decreasing within one operation; context lines repeat the last
+    /// value with fresh `text`.
+    pub percent: f32,
+    /// Raw git progress line, shown verbatim — e.g.
+    /// `"Writing objects:  53% (531/1000), 1.2 MiB | 500 KiB/s"`.
+    pub text: String,
+}
+
+/// Swift-implemented receiver for git network progress.
+///
+/// Calls arrive on core's stderr-reader thread — never the main one — so
+/// implementations must be thread-safe and must not block: core's contract
+/// for `EventSink::emit` is that a dropped tick degrades to a stalled bar,
+/// never a stalled operation.
+#[uniffi::export(foreign)]
+pub trait SyncProgressListener: Send + Sync {
+    /// Deliver one progress tick.
+    fn on_progress(&self, progress: SyncProgress);
+}
+
+/// Adapts core's [`EventSink`] to a [`SyncProgressListener`]. Non-git-progress
+/// events (the terminal variants) are ignored: this sink is only ever handed
+/// to `pull`/`push`, which emit nothing else.
+struct ProgressSink {
+    listener: Arc<dyn SyncProgressListener>,
+}
+
+impl EventSink for ProgressSink {
+    fn emit(&self, event: CoreEvent) {
+        if let CoreEvent::GitProgress(progress) = event {
+            self.listener.on_progress(SyncProgress {
+                percent: progress.percent,
+                text: progress.text,
+            });
+        }
+    }
+}
+
+/// The name of the repository's first remote, falling back to the literal
+/// `"origin"` when none is configured. Both clients resolve this immediately
+/// before each network operation rather than caching it.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when `git remote` itself fails.
+#[uniffi::export]
+pub fn get_remote(repo_path: String) -> Result<String, GitError> {
+    git::get_remote(repo_path).map_err(GitError::from)
+}
+
+/// `git fetch --prune <remote>`: refresh remote-tracking refs — and the
+/// ahead/behind counts derived from them — without touching the working
+/// tree. Fetch does not stream progress; core's fetch path has no sink.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when the fetch fails — unreachable remote, timeout.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn fetch(repo_path: String, remote: String) -> Result<(), GitError> {
+    git::fetch(repo_path, remote).await.map_err(GitError::from)
+}
+
+/// `git pull --ff --progress <remote>`. Fast-forward only: a diverged branch
+/// fails with git's own message instead of creating a merge or rebase.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when the pull fails — diverged branch, unreachable
+/// remote, or local changes that would be overwritten.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn pull(
+    repo_path: String,
+    remote: String,
+    listener: Arc<dyn SyncProgressListener>,
+) -> Result<(), GitError> {
+    git::pull(Arc::new(ProgressSink { listener }), repo_path, remote)
+        .await
+        .map_err(GitError::from)
+}
+
+/// `git push --progress [--set-upstream] [--force-with-lease] <remote>
+/// <branch>`.
+///
+/// `set_upstream` must be derived from `RepoStatus.has_upstream` (pass
+/// `!has_upstream`), never synthesised: that flag is only true when real
+/// tracking configuration exists, and dropping `--set-upstream` on a first
+/// push leaves the branch permanently untracked. `force_with_lease` is the
+/// only force mode core offers — there is no bare `--force` path.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when the push is rejected (non-fast-forward, stale
+/// lease) or the remote is unreachable.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn push(
+    repo_path: String,
+    remote: String,
+    branch: String,
+    set_upstream: bool,
+    force_with_lease: bool,
+    listener: Arc<dyn SyncProgressListener>,
+) -> Result<(), GitError> {
+    git::push(
+        Arc::new(ProgressSink { listener }),
+        repo_path,
+        remote,
+        branch,
+        set_upstream,
+        force_with_lease,
+    )
+    .await
+    .map_err(GitError::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -845,5 +988,208 @@ mod tests {
         assert_eq!(restored, "ours\n", "abort restores the pre-merge tree");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Rust stand-in for the Swift listener: collects every tick so tests
+    /// can assert the callback seam actually fires.
+    struct CollectingListener {
+        events: std::sync::Mutex<Vec<SyncProgress>>,
+    }
+
+    impl CollectingListener {
+        fn arc() -> Arc<Self> {
+            Arc::new(Self {
+                events: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    impl SyncProgressListener for CollectingListener {
+        fn on_progress(&self, progress: SyncProgress) {
+            self.events.lock().expect("lock").push(progress);
+        }
+    }
+
+    /// Create a bare "origin" next to the temp repos and wire `dir` to it.
+    fn bare_origin(tag: &str, dir: &Path) -> std::path::PathBuf {
+        let bare = std::env::temp_dir().join(format!(
+            "leogit-ffi-{tag}-origin-{}.git",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&bare);
+        std::fs::create_dir_all(&bare).expect("bare dir");
+        run_git(&bare, &["init", "--bare"]);
+        run_git(
+            dir,
+            &["remote", "add", "origin", bare.to_str().expect("utf-8")],
+        );
+        bare
+    }
+
+    /// Clone `bare` to a sibling working copy with commit identity configured.
+    fn cloned_workmate(tag: &str, bare: &Path) -> std::path::PathBuf {
+        let clone = std::env::temp_dir().join(format!("leogit-ffi-{tag}-b-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&clone);
+        run_git(
+            &std::env::temp_dir(),
+            &[
+                "clone",
+                bare.to_str().expect("utf-8"),
+                clone.to_str().expect("utf-8"),
+            ],
+        );
+        run_git(&clone, &["config", "user.name", "t"]);
+        run_git(&clone, &["config", "user.email", "t@t"]);
+        clone
+    }
+
+    /// The sync flow exactly as the Swift client drives it: publish the branch
+    /// (`push --set-upstream`) to a fresh bare origin — with progress ticks
+    /// crossing the callback seam — then `fetch` + `pull` a commit made by a
+    /// second clone.
+    #[tokio::test]
+    async fn sync_flow_publishes_fetches_and_pulls() {
+        let (dir, repo, default) = seeded_repo("sync");
+        assert_eq!(
+            get_remote(repo.clone()).expect("remote"),
+            "origin",
+            "no remote configured falls back to the literal origin"
+        );
+        let bare = bare_origin("sync", &dir);
+
+        let before = get_status(repo.clone()).expect("status");
+        assert!(
+            before.has_remote && !before.has_upstream,
+            "publish-branch state: a remote exists but the branch is untracked"
+        );
+
+        let listener = CollectingListener::arc();
+        push(
+            repo.clone(),
+            "origin".to_string(),
+            default.clone(),
+            true,
+            false,
+            listener.clone(),
+        )
+        .await
+        .expect("first push");
+        assert!(
+            !listener.events.lock().expect("lock").is_empty(),
+            "progress ticks crossed the callback seam"
+        );
+
+        let published = get_status(repo.clone()).expect("status");
+        assert!(published.has_upstream, "--set-upstream took");
+        assert_eq!((published.ahead, published.behind), (0, 0));
+
+        // A second clone advances the remote…
+        let clone_b = cloned_workmate("sync", &bare);
+        std::fs::write(clone_b.join("from-b.txt"), "b\n").expect("write");
+        run_git(&clone_b, &["add", "."]);
+        run_git(&clone_b, &["commit", "-m", "from b"]);
+        run_git(&clone_b, &["push"]);
+
+        // …fetch sees it as behind without touching the working tree…
+        fetch(repo.clone(), "origin".to_string())
+            .await
+            .expect("fetch");
+        let behind = get_status(repo.clone()).expect("status");
+        assert_eq!((behind.ahead, behind.behind), (0, 1));
+        assert!(
+            !dir.join("from-b.txt").exists(),
+            "fetch leaves the working tree alone"
+        );
+
+        // …and pull fast-forwards onto it.
+        pull(
+            repo.clone(),
+            "origin".to_string(),
+            CollectingListener::arc(),
+        )
+        .await
+        .expect("pull");
+        let after = get_status(repo).expect("status");
+        assert_eq!((after.ahead, after.behind), (0, 0));
+        assert!(
+            dir.join("from-b.txt").exists(),
+            "pull updated the working tree"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&bare);
+        let _ = std::fs::remove_dir_all(&clone_b);
+    }
+
+    /// Force-push semantics end to end: a diverged branch is rejected by a
+    /// plain push, rejected again by `--force-with-lease` while the
+    /// remote-tracking ref is stale, and accepted after a fetch — the exact
+    /// flow behind the UI's "Force Push (with Lease)…" confirmation.
+    #[tokio::test]
+    async fn force_with_lease_rejects_stale_then_succeeds_after_fetch() {
+        let (dir, repo, default) = seeded_repo("lease");
+        let bare = bare_origin("lease", &dir);
+        run_git(&dir, &["push", "--set-upstream", "origin", &default]);
+        let clone_b = cloned_workmate("lease", &bare);
+
+        // Diverge: B pushes "theirs" while A commits "ours" locally.
+        std::fs::write(clone_b.join("theirs.txt"), "t\n").expect("write");
+        run_git(&clone_b, &["add", "."]);
+        run_git(&clone_b, &["commit", "-m", "theirs"]);
+        run_git(&clone_b, &["push"]);
+        std::fs::write(dir.join("ours.txt"), "o\n").expect("write");
+        run_git(&dir, &["add", "."]);
+        run_git(&dir, &["commit", "-m", "ours"]);
+
+        // Plain push: non-fast-forward, rejected.
+        let rejected = push(
+            repo.clone(),
+            "origin".to_string(),
+            default.clone(),
+            false,
+            false,
+            CollectingListener::arc(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(rejected, GitError::Failed { .. }));
+
+        // Lease with a stale remote-tracking ref: still rejected — the lease
+        // means "the remote is where I last saw it", and we haven't seen B's
+        // push yet.
+        let stale = push(
+            repo.clone(),
+            "origin".to_string(),
+            default.clone(),
+            false,
+            true,
+            CollectingListener::arc(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(stale, GitError::Failed { .. }));
+
+        // After a fetch the lease matches, and the forced push wins.
+        fetch(repo.clone(), "origin".to_string())
+            .await
+            .expect("fetch");
+        push(
+            repo.clone(),
+            "origin".to_string(),
+            default.clone(),
+            false,
+            true,
+            CollectingListener::arc(),
+        )
+        .await
+        .expect("force with lease");
+
+        let local_head = run_git_stdout(&dir, &["rev-parse", "HEAD"]);
+        let remote_head = run_git_stdout(&bare, &["rev-parse", &default]);
+        assert_eq!(remote_head, local_head, "the remote now points at ours");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&bare);
+        let _ = std::fs::remove_dir_all(&clone_b);
     }
 }

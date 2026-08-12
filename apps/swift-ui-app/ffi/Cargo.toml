@@ -13,7 +13,14 @@ crate-type = ["lib", "staticlib"]
 
 [dependencies]
 leogit-core = { path = "../../../core" }
-uniffi = "0.32"
+# `tokio` enables `async_runtime = "tokio"` on async exports: core's network
+# ops run via `spawn_blocking`, which panics without a live tokio context.
+uniffi = { version = "0.32", features = ["tokio"] }
+
+[dev-dependencies]
+# The async exports are tested by awaiting them directly, which needs a
+# runtime — the `async_runtime` wrapper only applies to FFI-driven calls.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 # The bindings generator is a dev-time tool, not part of the shipped library, so
 # its CLI dependencies (clap & co.) stay out of the default build graph.

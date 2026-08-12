@@ -14,6 +14,7 @@ enum RepoTab: String, CaseIterable, Identifiable {
 struct ContentView: View {
     @Environment(RepoStore.self) private var store
     @State private var branchStore = BranchStore()
+    @State private var syncStore = SyncStore()
     @State private var isChoosingFolder = false
     @State private var tab: RepoTab = .changes
 
@@ -69,7 +70,15 @@ struct ContentView: View {
         .navigationSubtitle(branchSubtitle)
         .task(id: repoPath) {
             branchStore.reset()
+            syncStore.reset()
             await branchStore.load(repoPath: repoPath)
+            // One warm-up fetch so ahead/behind reflect the remote shortly
+            // after opening — the Tauri client runs the same immediate fetch
+            // at startup even with auto-fetch off. Silent: failures (offline,
+            // no remote) show nothing, and status reloads only if it worked.
+            if await syncStore.silentFetch(repoPath: repoPath) {
+                await store.refresh()
+            }
         }
         .toolbar {
             ToolbarItem(placement: .navigation) {
@@ -91,6 +100,15 @@ struct ContentView: View {
                 )
             }
 
+            ToolbarItemGroup(placement: .primaryAction) {
+                SyncControls(
+                    store: syncStore,
+                    repoPath: repoPath,
+                    status: store.status,
+                    onWorkingTreeChanged: { await store.refresh() }
+                )
+            }
+
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     Task {
@@ -100,12 +118,21 @@ struct ContentView: View {
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
-                .disabled(store.isLoading)
+                // Also held back during a network operation, the way the
+                // Tauri client pauses its status poll: `git status` racing a
+                // pull can trip over transient lock files.
+                .disabled(store.isLoading || syncStore.activeOperation != nil)
                 .help("Reload status, history, and branches")
             }
         }
         .overlay(alignment: .top) {
-            if store.isLoading {
+            if let operation = syncStore.activeOperation {
+                SyncProgressBanner(
+                    operation: operation,
+                    percent: syncStore.progressPercent,
+                    text: syncStore.progressText
+                )
+            } else if store.isLoading {
                 ProgressView()
                     .progressViewStyle(.linear)
                     .frame(maxWidth: .infinity)

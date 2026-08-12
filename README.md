@@ -71,8 +71,9 @@ The SwiftUI macOS client links the same `core/` via UniFFI, so both clients run 
 logic — only the marshaling differs. It needs Xcode and `brew install xcodegen`; build it with
 `just mac-run`. It currently covers open a repo → changes with per-file syntax-highlighted
 diffs → commit (checkbox file list + message composer) → branches (switch / create / delete
-and merge or squash-merge, with conflict + abort handling) → history, and is being ported
-flow by flow.
+and merge or squash-merge, with conflict + abort handling) → sync (pull / push / fetch with
+live transfer progress, publish-branch first push, force-push-with-lease) → history, and is
+being ported flow by flow.
 
 The pre-monorepo design is preserved on the `legacy/classic-design` branch (== tag `v0.1.32`);
 recall it with `git worktree add ../leogit-classic legacy/classic-design`.

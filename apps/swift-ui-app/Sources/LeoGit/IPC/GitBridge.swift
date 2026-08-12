@@ -163,6 +163,76 @@ enum GitBridge {
     static func commitsToMerge(in repoPath: String, from branch: String) async throws -> Int32 {
         try countCommitsToMerge(repoPath: repoPath, targetBranch: branch)
     }
+
+    // MARK: - Sync
+
+    /// The repository's first remote name, or the literal "origin" when none
+    /// is configured. Resolved immediately before each network operation,
+    /// never cached — matching the Tauri handlers.
+    @concurrent
+    static func remoteName(in repoPath: String) async throws -> String {
+        try getRemote(repoPath: repoPath)
+    }
+
+    /// `git fetch --prune`: refresh remote-tracking refs — and the
+    /// ahead/behind counts derived from them — without touching the working
+    /// tree. Fetch streams no progress; core's fetch path has no sink.
+    @concurrent
+    static func fetchRemote(in repoPath: String, remote: String) async throws {
+        try await fetch(repoPath: repoPath, remote: remote)
+    }
+
+    /// `git pull --ff --progress`. Fast-forward only: a diverged branch fails
+    /// with git's own message instead of merging or rebasing. Progress ticks
+    /// arrive on a Rust background thread — `onProgress` must hop to whatever
+    /// isolation it needs.
+    @concurrent
+    static func pullRemote(
+        in repoPath: String,
+        remote: String,
+        onProgress: @escaping @Sendable (SyncProgress) -> Void
+    ) async throws {
+        try await pull(repoPath: repoPath, remote: remote, listener: ProgressRelay(onProgress))
+    }
+
+    /// `git push --progress [--set-upstream] [--force-with-lease]`.
+    /// `setUpstream` must be `!status.hasUpstream` — that flag is only true
+    /// when real tracking configuration exists, and a first push without
+    /// `--set-upstream` leaves the branch permanently untracked. With-lease
+    /// is the only force mode core offers; there is no bare `--force`.
+    @concurrent
+    static func pushRemote(
+        in repoPath: String,
+        remote: String,
+        branch: String,
+        setUpstream: Bool,
+        forceWithLease: Bool,
+        onProgress: @escaping @Sendable (SyncProgress) -> Void
+    ) async throws {
+        try await push(
+            repoPath: repoPath,
+            remote: remote,
+            branch: branch,
+            setUpstream: setUpstream,
+            forceWithLease: forceWithLease,
+            listener: ProgressRelay(onProgress)
+        )
+    }
+}
+
+/// Bridges the generated `SyncProgressListener` callback protocol to a plain
+/// closure. Rust invokes `onProgress` from core's stderr-reader thread — never
+/// the main one — which the protocol encodes by requiring `Sendable`.
+private final class ProgressRelay: SyncProgressListener {
+    private let deliver: @Sendable (SyncProgress) -> Void
+
+    init(_ deliver: @escaping @Sendable (SyncProgress) -> Void) {
+        self.deliver = deliver
+    }
+
+    func onProgress(progress: SyncProgress) {
+        deliver(progress)
+    }
 }
 
 extension GitError {
