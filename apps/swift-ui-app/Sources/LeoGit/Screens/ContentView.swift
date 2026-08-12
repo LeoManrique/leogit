@@ -13,6 +13,7 @@ enum RepoTab: String, CaseIterable, Identifiable {
 /// screen afterwards.
 struct ContentView: View {
     @Environment(RepoStore.self) private var store
+    @State private var branchStore = BranchStore()
     @State private var isChoosingFolder = false
     @State private var tab: RepoTab = .changes
 
@@ -57,7 +58,8 @@ struct ContentView: View {
                 ChangesView(
                     repoPath: repoPath,
                     files: store.status?.files ?? [],
-                    statusEpoch: store.statusEpoch
+                    statusEpoch: store.statusEpoch,
+                    onCommitted: { await store.refresh() }
                 )
             case .history:
                 HistoryView(commits: store.commits)
@@ -65,6 +67,10 @@ struct ContentView: View {
         }
         .navigationTitle(store.repoName)
         .navigationSubtitle(branchSubtitle)
+        .task(id: repoPath) {
+            branchStore.reset()
+            await branchStore.load(repoPath: repoPath)
+        }
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Button {
@@ -75,14 +81,27 @@ struct ContentView: View {
                 .help("Close this repository")
             }
 
+            ToolbarItem(placement: .principal) {
+                BranchMenu(
+                    store: branchStore,
+                    repoPath: repoPath,
+                    status: store.status,
+                    isMerging: store.isMerging,
+                    onWorkingTreeChanged: { await store.refresh() }
+                )
+            }
+
             ToolbarItem(placement: .primaryAction) {
                 Button {
-                    Task { await store.refresh() }
+                    Task {
+                        await store.refresh()
+                        await branchStore.load(repoPath: repoPath)
+                    }
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
                 .disabled(store.isLoading)
-                .help("Reload status and history")
+                .help("Reload status, history, and branches")
             }
         }
         .overlay(alignment: .top) {
@@ -94,15 +113,19 @@ struct ContentView: View {
         }
     }
 
-    /// Branch, plus ahead/behind counts when the branch tracks a remote.
+    /// Branch, plus ahead/behind counts when the branch tracks a remote, plus
+    /// a merging marker while `MERGE_HEAD` exists.
     private var branchSubtitle: String {
         guard let status = store.status else { return "" }
+        var parts: [String] = []
         if status.detached {
-            return "Detached at \(String(status.headSha.prefix(7)))"
+            parts.append("Detached at \(String(status.headSha.prefix(7)))")
+        } else {
+            parts.append(status.branch)
+            if status.ahead > 0 { parts.append("↑\(status.ahead)") }
+            if status.behind > 0 { parts.append("↓\(status.behind)") }
         }
-        var parts = [status.branch]
-        if status.ahead > 0 { parts.append("↑\(status.ahead)") }
-        if status.behind > 0 { parts.append("↓\(status.behind)") }
+        if store.isMerging { parts.append("· merging") }
         return parts.joined(separator: " ")
     }
 }

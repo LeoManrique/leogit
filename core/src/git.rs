@@ -1403,13 +1403,21 @@ pub fn list_branches(repo_path: String) -> Result<Vec<BranchInfo>, String> {
         if name.is_empty() {
             continue;
         }
-        // Skip HEAD pointer entries like "origin/HEAD -> origin/main".
-        if name.contains(" -> ") {
-            continue;
-        }
         let is_current = parts[1].trim() == "*";
         let full_ref = parts[2].trim();
         let is_remote = full_ref.starts_with("refs/remotes/");
+        // Skip each remote's HEAD symref (refs/remotes/<remote>/HEAD). Under a
+        // custom --format there is no " -> target" decoration to key on, and
+        // %(refname:short) collapses the entry to the bare remote name
+        // ("origin"), which is not a branch. Only the path directly under the
+        // remote is the symref — "HEAD" is an invalid branch name, but
+        // "foo/HEAD" is legal, so refs/remotes/origin/foo/HEAD must survive.
+        if let Some(rest) = full_ref.strip_prefix("refs/remotes/")
+            && let Some((_, tail)) = rest.split_once('/')
+            && tail == "HEAD"
+        {
+            continue;
+        }
 
         branches.push(BranchInfo {
             name,
@@ -3923,6 +3931,65 @@ mod tests {
         let head_again =
             run_git(&clone_path, &["symbolic-ref", "--short", "HEAD"]).expect("HEAD ref");
         assert_eq!(head_again, "feature");
+    }
+
+    /// Regression: a clone carries `refs/remotes/origin/HEAD`, whose short name
+    /// collapses to a bare `origin` under `for-each-ref --format` — that phantom
+    /// row must not appear in the branch list. Real remote branches survive.
+    #[test]
+    fn list_branches_skips_remote_head_symref() {
+        let tmp = tempdir().expect("tempdir");
+
+        let upstream = tmp.path().join("upstream");
+        fs::create_dir(&upstream).expect("mkdir upstream");
+        init_test_repo(&upstream);
+        let upstream_path = upstream.to_str().expect("utf-8 path").to_string();
+        fs::write(upstream.join("README.md"), "hello\n").expect("write README");
+        commit(
+            upstream_path.clone(),
+            "init".to_string(),
+            vec![new_file("README.md")],
+            None,
+        )
+        .expect("seed commit");
+
+        let clone = tmp.path().join("clone");
+        let cloned = Command::new("git")
+            .args([
+                "clone",
+                "-q",
+                &upstream_path,
+                clone.to_str().expect("utf-8 path"),
+            ])
+            .status()
+            .expect("spawn git clone")
+            .success();
+        assert!(cloned, "git clone failed");
+        let clone_path = clone.to_str().expect("utf-8 path").to_string();
+        // git clone sets origin/HEAD itself, but pin it explicitly so the test
+        // still exercises the symref if that default ever changes.
+        let default_branch =
+            run_git(&clone_path, &["symbolic-ref", "--short", "HEAD"]).expect("default branch");
+        run_git(
+            &clone_path,
+            &["remote", "set-head", "origin", &default_branch],
+        )
+        .expect("set origin/HEAD");
+
+        let branches = list_branches(clone_path).expect("list branches");
+        assert!(
+            branches
+                .iter()
+                .any(|b| { b.is_remote && b.name == format!("origin/{default_branch}") }),
+            "the real remote branch is listed: {branches:?}"
+        );
+        assert!(
+            !branches.iter().any(|b| b.name == "origin"),
+            "the origin/HEAD symref must not surface as a phantom `origin` branch: {branches:?}"
+        );
+        let current: Vec<_> = branches.iter().filter(|b| b.is_current).collect();
+        assert_eq!(current.len(), 1, "exactly one current branch");
+        assert_eq!(current[0].name, default_branch);
     }
 
     /// `read_blob` must return the COMMITTED contents, not the working-tree

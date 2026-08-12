@@ -66,6 +66,103 @@ enum GitBridge {
     static func diffTokens(for fileDiff: FileDiff, source: BlobSource?) async -> [[Token]] {
         tokenizeDiff(fileDiff: fileDiff, source: source)
     }
+
+    /// The full commit message: summary, optional description, and
+    /// `Co-authored-by` trailers, joined the way `commitChanges` expects.
+    @concurrent
+    static func commitMessage(summary: String, description: String, coAuthors: [String]) async -> String {
+        formatCommitMessage(summary: summary, description: description, coAuthors: coAuthors)
+    }
+
+    /// Commit exactly `files` with `message`, regardless of prior index state:
+    /// core resets the index and re-stages the given files itself, so there
+    /// is no separate staging step. With `amend`, an empty file list is a
+    /// message-only amend.
+    @concurrent
+    static func commitChanges(
+        in repoPath: String,
+        message: String,
+        files: [FileEntry],
+        amend: Bool = false
+    ) async throws {
+        try commit(repoPath: repoPath, message: message, files: files, amend: amend)
+    }
+
+    // MARK: - Branches
+
+    /// Local and remote branches in one flat list, most recent commit first.
+    /// Remote entries use their short form (`origin/feature`).
+    @concurrent
+    static func branches(in repoPath: String) async throws -> [BranchInfo] {
+        try listBranches(repoPath: repoPath)
+    }
+
+    /// Create `name` off `HEAD` without checking it out; callers chain
+    /// `checkout` so "New Branch" lands the user on it, exactly like the
+    /// Tauri client.
+    @concurrent
+    static func newBranch(in repoPath: String, named name: String) async throws {
+        try createBranch(repoPath: repoPath, name: name, startPoint: "")
+    }
+
+    /// Check out `branch`. A remote-only name (`origin/feature`) becomes a
+    /// local tracking branch instead of detaching HEAD; a dirty working tree
+    /// is git's call — its refusal is surfaced verbatim.
+    @concurrent
+    static func checkout(in repoPath: String, branch: String) async throws {
+        try switchBranch(repoPath: repoPath, branch: branch)
+    }
+
+    /// Delete a local branch — always forced (`git branch -D`), so the UI
+    /// owns the confirmation.
+    @concurrent
+    static func removeBranch(in repoPath: String, named name: String) async throws {
+        try deleteBranch(repoPath: repoPath, name: name)
+    }
+
+    // MARK: - Merge
+
+    /// Merge `branch` into the current branch. A conflict is data, not a
+    /// thrown error: `success == false`, git's text in `errorMessage`, and
+    /// the conflicted paths listed.
+    @concurrent
+    static func merge(in repoPath: String, branch: String) async throws -> MergeResult {
+        try mergeBranch(repoPath: repoPath, branch: branch)
+    }
+
+    /// Stage `branch`'s combined changes (`git merge --squash`) without
+    /// committing; `commitSquash` completes the flow.
+    @concurrent
+    static func squashMerge(in repoPath: String, branch: String) async throws -> MergeResult {
+        try mergeSquash(repoPath: repoPath, branch: branch)
+    }
+
+    /// Commit a successful squash merge with git's auto-generated
+    /// "Squashed commit of the following:" message.
+    @concurrent
+    static func commitSquash(in repoPath: String) async throws {
+        try commitSquashMerge(repoPath: repoPath)
+    }
+
+    /// Abort an in-progress merge, restoring the pre-merge working tree.
+    @concurrent
+    static func abortMerge(in repoPath: String) async throws {
+        try mergeAbort(repoPath: repoPath)
+    }
+
+    /// Whether a merge is in progress (`MERGE_HEAD` exists) — drives the
+    /// merging indicator and the Abort Merge affordance.
+    @concurrent
+    static func mergeInProgress(in repoPath: String) async throws -> Bool {
+        try isMerging(repoPath: repoPath)
+    }
+
+    /// How many commits merging `branch` would bring in — the merge sheet's
+    /// preview number.
+    @concurrent
+    static func commitsToMerge(in repoPath: String, from branch: String) async throws -> Int32 {
+        try countCommitsToMerge(repoPath: repoPath, targetBranch: branch)
+    }
 }
 
 extension GitError {

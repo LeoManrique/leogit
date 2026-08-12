@@ -1,43 +1,113 @@
 import SwiftUI
 
-/// Working-tree changes for the open repository: the changed-file list on the
-/// left, the selected file's diff on the right.
+/// Working-tree changes for the open repository: the changed-file list and
+/// commit box on the left, the selected file's diff on the right.
+///
+/// Checkboxes mean "include this file in the next commit" — there is no
+/// staging-area concept, matching the Tauri client: nothing touches the index
+/// until Commit, and core's `commit` then resets and re-stages exactly the
+/// checked files.
 struct ChangesView: View {
     let repoPath: String
     let files: [FileEntry]
     let statusEpoch: Int
 
+    /// Called after a successful commit so the owner reloads status + history.
+    let onCommitted: () async -> Void
+
     /// Selection is the file's repo-relative path (`FileEntry.id`), so it
     /// survives a status reload that replaces every row value.
     @State private var selectedPath: String?
 
+    @State private var commitStore = CommitStore()
+
+    /// Snapshot of the files to commit while the embedded-repo confirmation
+    /// is up, so the commit operates on what the user was shown.
+    @State private var pendingFiles: [FileEntry] = []
+    @State private var isConfirmingEmbedded = false
+
     var body: some View {
-        if files.isEmpty {
-            ContentUnavailableView(
-                "No Changes",
-                systemImage: "checkmark.circle",
-                description: Text("The working tree is clean.")
-            )
-        } else {
-            HSplitView {
-                fileList
-                    .frame(minWidth: 240, idealWidth: 300, maxWidth: 520)
-                detail
-                    .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
-            }
-            .onChange(of: files.map(\.path), initial: true) {
-                // Keep something selected: first file on arrival, and again
-                // when a reload drops the previously selected path.
-                if selectedPath == nil || !files.contains(where: { $0.path == selectedPath }) {
-                    selectedPath = files.first?.path
+        Group {
+            if files.isEmpty {
+                ContentUnavailableView(
+                    "No Changes",
+                    systemImage: "checkmark.circle",
+                    description: Text("The working tree is clean.")
+                )
+            } else {
+                HSplitView {
+                    changesPane
+                        .frame(minWidth: 260, idealWidth: 320, maxWidth: 520)
+                    detail
+                        .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .onChange(of: files.map(\.path), initial: true) {
+                    // Keep something selected: first file on arrival, and again
+                    // when a reload drops the previously selected path.
+                    if selectedPath == nil || !files.contains(where: { $0.path == selectedPath }) {
+                        selectedPath = files.first?.path
+                    }
                 }
             }
         }
+        .onChange(of: repoPath) {
+            // A different repository must not inherit the previous one's
+            // draft message or checkbox opt-outs.
+            commitStore.reset()
+        }
+        .confirmationDialog(
+            "Commit Embedded Repositories?",
+            isPresented: $isConfirmingEmbedded
+        ) {
+            Button("Commit") { performCommit(pendingFiles) }
+            Button("Cancel", role: .cancel) { pendingFiles = [] }
+        } message: {
+            Text(embeddedWarning)
+        }
+    }
+
+    // MARK: Left pane
+
+    private var changesPane: some View {
+        VStack(spacing: 0) {
+            listHeader
+            Divider()
+            fileList
+            Divider()
+            CommitComposer(
+                store: commitStore,
+                includedCount: includedFiles.count,
+                onSubmit: submit
+            )
+        }
+    }
+
+    private var listHeader: some View {
+        HStack(spacing: 8) {
+            Toggle("Include all files", isOn: allIncludedBinding)
+                .toggleStyle(.checkbox)
+                .labelsHidden()
+                .disabled(committableFiles.isEmpty)
+                .help("Include or exclude every file")
+
+            Text("\(includedFiles.count) of \(committableFiles.count) files included")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
     }
 
     private var fileList: some View {
         List(files, selection: $selectedPath) { file in
             HStack(spacing: 10) {
+                Toggle("Include \(file.displayName)", isOn: includedBinding(for: file))
+                    .toggleStyle(.checkbox)
+                    .labelsHidden()
+                    .disabled(!CommitStore.isCommittable(file))
+
                 FileStatusBadge(status: file.status)
 
                 VStack(alignment: .leading, spacing: 1) {
@@ -84,5 +154,61 @@ struct ChangesView: View {
                 description: Text("Select a file to see its changes.")
             )
         }
+    }
+
+    // MARK: Inclusion state
+
+    private var committableFiles: [FileEntry] {
+        files.filter(CommitStore.isCommittable)
+    }
+
+    private var includedFiles: [FileEntry] {
+        commitStore.includedFiles(from: files)
+    }
+
+    private var allIncludedBinding: Binding<Bool> {
+        Binding {
+            !committableFiles.isEmpty && committableFiles.allSatisfy { commitStore.isIncluded($0) }
+        } set: { include in
+            commitStore.setAllIncluded(include, in: files)
+        }
+    }
+
+    private func includedBinding(for file: FileEntry) -> Binding<Bool> {
+        Binding {
+            commitStore.isIncluded(file)
+        } set: { include in
+            commitStore.setIncluded(file, include)
+        }
+    }
+
+    // MARK: Commit
+
+    private func submit() {
+        let files = includedFiles
+        if files.contains(where: \.embedded) {
+            // Committing a nested repository records only a gitlink — usually
+            // a mistake, so make it a deliberate choice (as the Tauri client
+            // does with its confirmation modal).
+            pendingFiles = files
+            isConfirmingEmbedded = true
+        } else {
+            performCommit(files)
+        }
+    }
+
+    private func performCommit(_ files: [FileEntry]) {
+        Task {
+            if await commitStore.commit(repoPath: repoPath, files: files) {
+                await onCommitted()
+            }
+        }
+    }
+
+    private var embeddedWarning: String {
+        let names = pendingFiles.filter(\.embedded).map(\.displayName)
+        return "\(names.joined(separator: ", ")): nested git "
+            + (names.count == 1 ? "repository" : "repositories")
+            + " commit as a pointer (gitlink), not as files. Their contents stay out of this repository."
     }
 }

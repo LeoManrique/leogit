@@ -149,6 +149,23 @@ Token `start`/`end` and `IntraLineRange` are code-point indices, which in Swift 
 `AttributedString.unicodeScalars` view — never `characters`, whose grapheme clusters can span
 several code points.
 
+Committing crosses as the same two calls the Svelte client makes — `format_commit_message`,
+then `commit` — and needed no new type mirrors: core's `commit` owns the whole staging story
+(it resets the index and re-stages exactly the files it was handed), so there is no separate
+stage step to expose. Neither client uses `diff::generate_patch`/`DiffSelection` yet;
+per-hunk staging is future work for both.
+
+Branches and merge cross 1:1 as well (`list_branches`, `create_branch`, `switch_branch`,
+`delete_branch`; `merge_branch`, `merge_squash`, `commit_squash_merge`, `merge_abort`,
+`is_merging`, `count_commits_to_merge`), with two flat mirrors (`BranchInfo`, `MergeResult`)
+and none of the `EventSink` machinery — every branch/merge function in core is a plain
+synchronous `Result<T, String>`. The multi-call sequences are the Tauri handlers' own:
+"New Branch" is `create_branch` then `switch_branch`, squash is `merge_squash` then
+`commit_squash_merge` on success, and a *failed merge is data, not an error* —
+`MergeResult { success: false }` with git's text and the conflicted paths, never a thrown
+`GitError`. `rename_branch` and `delete_remote_branch` exist in core but stay unexported —
+no client has UI for them yet, and the bridge doesn't carry dead surface.
+
 `scripts/build-rust.sh` builds the static lib and regenerates the bindings, and Xcode runs it as
 a pre-build phase — so the Swift API can never be stale relative to the Rust it calls.
 `ffi/generated/` is gitignored for the same reason. Three things there are load-bearing and

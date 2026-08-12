@@ -32,6 +32,11 @@ final class RepoStore {
     private(set) var isLoading = false
     private(set) var coreVersionText = ""
 
+    /// Whether a merge is in progress (`MERGE_HEAD` exists). Refreshed with
+    /// status, like the Tauri client folds `is_merging` into its poll; drives
+    /// the subtitle badge and the branch menu's Abort Merge item.
+    private(set) var isMerging = false
+
     /// Bumped on every successful status load. Views that derive from the
     /// working tree beyond `status` itself — the open diff, most notably —
     /// key their reload on this, since a refresh can change a file's diff
@@ -79,6 +84,7 @@ final class RepoStore {
         repoName = ""
         status = nil
         commits = []
+        isMerging = false
         errorMessage = nil
     }
 
@@ -92,6 +98,7 @@ final class RepoStore {
     private func loadRepoData(_ path: String) async {
         async let statusResult = GitBridge.status(of: path)
         async let logResult = GitBridge.log(of: path, limit: Self.historyPageSize)
+        async let mergingResult = GitBridge.mergeInProgress(in: path)
 
         do {
             let (newStatus, newCommits) = try await (statusResult, logResult)
@@ -102,5 +109,8 @@ final class RepoStore {
         } catch {
             errorMessage = error.displayMessage
         }
+        // Best-effort, like the Tauri client's poll: failure reads as "not
+        // merging" rather than an error.
+        isMerging = (try? await mergingResult) ?? false
     }
 }
