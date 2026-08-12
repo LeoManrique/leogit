@@ -40,6 +40,7 @@ just install     # pnpm install in apps/tauri-app
 just dev         # launch dev build with hot reload
 just build       # produce a debug bundle
 just check       # type-check (svelte-check + cargo check --workspace)
+just mac-run     # build and launch the native macOS app (needs Xcode + xcodegen)
 ```
 
 (Or run the underlying `pnpm tauri …` commands directly — see `justfile`.)
@@ -57,13 +58,20 @@ core/                    # leogit-core — Tauri-free Rust logic (git, diff, hig
                          #   terminal, config, gh, ai, …). The one host seam is
                          #   events::EventSink (streaming git progress + PTY output).
 apps/
-└── tauri-app/
-    ├── src/             # Svelte 5 frontend (TypeScript, runes)
-    └── src-tauri/       # Tauri host: one #[tauri::command] shim per core fn
+├── tauri-app/
+│   ├── src/             # Svelte 5 frontend (TypeScript, runes)
+│   └── src-tauri/       # Tauri host: one #[tauri::command] shim per core fn
+└── swift-ui-app/        # Native macOS client (SwiftUI, Swift 6)
+    ├── ffi/             # leogit-ffi: UniFFI bridge over the same core/
+    └── Sources/LeoGit/  # App, Screens, Stores, IPC, Design
 Cargo.toml               # workspace root (target/ and Cargo.lock live here)
 ```
 
-The SwiftUI macOS client (`apps/swift-ui-app`, planned) links the same `core/` via UniFFI.
+The SwiftUI macOS client links the same `core/` via UniFFI, so both clients run identical
+logic — only the marshaling differs. It needs Xcode and `brew install xcodegen`; build it with
+`just mac-run`. It currently covers one read path (open a repo → changes + history) and is
+being ported flow by flow.
+
 The pre-monorepo design is preserved on the `legacy/classic-design` branch (== tag `v0.1.32`);
 recall it with `git worktree add ../leogit-classic legacy/classic-design`.
 

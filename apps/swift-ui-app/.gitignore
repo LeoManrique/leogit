@@ -1,0 +1,20 @@
+# The Xcode project is generated from project.yml by XcodeGen — never edit or
+# commit it, or the spec stops being the source of truth (and it is a reliable
+# merge-conflict generator).
+*.xcodeproj/
+*.xcworkspace/
+
+# Info.plist materialised from project.yml's `info:` block at generation time.
+Generated/
+
+# UniFFI output: Swift bindings, C header and modulemap, all derived from the
+# Rust source by scripts/build-rust.sh. Regenerate rather than commit — a stale
+# copy silently disagreeing with libleogit_ffi.a is the worst failure mode here.
+ffi/generated/
+
+# xcodebuild -derivedDataPath output for CLI builds.
+build/
+
+# Xcode user state
+xcuserdata/
+*.xcuserstate

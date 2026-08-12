@@ -19,13 +19,16 @@ Functional behavior lives in [DESIGN.md](DESIGN.md). Visual design language live
 | HTTP | `reqwest` 0.13 | Used only for Ollama |
 | Config | `toml` 1.1 + `directories` 6 + `serde_json` | `~/.config/leogit/{config.toml,repos-state.json}` |
 | Recoverable delete | `trash` 5 | "Discard" sends never-committed files to the OS trash instead of unlinking |
-| Build tool | `just` | Wraps `pnpm tauri …` |
+| Native macOS client | SwiftUI, Swift 6 language mode | `apps/swift-ui-app`; macOS 26 deployment target, built with Xcode 26 |
+| Swift ↔ Rust bridge | UniFFI 0.32 | Static lib linked into the app bundle; core's types cross via `#[uniffi::remote]` |
+| macOS project generation | XcodeGen 2.46 | `project.yml` is the source of truth; the `.xcodeproj` is generated and gitignored |
+| Build tool | `just` | Wraps `pnpm tauri …` and the macOS `xcodegen`/`xcodebuild` recipes |
 
 ## Repository layout
 
 A **Cargo workspace**: all logic lives once in `core/` (the `leogit-core` crate), and each
-client is a thin shell over it. The Tauri host embeds it directly; the planned SwiftUI client
-links the same crate through UniFFI. The only place a UI framework leaks into the core is
+client is a thin shell over it. The Tauri host embeds it directly; the SwiftUI client links the
+same crate through UniFFI. The only place a UI framework leaks into the core is
 `events::EventSink` (see *Core / host split* below).
 
 ```
@@ -52,32 +55,47 @@ leogit/
 │       ├── progress.rs              # git --progress step/weight parser
 │       └── update.rs                # GitHub-release update check
 ├── apps/
-│   └── tauri-app/
-│       ├── src/                     # Svelte 5 frontend (untouched by the core extraction)
-│       │   ├── App.svelte           # Startup phases (loading → picker / main / error)
-│       │   ├── main.ts              # Mounts App
-│       │   ├── app.css              # Theme tokens + base element styles
-│       │   └── lib/
-│       │       ├── api/commands.ts  # Typed wrappers over every Tauri command
-│       │       ├── actions/         # Svelte use: actions (autofocus, listNavigation)
-│       │       ├── utils/path.ts    # basename for OS paths (either separator)
-│       │       ├── stores/          # appState, repoState, config (Svelte writables)
-│       │       ├── components/      # Header, TabBar, FileList, CommitList, DiffViewer, …
-│       │       └── views/           # MainLayout, RepoPicker, CloneOverlay, MergeOverlay, …
-│       ├── src-tauri/
-│       │   ├── src/
-│       │   │   ├── main.rs          # PATH fix + single-instance + invoke_handler registry
-│       │   │   ├── lib.rs           # Declares shims / event_sink / launch_glue
-│       │   │   ├── event_sink.rs    # TauriEventSink: CoreEvent → window emit
-│       │   │   ├── launch_glue.rs   # Window-focusing half of `leogit <dir>`
-│       │   │   └── shims/           # One #[tauri::command] per core fn (config.rs, git.rs, …)
-│       │   ├── capabilities/default.json
-│       │   ├── tauri.conf.json
-│       │   └── Cargo.toml           # tauri + plugins + leogit-core (path dep)
-│       ├── package.json             # pnpm scripts (dev, build, check, lint)
-│       ├── vite.config.ts           # $lib alias, port 5173
-│       └── tsconfig.json
-├── justfile                         # install / dev / build / build-release / check / format
+│   ├── tauri-app/
+│   │   ├── src/                     # Svelte 5 frontend (untouched by the core extraction)
+│   │   │   ├── App.svelte           # Startup phases (loading → picker / main / error)
+│   │   │   ├── main.ts              # Mounts App
+│   │   │   ├── app.css              # Theme tokens + base element styles
+│   │   │   └── lib/
+│   │   │       ├── api/commands.ts  # Typed wrappers over every Tauri command
+│   │   │       ├── actions/         # Svelte use: actions (autofocus, listNavigation)
+│   │   │       ├── utils/path.ts    # basename for OS paths (either separator)
+│   │   │       ├── stores/          # appState, repoState, config (Svelte writables)
+│   │   │       ├── components/      # Header, TabBar, FileList, CommitList, DiffViewer, …
+│   │   │       └── views/           # MainLayout, RepoPicker, CloneOverlay, MergeOverlay, …
+│   │   ├── src-tauri/
+│   │   │   ├── src/
+│   │   │   │   ├── main.rs          # PATH fix + single-instance + invoke_handler registry
+│   │   │   │   ├── lib.rs           # Declares shims / event_sink / launch_glue
+│   │   │   │   ├── event_sink.rs    # TauriEventSink: CoreEvent → window emit
+│   │   │   │   ├── launch_glue.rs   # Window-focusing half of `leogit <dir>`
+│   │   │   │   └── shims/           # One #[tauri::command] per core fn (config.rs, git.rs, …)
+│   │   │   ├── capabilities/default.json
+│   │   │   ├── tauri.conf.json
+│   │   │   └── Cargo.toml           # tauri + plugins + leogit-core (path dep)
+│   │   ├── package.json             # pnpm scripts (dev, build, check, lint)
+│   │   ├── vite.config.ts           # $lib alias, port 5173
+│   │   └── tsconfig.json
+│   └── swift-ui-app/                # Native macOS client (SwiftUI)
+│       ├── project.yml              # XcodeGen spec — the .xcodeproj is generated, gitignored
+│       ├── scripts/build-rust.sh    # cargo build + uniffi-bindgen (Xcode pre-build phase)
+│       ├── ffi/                     # leogit-ffi: UniFFI bridge crate over leogit-core
+│       │   ├── Cargo.toml           # crate-type lib + staticlib; `bindgen` feature for the CLI
+│       │   ├── uniffi.toml          # Swift module name + immutable records
+│       │   ├── src/lib.rs           # #[uniffi::export] fns + #[uniffi::remote] type mirrors
+│       │   ├── src/bin/…            # uniffi-bindgen-swift entry point
+│       │   └── generated/           # GENERATED: LeoGitCore.swift + header + modulemap
+│       └── Sources/LeoGit/
+│           ├── App/                 # @main App + scene setup
+│           ├── IPC/GitBridge.swift  # The only place Swift calls Rust (@concurrent wrappers)
+│           ├── Stores/RepoStore.swift  # @MainActor @Observable state for the open repo
+│           ├── Screens/             # ContentView, WelcomeView, ChangesView, HistoryView
+│           └── Design/              # Date formatting + FileStatus presentation
+├── justfile                         # install / dev / build / check / format / mac-*
 └── DESIGN.md / TECHNICAL.md / STYLE.md / FRONTEND.md / ROADMAP.md / README.md
 ```
 
@@ -104,6 +122,31 @@ data types the UI serializes. The Tauri host (`apps/tauri-app/src-tauri`) adds o
 consumer and the payload must stay byte-identical; the SwiftUI client will consume the same
 structured `FileDiff` / `Token` / `TokenClass` types directly and map them to `AttributedString`
 instead of calling `render`.
+
+### Swift host (UniFFI)
+
+`apps/swift-ui-app/ffi` (`leogit-ffi`) is the macOS equivalent of the Tauri shim layer: glue
+only, one `#[uniffi::export]` per core function. Two decisions shape it:
+
+- **Core stays UniFFI-free.** Types cross via `#[uniffi::remote(Record)]` / `(Enum)`
+  declarations that restate core's structs in the bridge crate, so `leogit-core` gains no
+  `uniffi` dependency — exactly as it gained no `tauri` one. A remote declaration must mirror
+  the real type field-for-field, so drift in core surfaces as a **compile error in the bridge**
+  rather than a silent wire mismatch. The cost is restating a struct when you expose it.
+- **Blocking calls must leave the main actor.** Every core function shells out to `git` and
+  waits. `GitBridge` marks each wrapper `@concurrent` (SE-0461); without it a `nonisolated
+  async` function would inherit the caller's executor and freeze the UI.
+
+`scripts/build-rust.sh` builds the static lib and regenerates the bindings, and Xcode runs it as
+a pre-build phase — so the Swift API can never be stale relative to the Rust it calls.
+`ffi/generated/` is gitignored for the same reason. Three things there are load-bearing and
+guarded by assertions in that script:
+
+| Concern | Why it bites |
+|---|---|
+| `module_name` (`uniffi.toml`) ↔ `--module-name` ↔ `SWIFT_INCLUDE_PATHS` | The bindings import the C shim as `#if canImport(LeoGitCoreFFI)`. A mismatch does not error — the guard just goes false and every FFI symbol fails to resolve. |
+| `--link-frameworks SystemConfiguration` | Core's `reqwest` → `hyper-util` chain reads system proxy settings. Declaring the framework in the modulemap keeps the requirement with the library instead of in each consumer's build settings. |
+| `SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated` | Xcode 26 defaults new app targets to `MainActor`, which **breaks** the generated bindings (raw pointers, `deinit`, sync C interop cannot be main-actor isolated — mozilla/uniffi-rs#2818). UI types opt into `@MainActor` explicitly instead. |
 
 ## Process model
 
@@ -396,7 +439,7 @@ They're `#[tauri::command(async)]` (worker thread) and routed through `process::
 
 ## Config & persistence
 
-Defined in [src-tauri/src/commands/config.rs](core/src/config.rs).
+Defined in [core/src/config.rs](core/src/config.rs).
 
 - Config dir is resolved via `directories::BaseDirs::config_dir().join("leogit")` (`~/.config/leogit` on Linux, `~/Library/Application Support/leogit` on macOS, `%APPDATA%\leogit` on Windows). It's created if missing.
 - `config.toml` — every field on the `Config` struct. New fields carry `#[serde(default = "…")]` so users on older configs keep working. Defaults are written to disk on first run so the file is discoverable.
@@ -424,14 +467,23 @@ No filesystem, shell, or HTTP plugins are exposed to the WebView. All side effec
 
 ```bash
 # From the project root
-just install         # pnpm install inside tauri-app
+just install         # pnpm install inside apps/tauri-app
 just dev             # pnpm tauri dev   (Vite on :5173 + Tauri host)
 just build           # pnpm tauri build (debug bundle)
 just build-release   # pnpm tauri build --release with RUST_BACKTRACE=1
-just check           # pnpm svelte-check + cargo check
-just format          # prettier + cargo fmt
-just clean           # nuke dist/, target/, node_modules
+just check           # pnpm svelte-check + cargo check --workspace
+just format          # prettier + cargo fmt --all
+just clean           # nuke dist/, target/, node_modules, generated macOS artifacts
+
+# Native macOS client (needs Xcode + `brew install xcodegen`)
+just mac-generate    # project.yml → LeoGit.xcodeproj
+just mac-bindings    # cargo build -p leogit-ffi + regenerate Swift bindings
+just mac-build       # xcodebuild (runs mac-bindings first, via a pre-build phase)
+just mac-run         # build, then launch LeoGit.app
 ```
+
+`just check` covers the whole Cargo workspace, so `leogit-ffi` type-checks alongside core and
+the Tauri host. The macOS app is not part of it — it needs Xcode, so it stays behind `mac-*`.
 
 Inside `tauri-app`, `pnpm run check:native` runs the same tsconfig through the TypeScript 7 native compiler (`tsc --noEmit`, ~0.2 s full check) for fast feedback on `.ts` files; `pnpm check` (svelte-check, on the TS 6 JS line) stays authoritative because the native compiler doesn't see `.svelte` files. `src/vite-env.d.ts` (`vite/client` types) declares the CSS side-effect imports that TS 6/7's stricter resolution (TS2882) would otherwise reject.
 

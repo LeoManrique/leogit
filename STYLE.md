@@ -4,6 +4,8 @@ leogit's interface is a desktop Git client. The design language is the calm, res
 
 > **Note on current state.** The shipped CSS is GitHub Primer–flavored (`#0d1117`, `#58a6ff`, `#3fb950`, etc.). This document describes the target the UI should migrate toward, not what's currently in [tauri-app/src/app.css](apps/tauri-app/src/app.css). When a component is touched, prefer to move it in this direction rather than match neighboring code.
 
+> **The native client is the reference.** The macOS SwiftUI client ([apps/swift-ui-app](apps/swift-ui-app)) reaches this aesthetic by construction rather than by imitation — it uses stock `List`/`Table`/toolbar and the system font stack, so it inherits the macOS 26 look (including Liquid Glass chrome) for free. It deliberately adopts no custom glass or colour treatments: anything it can get from a standard control, it gets from the standard control. Where this document and the native app disagree about a control's look, the native app wins, and this document should be updated to match. The Tauri frontend is to be re-skinned onto it rather than the two evolving in parallel.
+
 ## Intent
 
 If a designer at Apple would not ship it in macOS Settings, Finder, or Xcode, it doesn't belong here. The recurring failure modes we deliberately avoid: GitHub-style colored pill badges on every row, status banners with tinted backgrounds, icon-in-tinted-square section headers, all-caps tracked section labels, chunky pill buttons with leading icons, two-line radio-card pickers with marketing-style descriptions, custom mono fonts (JetBrains Mono, Fira Code) for diff content, accent-color glow shadows. leogit is a tool the user keeps open all day — it should disappear into the OS, not announce itself.

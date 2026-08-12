@@ -1,0 +1,96 @@
+name: LeoGit
+
+# The Xcode project is generated, never committed — run `just mac-generate`
+# (or `xcodegen generate` here) after changing this file or adding sources.
+
+options:
+  bundleIdPrefix: com.leomanrique
+  deploymentTarget:
+    macOS: "26.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    # Swift 6 language mode: data-race safety as errors rather than warnings.
+    SWIFT_VERSION: "6.0"
+    SWIFT_APPROACHABLE_CONCURRENCY: YES
+
+    # Deliberately NOT MainActor (the Xcode 26 template default for new apps).
+    # UniFFI's generated bindings use raw pointers, `deinit`, and synchronous C
+    # interop that cannot be main-actor isolated, and they are compiled into this
+    # target — mozilla/uniffi-rs#2818. UI types opt in explicitly with @MainActor
+    # instead; GitBridge relies on this default to keep blocking git work off the
+    # main actor.
+    SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated
+
+    # The pre-build phase runs cargo, which writes to <repo>/target and
+    # ~/.cargo — both outside the sandbox's allowed paths.
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+    # A local developer tool: it shells out to git and reads repositories
+    # anywhere on disk, so it is unsandboxed and ad-hoc signed. No entitlements
+    # file is declared, which leaves App Sandbox off.
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGNING_REQUIRED: NO
+    ENABLE_HARDENED_RUNTIME: NO
+
+    # Surfaces the generated module.modulemap so the bindings'
+    # `#if canImport(LeoGitCoreFFI)` guard resolves. If this path is wrong the
+    # guard silently fails and every FFI symbol goes unresolved.
+    SWIFT_INCLUDE_PATHS: $(SRCROOT)/ffi/generated
+
+targets:
+  LeoGit:
+    type: application
+    platform: macOS
+
+    sources:
+      - path: Sources/LeoGit
+      # Only the Swift API is compiled; the header and modulemap beside it are
+      # consumed through SWIFT_INCLUDE_PATHS, not as build inputs.
+      #
+      # Deliberately not `optional: true`: this file is generated, and if it is
+      # missing a hard failure here ("Source file not found") points straight at
+      # the fix — run `just mac-bindings`. Marking it optional instead defers the
+      # failure to Xcode, which reports a far more confusing missing-build-input
+      # error against a file the build itself is supposed to produce.
+      - path: ffi/generated/LeoGitCore.swift
+
+    info:
+      path: Generated/Info.plist
+      properties:
+        CFBundleDisplayName: LeoGit
+        LSApplicationCategoryType: public.app-category.developer-tools
+        LSMinimumSystemVersion: "26.0"
+        NSHumanReadableCopyright: "© 2026 Leonardo Manrique"
+
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.leomanrique.leogit.mac
+        PRODUCT_NAME: LeoGit
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOL_EXTENSIONS: NO
+      configs:
+        # Linked by absolute path rather than -l + LIBRARY_SEARCH_PATHS: the
+        # archive lives in the workspace-root target/ dir, which differs per
+        # configuration, and a full path is also immune to the linker preferring
+        # a same-named .dylib should the crate ever add a cdylib crate-type.
+        Debug:
+          OTHER_LDFLAGS: ["$(inherited)", "$(SRCROOT)/../../target/debug/libleogit_ffi.a"]
+        Release:
+          OTHER_LDFLAGS: ["$(inherited)", "$(SRCROOT)/../../target/release/libleogit_ffi.a"]
+
+    preBuildScripts:
+      # Invoked by path rather than declared with `path:`, which would inline the
+      # file's contents into the project — the script would then be a stale copy
+      # frozen at generation time, and its own location would resolve to Xcode's
+      # intermediates directory instead of the repo.
+      - name: Build Rust core + generate bindings
+        script: exec "${SRCROOT}/scripts/build-rust.sh"
+        shell: /bin/bash
+        # cargo does its own change detection, and the generated bindings are
+        # not declared as outputs, so Xcode must not try to skip this phase.
+        basedOnDependencyAnalysis: false
+
+    scheme: {}

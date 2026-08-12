@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "core",
     "apps/tauri-app/src-tauri",
-    # "apps/swift-ui-app/ffi" joins in Phase 1 (SwiftUI + UniFFI).
+    "apps/swift-ui-app/ffi",
 ]
 
 # Shared lint policy (CLAUDE.md: clippy pedantic). Members opt in with

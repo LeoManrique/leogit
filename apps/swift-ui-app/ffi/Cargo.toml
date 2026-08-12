@@ -1,0 +1,29 @@
+[package]
+name = "leogit-ffi"
+version = "0.1.0"
+edition = "2024"
+description = "UniFFI bridge exposing leogit-core to the native SwiftUI macOS client"
+publish = false
+
+[lib]
+name = "leogit_ffi"
+# `staticlib` is the artifact the macOS app links; `lib` keeps the crate usable
+# from Rust (tests, and `cargo check --workspace`).
+crate-type = ["lib", "staticlib"]
+
+[dependencies]
+leogit-core = { path = "../../../core" }
+uniffi = "0.32"
+
+# The bindings generator is a dev-time tool, not part of the shipped library, so
+# its CLI dependencies (clap & co.) stay out of the default build graph.
+[features]
+bindgen = ["uniffi/cli"]
+
+[[bin]]
+name = "uniffi-bindgen-swift"
+path = "src/bin/uniffi_bindgen_swift.rs"
+required-features = ["bindgen"]
+
+[lints]
+workspace = true

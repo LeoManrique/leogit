@@ -8,6 +8,12 @@ leogit is a desktop Git client for developers who already know git on the comman
 
 The embedded terminal is part of that contract — it runs in the repo directory and shares the same working tree as the UI.
 
+## Clients
+
+Every flow below is described as the **Tauri client** implements it — the complete, shipping surface on macOS, Windows and Linux. A native **macOS SwiftUI client** is being built alongside it on the same `leogit-core`, and is the lead product going forward; the Tauri app will be re-skinned to match its design once the port is further along.
+
+The native client currently covers one read path: choose a folder (a repo root or any subdirectory of one), then browse the working-tree changes and commit history. Opening is a folder picker rather than the scan-and-discover flow described below — discovery, committing, branching, sync and the terminal are still Tauri-only. Flows land there one at a time, each verified before the next begins, so treat any flow not named here as not yet ported.
+
 ## Top-level flows
 
 ### 1. Launch and repo discovery

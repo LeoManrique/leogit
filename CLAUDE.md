@@ -39,3 +39,16 @@ If we have to decide between downgrading or updating versions of packages or lib
 ## Visual testing
 
 Do not use screenshots for testing, ask to visually check the result of a change and wait for confirmation to consider it as complete.
+
+## Always fetch Swift UI current docs before writing code
+
+Before making non-trivial changes in this repo to Swift UI app, pull current documentation via the **context7** MCP server or `WebFetch` against developer.apple.com. Built-in knowledge lags Apple's SDK churn.
+
+- **Latest Swift version** (strict concurrency). Resolve `swift` on context7 and fetch docs for whatever API you're touching — actor isolation, `Sendable` conformance, and the `Observable` macro have evolved each major release.
+- **Latest SwiftUI / AppKit / Darwin libproc** (latest macOS SDK). Always:
+  1. Identify the precise type/function you're using
+  2. Fetch its current docs before writing code that depends on its signature or behavior.
+
+Skip the lookup only for trivial edits (renames, comment-only changes, etc.).
+
+Suggest to upgrade libraries to user when available. Wait for their approval to proceed with the upgrade.

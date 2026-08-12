@@ -1,0 +1,13 @@
+# Swift binding generation options (UniFFI ≥ 0.32).
+#
+# `module_name` names the Swift file/module the app compiles in; the low-level
+# C shim module is derived from it as `<module_name>FFI`, which is also the
+# name `scripts/build-rust.sh` passes to `--module-name` when emitting the
+# modulemap. Keep the three in sync or the generated `#if canImport(...)` guard
+# silently compiles to nothing and every FFI call fails to resolve.
+[bindings.swift]
+module_name = "LeoGitCore"
+
+# Records cross the boundary as immutable snapshots; `let` fields make them
+# trivially safe to hand to SwiftUI views across actor boundaries.
+generate_immutable_records = true
