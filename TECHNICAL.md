@@ -1,6 +1,6 @@
 # leogit — Technical Architecture
 
-Functional behavior lives in [DESIGN.md](DESIGN.md). Visual design language lives in [FRONTEND.md](FRONTEND.md). This document covers **how the code is organized** and the decisions that pin it together.
+Functional behavior lives in [DESIGN.md](DESIGN.md). Visual design language lives in [STYLE.md](STYLE.md); the frontend contract shared by the Tauri and (planned) SwiftUI clients lives in [FRONTEND.md](FRONTEND.md). This document covers **how the code is organized** and the decisions that pin it together.
 
 ## Stack
 
@@ -65,7 +65,7 @@ leogit/
 │   ├── vite.config.ts               # $lib alias, port 5173
 │   └── tsconfig.json
 ├── justfile                         # install / dev / build / build-release / check / format
-└── DESIGN.md / TECHNICAL.md / ROADMAP.md / FRONTEND.md / README.md
+└── DESIGN.md / TECHNICAL.md / STYLE.md / FRONTEND.md / ROADMAP.md / README.md
 ```
 
 ## Process model

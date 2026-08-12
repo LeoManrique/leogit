@@ -1,6 +1,6 @@
 # leogit — Functional Design
 
-Visual / interaction design language lives in [FRONTEND.md](FRONTEND.md). This document covers user-facing **features and flows** — what leogit does, in what order, and how the pieces fit together.
+This document covers user-facing **features and flows** — what leogit does, in what order, and how the pieces fit together.
 
 ## Product intent
 

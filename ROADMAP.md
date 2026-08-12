@@ -91,8 +91,8 @@ What's shipped lives in [DESIGN.md](DESIGN.md). This file tracks **what's next**
 - [ ] **Multi-repo workspace.** Open a workspace of related repos with a single window.
 - [ ] **Custom keybindings.** User-editable mapping in Settings, persisted to `config.toml`.
 - [ ] **Plugin system.** Stable Tauri command surface + a manifest format for community extensions.
-- [ ] **Light theme palette pass.** [FRONTEND.md](FRONTEND.md) describes a target Apple-system aesthetic; the shipped CSS is still GitHub Primer-flavored. Migrate component-by-component when touched.
-- [ ] **Marketing site.** Section on FRONTEND.md already specifies the design language for it.
+- [ ] **Light theme palette pass.** [STYLE.md](STYLE.md) describes a target Apple-system aesthetic; the shipped CSS is still GitHub Primer-flavored. Migrate component-by-component when touched.
+- [ ] **Marketing site.** Section on STYLE.md already specifies the design language for it.
 - [ ] **Localization scaffolding.** No strings catalog today.
 - [ ] Per-line / per-hunk include checkboxes in the diff (backend `generate_patch` already supports it).
 - [ ] Line-level discard from the diff.
@@ -146,6 +146,7 @@ What's shipped lives in [DESIGN.md](DESIGN.md). This file tracks **what's next**
 - [ ] Drag a commit onto the branch dropdown to cherry-pick into any branch.
 - [ ] Resizable toolbar buttons (e.g. `Cmd-8/9` widens push/pull and branch dropdown).
 - [x] **Linux packaging + install.** `deploy_releases.sh` builds an AppImage and `install.sh` installs it to `~/.local/bin` with a `.desktop` launcher; macOS ships a zipped `.app`. One AppImage covers GNOME / COSMIC (same WebKitGTK runtime).
+- [ ] **Native SwiftUI frontend for macOS (Tauri stays for Windows/Linux).** Share one Tauri-free `leogit-core` between both frontends; SwiftUI on macOS, Tauri on Win/Linux — the same dual-frontend shape as `git-projects-manager` and `leosync-src`. Plan + open decisions (bridge mechanism, workspace layout, diff-render format, terminal widget) in [docs/plans/swiftui-macos-frontend.md](docs/plans/swiftui-macos-frontend.md); the cross-frontend contract is [FRONTEND.md](FRONTEND.md). First step is a decision-independent extraction of `leogit-core` from `src-tauri`.
 - [ ] **App signing + notarization (macOS).** Configure in `src-tauri/tauri.conf.json` for distributable DMGs.
 - [ ] **Auto-update (download + apply in-app).** Tauri's updater plugin needs a signed release feed; today we only *detect* a new release and hand over the install command / download link.
 - [ ] **CI build matrix.** macOS / Linux / Windows on push.

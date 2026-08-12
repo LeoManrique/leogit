@@ -56,7 +56,7 @@ tauri-app/
 └── src-tauri/     # Rust backend (Tauri commands)
 ```
 
-See [DESIGN.md](DESIGN.md) for user-facing features and flows, [TECHNICAL.md](TECHNICAL.md) for architecture, [FRONTEND.md](FRONTEND.md) for the visual design language, and [ROADMAP.md](ROADMAP.md) for what's next.
+See [DESIGN.md](DESIGN.md) for user-facing features and flows, [TECHNICAL.md](TECHNICAL.md) for architecture, [STYLE.md](STYLE.md) for the visual design language, [FRONTEND.md](FRONTEND.md) for the frontend contract shared by the Tauri and (planned) SwiftUI clients, and [ROADMAP.md](ROADMAP.md) for what's next.
 
 ## License
 
