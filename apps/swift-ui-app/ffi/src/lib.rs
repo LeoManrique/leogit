@@ -27,11 +27,13 @@
 
 use std::path::Path;
 
-use leogit_core::git;
+use leogit_core::{diff, git, highlight};
 
 // Re-exported so Swift sees the real core types. Names are used by the
 // `#[uniffi::remote]` declarations below.
+pub use leogit_core::diff::{DiffLine, FileDiff, Hunk, HunkHeader, IntraLineRange, LineType};
 pub use leogit_core::git::{CommitInfo, FileEntry, FileStatus, LogOptions, RepoStatus};
+pub use leogit_core::highlight::{BlobSource, Token, TokenClass};
 
 uniffi::setup_scaffolding!();
 
@@ -141,6 +143,128 @@ pub struct LogOptions {
     pub skip: i32,
 }
 
+/// Mirrors [`leogit_core::diff::LineType`].
+#[uniffi::remote(Enum)]
+pub enum LineType {
+    Context,
+    Add,
+    Delete,
+    Hunk,
+    NoNewline,
+}
+
+/// Mirrors [`leogit_core::diff::IntraLineRange`].
+#[uniffi::remote(Record)]
+pub struct IntraLineRange {
+    pub start: u32,
+    pub length: u32,
+}
+
+/// Mirrors [`leogit_core::diff::DiffLine`].
+#[uniffi::remote(Record)]
+pub struct DiffLine {
+    pub text: String,
+    pub content: String,
+    pub line_type: LineType,
+    pub old_line_no: Option<i32>,
+    pub new_line_no: Option<i32>,
+    pub intra_line_diff: Option<IntraLineRange>,
+}
+
+/// Mirrors [`leogit_core::diff::HunkHeader`].
+#[uniffi::remote(Record)]
+pub struct HunkHeader {
+    pub old_start: i32,
+    pub old_count: i32,
+    pub new_start: i32,
+    pub new_count: i32,
+}
+
+/// Mirrors [`leogit_core::diff::Hunk`].
+#[uniffi::remote(Record)]
+pub struct Hunk {
+    pub header: HunkHeader,
+    pub lines: Vec<DiffLine>,
+}
+
+/// Mirrors [`leogit_core::diff::FileDiff`].
+#[uniffi::remote(Record)]
+pub struct FileDiff {
+    pub old_path: String,
+    pub new_path: String,
+    pub file_header: String,
+    pub hunks: Vec<Hunk>,
+    pub is_binary: bool,
+}
+
+/// Mirrors [`leogit_core::highlight::TokenClass`].
+#[uniffi::remote(Enum)]
+pub enum TokenClass {
+    Plain,
+    Keyword,
+    String,
+    Comment,
+    Function,
+    Type,
+    Variable,
+    Number,
+    Constant,
+    Operator,
+    Punctuation,
+    Tag,
+    Attribute,
+    Builtin,
+    Decorator,
+    Heading,
+    Strong,
+    Emphasis,
+    Strikethrough,
+    Link,
+    Raw,
+    Quote,
+}
+
+/// Mirrors [`leogit_core::highlight::Token`].
+#[uniffi::remote(Record)]
+pub struct Token {
+    pub start: u32,
+    pub end: u32,
+    pub class: TokenClass,
+}
+
+/// Mirrors [`leogit_core::highlight::BlobSource`].
+#[uniffi::remote(Enum)]
+pub enum BlobSource {
+    WorkingTree { repo_path: String },
+    Commit { repo_path: String, sha: String },
+}
+
+/// The structured result of parsing one file's raw diff.
+///
+/// A purpose-built record rather than a `#[uniffi::remote]` mirror of core's
+/// [`diff::ParsedDiff`]: that struct also carries phase-1 HTML strings and
+/// side-by-side row pairs — `WebView` presentation the native client neither
+/// needs nor should pay to marshal. `file_diff` is still the real core type.
+#[derive(uniffi::Record)]
+pub struct DiffPayload {
+    /// The parsed diff: hunks of typed lines plus file-level metadata.
+    pub file_diff: FileDiff,
+    /// Added-line total for the header badge (0 for binary diffs).
+    pub additions: u32,
+    /// Deleted-line total for the header badge (0 for binary diffs).
+    pub deletions: u32,
+}
+
+impl From<diff::ParsedDiff> for DiffPayload {
+    fn from(parsed: diff::ParsedDiff) -> Self {
+        Self {
+            file_diff: parsed.file_diff,
+            additions: parsed.additions,
+            deletions: parsed.deletions,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Exported functions — open → status → log
 // ---------------------------------------------------------------------------
@@ -197,6 +321,51 @@ pub fn core_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+// ---------------------------------------------------------------------------
+// Exported functions — diff pipeline
+// ---------------------------------------------------------------------------
+//
+// Three steps, same as the Tauri client: raw text → structure → tokens. Kept
+// separate (rather than fused into one call) so the UI can render the plain
+// structured diff immediately and apply syntax colour when tokenization —
+// which may read and parse whole blobs — catches up.
+
+/// The raw unified diff for one working-tree file, `HEAD` against the working
+/// tree (staged and unstaged combined). Untracked files diff against
+/// `/dev/null`, so a brand-new file still yields hunks.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when `git diff` fails.
+#[uniffi::export]
+pub fn get_diff(repo_path: String, file: FileEntry) -> Result<String, GitError> {
+    git::get_diff(repo_path, file).map_err(GitError::from)
+}
+
+/// Parse a raw unified diff into hunks of typed lines.
+///
+/// Returns `None` for input that contains no parseable diff — an empty string,
+/// or output for a file with no textual changes (e.g. a pure mode change).
+#[must_use]
+#[uniffi::export]
+pub fn parse_diff(raw: String) -> Option<DiffPayload> {
+    diff::parse_diff(raw).map(DiffPayload::from)
+}
+
+/// Syntax tokens for a parsed diff: one entry per flattened line of
+/// `file_diff` (hunks concatenated, each hunk's `@@` header included), empty
+/// where the tokenizer has nothing to say. Token `start`/`end` are code-point
+/// indices into the line's `content`, the same unit as `IntraLineRange`.
+///
+/// `source` tells the tokenizer where to read complete blobs from, which keeps
+/// multi-line constructs (block comments, embedded languages) correct;
+/// without it, tokenization falls back to the diff's own lines.
+#[must_use]
+#[uniffi::export]
+pub fn tokenize_diff(file_diff: FileDiff, source: Option<BlobSource>) -> Vec<Vec<Token>> {
+    highlight::tokenize_diff(&file_diff, source.as_ref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,5 +387,86 @@ mod tests {
     #[test]
     fn core_version_is_reported() {
         assert!(!core_version().is_empty());
+    }
+
+    /// Runs `git` in `dir`, panicking on failure so a broken fixture is loud.
+    fn run_git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// The full diff pipeline against a real throwaway repository: status →
+    /// raw diff → parse → tokenize, for both a modified and an untracked file.
+    /// Pins the parallel-array contract: tokenize returns exactly one entry
+    /// per flattened `file_diff` line.
+    #[test]
+    fn diff_pipeline_parses_and_tokenizes_working_tree_changes() {
+        let dir = std::env::temp_dir().join(format!("leogit-ffi-diff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        run_git(&dir, &["init"]);
+        std::fs::write(
+            dir.join("main.rs"),
+            "fn main() {\n    println!(\"a\");\n}\n",
+        )
+        .expect("write");
+        run_git(&dir, &["add", "."]);
+        run_git(
+            &dir,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-m",
+                "init",
+            ],
+        );
+        std::fs::write(
+            dir.join("main.rs"),
+            "fn main() {\n    println!(\"b\");\n}\n",
+        )
+        .expect("write");
+        std::fs::write(dir.join("new.rs"), "pub fn added() {}\n").expect("write");
+
+        let repo = dir.to_string_lossy().to_string();
+        let status = get_status(repo.clone()).expect("status");
+        assert_eq!(status.files.len(), 2, "one modified + one untracked");
+
+        for file in status.files {
+            let raw = get_diff(repo.clone(), file.clone()).expect("diff");
+            let payload = parse_diff(raw).expect("parses");
+            assert!(payload.additions > 0, "{} adds lines", file.path);
+
+            let flat: usize = payload.file_diff.hunks.iter().map(|h| h.lines.len()).sum();
+            let tokens = tokenize_diff(
+                payload.file_diff,
+                Some(BlobSource::WorkingTree {
+                    repo_path: repo.clone(),
+                }),
+            );
+            assert_eq!(
+                tokens.len(),
+                flat,
+                "{}: one token line per diff line",
+                file.path
+            );
+            assert!(
+                tokens.iter().any(|line| !line.is_empty()),
+                "{}: rust source produces at least one token",
+                file.path
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

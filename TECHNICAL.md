@@ -118,10 +118,12 @@ data types the UI serializes. The Tauri host (`apps/tauri-app/src-tauri`) adds o
 - **`launch_glue.rs`** — the window-focusing half of `leogit <dir>`; the pure argv→target
   resolution stays in `core/src/launch.rs`.
 
-`render.rs` (structured diff → HTML) stays in core for now because the Svelte host is its only
-consumer and the payload must stay byte-identical; the SwiftUI client will consume the same
-structured `FileDiff` / `Token` / `TokenClass` types directly and map them to `AttributedString`
-instead of calling `render`.
+`render.rs` (structured diff → HTML) stays in core because the Svelte host is its only
+consumer and the payload must stay byte-identical; the SwiftUI client consumes the structured
+layer directly — `highlight::tokenize_diff` (public precisely for this) hands it the same
+`Token` / `TokenClass` runs that `render.rs` collapses into `<span>`s, and
+`Design/DiffLineText.swift` maps them onto `AttributedString`. `IntraLineRange` uses `u32`
+indices to match `Token` and stay UniFFI-representable.
 
 ### Swift host (UniFFI)
 
@@ -136,6 +138,16 @@ only, one `#[uniffi::export]` per core function. Two decisions shape it:
 - **Blocking calls must leave the main actor.** Every core function shells out to `git` and
   waits. `GitBridge` marks each wrapper `@concurrent` (SE-0461); without it a `nonisolated
   async` function would inherit the caller's executor and freeze the UI.
+
+The exported surface tracks the ported flows and stays 1:1 with core, with one deliberate
+exception: `parse_diff` returns a purpose-built `DiffPayload` record rather than mirroring
+core's `ParsedDiff`, which also carries phase-1 HTML strings and side-by-side row pairs —
+`WebView` presentation the native client should not pay to marshal. The diff view keeps the
+Tauri client's two-phase shape (`get_diff` → `parse_diff` paints the structure immediately;
+`tokenize_diff`, blob-backed so multi-line constructs highlight correctly, recolours in place).
+Token `start`/`end` and `IntraLineRange` are code-point indices, which in Swift is the
+`AttributedString.unicodeScalars` view — never `characters`, whose grapheme clusters can span
+several code points.
 
 `scripts/build-rust.sh` builds the static lib and regenerates the bindings, and Xcode runs it as
 a pre-build phase — so the Swift API can never be stale relative to the Rust it calls.

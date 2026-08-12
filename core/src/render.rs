@@ -125,8 +125,8 @@ fn render_slice(
         emit_span(&chars[start..end], base_class, out);
         return;
     };
-    let overlap_start = start.max(intra.start);
-    let overlap_end = end.min(intra.start + intra.length);
+    let overlap_start = start.max(intra.start as usize);
+    let overlap_end = end.min((intra.start + intra.length) as usize);
     if overlap_start >= overlap_end {
         emit_span(&chars[start..end], base_class, out);
         return;

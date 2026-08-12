@@ -32,6 +32,12 @@ final class RepoStore {
     private(set) var isLoading = false
     private(set) var coreVersionText = ""
 
+    /// Bumped on every successful status load. Views that derive from the
+    /// working tree beyond `status` itself — the open diff, most notably —
+    /// key their reload on this, since a refresh can change a file's diff
+    /// without changing its row in the file list.
+    private(set) var statusEpoch = 0
+
     /// Set when the last operation failed; surfaced as a banner and cleared on
     /// the next successful load.
     var errorMessage: String?
@@ -91,6 +97,7 @@ final class RepoStore {
             let (newStatus, newCommits) = try await (statusResult, logResult)
             status = newStatus
             commits = newCommits
+            statusEpoch += 1
             errorMessage = nil
         } catch {
             errorMessage = error.displayMessage

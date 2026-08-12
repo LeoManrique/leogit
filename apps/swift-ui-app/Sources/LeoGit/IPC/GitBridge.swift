@@ -43,6 +43,29 @@ enum GitBridge {
     static func version() async -> String {
         coreVersion()
     }
+
+    /// Raw unified diff for one working-tree file: `HEAD` against the working
+    /// tree, staged and unstaged combined. Untracked files diff against
+    /// `/dev/null`, so a brand-new file still yields hunks.
+    @concurrent
+    static func rawDiff(of repoPath: String, for file: FileEntry) async throws -> String {
+        try getDiff(repoPath: repoPath, file: file)
+    }
+
+    /// Structure a raw diff into hunks of typed lines, or `nil` when there is
+    /// nothing textual to show.
+    @concurrent
+    static func parsedDiff(from raw: String) async -> DiffPayload? {
+        parseDiff(raw: raw)
+    }
+
+    /// Syntax tokens for a parsed diff — one entry per flattened line, empty
+    /// where the tokenizer has nothing to say. `source` lets the tokenizer
+    /// read complete blobs so multi-line constructs stay correct.
+    @concurrent
+    static func diffTokens(for fileDiff: FileDiff, source: BlobSource?) async -> [[Token]] {
+        tokenizeDiff(fileDiff: fileDiff, source: source)
+    }
 }
 
 extension GitError {

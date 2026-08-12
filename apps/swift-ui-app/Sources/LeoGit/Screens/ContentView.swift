@@ -18,8 +18,8 @@ struct ContentView: View {
 
     var body: some View {
         Group {
-            if store.isRepoOpen {
-                repositoryScreen
+            if let repoPath = store.repoPath {
+                repositoryScreen(repoPath: repoPath)
             } else {
                 WelcomeView(coreVersion: store.coreVersionText) { isChoosingFolder = true }
             }
@@ -36,7 +36,7 @@ struct ContentView: View {
         .fileDialogConfirmationLabel("Open Repository")
     }
 
-    private var repositoryScreen: some View {
+    private func repositoryScreen(repoPath: String) -> some View {
         VStack(spacing: 0) {
             if let errorMessage = store.errorMessage {
                 ErrorBanner(message: errorMessage)
@@ -54,7 +54,11 @@ struct ContentView: View {
 
             switch tab {
             case .changes:
-                ChangesView(files: store.status?.files ?? [])
+                ChangesView(
+                    repoPath: repoPath,
+                    files: store.status?.files ?? [],
+                    statusEpoch: store.statusEpoch
+                )
             case .history:
                 HistoryView(commits: store.commits)
             }

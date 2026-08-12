@@ -31,9 +31,9 @@ pub struct DiffLine {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct IntraLineRange {
     /// Zero-based character (code point) index into the line's `content`.
-    pub start: usize,
+    pub start: u32,
     /// Number of characters (code points) that differ starting at `start`.
-    pub length: usize,
+    pub length: u32,
 }
 
 /// Match GitHub Desktop's safeguard — above this length, the prefix/suffix
@@ -486,13 +486,18 @@ fn compute_intra_line_ranges(a: &str, b: &str) -> (Option<IntraLineRange>, Optio
     let a_len = a_chars.len() - prefix - suffix;
     let b_len = b_chars.len() - prefix - suffix;
 
+    // The call site skips lines longer than `MAX_INTRA_LINE_LEN`, so every
+    // index fits the `u32` the range shares with `highlight::Token`.
+    let index =
+        |n: usize| u32::try_from(n).expect("intra-line indices bounded by MAX_INTRA_LINE_LEN");
+
     let a_range = (a_len > 0).then_some(IntraLineRange {
-        start: prefix,
-        length: a_len,
+        start: index(prefix),
+        length: index(a_len),
     });
     let b_range = (b_len > 0).then_some(IntraLineRange {
-        start: prefix,
-        length: b_len,
+        start: index(prefix),
+        length: index(b_len),
     });
     (a_range, b_range)
 }

@@ -39,6 +39,10 @@ settings:
     # guard silently fails and every FFI symbol goes unresolved.
     SWIFT_INCLUDE_PATHS: $(SRCROOT)/ffi/generated
 
+    # The app declares no App Intents; skipping extraction silences the
+    # otherwise-unavoidable "Metadata extraction skipped" build warning.
+    LM_SKIP_METADATA_EXTRACTION: YES
+
 targets:
   LeoGit:
     type: application

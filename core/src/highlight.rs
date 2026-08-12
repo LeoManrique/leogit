@@ -117,7 +117,12 @@ pub fn highlight_diff(file_diff: FileDiff, source: Option<BlobSource>) -> Vec<St
 
 /// The tokenization behind `highlight_diff`: one `TokenLine` per flattened
 /// diff line, empty where the tokenizer has nothing to say.
-fn tokenize_diff(file_diff: &FileDiff, source: Option<&BlobSource>) -> Vec<TokenLine> {
+///
+/// Public because native clients consume tokens directly (mapping `TokenClass`
+/// to platform text attributes) instead of the HTML `highlight_diff` renders
+/// for the `WebView`.
+#[must_use]
+pub fn tokenize_diff(file_diff: &FileDiff, source: Option<&BlobSource>) -> Vec<TokenLine> {
     let path = if file_diff.new_path.is_empty() {
         file_diff.old_path.as_str()
     } else {

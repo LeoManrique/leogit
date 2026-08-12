@@ -69,8 +69,8 @@ Cargo.toml               # workspace root (target/ and Cargo.lock live here)
 
 The SwiftUI macOS client links the same `core/` via UniFFI, so both clients run identical
 logic — only the marshaling differs. It needs Xcode and `brew install xcodegen`; build it with
-`just mac-run`. It currently covers one read path (open a repo → changes + history) and is
-being ported flow by flow.
+`just mac-run`. It currently covers the read path (open a repo → changes with per-file
+syntax-highlighted diffs → history) and is being ported flow by flow.
 
 The pre-monorepo design is preserved on the `legacy/classic-design` branch (== tag `v0.1.32`);
 recall it with `git worktree add ../leogit-classic legacy/classic-design`.
