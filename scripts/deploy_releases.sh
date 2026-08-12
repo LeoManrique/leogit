@@ -31,10 +31,12 @@ error()   { echo -e "  ${RED}✗ $1${NC}"; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-APP_DIR="$PROJECT_ROOT/tauri-app"
+APP_DIR="$PROJECT_ROOT/apps/tauri-app"
 TAURI_CONF="$APP_DIR/src-tauri/tauri.conf.json"
 CARGO_TOML="$APP_DIR/src-tauri/Cargo.toml"
-CARGO_LOCK="$APP_DIR/src-tauri/Cargo.lock"
+# Cargo workspace: one lockfile and one target/ live at the repo root now.
+CARGO_LOCK="$PROJECT_ROOT/Cargo.lock"
+TARGET_DIR="$PROJECT_ROOT/target"
 PKG_JSON="$APP_DIR/package.json"
 cd "$PROJECT_ROOT"
 
@@ -129,7 +131,7 @@ else
   # Cargo.lock records the workspace package's own version too. Sync it now
   # (-w touches only workspace members, not dependency pins) so the build in
   # step 4 doesn't resync it and leave the tree dirty after the release.
-  (cd "$APP_DIR/src-tauri" && cargo update -w >/dev/null 2>&1) \
+  (cd "$PROJECT_ROOT" && cargo update -w >/dev/null 2>&1) \
     || warn "cargo update -w failed; Cargo.lock may be left stale"
   git add "$TAURI_CONF" "$PKG_JSON" "$CARGO_TOML" "$CARGO_LOCK"
   git commit -m "Bump version to $VERSION"
@@ -189,7 +191,7 @@ rm -f "$ARTIFACT_PATH"
 
 case "$TARGET_OS" in
   macOS)
-    APP_PATH="$APP_DIR/src-tauri/target/release/bundle/macos/leogit.app"
+    APP_PATH="$TARGET_DIR/release/bundle/macos/leogit.app"
     [ -d "$APP_PATH" ] || error "Bundle script did not produce $APP_PATH"
     # `ditto -c -k --keepParent` is the macOS-canonical way to zip an .app:
     # preserves resource forks, xattrs, and symlinks (plain `zip` strips them and
@@ -200,7 +202,7 @@ case "$TARGET_OS" in
     # Tauri names the NSIS installer leogit_<version>_<arch>-setup.exe under
     # bundle/nsis/. bundle.sh wiped stale installers first, but glob by version
     # anyway so we never grab a leftover from an earlier version's build.
-    SETUP=$(ls "$APP_DIR/src-tauri/target/release/bundle/nsis/"*_"$VERSION"_*-setup.exe 2>/dev/null | head -1 || true)
+    SETUP=$(ls "$TARGET_DIR/release/bundle/nsis/"*_"$VERSION"_*-setup.exe 2>/dev/null | head -1 || true)
     [ -n "$SETUP" ] && [ -f "$SETUP" ] || error "Bundle script did not produce an NSIS installer for $VERSION"
     cp "$SETUP" "$ARTIFACT_PATH"
     ;;
@@ -208,7 +210,7 @@ case "$TARGET_OS" in
     # Tauri writes the AppImage under bundle/appimage/ with its own version/arch
     # naming, so glob for it rather than reconstructing the filename. The AppImage
     # is already a single self-contained executable — just copy it into dist/.
-    APPIMAGE=$(ls "$APP_DIR/src-tauri/target/release/bundle/appimage/"*.AppImage 2>/dev/null | head -1 || true)
+    APPIMAGE=$(ls "$TARGET_DIR/release/bundle/appimage/"*.AppImage 2>/dev/null | head -1 || true)
     [ -n "$APPIMAGE" ] && [ -f "$APPIMAGE" ] || error "Bundle script did not produce an AppImage"
     cp "$APPIMAGE" "$ARTIFACT_PATH"
     chmod +x "$ARTIFACT_PATH"

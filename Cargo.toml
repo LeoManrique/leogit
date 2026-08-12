@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = [
+    "core",
+    "apps/tauri-app/src-tauri",
+    # "apps/swift-ui-app/ffi" joins in Phase 1 (SwiftUI + UniFFI).
+]
+
+# Shared lint policy (CLAUDE.md: clippy pedantic). Members opt in with
+# `[lints]\nworkspace = true`.
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }

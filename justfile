@@ -1,4 +1,4 @@
-app := "tauri-app"
+app := "apps/tauri-app"
 
 # `just` runs every recipe with `sh`, including on Windows. Git for Windows ships
 # it at C:\Program Files\Git\usr\bin; keep that directory on PATH so the POSIX
@@ -34,17 +34,18 @@ build:
 build-release:
     cd {{app}} && RUST_BACKTRACE=1 pnpm tauri build --release
 
-# Clean build artifacts
+# Clean build artifacts. The Cargo workspace target/ now lives at the repo root,
+# so `cargo clean` (run from root) wipes it for every crate at once.
 clean:
-    cd {{app}} && rm -rf dist target src-tauri/target node_modules pnpm-lock.yaml
-    cd {{app}} && cargo clean --manifest-path src-tauri/Cargo.toml
+    cd {{app}} && rm -rf dist node_modules pnpm-lock.yaml
+    cargo clean
 
-# Run type checking
+# Run type checking (frontend + the whole Rust workspace: core + host)
 check:
     cd {{app}} && pnpm check
-    cd {{app}} && cargo check --manifest-path src-tauri/Cargo.toml
+    cargo check --workspace
 
-# Format code with prettier and rustfmt
+# Format code with prettier and rustfmt (whole workspace)
 format:
     cd {{app}} && pnpm format
-    cd {{app}} && cargo fmt --manifest-path src-tauri/Cargo.toml
+    cargo fmt --all

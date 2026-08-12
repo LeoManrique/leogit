@@ -1,5 +1,6 @@
 {
     "rust-analyzer.linkedProjects": [
-        "tauri-app/src-tauri/Cargo.toml"
-    ]
+        "Cargo.toml"
+    ],
+    "git.ignoreLimitWarning": true
 }

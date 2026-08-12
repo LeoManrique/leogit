@@ -1,0 +1,44 @@
+[package]
+name = "leogit-core"
+version = "0.1.0"
+description = "Tauri-free core logic for LeoGit (git, diff, highlight, terminal, config, …)"
+authors = ["Leonardo Manrique"]
+edition = "2024"
+
+# This crate is deliberately UI-framework-agnostic: no `tauri`, no plugins. Both
+# the Tauri host (`apps/tauri-app`) and the SwiftUI/UniFFI host embed it in-process.
+# The only host seam is `events::EventSink` (streaming git progress + PTY output).
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tokio = { version = "1.52.3", features = ["full"] }
+toml = "1.1.2"
+directories = "6.0.0"
+reqwest = { version = "0.13.3", features = ["json"] }
+portable-pty = "0.9.0"
+syntect = { version = "5.3", default-features = false, features = ["parsing", "regex-fancy"] }
+two-face = "0.5"
+# Recoverable deletes for the Changes-tab "Discard" action: never-committed
+# files go to the OS trash rather than being unlinked outright.
+trash = "5"
+# Windows path normalisation: `fs::canonicalize` returns verbatim paths
+# (`\\?\C:\…`) that neither a UI nor PowerShell renders sensibly. See
+# `paths`. A no-op re-export of `std::fs` on macOS and Linux.
+dunce = "1.0.5"
+
+# Windows shell discovery and build-number lookup: Git for Windows records its
+# install root under HKLM\SOFTWARE\GitForWindows, and the OS build number
+# (needed to enable xterm.js reflow) lives in CurrentVersion. Both are registry
+# reads, so this is Windows-only.
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55.0"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lib]
+name = "leogit_core"
+path = "src/lib.rs"
+
+[lints]
+workspace = true

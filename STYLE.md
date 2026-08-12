@@ -2,7 +2,7 @@
 
 leogit's interface is a desktop Git client. The design language is the calm, restrained, system-feeling aesthetic that Apple ships in macOS Tahoe — Finder, Xcode, Settings — built on system blue, semantic surfaces, and the OS font stack. Two themes are supported, Light and Dark.
 
-> **Note on current state.** The shipped CSS is GitHub Primer–flavored (`#0d1117`, `#58a6ff`, `#3fb950`, etc.). This document describes the target the UI should migrate toward, not what's currently in [tauri-app/src/app.css](tauri-app/src/app.css). When a component is touched, prefer to move it in this direction rather than match neighboring code.
+> **Note on current state.** The shipped CSS is GitHub Primer–flavored (`#0d1117`, `#58a6ff`, `#3fb950`, etc.). This document describes the target the UI should migrate toward, not what's currently in [tauri-app/src/app.css](apps/tauri-app/src/app.css). When a component is touched, prefer to move it in this direction rather than match neighboring code.
 
 ## Intent
 
@@ -22,7 +22,7 @@ If a designer at Apple would not ship it in macOS Settings, Finder, or Xcode, it
 
 ## Color
 
-Each theme defines a parallel set of tokens. Components consume tokens — never hardcoded hex values — so the same component renders correctly in both themes. The current variable names (`--bg-primary`, `--text-primary`, `--status-green`, etc. in [app.css](tauri-app/src/app.css#L7-L53)) stay; only the values move toward the palette below.
+Each theme defines a parallel set of tokens. Components consume tokens — never hardcoded hex values — so the same component renders correctly in both themes. The current variable names (`--bg-primary`, `--text-primary`, `--status-green`, etc. in [app.css](apps/tauri-app/src/app.css#L7-L53)) stay; only the values move toward the palette below.
 
 ### Light
 
@@ -89,14 +89,14 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 - **Row height in dense lists:** ~22–24px effective. Vertical padding of 4px with 13px text matches macOS Finder list view. This applies to the file list and the branch list. The commit list is the deliberate exception — its rows are 50px because each commit stacks a summary line and an author/date line (see Commit list).
 - **Pane gutters:** 1px borders, never wider. The sidebar/content separator and tab-bar underline are both 1px `--border-inactive`. No 2px divider, no double rule.
 - **The window never scrolls.** `html`/`body`/`#app` are locked to the viewport (`height: 100%`, `overflow: hidden`, `overscroll-behavior: none`) so only inner panes scroll and a trackpad drag at an edge can't rubber-band the whole app. New top-level layout must fit the viewport, not extend it.
-- **Focus ring:** 2px ring at accent color with low alpha (~0.2, i.e. `--cursor-bg`). No glowing shadows, no `0 0 20px` halos. Current CSS uses `box-shadow: 0 0 0 3px var(--cursor-bg)` ([app.css:95](tauri-app/src/app.css#L95)) — that's the right shape; tighten to 2px and ensure alpha stays low in both themes.
+- **Focus ring:** 2px ring at accent color with low alpha (~0.2, i.e. `--cursor-bg`). No glowing shadows, no `0 0 20px` halos. Current CSS uses `box-shadow: 0 0 0 3px var(--cursor-bg)` ([app.css:95](apps/tauri-app/src/app.css#L95)) — that's the right shape; tighten to 2px and ensure alpha stays low in both themes.
 - **Shadows:** subtle. `0 4px 12px rgba(0,0,0,0.4)` for popovers/dropdowns/modals in dark; lower-alpha (`0 4px 12px rgba(0,0,0,0.12)`) in light. Never combine shadow + gradient.
 
 ## Component patterns
 
 ### App chrome / layout
 
-- **Two-column layout**: 320px sidebar on the left (file list + commit composer), flexible main content on the right ([MainLayout.svelte:490](tauri-app/src/lib/views/MainLayout.svelte#L490)).
+- **Two-column layout**: 320px sidebar on the left (file list + commit composer), flexible main content on the right ([MainLayout.svelte:490](apps/tauri-app/src/lib/views/MainLayout.svelte#L490)).
 - Sidebar background: `--bg-secondary`. Main content background: `--bg-primary`. The 1px right border on the sidebar is `--border-inactive`.
 - **Terminal pane** docks at the bottom of the main content, ~280px tall, separated by a 1px border. Its own background can stay slightly darker than `--bg-primary` (use `#000` or `--bg-primary` — never an arbitrary off-color).
 - The header strip at the top of the main content carries repo name, branch dropdown, and the quick-action button (Pull / Push, or Publish branch / Publish when the branch or repo isn't on a remote yet). Keep it ~36–40px tall.
@@ -178,7 +178,7 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 - Backdrop: `rgba(0,0,0,0.3)` light, `rgba(0,0,0,0.5)` dark. No backdrop blur (skip in the desktop app where opaque windows make the effect inert).
 - Close affordance: a tiny X in the header corner. `Escape` dismisses. Backdrop click dismisses for non-destructive dialogs (Settings, Help, Branches); destructive dialogs (Force push, Discard changes) require an explicit button.
 - One concern per modal. Prefer in-page sections (sidebar tabs, settings categories) over spawning a modal.
-- **Error modal** ([ErrorModal.svelte](tauri-app/src/lib/components/ErrorModal.svelte)): title in `--status-red` semibold, body in `--text-primary`, single `[OK]` button right-aligned. No icon-in-tinted-square next to the title.
+- **Error modal** ([ErrorModal.svelte](apps/tauri-app/src/lib/components/ErrorModal.svelte)): title in `--status-red` semibold, body in `--text-primary`, single `[OK]` button right-aligned. No icon-in-tinted-square next to the title.
 
 ### Branch picker
 

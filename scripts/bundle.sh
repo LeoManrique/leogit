@@ -2,11 +2,11 @@
 set -euo pipefail
 
 # Builds the LeoGit app bundle from the Tauri project for the host platform.
-#   macOS   → tauri-app/src-tauri/target/release/bundle/macos/leogit.app
-#   Linux   → tauri-app/src-tauri/target/release/bundle/appimage/*.AppImage
-#   Windows → tauri-app/src-tauri/target/release/bundle/nsis/*-setup.exe
+#   macOS   → target/release/bundle/macos/leogit.app
+#   Linux   → target/release/bundle/appimage/*.AppImage
+#   Windows → target/release/bundle/nsis/*-setup.exe
 # Usage:  scripts/bundle.sh
-#   Version is read from tauri-app/src-tauri/tauri.conf.json and baked into
+#   Version is read from apps/tauri-app/src-tauri/tauri.conf.json and baked into
 #   the bundle at build time. To release a new version, use
 #   deploy_releases.sh, which bumps the version (and commits it) before
 #   calling this script.
@@ -20,8 +20,11 @@ info()    { echo -e "${CYAN}$1${NC}"; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-APP_DIR="$PROJECT_ROOT/tauri-app"
+APP_DIR="$PROJECT_ROOT/apps/tauri-app"
 TAURI_CONF="$APP_DIR/src-tauri/tauri.conf.json"
+# The Cargo workspace relocates target/ to the repo root, so tauri drops bundle
+# artifacts here rather than under the app's src-tauri.
+TARGET_DIR="$PROJECT_ROOT/target"
 cd "$APP_DIR"
 
 # Host kernel drives the per-OS bundle target below. MSYS2/Git-Bash report
@@ -66,7 +69,7 @@ case "$OS_KERNEL" in
     # Tauri drops one <product>_<version>_<arch>-setup.exe into bundle/nsis per
     # build and never prunes old ones. Wipe the dir first so the only installer
     # left afterward is this build's — deploy_releases.sh globs it by version.
-    rm -rf "$APP_DIR/src-tauri/target/release/bundle/nsis"
+    rm -rf "$TARGET_DIR/release/bundle/nsis"
     ;;
   Linux)
     BUNDLE_TARGET=appimage
@@ -101,7 +104,7 @@ success "Built Release configuration"
 
 case "$OS_KERNEL" in
   Darwin)
-    APP_PATH="$APP_DIR/src-tauri/target/release/bundle/macos/leogit.app"
+    APP_PATH="$TARGET_DIR/release/bundle/macos/leogit.app"
     [ -d "$APP_PATH" ] || error "tauri build did not produce $APP_PATH"
 
     # Ad-hoc sign. No Developer ID — users bypass Gatekeeper via xattr -cr
@@ -120,13 +123,13 @@ case "$OS_KERNEL" in
   MINGW*|MSYS*|CYGWIN*)
     # NSIS produces a self-contained, unsigned setup.exe. The bundle/nsis dir was
     # wiped before the build, so the single *-setup.exe here is this version's.
-    SETUP=$(ls "$APP_DIR/src-tauri/target/release/bundle/nsis/"*-setup.exe 2>/dev/null | head -1 || true)
+    SETUP=$(ls "$TARGET_DIR/release/bundle/nsis/"*-setup.exe 2>/dev/null | head -1 || true)
     [ -n "$SETUP" ] && [ -f "$SETUP" ] || error "tauri build did not produce an NSIS installer"
     success "Built $SETUP"
     ;;
   *)
     # Linux AppImages are self-contained and need no signing.
-    APPIMAGE=$(ls "$APP_DIR/src-tauri/target/release/bundle/appimage/"*.AppImage 2>/dev/null | head -1 || true)
+    APPIMAGE=$(ls "$TARGET_DIR/release/bundle/appimage/"*.AppImage 2>/dev/null | head -1 || true)
     [ -n "$APPIMAGE" ] && [ -f "$APPIMAGE" ] || error "tauri build did not produce an AppImage"
     success "Built $APPIMAGE"
     ;;

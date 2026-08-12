@@ -19,7 +19,7 @@ A calm desktop Git client built with Tauri 2, Rust, and Svelte 5. Designed to ge
 - `git` and (optionally) `gh` in `$PATH`.
 - macOS 10.13+, Ubuntu 20.04+, or Windows 10+.
 - Node.js 18+ and `pnpm` for development.
-- Rust 1.95+ for building from source.
+- Rust 1.85+ for building from source (the workspace is on the 2024 edition).
 
 ## Install
 
@@ -36,10 +36,10 @@ The installer also adds a `leogit [dir]` shell command to your shell config (zsh
 ## Quick start
 
 ```bash
-just install     # pnpm install in tauri-app
+just install     # pnpm install in apps/tauri-app
 just dev         # launch dev build with hot reload
 just build       # produce a debug bundle
-just check       # type-check (svelte-check + cargo check)
+just check       # type-check (svelte-check + cargo check --workspace)
 ```
 
 (Or run the underlying `pnpm tauri …` commands directly — see `justfile`.)
@@ -50,11 +50,22 @@ On first run the app scans the configured paths (default: `~/Dev`, `~/dev`, `~/c
 
 ## Repository layout
 
+A Cargo workspace: all logic lives once in `core/`, and each client is a thin shell over it.
+
 ```
-tauri-app/
-├── src/           # Svelte 5 frontend (TypeScript, runes)
-└── src-tauri/     # Rust backend (Tauri commands)
+core/                    # leogit-core — Tauri-free Rust logic (git, diff, highlight,
+                         #   terminal, config, gh, ai, …). The one host seam is
+                         #   events::EventSink (streaming git progress + PTY output).
+apps/
+└── tauri-app/
+    ├── src/             # Svelte 5 frontend (TypeScript, runes)
+    └── src-tauri/       # Tauri host: one #[tauri::command] shim per core fn
+Cargo.toml               # workspace root (target/ and Cargo.lock live here)
 ```
+
+The SwiftUI macOS client (`apps/swift-ui-app`, planned) links the same `core/` via UniFFI.
+The pre-monorepo design is preserved on the `legacy/classic-design` branch (== tag `v0.1.32`);
+recall it with `git worktree add ../leogit-classic legacy/classic-design`.
 
 See [DESIGN.md](DESIGN.md) for user-facing features and flows, [TECHNICAL.md](TECHNICAL.md) for architecture, [STYLE.md](STYLE.md) for the visual design language, [FRONTEND.md](FRONTEND.md) for the frontend contract shared by the Tauri and (planned) SwiftUI clients, and [ROADMAP.md](ROADMAP.md) for what's next.
 
