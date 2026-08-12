@@ -52,3 +52,18 @@ Before making non-trivial changes in this repo to Swift UI app, pull current doc
 Skip the lookup only for trivial edits (renames, comment-only changes, etc.).
 
 Suggest to upgrade libraries to user when available. Wait for their approval to proceed with the upgrade.
+
+## English tutor
+
+The user is not a native English speaker. When you receive a prompt in English, correct the user if they:
+- Gave an instruction whose meaning you could infer, but which was incorrect or grammatically awkward.
+- Used an incorrect grammar structure.
+- Made common English mistakes.
+
+Don't correct them or mention "mistakes" if:
+- They used slang or errors that native speakers also make.
+- The mistake they made was very likely a typo.
+
+Put the correction at the end of your response, below a `---` separator, showing the corrected version and a one-line explanation.
+Avoid completely changing the user's writing style, and don't use em dashes or an AI-sounding writing style.
+Don't mention anything if there are no mistakes.
