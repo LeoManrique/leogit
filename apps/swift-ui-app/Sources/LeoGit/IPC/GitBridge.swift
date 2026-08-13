@@ -14,6 +14,19 @@ import Foundation
 /// between the bridge and the bindings it wraps — the generated Swift is compiled
 /// into this same module, so both live in one namespace.
 enum GitBridge {
+    // MARK: - Bootstrap
+
+    /// Replace this process's `PATH` with the user's interactive login
+    /// `PATH`, so spawned tools (`git`, `gh`, the `claude` CLI) resolve when
+    /// the app is launched from Finder rather than a terminal. Must be the
+    /// app's first Rust call, made in `App.init` before any other thread
+    /// could be reading the environment — the same contract as the Tauri
+    /// host, which calls it at the top of `main`. Deliberately synchronous
+    /// for exactly that reason.
+    static func bootstrapPathEnvironment() {
+        fixPathEnv()
+    }
+
     /// Resolve any path inside a repository to that repository's root.
     @concurrent
     static func repoRoot(of path: String) async throws -> String {
@@ -217,6 +230,42 @@ enum GitBridge {
             forceWithLease: forceWithLease,
             listener: ProgressRelay(onProgress)
         )
+    }
+
+    // MARK: - AI commit message
+
+    /// The combined unified diff of exactly `files` — the input Generate
+    /// hands to the AI provider. An empty selection yields an empty string,
+    /// which `generateMessage` then rejects as "no files selected".
+    @concurrent
+    static func selectedDiff(in repoPath: String, files: [FileEntry]) async throws -> String {
+        try getSelectedDiff(repoPath: repoPath, files: files)
+    }
+
+    /// The AI settings from the shared `~/.config/leogit/config.toml`, via
+    /// the same config→provider mapping the Tauri client performs before
+    /// every generate call. Read fresh each time, never cached, so an edit
+    /// to the file — or a save from the Tauri client — takes effect on the
+    /// next use.
+    @concurrent
+    static func aiConfig() async throws -> AiProviderConfig {
+        try loadAiConfig()
+    }
+
+    /// Persist the provider picker's choice (`"claude"` | `"ollama"`) into
+    /// the shared config file, leaving every other setting untouched.
+    @concurrent
+    static func setAIProvider(_ provider: String) async throws {
+        try saveAiProvider(provider: provider)
+    }
+
+    /// Generate a commit message from `diff` via `config.provider` — the
+    /// local `claude` CLI or a self-hosted Ollama instance. Plain
+    /// request/response bounded by core's 120 s timeout; there is no
+    /// streaming and no cancel, matching the Tauri client.
+    @concurrent
+    static func generateMessage(diff: String, config: AiProviderConfig) async throws -> CommitMessage {
+        try await generateCommitMessage(diff: diff, provider: config.provider, config: config)
     }
 }
 

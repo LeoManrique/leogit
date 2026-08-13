@@ -4,7 +4,10 @@
 //! 1:1 delegation to `leogit-core`, mirroring what
 //! `apps/tauri-app/src-tauri/src/shims/` does for the Tauri host. The two clients
 //! therefore observe byte-identical behaviour; only the marshaling differs (JSON
-//! over the `WebView` bridge vs. `UniFFI`'s binary encoding).
+//! over the `WebView` bridge vs. `UniFFI`'s binary encoding). The one deliberate
+//! exception: glue the Tauri client keeps in its TypeScript layer (the config →
+//! [`AiProviderConfig`] mapping) lives here in Rust instead, still one
+//! implementation per behaviour — just owned by the bridge rather than the UI.
 //!
 //! # Type sharing
 //!
@@ -34,10 +37,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use leogit_core::events::{CoreEvent, EventSink};
-use leogit_core::{diff, git, highlight};
+use leogit_core::{ai, config, diff, git, highlight, process};
 
 // Re-exported so Swift sees the real core types. Names are used by the
 // `#[uniffi::remote]` declarations below.
+pub use leogit_core::ai::{AiProviderConfig, CommitMessage};
 pub use leogit_core::diff::{DiffLine, FileDiff, Hunk, HunkHeader, IntraLineRange, LineType};
 pub use leogit_core::git::{
     BranchInfo, CommitInfo, FileEntry, FileStatus, LogOptions, MergeResult, RepoStatus,
@@ -289,6 +293,21 @@ impl From<diff::ParsedDiff> for DiffPayload {
             deletions: parsed.deletions,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Exported functions — host bootstrap
+// ---------------------------------------------------------------------------
+
+/// Replace this process's `PATH` with the user's interactive login `PATH`,
+/// so spawned tools (`git`, `gh`, the `claude` CLI) resolve when the app is
+/// launched from Finder rather than a terminal. Must be the host's first
+/// call, before any other thread can be reading the environment — the Swift
+/// app runs it in `App.init`, exactly as the Tauri host runs it at the top
+/// of `main`.
+#[uniffi::export]
+pub fn fix_path_env() {
+    process::fix_path_env();
 }
 
 // ---------------------------------------------------------------------------
@@ -701,6 +720,140 @@ pub async fn push(
     )
     .await
     .map_err(GitError::from)
+}
+
+// ---------------------------------------------------------------------------
+// Exported functions — AI commit message
+// ---------------------------------------------------------------------------
+//
+// The same two-step pipeline as the Tauri composer: gather the checked files'
+// combined diff (`get_selected_diff`), then hand that one string to the
+// provider (`generate_commit_message`). Which provider — and its model and
+// endpoint — comes from the shared `~/.config/leogit/config.toml`, so both
+// clients honour one setting. The Tauri client maps that config into an
+// `AiProviderConfig` in TypeScript before every call; `load_ai_config` is
+// that same mapping owned here in Rust instead, where core drift becomes a
+// compile error rather than a silent field mismatch.
+//
+// `check_provider_available` stays unexported: it has no callers in either
+// client (the Tauri API wrapper for it is dead code).
+
+/// Mirrors [`leogit_core::ai::CommitMessage`] — the provider's already-split
+/// suggestion: `title` fills the summary field, `description` the body.
+#[uniffi::remote(Record)]
+pub struct CommitMessage {
+    pub title: String,
+    pub description: String,
+}
+
+/// Mirrors [`leogit_core::ai::AiProviderConfig`].
+///
+/// `provider` is `"claude"` or `"ollama"`; core dispatches on the standalone
+/// `provider` argument of [`generate_commit_message`] and treats this record
+/// as provider knobs only (`model`, `base_url`; `api_key` is accepted for
+/// wire-compatibility but read by neither provider). `None` fields fall back
+/// inside core: model `"sonnet"` (claude) / `"tavernari/git-commit-message:
+/// latest"` (ollama), base URL `http://localhost:11434`.
+#[uniffi::remote(Record)]
+pub struct AiProviderConfig {
+    pub provider: String,
+    pub model: Option<String>,
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
+}
+
+/// The config→provider mapping the Tauri client performs in TypeScript
+/// (`CommitMessage.svelte`) before every generate call, ported verbatim so
+/// the two clients can never drift on which config field feeds which knob.
+fn ai_provider_config(cfg: config::Config) -> AiProviderConfig {
+    AiProviderConfig {
+        // Anything unrecognized falls back to claude, matching the
+        // frontend's `=== 'ollama' ? 'ollama' : 'claude'` guard.
+        provider: if cfg.ai_provider == "ollama" {
+            "ollama".to_string()
+        } else {
+            "claude".to_string()
+        },
+        model: cfg.ai_model,
+        api_key: cfg.ai_api_key,
+        base_url: Some(cfg.ollama_server_url),
+    }
+}
+
+/// The AI settings from the shared config file, ready to pass to
+/// [`generate_commit_message`]. Loaded fresh before every generate — never
+/// cached — so an edit to `config.toml` (or a save from the Tauri client)
+/// takes effect on the next click.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when the config file exists but cannot be read or
+/// parsed. A missing file is not an error — defaults are written and used.
+#[uniffi::export]
+pub fn load_ai_config() -> Result<AiProviderConfig, GitError> {
+    config::load_config()
+        .map(ai_provider_config)
+        .map_err(GitError::from)
+}
+
+/// Persist the composer's provider choice (`"claude"` | `"ollama"`) into the
+/// shared config file — a read-modify-write of the whole `Config`, so every
+/// other setting survives untouched. Validated before touching disk: an
+/// unknown value can never be persisted.
+///
+/// # Errors
+///
+/// Returns [`GitError`] for an unknown provider name, or when the config
+/// file cannot be read or written.
+#[uniffi::export]
+pub fn save_ai_provider(provider: String) -> Result<(), GitError> {
+    if !matches!(provider.as_str(), "claude" | "ollama") {
+        return Err(GitError::Failed {
+            message: format!("Unknown AI provider: {provider}"),
+        });
+    }
+    let mut cfg = config::load_config().map_err(GitError::from)?;
+    cfg.ai_provider = provider;
+    config::save_config(cfg).map_err(GitError::from)
+}
+
+/// The combined unified diff of exactly `files` — each file diffed
+/// individually (untracked files against `/dev/null`) and concatenated, the
+/// string `generate_commit_message` takes as its input. An empty selection
+/// yields an empty string, which generate then rejects as "no files
+/// selected".
+///
+/// # Errors
+///
+/// Returns [`GitError`] when `git diff` itself fails; a file with no textual
+/// changes simply contributes nothing.
+#[uniffi::export]
+pub fn get_selected_diff(repo_path: String, files: Vec<FileEntry>) -> Result<String, GitError> {
+    git::get_selected_diff(repo_path, files).map_err(GitError::from)
+}
+
+/// Generate a commit message from `diff` via the chosen provider: the local
+/// `claude` CLI (spawned from `PATH` — hence [`fix_path_env`]) or a
+/// self-hosted Ollama instance. Plain request/response with a 120 s timeout
+/// inside core; there is no streaming and no cancel, matching the Tauri
+/// client. Async over tokio machinery (`tokio::process`, reqwest), hence
+/// `async_runtime = "tokio"` like the sync exports above.
+///
+/// # Errors
+///
+/// Returns [`GitError`] with core's own text: empty diff, unknown provider,
+/// oversized diff, spawn/timeout/HTTP failures, or a response no commit
+/// message could be extracted from. Provider API errors surface as errors,
+/// never as the message — pinned by core's envelope tests.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn generate_commit_message(
+    diff: String,
+    provider: String,
+    config: AiProviderConfig,
+) -> Result<CommitMessage, GitError> {
+    ai::generate_commit_message(diff, provider, config)
+        .await
+        .map_err(GitError::from)
 }
 
 #[cfg(test)]
@@ -1191,5 +1344,120 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&bare);
         let _ = std::fs::remove_dir_all(&clone_b);
+    }
+
+    /// The bridge's config→provider mapping — the port of what the Tauri
+    /// client does in TypeScript before every generate call. Pinned so the
+    /// two clients can't drift on which config field feeds which knob.
+    #[test]
+    fn ai_config_mapping_matches_the_tauri_client() {
+        let defaults = ai_provider_config(config::Config::default());
+        assert_eq!(defaults.provider, "claude");
+        assert_eq!(defaults.model, None);
+        assert_eq!(
+            defaults.base_url.as_deref(),
+            Some("http://localhost:11434"),
+            "the ollama URL always travels as base_url, like the frontend"
+        );
+
+        let ollama = ai_provider_config(config::Config {
+            ai_provider: "ollama".to_string(),
+            ai_model: Some("llama3".to_string()),
+            ..config::Config::default()
+        });
+        assert_eq!(ollama.provider, "ollama");
+        assert_eq!(ollama.model.as_deref(), Some("llama3"));
+
+        let unknown = ai_provider_config(config::Config {
+            ai_provider: "copilot".to_string(),
+            ..config::Config::default()
+        });
+        assert_eq!(
+            unknown.provider, "claude",
+            "unrecognized providers fall back to claude"
+        );
+    }
+
+    /// `get_selected_diff` exactly as the composer's Generate drives it: the
+    /// checked files' combined diff — and only theirs — with an empty
+    /// selection yielding the empty string core's generate then rejects.
+    #[test]
+    fn selected_diff_combines_only_the_given_files() {
+        let (dir, repo, _default) = seeded_repo("seldiff");
+        std::fs::write(dir.join("base.txt"), "changed\n").expect("write");
+        std::fs::write(dir.join("fresh.txt"), "new\n").expect("write");
+
+        let status = get_status(repo.clone()).expect("status");
+        assert_eq!(status.files.len(), 2, "one modified + one untracked");
+
+        let all = get_selected_diff(repo.clone(), status.files.clone()).expect("diff");
+        assert!(
+            all.contains("base.txt") && all.contains("fresh.txt"),
+            "both checked files contribute hunks"
+        );
+
+        let only_fresh: Vec<FileEntry> = status
+            .files
+            .into_iter()
+            .filter(|f| f.path == "fresh.txt")
+            .collect();
+        let single = get_selected_diff(repo.clone(), only_fresh).expect("diff");
+        assert!(
+            single.contains("fresh.txt") && !single.contains("base.txt"),
+            "unchecked files stay out of the AI's input"
+        );
+
+        assert_eq!(get_selected_diff(repo, Vec::new()).expect("diff"), "");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn bare_ai_config(provider: &str) -> AiProviderConfig {
+        AiProviderConfig {
+            provider: provider.to_string(),
+            model: None,
+            api_key: None,
+            base_url: None,
+        }
+    }
+
+    /// The generate export's own guards — the paths that need no AI backend
+    /// installed. Also proves the async export is awaitable outside the FFI
+    /// (the `async_runtime` wrapper only applies to FFI-driven calls).
+    #[tokio::test]
+    async fn generate_commit_message_rejects_bad_input_without_a_backend() {
+        let empty = generate_commit_message(
+            "   ".to_string(),
+            "claude".to_string(),
+            bare_ai_config("claude"),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(empty, GitError::Failed { ref message } if message.contains("no files selected")),
+            "a whitespace-only diff is refused before any provider runs"
+        );
+
+        let unknown = generate_commit_message(
+            "diff --git a/x b/x".to_string(),
+            "copilot".to_string(),
+            bare_ai_config("copilot"),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(unknown, GitError::Failed { ref message } if message.contains("Unknown AI provider"))
+        );
+    }
+
+    /// `save_ai_provider` validates before touching the config file, so a bad
+    /// value can never be persisted — which is also what keeps this test away
+    /// from the user's real `config.toml`.
+    #[test]
+    fn save_ai_provider_rejects_unknown_providers() {
+        let err = save_ai_provider("copilot".to_string()).unwrap_err();
+        assert!(
+            matches!(err, GitError::Failed { ref message } if message.contains("Unknown AI provider"))
+        );
     }
 }

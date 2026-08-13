@@ -70,7 +70,8 @@ Cargo.toml               # workspace root (target/ and Cargo.lock live here)
 The SwiftUI macOS client links the same `core/` via UniFFI, so both clients run identical
 logic — only the marshaling differs. It needs Xcode and `brew install xcodegen`; build it with
 `just mac-run`. It currently covers open a repo → changes with per-file syntax-highlighted
-diffs → commit (checkbox file list + message composer) → branches (switch / create / delete
+diffs → commit (checkbox file list + message composer, AI-generated messages via the claude
+CLI or Ollama sharing the Tauri client's config) → branches (switch / create / delete
 and merge or squash-merge, with conflict + abort handling) → sync (pull / push / fetch with
 live transfer progress, publish-branch first push, force-push-with-lease) → history, and is
 being ported flow by flow.

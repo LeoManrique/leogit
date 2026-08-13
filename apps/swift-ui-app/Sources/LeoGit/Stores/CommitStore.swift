@@ -24,8 +24,15 @@ final class CommitStore {
 
     private(set) var isCommitting = false
 
-    /// Core's own failure text from the last attempt; cleared on the next
-    /// attempt, on success, and on `reset()`.
+    private(set) var isGenerating = false
+
+    /// AI provider driving Generate — mirrors `ai_provider` in the shared
+    /// config file. `"claude"` until `loadAIProvider` reads the real value.
+    private(set) var aiProvider = "claude"
+
+    /// Failure text from the last commit, generate, or provider-save
+    /// attempt — one shared slot, like the Tauri composer's inline error.
+    /// Cleared when the next attempt starts, on success, and on `reset()`.
     private(set) var errorMessage: String?
 
     /// Whether the parent repository can stage this entry at all. A dirty
@@ -76,7 +83,13 @@ final class CommitStore {
     /// own text. Returns whether the commit landed.
     func commit(repoPath: String, files: [FileEntry]) async -> Bool {
         let trimmedSummary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedSummary.isEmpty, !files.isEmpty, !isCommitting else { return false }
+        // `!isGenerating`: committing mid-generation would clear both drafts
+        // and then have the late AI result overwrite the empty composer. The
+        // Tauri client leaves that race open; the busy-guard closes it, like
+        // BranchStore's double-fire guard.
+        guard !trimmedSummary.isEmpty, !files.isEmpty, !isCommitting, !isGenerating else {
+            return false
+        }
         isCommitting = true
         errorMessage = nil
         defer { isCommitting = false }
@@ -93,6 +106,68 @@ final class CommitStore {
         } catch {
             errorMessage = error.displayMessage
             return false
+        }
+    }
+
+    // MARK: AI generation
+
+    /// Read the persisted provider so the picker shows the real value.
+    /// Failure keeps the default — the picker still works, and generating
+    /// surfaces any real config problem itself.
+    func loadAIProvider() async {
+        if let config = try? await GitBridge.aiConfig() {
+            aiProvider = config.provider
+        }
+    }
+
+    /// Persist a provider change. On failure the picker reverts and the
+    /// error shows inline — unlike the Tauri client, which leaves the
+    /// optimistic value on screen; reverting keeps the picker truthful
+    /// about what Generate will actually use.
+    func setAIProvider(_ provider: String) async {
+        guard provider != aiProvider else { return }
+        let previous = aiProvider
+        aiProvider = provider
+        do {
+            try await GitBridge.setAIProvider(provider)
+        } catch {
+            aiProvider = previous
+            errorMessage = "Failed to save provider: \(error.displayMessage)"
+        }
+    }
+
+    /// Generate a commit message from the checked files' combined diff and
+    /// fill both drafts with the result — overwriting whatever was typed,
+    /// exactly like the Tauri composer. Failures land in the shared
+    /// `errorMessage` slot with the same wording the Tauri client uses.
+    func generate(repoPath: String, files: [FileEntry]) async {
+        guard !isGenerating, !isCommitting else { return }
+        guard !files.isEmpty else {
+            errorMessage = "No files selected"
+            return
+        }
+        isGenerating = true
+        errorMessage = nil
+        defer { isGenerating = false }
+
+        do {
+            let diff = try await GitBridge.selectedDiff(in: repoPath, files: files)
+            // A fresh config read per generate, degrading to bare defaults
+            // when it fails — the Tauri client wraps its load in the same
+            // swallow-everything catch. The picker's value is the provider
+            // either way, so what the user sees is what runs.
+            let loaded = try? await GitBridge.aiConfig()
+            let config = AiProviderConfig(
+                provider: aiProvider,
+                model: loaded?.model,
+                apiKey: loaded?.apiKey,
+                baseUrl: loaded?.baseUrl
+            )
+            let message = try await GitBridge.generateMessage(diff: diff, config: config)
+            summary = message.title
+            details = message.description
+        } catch {
+            errorMessage = "Generate failed: \(error.displayMessage)"
         }
     }
 }

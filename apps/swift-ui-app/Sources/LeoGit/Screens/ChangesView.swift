@@ -60,6 +60,11 @@ struct ChangesView: View {
             // draft message or checkbox opt-outs.
             commitStore.reset()
         }
+        .task {
+            // The provider picker mirrors the shared config file; one read
+            // per appearance is enough (it's machine-global, not per-repo).
+            await commitStore.loadAIProvider()
+        }
         .confirmationDialog(
             "Commit Embedded Repositories?",
             isPresented: $isConfirmingEmbedded
@@ -82,7 +87,8 @@ struct ChangesView: View {
             CommitComposer(
                 store: commitStore,
                 includedCount: includedFiles.count,
-                onSubmit: submit
+                onSubmit: submit,
+                onGenerate: generate
             )
         }
     }
@@ -207,6 +213,12 @@ struct ChangesView: View {
             if await commitStore.commit(repoPath: repoPath, files: files) {
                 await onCommitted()
             }
+        }
+    }
+
+    private func generate() {
+        Task {
+            await commitStore.generate(repoPath: repoPath, files: includedFiles)
         }
     }
 

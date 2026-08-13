@@ -184,6 +184,26 @@ by generation; there is no completion event — an operation is over when its `a
 the native client reads ahead/behind from `get_status` and has no repo picker, clone, or
 gh-publish UI yet.
 
+AI commit-message generation crosses as the Tauri composer's own two-step pipeline —
+`get_selected_diff` (the checked files' combined diff) feeding `generate_commit_message`,
+which is async for a different reason than sync: no `spawn_blocking`, but core drives the
+`claude` CLI through `tokio::process` and Ollama through async `reqwest`, so it carries the
+same `async_runtime = "tokio"`. No `EventSink`, no streaming, no cancel — plain
+request/response returning a pre-split `CommitMessage { title, description }` (mirrored 1:1,
+as is `AiProviderConfig`). The one mapping the Tauri client keeps in TypeScript — assembling
+`AiProviderConfig` from the shared `config.toml` (`ai_provider` normalised to
+claude/ollama, `ai_model`, `ai_api_key`, `ollama_server_url` as `base_url`) — lives in the
+bridge as `load_ai_config`, where core drift is a compile error; `save_ai_provider` persists
+the composer's provider picker with a validated read-modify-write of the whole `Config`, so
+no other setting is clobbered and no settings UI is needed natively. Core's
+`check_provider_available` stays unexported — its Tauri API wrapper is dead code, and the
+bridge doesn't carry dead surface. Because core spawns `claude` from `PATH`, the
+Finder-launch environment matters for the first time: the Tauri host's hand-rolled PATH
+repair moved into core as `process::fix_path_env` (spawn the login shell once, replace
+`PATH`; the edition-2024 `unsafe set_var` contract — call before any other thread exists —
+travels with it), the Tauri `main` now calls it from there, and the bridge exports it for
+`LeoGitApp.init` to run as the process's first Rust call.
+
 `scripts/build-rust.sh` builds the static lib and regenerates the bindings, and Xcode runs it as
 a pre-build phase — so the Swift API can never be stale relative to the Rust it calls.
 `ffi/generated/` is gitignored for the same reason. Three things there are load-bearing and

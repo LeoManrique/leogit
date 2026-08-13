@@ -6,42 +6,11 @@ use leogit_lib::shims::{
     ai, config, diff, gh, git, highlight, launch, os, shell, terminal, update,
 };
 
-// macOS/Linux apps launched from Finder/.desktop inherit a minimal PATH
-// (e.g. /usr/bin:/bin:/usr/sbin:/sbin) and miss user-installed binaries like
-// `claude`, `gh`, or homebrew tools. Resolve the user's interactive login PATH
-// by spawning their shell once at startup, mirroring what VS Code's `fix-path`
-// does. No-op on Windows.
-#[cfg(not(target_os = "windows"))]
-fn fix_path_env() {
-    let shell = match std::env::var("SHELL") {
-        Ok(s) if !s.is_empty() => s,
-        _ => return,
-    };
-    let output = std::process::Command::new(&shell)
-        .arg("-ilc")
-        .arg("echo -n \"$PATH\"")
-        .output();
-    if let Ok(out) = output
-        && out.status.success()
-    {
-        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !path.is_empty() {
-            // SAFETY: this runs at the very top of `main`, before the Tauri
-            // runtime or any worker thread is spawned, so nothing else can be
-            // reading the environment concurrently. Edition 2024 marks
-            // `set_var` unsafe precisely to guard against that data race.
-            unsafe {
-                std::env::set_var("PATH", path);
-            }
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn fix_path_env() {}
-
 fn main() {
-    fix_path_env();
+    // GUI launches inherit a minimal PATH that misses user-installed tools
+    // (`claude`, `gh`, homebrew). Repair it before anything else can be
+    // reading the environment — see core's `fix_path_env` contract.
+    leogit_core::process::fix_path_env();
 
     // Resolve a cold-start `leogit <dir>` path before the window exists; the
     // frontend claims it on mount via `take_pending_launch_target`. Warm starts

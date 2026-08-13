@@ -20,7 +20,7 @@ Don't implement too multiple features at once, make the feature implementation o
 
 ## Clean, Mantainable, and Readable Code
 
-Follow DRY and Single Responsability principles to make our code clean, mantainable, and readable code. Also give files and folders a meaningful name.
+Follow DRY and Single Responsability principles to make our code clean, mantainable, and readable code. Try re using components that are used by multiple features when possible. Also give files and folders a meaningful name.
 
 Run clippy pedantic to see if rust recommendations are being followed.
 

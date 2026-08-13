@@ -12,7 +12,9 @@
 //!
 //! This module also owns [`run_timed`], the bounded subprocess runner every
 //! network-touching git/gh command goes through so an offline or flaky
-//! connection can never wedge a worker thread indefinitely.
+//! connection can never wedge a worker thread indefinitely — and
+//! [`fix_path_env`], which repairs the minimal `PATH` a GUI launch inherits
+//! so user-installed subprocesses can be found at all.
 
 use std::io::Read;
 use std::process::{Command, Output, Stdio};
@@ -42,6 +44,50 @@ pub fn hide_console_async(cmd: &mut tokio::process::Command) -> &mut tokio::proc
     }
     cmd
 }
+
+/// Replace this process's `PATH` with the user's interactive login `PATH`.
+///
+/// macOS/Linux apps launched from Finder or a `.desktop` entry inherit a
+/// minimal `PATH` (e.g. `/usr/bin:/bin:/usr/sbin:/sbin`) and miss
+/// user-installed binaries like `claude`, `gh`, or homebrew tools. Spawning
+/// the user's shell once resolves the `PATH` their terminal would have,
+/// mirroring what VS Code's `fix-path` does. No-op on Windows, where GUI
+/// launches inherit the full user environment already.
+///
+/// Call this once at the very top of the host's startup — before the UI
+/// framework, the tokio runtime, or any worker thread exists — because it
+/// writes the process environment, which is only sound while nothing else
+/// can be reading it concurrently. Both hosts do exactly that: the Tauri app
+/// at the top of `main`, the `SwiftUI` app in its `App.init`.
+#[cfg(not(target_os = "windows"))]
+pub fn fix_path_env() {
+    let shell = match std::env::var("SHELL") {
+        Ok(s) if !s.is_empty() => s,
+        _ => return,
+    };
+    let output = Command::new(&shell)
+        .arg("-ilc")
+        .arg("echo -n \"$PATH\"")
+        .output();
+    if let Ok(out) = output
+        && out.status.success()
+    {
+        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !path.is_empty() {
+            // SAFETY: per this function's contract, callers invoke it before
+            // any other thread exists, so nothing else can be reading the
+            // environment concurrently. Edition 2024 marks `set_var` unsafe
+            // precisely to guard against that data race.
+            unsafe {
+                std::env::set_var("PATH", path);
+            }
+        }
+    }
+}
+
+/// No-op on Windows — GUI launches inherit the full user environment.
+#[cfg(target_os = "windows")]
+pub fn fix_path_env() {}
 
 /// How often the timeout loop wakes to check whether the child has exited.
 /// Small enough to react promptly, large enough not to busy-spin.
