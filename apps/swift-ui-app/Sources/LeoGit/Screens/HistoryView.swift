@@ -17,6 +17,9 @@ struct HistoryView: View {
                 systemImage: "clock",
                 description: Text("This repository has no commit history yet.")
             )
+            // Claim the full space like the Table it replaces, so the tab
+            // picker stays pinned under the toolbar (see ChangesView).
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             Table(commits, selection: $selection) {
                 TableColumn("Summary") { commit in

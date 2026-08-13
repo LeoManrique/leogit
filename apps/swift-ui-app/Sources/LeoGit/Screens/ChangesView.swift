@@ -34,6 +34,11 @@ struct ChangesView: View {
                     systemImage: "checkmark.circle",
                     description: Text("The working tree is clean.")
                 )
+                // Must claim the full space like the split view it replaces:
+                // left to its own (small) ideal size, the surrounding VStack
+                // would center vertically, shoving the tab picker into the
+                // middle of the window and re-sizing it after a commit.
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 HSplitView {
                     changesPane
