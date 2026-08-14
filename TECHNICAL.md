@@ -14,7 +14,8 @@ Functional behavior lives in [DESIGN.md](DESIGN.md). Visual design language live
 | Frontend bundler | Vite 8 (rolldown) | `terser` for minified release builds; `@xterm/*` split into its own chunk (rolldown `codeSplitting` group) to keep every chunk under the 500 kB warning |
 | Type system | TypeScript 7 strict (native `tsc`) | `typescript` is npm-aliased to `@typescript/typescript6` — svelte-check/editors need the JS API until TS 7.1 ships the programmatic API. `$lib/*` alias points at `src/lib/*` |
 | Diff syntax | syntect 5.3 + two-face 0.5 (Rust) | Class-based output; theme colours live in `--syn-*` CSS variables |
-| Terminal UI | xterm.js 6 + FitAddon + WebLinksAddon | Black background, 12 px monospace |
+| Terminal UI (Tauri) | xterm.js 6 + FitAddon + WebLinksAddon | Black background, 12 px monospace |
+| Terminal UI (native) | SwiftTerm 1.18 (SPM) | Same black 12 px monospace; fed by the core PTY over a UniFFI callback |
 | PTY | `portable-pty` 0.9 | Spawns user `$SHELL`, falls back to `/bin/zsh` / `cmd.exe` |
 | HTTP | `reqwest` 0.13 | Used only for Ollama |
 | Config | `toml` 1.1 + `directories` 6 + `serde_json` | `~/.config/leogit/{config.toml,repos-state.json}` |
@@ -180,9 +181,9 @@ a flat `SyncProgress` record: the core-computed aggregate percent (0–100, weig
 in `core/src/progress.rs`) plus git's raw progress line. Ticks are invoked on core's
 stderr-reader thread, so the Swift side hops to the main actor itself and drops stragglers
 by generation; there is no completion event — an operation is over when its `await` returns.
-`repo_sync_status`, `get_ahead_behind`, `clone_repo`, and the `gh` surface stay unexported:
-the native client reads ahead/behind from `get_status` and has no repo picker, clone, or
-gh-publish UI yet.
+`get_ahead_behind` stays unexported: the native client reads ahead/behind from
+`get_status` (`repo_sync_status` later joined the surface with the repo switcher — see
+below, as did `clone_repo` and the gh clone surface with the Clone sheet).
 
 AI commit-message generation crosses as the Tauri composer's own two-step pipeline —
 `get_selected_diff` (the checked files' combined diff) feeding `generate_commit_message`,
@@ -195,7 +196,8 @@ as is `AiProviderConfig`). The one mapping the Tauri client keeps in TypeScript 
 claude/ollama, `ai_model`, `ai_api_key`, `ollama_server_url` as `base_url`) — lives in the
 bridge as `load_ai_config`, where core drift is a compile error; `save_ai_provider` persists
 the composer's provider picker with a validated read-modify-write of the whole `Config`, so
-no other setting is clobbered and no settings UI is needed natively. Core's
+no other setting is clobbered — the pattern the native Settings window later adopted
+wholesale (see below). Core's
 `check_provider_available` stays unexported — its Tauri API wrapper is dead code, and the
 bridge doesn't carry dead surface. Because core spawns `claude` from `PATH`, the
 Finder-launch environment matters for the first time: the Tauri host's hand-rolled PATH
@@ -203,6 +205,91 @@ repair moved into core as `process::fix_path_env` (spawn the login shell once, r
 `PATH`; the edition-2024 `unsafe set_var` contract — call before any other thread exists —
 travels with it), the Tauri `main` now calls it from there, and the bridge exports it for
 `LeoGitApp.init` to run as the process's first Rust call.
+
+The repo switcher and background refresh cross as the picker/scheduler surface the Tauri
+client already had: `load_config` (a full `Config` mirror — the native client consumes
+`auto_fetch`/`fetch_interval_ms` and `scan_paths`/`scan_depth`, but the mirror restates all
+16 fields so it can't drift), `load_state`/`patch_state`/`record_recent_repo` over
+`ReposState`/`ReposStatePatch` mirrors — the shared `repos-state.json`, where
+`last_opened_repo` is patched on every switch and restored at launch by *either* client,
+and the MRU list feeds the tiered badge scheduler — `discover_repos`/`effective_scan_paths`
+(pure filesystem walk, no git subprocesses), and `repo_sync_status` returning a `RepoSync`
+mirror, the per-repo dirty/behind/ahead badge summary. That last one is the bridge's one
+async-over-sync export: core's function is synchronous, but an opted-in fetch can hold its
+thread for the full 12 s background timeout, so the bridge wraps it in
+`tokio::task::spawn_blocking` under `async_runtime = "tokio"` — the same worker-thread hop
+`#[tauri::command(async)]` performs implicitly — keeping Swift's cooperative pool
+unparked. On the Swift side, all refresh timing is structured concurrency instead
+of timers: `ContentView` owns `.task(id: repoPath)` loops — the 2 s status poll, the
+config-driven auto-fetch, and `RepoDirectoryStore`'s tier scheduler (Tauri's cadence
+number-for-number: 2/5/10 min over the MRU with 1.5/4/8 s launch kicks, sequential, active
+repo excluded) — so a repo switch or close cancels and restarts them structurally, the
+teardown the Tauri client does with `clearInterval` bookkeeping. The poll's
+`RepoStore.refreshQuietly` never touches `isLoading`, refetches history only when
+`head_sha` moved, and bumps `statusEpoch` (the diff-reload key) only when status actually
+changed — plus unconditionally on app re-activation
+(`NSApplication.didBecomeActiveNotification`, the native `resyncOnActive`), since a file
+can change on disk without its status row changing. A `ConnectivityBreaker` (Tauri's
+numbers: 2 failures → 30 s backoff doubling to a 5 min cap) gates every background fetch,
+fed only by real attempts against real remotes; both loops also pause while the app is
+inactive — a deliberate native improvement the activation resync makes safe.
+
+The embedded terminal crosses as the bridge's second foreign callback trait:
+`TerminalEventListener { on_output(pid, data), on_closed(pid) }`, adapted to core's
+`EventSink` by a private `TerminalSink` — its own trait rather than variants bolted onto
+`SyncProgressListener`, because the two event shapes share nothing and each sink is scoped
+to what its operation can emit. Everything is synchronous (core's PTY sessions run on plain
+OS threads; no tokio): `start_terminal` — whose session reader thread holds the listener
+until the child exits — plus `write_terminal`, `resize_terminal`, `close_terminal` and a
+`StartedTerminal` mirror. `terminal_pty_info` (Windows-ConPTY metadata xterm.js needs
+before construction; all-`None` on macOS) stays unexported. On the
+Swift side, SwiftTerm renders the emulator (an SPM package pinned in `project.yml`, since
+the generated project's `Package.resolved` is gitignored). A `TerminalController` bridges
+one `TerminalView` to one session: keystrokes and grid sizes go out on a serial I/O queue —
+ordering the blocking writes and keeping them off the main actor — and output comes back
+through a coalescing relay: chunks arrive once per 4 KiB PTY read on the Rust reader
+thread, append to a locked buffer, and at most one main-actor drain is ever in flight, so
+floods batch into a single `feed` — the port plan's byte-stream-throughput question,
+answered. Session lifecycle rides structural identity: `TerminalSessionView` mounts under
+`.id("repoPath:generation")` while `TerminalStore.generation > 0`, so New Session and repo
+switches unmount the old view (whose `onDisappear` kills the PTY) — the native `{#key}`
+remount — and a natural shell exit nulls the pid *before* collapsing the dock, so unmount
+never double-closes a session core already dropped. Collapsing only hides the view and
+skips the degenerate resize it produces, so re-expanding restores the exact prompt; ⌘`
+toggles, and terminal focus (SwiftTerm's view as first responder) suppresses auto-fetch
+exactly like the field-editor check.
+
+Cloning and the Settings window crossed together. `clone_repo` is exported like `pull`
+(async over tokio, progress through the same `SyncProgressListener` seam — `ProgressSink`
+needed no change, since core aggregates clone's phase weights before emitting) and the gh
+pair joins it: `gh_repo_list` (a `GhRepo` mirror; async over `spawn_blocking` like
+`repo_sync_status`, since the 20 s `gh` query must not park a cooperative thread) and
+`gh_clone` (no listener — `gh repo clone` reports nothing parseable, so the sheet shows an
+indeterminate bar, as the Tauri dialog does). The destination contract is core's
+`prepare_clone_target`, shared by both paths: the caller passes the *full* target path,
+core expands `~`, refuses an existing path, and creates the parent — deriving the folder
+name from the URL/`owner-name` is the UI's job, so `CloneStore` ports the Tauri dialog's
+`repoNameFromUrl`/`normalizeUrl` rules verbatim (strip trailing slashes and `.git`, last
+`/`- or `:`-segment; `owner/name` expands to `https://github.com/owner/name`). The sheet
+(reachable from Welcome and the repo switcher's footer) seeds its destination from the
+shared `last_clone_dir` → first scan path → `~/Dev`, persists the parent folder back on
+success, shares the GitHub tab's `clone_sort_mode` with the Tauri dialog through
+`repos-state.json`, and disables every exit while cloning — there is no cancel; a
+dismissed sheet would orphan the clone. Success hands the fresh path to `RepoStore.open`,
+so the normal `.task(id:)` chain records it as recent and runs the warm-up fetch. The
+Settings scene (`Settings { }` in `LeoGitApp`, which is what binds ⌘, and the app-menu
+item) exposes only fields with native consumers — auto-fetch cadence, scan paths/depth,
+the terminal shell (via the newly exported `list_shells` + `ShellOption` mirror, with a
+stored-but-uninstalled id rendering as Automatic), and the AI knobs — never Tauri-only
+fields like `theme` or the diff toggles, which cross untouched: `SettingsStore.save()`
+loads a fresh `Config`, overlays just the managed fields, and writes whole via the newly
+exported `save_config` (the `save_ai_provider` read-modify-write pattern writ large,
+since core rewrites the entire file). Discrete controls save through a 300 ms debounce;
+text fields commit on focus-loss/Return, normalizing an emptied model to `None` and an
+emptied Ollama URL back to the default (Tauri persists `""` for both). And the native
+auto-fetch loop now re-reads the config every tick — a cheap TOML load — so interval and
+toggle changes apply within one interval, the live re-arm the Tauri client still lacks
+(its ROADMAP entry).
 
 `scripts/build-rust.sh` builds the static lib and regenerates the bindings, and Xcode runs it as
 a pre-build phase — so the Swift API can never be stale relative to the Rust it calls.

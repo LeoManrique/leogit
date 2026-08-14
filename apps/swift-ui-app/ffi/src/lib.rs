@@ -22,9 +22,10 @@
 //! Most functions below are blocking: they shell out to `git` and wait. Swift
 //! must call these off the main actor (see `Sources/LeoGit/IPC/`), exactly as
 //! the Tauri host runs them on worker threads. The network operations
-//! (`fetch` / `pull` / `push`) are exported async instead — core drives them
-//! through `spawn_blocking`, which needs a live tokio context, hence
-//! `async_runtime = "tokio"` — and surface in Swift as native `async` calls.
+//! (`fetch` / `pull` / `push` / `clone_repo` and the `gh` calls) are exported
+//! async instead — core drives them through `spawn_blocking`, which needs a
+//! live tokio context, hence `async_runtime = "tokio"` — and surface in Swift
+//! as native `async` calls.
 //! Progress callbacks arrive on core's stderr-reader thread, never the main
 //! one; Swift listeners must hop to the main actor themselves.
 
@@ -37,16 +38,20 @@ use std::path::Path;
 use std::sync::Arc;
 
 use leogit_core::events::{CoreEvent, EventSink};
-use leogit_core::{ai, config, diff, git, highlight, process};
+use leogit_core::{ai, config, diff, gh, git, highlight, process, shell, terminal};
 
 // Re-exported so Swift sees the real core types. Names are used by the
 // `#[uniffi::remote]` declarations below.
 pub use leogit_core::ai::{AiProviderConfig, CommitMessage};
+pub use leogit_core::config::{Config, ReposState, ReposStatePatch};
 pub use leogit_core::diff::{DiffLine, FileDiff, Hunk, HunkHeader, IntraLineRange, LineType};
+pub use leogit_core::gh::GhRepo;
 pub use leogit_core::git::{
-    BranchInfo, CommitInfo, FileEntry, FileStatus, LogOptions, MergeResult, RepoStatus,
+    BranchInfo, CommitInfo, FileEntry, FileStatus, LogOptions, MergeResult, RepoStatus, RepoSync,
 };
 pub use leogit_core::highlight::{BlobSource, Token, TokenClass};
+pub use leogit_core::shell::ShellOption;
+pub use leogit_core::terminal::StartedTerminal;
 
 uniffi::setup_scaffolding!();
 
@@ -587,7 +592,7 @@ pub fn count_commits_to_merge(repo_path: String, target_branch: String) -> Resul
 }
 
 // ---------------------------------------------------------------------------
-// Exported functions — sync (fetch / pull / push)
+// Exported functions — sync (fetch / pull / push / clone)
 // ---------------------------------------------------------------------------
 //
 // The first async exports and the first foreign callback interface in the
@@ -630,7 +635,7 @@ pub trait SyncProgressListener: Send + Sync {
 
 /// Adapts core's [`EventSink`] to a [`SyncProgressListener`]. Non-git-progress
 /// events (the terminal variants) are ignored: this sink is only ever handed
-/// to `pull`/`push`, which emit nothing else.
+/// to `pull`/`push`/`clone_repo`, which emit nothing else.
 struct ProgressSink {
     listener: Arc<dyn SyncProgressListener>,
 }
@@ -720,6 +725,91 @@ pub async fn push(
     )
     .await
     .map_err(GitError::from)
+}
+
+/// `git clone --progress <url> <target_path>` — the Clone flow's URL path.
+/// `target_path` is the full destination (parent plus repo folder), not a
+/// parent directory: deriving the folder name from the URL is the UI's job,
+/// exactly as in the Tauri dialog. Core expands a leading `~`, refuses an
+/// existing path, and creates the parent; git creates the leaf. Returns the
+/// absolute path of the fresh clone, ready to open. Progress streams through
+/// the same listener seam as pull/push — clone's phase weights are applied
+/// inside core, so `percent` arrives aggregated here like every other op.
+///
+/// # Errors
+///
+/// Returns [`GitError`] with git's own combined output — unreachable URL,
+/// missing credentials (interactive prompts are hard-disabled, so private
+/// remotes fail instead of hanging), or an existing destination.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn clone_repo(
+    url: String,
+    target_path: String,
+    listener: Arc<dyn SyncProgressListener>,
+) -> Result<String, GitError> {
+    git::clone_repo(Arc::new(ProgressSink { listener }), url, target_path)
+        .await
+        .map_err(GitError::from)
+}
+
+// ---------------------------------------------------------------------------
+// Exported functions — GitHub CLI (Clone dialog's GitHub tab)
+// ---------------------------------------------------------------------------
+//
+// List the signed-in user's repositories and clone by `owner/name`, both
+// shelling out to `gh` so its stored auth is ambient — private repos clone
+// without a prompt. `gh repo clone` reports no parseable progress, so
+// `gh_clone` takes no listener and the UI shows an indeterminate bar, as the
+// Tauri dialog does. `check_auth` and `gh_publish_repo` stay unexported (the
+// dead-surface rule): the native client has no publish UI yet, and
+// `gh_repo_list`'s own error text already distinguishes "gh missing" from
+// "not authenticated".
+
+/// Mirrors [`leogit_core::gh::GhRepo`] — one row of the Clone dialog's
+/// GitHub tab. `pushed_at` is an ISO-8601 last-push timestamp; the "recent"
+/// sort compares it lexically, exactly like the Tauri client.
+#[uniffi::remote(Record)]
+pub struct GhRepo {
+    pub name_with_owner: String,
+    pub name: String,
+    pub description: String,
+    pub is_private: bool,
+    pub pushed_at: String,
+}
+
+/// The signed-in user's GitHub repositories, most recently pushed first —
+/// forks included, archived skipped. Async over `spawn_blocking` like
+/// [`repo_sync_status`]: the `gh` query can hold its thread for its full
+/// 20 s timeout, which must never be a Swift cooperative thread.
+///
+/// # Errors
+///
+/// Returns [`GitError`] with a dialog-ready message: `gh` not installed,
+/// not authenticated, or timed out.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn gh_repo_list(limit: u32) -> Result<Vec<GhRepo>, GitError> {
+    tokio::task::spawn_blocking(move || gh::gh_repo_list(limit))
+        .await
+        .map_err(|join_error| GitError::Failed {
+            message: format!("gh repo list did not complete: {join_error}"),
+        })?
+        .map_err(GitError::from)
+}
+
+/// `gh repo clone <owner/name> <target_path>` — clone through the GitHub
+/// CLI so its auth covers private repositories. Same destination contract
+/// as [`clone_repo`] (full path, `~` expanded, existing path refused,
+/// parent created); returns the absolute path of the fresh clone.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when `gh` is missing, the clone fails or times out
+/// (600 s cap), or the destination already exists.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn gh_clone(name_with_owner: String, target_path: String) -> Result<String, GitError> {
+    gh::gh_clone(name_with_owner, target_path)
+        .await
+        .map_err(GitError::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -854,6 +944,337 @@ pub async fn generate_commit_message(
     ai::generate_commit_message(diff, provider, config)
         .await
         .map_err(GitError::from)
+}
+
+// ---------------------------------------------------------------------------
+// Exported functions — repo directory & background refresh
+// ---------------------------------------------------------------------------
+//
+// Everything the repo switcher and the background schedulers consume: the
+// shared config file (auto-fetch cadence, scan roots), the shared repos-state
+// file (last-opened repo + most-recently-used list), filesystem discovery,
+// and the per-repo sync summary behind the picker's dirty/behind/ahead
+// badges. Both files are the same ones the Tauri client reads and writes, so
+// opening a repo in one client is what the other restores on launch.
+//
+// `get_ahead_behind` stays unexported (the dead-surface rule): `get_status`
+// and `repo_sync_status` already carry the counts everywhere the UI needs
+// them.
+
+/// Mirrors [`leogit_core::config::Config`] — the shared `config.toml`, read
+/// whole. The native client consumes `auto_fetch` / `fetch_interval_ms` (the
+/// auto-fetch loop) and `scan_paths` / `scan_depth` (repo discovery); the
+/// rest crosses so the record can't drift from core.
+#[uniffi::remote(Record)]
+pub struct Config {
+    pub theme: String,
+    pub fetch_interval_ms: u32,
+    pub ai_provider: String,
+    pub ai_model: Option<String>,
+    pub ai_api_key: Option<String>,
+    pub auto_fetch: bool,
+    pub syntax_highlighting: bool,
+    pub scan_paths: Vec<String>,
+    pub scan_depth: u32,
+    pub side_by_side_diff: bool,
+    pub hide_whitespace: bool,
+    pub wrap_long_lines: bool,
+    pub tab_size: u32,
+    pub claude_timeout_secs: u32,
+    pub ollama_server_url: String,
+    pub terminal_shell: Option<String>,
+}
+
+/// Mirrors [`leogit_core::config::ReposState`] — the shared
+/// `repos-state.json`: which repo to restore on launch, plus the
+/// most-recently-opened list that drives the picker's tiered background
+/// refresh.
+#[uniffi::remote(Record)]
+pub struct ReposState {
+    pub last_opened_repo: Option<String>,
+    pub last_clone_dir: Option<String>,
+    pub repo_sort_mode: Option<String>,
+    pub clone_sort_mode: Option<String>,
+    pub recent_repos: Option<Vec<String>>,
+}
+
+/// Mirrors [`leogit_core::config::ReposStatePatch`]. `None` leaves a field
+/// as it is on disk; `recent_repos` is deliberately absent from the patch —
+/// the MRU list's only writer is [`record_recent_repo`].
+#[uniffi::remote(Record)]
+pub struct ReposStatePatch {
+    pub last_opened_repo: Option<String>,
+    pub last_clone_dir: Option<String>,
+    pub repo_sort_mode: Option<String>,
+    pub clone_sort_mode: Option<String>,
+}
+
+/// Mirrors [`leogit_core::git::RepoSync`] — the picker-badge summary:
+/// pending pushes (`ahead`), pending pulls (`behind`), and uncommitted
+/// changes (`dirty`), computed from `git status` headers without building a
+/// file list. `fetched` reports whether a *requested* fetch reached the
+/// remote, feeding the connectivity breaker.
+#[uniffi::remote(Record)]
+pub struct RepoSync {
+    pub ahead: i32,
+    pub behind: i32,
+    pub has_remote: bool,
+    pub fetched: bool,
+    pub dirty: bool,
+}
+
+/// The shared configuration file, read fresh — the native client re-reads it
+/// on every repo switch, like the Tauri client, so edits (from either
+/// client) take effect without a restart.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when the file exists but cannot be read or parsed.
+/// A missing file is not an error — defaults are written and returned.
+#[uniffi::export]
+pub fn load_config() -> Result<Config, GitError> {
+    config::load_config().map_err(GitError::from)
+}
+
+/// Persist the whole configuration — the native Settings window's writer.
+/// Core rewrites the entire file, so callers must follow the
+/// [`save_ai_provider`] pattern writ large: load fresh, apply their edits,
+/// save — never persist a `Config` loaded before the user started editing,
+/// which would clobber changes made by the other client in between.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when the file cannot be serialized or written.
+#[uniffi::export]
+pub fn save_config(config: Config) -> Result<(), GitError> {
+    config::save_config(config).map_err(GitError::from)
+}
+
+/// The shared repos-state file. Corrupt state self-heals to defaults inside
+/// core rather than erroring.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when the state file cannot be read.
+#[uniffi::export]
+pub fn load_state() -> Result<ReposState, GitError> {
+    config::load_state().map_err(GitError::from)
+}
+
+/// Apply a field-wise patch to the repos-state file and return the result.
+/// The native client patches `last_opened_repo` on every switch, so the next
+/// launch — of either client — restores it.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when the state file cannot be read or written.
+#[uniffi::export]
+pub fn patch_state(patch: ReposStatePatch) -> Result<ReposState, GitError> {
+    config::patch_state(patch).map_err(GitError::from)
+}
+
+/// Move `path` to the front of the most-recently-used list (de-duped,
+/// capped inside core) and return the updated state.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when the state file cannot be read or written.
+#[uniffi::export]
+pub fn record_recent_repo(path: String) -> Result<ReposState, GitError> {
+    config::record_recent_repo(path).map_err(GitError::from)
+}
+
+/// Walk the scan folders for git repositories — a pure filesystem walk, no
+/// git subprocesses. An empty `scan_paths` falls back to core's defaults;
+/// results are canonicalized and sorted. Blocking and potentially slow on
+/// deep trees: call off the main actor.
+///
+/// # Errors
+///
+/// Returns [`GitError`] only on walk-level failures; unreadable folders are
+/// skipped, not fatal.
+#[uniffi::export]
+pub fn discover_repos(scan_paths: Vec<String>, max_depth: u32) -> Result<Vec<String>, GitError> {
+    git::discover_repos(scan_paths, max_depth).map_err(GitError::from)
+}
+
+/// The folders discovery would actually walk for this configuration,
+/// tilde-expanded — backs the picker's "no repositories found — we looked
+/// here" empty state.
+#[uniffi::export]
+#[must_use]
+pub fn effective_scan_paths(scan_paths: Vec<String>) -> Vec<String> {
+    git::effective_scan_paths(scan_paths)
+}
+
+/// Per-repo badge summary, optionally refreshing the remote-tracking refs
+/// first. With `do_fetch`, the fetch runs under core's short background
+/// timeouts (12 s cap) and a failure is swallowed — stale counts still come
+/// back, with `fetched == false` for the breaker.
+///
+/// Async over `spawn_blocking` even though core's function is synchronous:
+/// that fetch can hold its thread for the full timeout, which must never be
+/// a Swift cooperative thread. The Tauri host makes the same hop implicitly
+/// via `#[tauri::command(async)]`.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when `git status` itself fails — a missing repo, a
+/// deleted directory. Fetch failures are data (`fetched`), not errors.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn repo_sync_status(repo_path: String, do_fetch: bool) -> Result<RepoSync, GitError> {
+    tokio::task::spawn_blocking(move || git::repo_sync_status(repo_path, do_fetch))
+        .await
+        .map_err(|join_error| GitError::Failed {
+            message: format!("repo_sync_status did not complete: {join_error}"),
+        })?
+        .map_err(GitError::from)
+}
+
+// ---------------------------------------------------------------------------
+// Exported functions — embedded terminal
+// ---------------------------------------------------------------------------
+//
+// The PTY lives entirely in core (portable-pty): sessions are keyed by a
+// synthetic id, and each one owns a reader thread that streams decoded UTF-8
+// through the `EventSink` seam. `TerminalSink` adapts that seam to a
+// Swift-implemented `TerminalEventListener` — its own foreign trait rather
+// than variants bolted onto `SyncProgressListener`, because the two event
+// shapes share nothing and each sink is scoped to what its operation can
+// emit. Everything here is synchronous: core spawns plain OS threads, so no
+// tokio context is involved (unlike fetch/pull/push).
+//
+// Deliberately NOT exported (no native consumers — the dead-surface rule):
+// `terminal_pty_info`, whose `backend`/`build_number` describe Windows
+// ConPTY quirks xterm.js must know about before construction and which is
+// all-`None` on macOS.
+
+/// Swift-implemented receiver for one terminal session's events.
+///
+/// `on_output` arrives on the session's PTY reader thread — never the main
+/// one — once per read (4 KiB max) with no throttling, so implementations
+/// must return quickly (buffer and hop) rather than render in place. `data`
+/// is decoded UTF-8 text, not raw bytes: core's streaming decoder holds
+/// split multi-byte sequences across chunk boundaries, so feeding
+/// `data.utf8` to an emulator is lossless.
+///
+/// `on_closed` is emitted by the same reader thread when the child exits —
+/// on its own or via [`close_terminal`] — after core has already dropped the
+/// session. It is the only end-of-session signal; there is no exit code.
+#[uniffi::export(foreign)]
+pub trait TerminalEventListener: Send + Sync {
+    /// Deliver one chunk of decoded PTY output.
+    fn on_output(&self, pid: u32, data: String);
+    /// The session's child exited; `pid` is no longer valid.
+    fn on_closed(&self, pid: u32);
+}
+
+/// Adapts core's [`EventSink`] to a [`TerminalEventListener`]. Git progress
+/// is ignored: this sink is only ever handed to `start_terminal`, whose
+/// session emits nothing else.
+struct TerminalSink {
+    listener: Arc<dyn TerminalEventListener>,
+}
+
+impl EventSink for TerminalSink {
+    fn emit(&self, event: CoreEvent) {
+        match event {
+            CoreEvent::TerminalOutput { pid, data } => self.listener.on_output(pid, data),
+            CoreEvent::TerminalClosed { pid } => self.listener.on_closed(pid),
+            CoreEvent::GitProgress(_) => {}
+        }
+    }
+}
+
+#[uniffi::remote(Record)]
+pub struct StartedTerminal {
+    /// Synthetic session id — deliberately not the OS pid, so the UI never
+    /// holds a reusable process handle. The key for write/resize/close and
+    /// the id the listener's events carry.
+    pub pid: u32,
+    /// Id of the shell that actually launched (`"default"`, `"zsh"`, …).
+    pub shell_id: String,
+    /// Human-readable shell name for the panel header, so what launched is
+    /// never a guess.
+    pub shell_label: String,
+}
+
+/// Spawn a shell in a fresh PTY at `repo_path`, 80×24 until the first
+/// resize. `shell_id` is the shared config's `terminal_shell`; `None` — or
+/// an id whose shell is not installed here — resolves to the best shell on
+/// this machine (`$SHELL`, then zsh/bash/fish/sh). The session's reader
+/// thread holds `listener` until the child exits.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when the PTY cannot be opened or the shell fails to
+/// spawn.
+#[uniffi::export]
+pub fn start_terminal(
+    listener: Arc<dyn TerminalEventListener>,
+    repo_path: String,
+    shell_id: Option<String>,
+) -> Result<StartedTerminal, GitError> {
+    terminal::start_terminal(Arc::new(TerminalSink { listener }), &repo_path, shell_id)
+        .map_err(GitError::from)
+}
+
+/// Write keystrokes (or a paste) to the session's PTY, flushed immediately.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when the session is gone or the PTY write fails.
+#[uniffi::export]
+pub fn write_terminal(pid: u32, data: String) -> Result<(), GitError> {
+    terminal::write_terminal(pid, &data).map_err(GitError::from)
+}
+
+/// Propagate the emulator's grid size to the PTY, which delivers `SIGWINCH`
+/// to the child.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when the session is gone or the resize fails.
+#[uniffi::export]
+pub fn resize_terminal(pid: u32, cols: u16, rows: u16) -> Result<(), GitError> {
+    terminal::resize_terminal(pid, cols, rows).map_err(GitError::from)
+}
+
+/// Kill the session's child. The reader thread then reaches EOF and emits
+/// `on_closed`, exactly as when the shell exits on its own — callers treat
+/// that event, never this return, as the end of the session.
+///
+/// # Errors
+///
+/// Returns [`GitError`] only on a poisoned session registry.
+#[uniffi::export]
+pub fn close_terminal(pid: u32) -> Result<(), GitError> {
+    terminal::close_terminal(pid).map_err(GitError::from)
+}
+
+/// Mirrors [`leogit_core::shell::ShellOption`] — one row of the Settings
+/// window's shell picker. `id` is the stable value persisted in
+/// `config.terminal_shell` (`"default"` is the `$SHELL` row, not a
+/// sentinel — the *absent* preference is `terminal_shell: None`, which the
+/// picker renders as "Automatic").
+#[uniffi::remote(Record)]
+pub struct ShellOption {
+    pub id: String,
+    pub label: String,
+    pub path: String,
+    pub args: Vec<String>,
+}
+
+/// The shells installed on this machine, best first — probe-based, so every
+/// row is launchable, and never empty (`sh` at worst). Feeds the native
+/// Settings shell picker the same way `list_shells` feeds the Tauri one; an
+/// id that stops resolving (uninstalled shell) is normalized by the picker
+/// to "Automatic", and `start_terminal` would fall back to the best shell
+/// anyway.
+#[uniffi::export]
+#[must_use]
+pub fn list_shells() -> Vec<ShellOption> {
+    shell::list_shells()
 }
 
 #[cfg(test)]
@@ -1459,5 +1880,322 @@ mod tests {
         assert!(
             matches!(err, GitError::Failed { ref message } if message.contains("Unknown AI provider"))
         );
+    }
+
+    /// Discovery exactly as the picker drives it: repos at the scan root's
+    /// first level and nested deeper are both found, plain folders and
+    /// missing scan roots contribute nothing, and `effective_scan_paths`
+    /// reports tilde-expanded folders. The config/state read-write functions
+    /// are deliberately untested here — they operate on the user's real
+    /// shared files, like the AI config load/save paths.
+    #[test]
+    fn discovery_finds_repos_and_reports_scan_folders() {
+        let root = std::env::temp_dir().join(format!("leogit-ffi-discover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let direct = root.join("direct");
+        let nested = root.join("group").join("nested");
+        std::fs::create_dir_all(&direct).expect("dir");
+        std::fs::create_dir_all(&nested).expect("dir");
+        std::fs::create_dir_all(root.join("plain")).expect("dir");
+        run_git(&direct, &["init"]);
+        run_git(&nested, &["init"]);
+
+        let missing = root.join("not-there");
+        let repos = discover_repos(
+            vec![
+                root.to_string_lossy().into_owned(),
+                missing.to_string_lossy().into_owned(),
+            ],
+            3,
+        )
+        .expect("discover");
+        // Compare by suffix: results are canonicalized, and /tmp resolves
+        // through /private on macOS.
+        assert_eq!(repos.len(), 2, "two repos, the plain folder ignored");
+        assert!(repos.iter().any(|r| r.ends_with("/direct")));
+        assert!(repos.iter().any(|r| r.ends_with("/nested")));
+
+        let folders = effective_scan_paths(vec!["~/Dev".to_string()]);
+        assert_eq!(folders.len(), 1);
+        assert!(
+            folders[0].ends_with("/Dev") && !folders[0].starts_with('~'),
+            "scan folders come back tilde-expanded: {folders:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The picker-badge summary through every state the rows render: no
+    /// remote (badges suppressed, fetch skipped), in sync, dirty, ahead —
+    /// and behind, which only a `do_fetch` sweep can see, pinning that the
+    /// fetch path actually refreshes the remote-tracking ref.
+    #[tokio::test]
+    async fn repo_sync_status_reports_dirty_ahead_and_behind() {
+        let (dir, repo, default) = seeded_repo("badges");
+
+        let no_remote = repo_sync_status(repo.clone(), true).await.expect("sync");
+        assert!(!no_remote.has_remote);
+        assert!(
+            no_remote.fetched,
+            "no remote to reach counts as nothing-to-report, not a failure"
+        );
+        assert_eq!((no_remote.ahead, no_remote.behind), (0, 0));
+        assert!(!no_remote.dirty);
+
+        let bare = bare_origin("badges", &dir);
+        run_git(&dir, &["push", "--set-upstream", "origin", &default]);
+        let in_sync = repo_sync_status(repo.clone(), false).await.expect("sync");
+        assert!(in_sync.has_remote && !in_sync.dirty);
+        assert_eq!((in_sync.ahead, in_sync.behind), (0, 0));
+
+        std::fs::write(dir.join("wip.txt"), "wip\n").expect("write");
+        let dirty = repo_sync_status(repo.clone(), false).await.expect("sync");
+        assert!(dirty.dirty, "an untracked file lights the dirty dot");
+
+        run_git(&dir, &["add", "."]);
+        run_git(&dir, &["commit", "-m", "wip"]);
+        let ahead = repo_sync_status(repo.clone(), false).await.expect("sync");
+        assert!(!ahead.dirty, "committed, so the dot goes out");
+        assert_eq!((ahead.ahead, ahead.behind), (1, 0));
+
+        run_git(&dir, &["push"]);
+        let clone_b = cloned_workmate("badges", &bare);
+        std::fs::write(clone_b.join("from-b.txt"), "b\n").expect("write");
+        run_git(&clone_b, &["add", "."]);
+        run_git(&clone_b, &["commit", "-m", "from b"]);
+        run_git(&clone_b, &["push"]);
+
+        let stale = repo_sync_status(repo.clone(), false).await.expect("sync");
+        assert_eq!(
+            stale.behind, 0,
+            "a fetch-less sweep reads only local refs, so B's push is invisible"
+        );
+        let fetched = repo_sync_status(repo, true).await.expect("sync");
+        assert!(fetched.fetched, "the requested fetch reached the remote");
+        assert_eq!((fetched.ahead, fetched.behind), (0, 1));
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&bare);
+        let _ = std::fs::remove_dir_all(&clone_b);
+    }
+
+    /// Collects one session's terminal events across the callback seam, the
+    /// way the Swift relay will.
+    #[derive(Default)]
+    struct TerminalProbe {
+        output: std::sync::Mutex<String>,
+        closed: std::sync::Mutex<Vec<u32>>,
+    }
+
+    impl TerminalEventListener for TerminalProbe {
+        fn on_output(&self, _pid: u32, data: String) {
+            self.output.lock().unwrap().push_str(&data);
+        }
+        fn on_closed(&self, pid: u32) {
+            self.closed.lock().unwrap().push(pid);
+        }
+    }
+
+    /// Polls `ready` until it holds or `secs` elapse — the PTY reader thread
+    /// delivers asynchronously, so the tests wait rather than sleep blind.
+    fn wait_until(secs: u64, mut ready: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        while std::time::Instant::now() < deadline {
+            if ready() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        false
+    }
+
+    /// A real PTY session end-to-end through the exports: spawn `sh` in a
+    /// temp dir, type a command, watch its output arrive via `on_output`,
+    /// exit, and watch `on_closed` retire the pid.
+    #[test]
+    fn terminal_session_streams_output_and_reports_exit() {
+        let dir = std::env::temp_dir().join(format!("leogit-ffi-term-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        let probe = Arc::new(TerminalProbe::default());
+        let started = start_terminal(
+            probe.clone(),
+            dir.to_string_lossy().to_string(),
+            Some("sh".to_string()),
+        )
+        .expect("terminal starts");
+        assert!(started.pid >= 1, "synthetic ids start at 1");
+        assert!(
+            !started.shell_label.is_empty(),
+            "the launch names its shell"
+        );
+
+        write_terminal(started.pid, "printf 'seam:%s\\n' ok; exit\n".to_string())
+            .expect("write reaches the pty");
+
+        assert!(
+            wait_until(10, || probe.output.lock().unwrap().contains("seam:ok")),
+            "command output crossed the callback seam; saw: {:?}",
+            probe.output.lock().unwrap()
+        );
+        assert!(
+            wait_until(10, || probe.closed.lock().unwrap().contains(&started.pid)),
+            "the shell's own exit emitted on_closed"
+        );
+        assert!(
+            write_terminal(started.pid, "x".to_string()).is_err(),
+            "a closed session's pid no longer accepts writes"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `close_terminal` kills the child, and the reader thread still delivers
+    /// the same `on_closed` as a natural exit — the one end-of-session signal
+    /// the UI keys off in both cases.
+    #[test]
+    fn close_terminal_kills_the_session_and_retires_the_pid() {
+        let dir = std::env::temp_dir().join(format!("leogit-ffi-term-kill-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        let probe = Arc::new(TerminalProbe::default());
+        let started = start_terminal(
+            probe.clone(),
+            dir.to_string_lossy().to_string(),
+            Some("sh".to_string()),
+        )
+        .expect("terminal starts");
+
+        resize_terminal(started.pid, 120, 40).expect("a live session resizes");
+        close_terminal(started.pid).expect("close succeeds");
+
+        assert!(
+            wait_until(10, || probe.closed.lock().unwrap().contains(&started.pid)),
+            "a kill still ends in on_closed"
+        );
+        assert!(
+            resize_terminal(started.pid, 80, 24).is_err(),
+            "the killed session's pid is retired"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Clone flow end-to-end against a local source: the export returns
+    /// the destination it was given, the clone is a real repository, and the
+    /// same destination is refused on a second attempt (core's
+    /// `prepare_clone_target` guard) — the error the sheet must surface.
+    #[tokio::test]
+    async fn clone_repo_clones_a_local_source_and_refuses_an_existing_target() {
+        let base = std::env::temp_dir().join(format!("leogit-ffi-clone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let source = base.join("source");
+        std::fs::create_dir_all(&source).expect("source dir");
+        run_git(&source, &["init"]);
+        std::fs::write(source.join("a.txt"), "a\n").expect("write");
+        run_git(&source, &["add", "."]);
+        run_git(
+            &source,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-m",
+                "init",
+            ],
+        );
+
+        let target = base.join("cloned");
+        let listener = CollectingListener::arc();
+        let cloned = clone_repo(
+            source.to_string_lossy().to_string(),
+            target.to_string_lossy().to_string(),
+            listener.clone(),
+        )
+        .await
+        .expect("local clone succeeds");
+
+        assert_eq!(cloned, target.to_string_lossy(), "returns the destination");
+        assert!(
+            Path::new(&cloned).join(".git").exists(),
+            "the clone is a git repository"
+        );
+        assert!(
+            std::fs::read_to_string(target.join("a.txt")).is_ok(),
+            "the worktree is checked out"
+        );
+        // A tiny local clone may finish inside git's progress throttle, so
+        // tick *presence* is not asserted — only that any that did arrive
+        // carry sane aggregate percents.
+        assert!(
+            listener
+                .events
+                .lock()
+                .expect("lock")
+                .iter()
+                .all(|tick| (0.0..=100.0).contains(&tick.percent)),
+            "progress percents stay within 0–100"
+        );
+
+        let err = clone_repo(
+            source.to_string_lossy().to_string(),
+            target.to_string_lossy().to_string(),
+            CollectingListener::arc(),
+        )
+        .await
+        .expect_err("an existing destination is refused");
+        let GitError::Failed { message } = err;
+        assert!(
+            message.contains("already exists"),
+            "guard fires before git: {message}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `gh_clone` shares `clone_repo`'s destination guard, and it fires
+    /// before `gh` is ever spawned — so this pins the contract without
+    /// needing the GitHub CLI installed or authenticated.
+    #[tokio::test]
+    async fn gh_clone_refuses_an_existing_target_before_running_gh() {
+        let target =
+            std::env::temp_dir().join(format!("leogit-ffi-ghclone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&target);
+        std::fs::create_dir_all(&target).expect("target dir");
+
+        let err = gh_clone(
+            "owner/repo".to_string(),
+            target.to_string_lossy().to_string(),
+        )
+        .await
+        .expect_err("an existing destination is refused");
+        let GitError::Failed { message } = err;
+        assert!(
+            message.contains("already exists"),
+            "guard fires before gh: {message}"
+        );
+
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// The Settings shell picker's data source: probe-based, so every row it
+    /// offers is actually launchable on this machine, and never empty.
+    #[test]
+    fn list_shells_offers_only_launchable_shells() {
+        let shells = list_shells();
+        assert!(!shells.is_empty(), "at least the fallback shell exists");
+        for shell in &shells {
+            assert!(!shell.id.is_empty(), "every row has a stable id");
+            assert!(!shell.label.is_empty(), "every row has a label");
+            assert!(
+                Path::new(&shell.path).exists(),
+                "{}: probed path exists on disk",
+                shell.id
+            );
+        }
     }
 }

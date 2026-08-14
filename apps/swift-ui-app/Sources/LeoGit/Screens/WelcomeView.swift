@@ -4,6 +4,7 @@ import SwiftUI
 struct WelcomeView: View {
     let coreVersion: String
     let onOpen: () -> Void
+    let onClone: () -> Void
 
     var body: some View {
         VStack(spacing: 16) {
@@ -18,9 +19,12 @@ struct WelcomeView: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
-            Button("Open Repository…", action: onOpen)
-                .controlSize(.large)
-                .keyboardShortcut("o")
+            HStack(spacing: 12) {
+                Button("Open Repository…", action: onOpen)
+                    .keyboardShortcut("o")
+                Button("Clone Repository…", action: onClone)
+            }
+            .controlSize(.large)
 
             if !coreVersion.isEmpty {
                 // Proves the Rust bridge answered before any repo was opened.

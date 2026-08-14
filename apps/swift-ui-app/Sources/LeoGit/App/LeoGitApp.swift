@@ -22,5 +22,12 @@ struct LeoGitApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {}
         }
+
+        // Gives the app the standard "LeoGit ▸ Settings…" menu item and ⌘,
+        // for free; the window edits the same config.toml the Tauri client
+        // reads, so a change here applies to both.
+        Settings {
+            SettingsView()
+        }
     }
 }

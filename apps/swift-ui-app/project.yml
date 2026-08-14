@@ -3,6 +3,14 @@ name: LeoGit
 # The Xcode project is generated, never committed — run `just mac-generate`
 # (or `xcodegen generate` here) after changing this file or adding sources.
 
+packages:
+  # Terminal emulator for the embedded terminal — the native counterpart of
+  # xterm.js. The version is pinned here because the generated project (and
+  # its Package.resolved) is gitignored; bump deliberately, never downgrade.
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm
+    from: 1.18.0
+
 options:
   bundleIdPrefix: com.leomanrique
   deploymentTarget:
@@ -59,6 +67,9 @@ targets:
       # failure to Xcode, which reports a far more confusing missing-build-input
       # error against a file the build itself is supposed to produce.
       - path: ffi/generated/LeoGitCore.swift
+
+    dependencies:
+      - package: SwiftTerm
 
     info:
       path: Generated/Info.plist

@@ -78,14 +78,36 @@ final class RepoStore {
         await loadRepoData(repoPath)
     }
 
-    /// Close the repository and return to the welcome screen.
-    func close() {
-        repoPath = nil
-        repoName = ""
-        status = nil
-        commits = []
-        isMerging = false
-        errorMessage = nil
+    /// The background poll's tick — the silent counterpart of `refresh()`,
+    /// mirroring the Tauri client's 2 s loop: no `isLoading` (the progress
+    /// bar must not flash every 2 s), failures swallowed (`errorMessage`
+    /// stays whatever the last real action left), history refetched only
+    /// when HEAD actually moved (how commits made in an outside terminal
+    /// appear), and `statusEpoch` bumped only when the status changed — so
+    /// an idle tick never makes the open diff reload.
+    ///
+    /// `forceDiffReload` is the refocus path: files may have been edited on
+    /// disk without their status rows changing, so coming back to the app
+    /// re-reads the open diff unconditionally, like the Tauri client's
+    /// `reloadActiveDiff` on focus.
+    func refreshQuietly(forceDiffReload: Bool = false) async {
+        guard let repoPath else { return }
+        guard let newStatus = try? await GitBridge.status(of: repoPath) else { return }
+
+        let headMoved = newStatus.headSha != status?.headSha
+        let statusChanged = newStatus != status
+        if statusChanged {
+            status = newStatus
+        }
+        if statusChanged || forceDiffReload {
+            statusEpoch += 1
+        }
+        isMerging = (try? await GitBridge.mergeInProgress(in: repoPath)) ?? false
+        if headMoved,
+            let newCommits = try? await GitBridge.log(of: repoPath, limit: Self.historyPageSize)
+        {
+            commits = newCommits
+        }
     }
 
     /// Report which Rust build the UI is linked against.

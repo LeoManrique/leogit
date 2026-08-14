@@ -232,6 +232,88 @@ enum GitBridge {
         )
     }
 
+    // MARK: - Clone
+
+    /// `git clone --progress` into `targetPath` — the FULL destination
+    /// (parent plus a folder name the caller derives from the URL), never a
+    /// parent directory. Core expands `~`, refuses an existing path, and
+    /// creates the parent. Returns the absolute path of the fresh clone,
+    /// ready to open. Progress ticks arrive on a Rust background thread,
+    /// exactly like pull/push.
+    @concurrent
+    static func cloneRepository(
+        url: String,
+        into targetPath: String,
+        onProgress: @escaping @Sendable (SyncProgress) -> Void
+    ) async throws -> String {
+        try await cloneRepo(url: url, targetPath: targetPath, listener: ProgressRelay(onProgress))
+    }
+
+    /// The signed-in user's GitHub repositories via the `gh` CLI, most
+    /// recently pushed first — the Clone sheet's GitHub tab. Failures carry
+    /// a dialog-ready message (gh missing / unauthenticated / timed out).
+    @concurrent
+    static func githubRepositories(limit: UInt32) async throws -> [GhRepo] {
+        try await ghRepoList(limit: limit)
+    }
+
+    /// Clone `owner/name` through the GitHub CLI, whose stored auth covers
+    /// private repositories without a prompt. No progress stream: `gh repo
+    /// clone` reports nothing parseable, so callers show an indeterminate
+    /// bar — the Tauri dialog does the same.
+    @concurrent
+    static func githubClone(nameWithOwner: String, into targetPath: String) async throws -> String {
+        try await ghClone(nameWithOwner: nameWithOwner, targetPath: targetPath)
+    }
+
+    /// Persist the folder the user last cloned into — the parent directory,
+    /// not the repo path — so the next Clone sheet (in either client)
+    /// pre-fills it.
+    @concurrent
+    static func setLastCloneDir(_ dir: String) async throws {
+        _ = try patchState(
+            patch: ReposStatePatch(
+                lastOpenedRepo: nil,
+                lastCloneDir: dir,
+                repoSortMode: nil,
+                cloneSortMode: nil
+            )
+        )
+    }
+
+    /// Persist the GitHub tab's sort toggle (`"recent"` | `"name"`) — the
+    /// same state the Tauri dialog's toggle round-trips.
+    @concurrent
+    static func setCloneSortMode(_ mode: String) async throws {
+        _ = try patchState(
+            patch: ReposStatePatch(
+                lastOpenedRepo: nil,
+                lastCloneDir: nil,
+                repoSortMode: nil,
+                cloneSortMode: mode
+            )
+        )
+    }
+
+    // MARK: - Settings
+
+    /// Persist the whole configuration file. Callers must load fresh, apply
+    /// their edits, and save — core rewrites the entire file, so saving a
+    /// `Config` loaded before the user started editing would clobber
+    /// changes the other client made in between.
+    @concurrent
+    static func saveAppConfig(_ config: Config) async throws {
+        try saveConfig(config: config)
+    }
+
+    /// The launchable shells on this machine, best first — the Settings
+    /// shell picker's rows. Probe-based (every row's executable exists) and
+    /// never empty.
+    @concurrent
+    static func shellOptions() async -> [ShellOption] {
+        listShells()
+    }
+
     // MARK: - AI commit message
 
     /// The combined unified diff of exactly `files` — the input Generate
@@ -266,6 +348,108 @@ enum GitBridge {
     @concurrent
     static func generateMessage(diff: String, config: AiProviderConfig) async throws -> CommitMessage {
         try await generateCommitMessage(diff: diff, provider: config.provider, config: config)
+    }
+
+    // MARK: - Repo directory & background refresh
+
+    /// The whole shared configuration file, read fresh — the auto-fetch loop
+    /// takes `autoFetch`/`fetchIntervalMs` from it, discovery takes
+    /// `scanPaths`/`scanDepth`. Re-read on every repo switch, like the Tauri
+    /// client, so edits from either client apply without a restart.
+    @concurrent
+    static func appConfig() async throws -> Config {
+        try loadConfig()
+    }
+
+    /// The shared repos-state file: the repo to restore on launch plus the
+    /// most-recently-opened list.
+    @concurrent
+    static func reposState() async throws -> ReposState {
+        try loadState()
+    }
+
+    /// Persist `repoPath` as the repo to restore on the next launch — of
+    /// either client; the state file is shared with the Tauri app.
+    @concurrent
+    static func setLastOpened(repoPath: String) async throws {
+        _ = try patchState(
+            patch: ReposStatePatch(
+                lastOpenedRepo: repoPath,
+                lastCloneDir: nil,
+                repoSortMode: nil,
+                cloneSortMode: nil
+            )
+        )
+    }
+
+    /// Move `repoPath` to the front of the most-recently-used list (core
+    /// de-dupes and caps it) and return the updated state.
+    @concurrent
+    @discardableResult
+    static func recordRecent(repoPath: String) async throws -> ReposState {
+        try recordRecentRepo(path: repoPath)
+    }
+
+    /// Walk the configured scan folders for git repositories — a pure
+    /// filesystem walk, no git subprocesses. An empty list falls back to
+    /// core's default folders.
+    @concurrent
+    static func discoverRepositories(scanPaths: [String], depth: UInt32) async throws -> [String] {
+        try discoverRepos(scanPaths: scanPaths, maxDepth: depth)
+    }
+
+    /// The folders discovery would actually walk, tilde-expanded — for the
+    /// picker's "we looked here" empty state.
+    @concurrent
+    static func scanFolders(for scanPaths: [String]) async -> [String] {
+        effectiveScanPaths(scanPaths: scanPaths)
+    }
+
+    /// Per-repo badge summary: dirty / ahead / behind. With `fetching`, the
+    /// remote-tracking refs refresh first under core's short background
+    /// timeouts (12 s cap); a failed fetch is reported in `fetched`, never
+    /// thrown, and stale counts still come back.
+    @concurrent
+    static func syncSummary(of repoPath: String, fetching: Bool) async throws -> RepoSync {
+        try await repoSyncStatus(repoPath: repoPath, doFetch: fetching)
+    }
+
+    // MARK: - Embedded terminal
+
+    /// Spawn a shell in a fresh PTY at the repository root, 80×24 until the
+    /// first resize. `shellID` is the shared config's `terminal_shell`; nil
+    /// or an uninstalled id resolves to the best shell on this machine. The
+    /// listener's callbacks arrive on the session's Rust reader thread —
+    /// never the main one — and its `onClosed` is the only end-of-session
+    /// signal, for a self-exiting shell and a `killTerminal` alike.
+    @concurrent
+    static func launchTerminal(
+        in repoPath: String,
+        shellID: String?,
+        listener: TerminalEventListener
+    ) async throws -> StartedTerminal {
+        try startTerminal(listener: listener, repoPath: repoPath, shellId: shellID)
+    }
+
+    /// Write keystrokes (or a paste) to the session's PTY. Blocking, and
+    /// deliberately synchronous: input must reach the shell in typing order,
+    /// which the caller's serial I/O queue guarantees and unordered `Task`s
+    /// would not. Never call on the main actor.
+    static func sendTerminalInput(pid: UInt32, data: String) throws {
+        try writeTerminal(pid: pid, data: data)
+    }
+
+    /// Propagate the emulator's grid size to the PTY (`SIGWINCH`s the
+    /// child). Blocking; terminal I/O queue only.
+    static func resizeTerminalGrid(pid: UInt32, cols: UInt16, rows: UInt16) throws {
+        try resizeTerminal(pid: pid, cols: cols, rows: rows)
+    }
+
+    /// Kill the session's child. The end of the session is the listener's
+    /// `onClosed` — emitted once the reader thread sees EOF — never this
+    /// return. Blocking; terminal I/O queue only.
+    static func killTerminal(pid: UInt32) throws {
+        try closeTerminal(pid: pid)
     }
 }
 

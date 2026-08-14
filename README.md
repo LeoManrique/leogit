@@ -12,7 +12,7 @@ A calm desktop Git client built with Tauri 2, Rust, and Svelte 5. Designed to ge
 - **Open pull requests** through the GitHub CLI: list, check CI status, create, checkout.
 - **Embedded terminal** docked at the bottom of the window, running the user's `$SHELL` in the repo directory.
 - **Auto-fetch** + 2 s status polling so the UI stays in sync with anything the user does in another terminal.
-- **Light / dark themes**, persistent layout, and a TOML config at `~/.config/leogit/config.toml`.
+- **Light / dark themes**, persistent layout, and a TOML config in the platform config dir (`~/Library/Application Support/leogit/` on macOS, `~/.config/leogit/` on Linux).
 
 ## Requirements
 
@@ -73,8 +73,14 @@ logic — only the marshaling differs. It needs Xcode and `brew install xcodegen
 diffs → commit (checkbox file list + message composer, AI-generated messages via the claude
 CLI or Ollama sharing the Tauri client's config) → branches (switch / create / delete
 and merge or squash-merge, with conflict + abort handling) → sync (pull / push / fetch with
-live transfer progress, publish-branch first push, force-push-with-lease) → history, and is
-being ported flow by flow.
+live transfer progress, publish-branch first push, force-push-with-lease, plus auto-fetch,
+2 s status polling, and resync on app re-activation) → history → an embedded terminal
+(SwiftTerm, ⌘` to toggle, fed by the same core PTY as the Tauri client) → cloning (your
+GitHub repos via `gh` or any URL, with live progress) — with a toolbar repo switcher
+(discovered + recent repos, dirty / pull / push indicators per row) that restores the last
+opened repo at launch, and a native Settings window (⌘,) editing the same shared config —
+and is being ported flow by flow. Building it also needs Xcode's Metal Toolchain component
+(`xcodebuild -downloadComponent MetalToolchain`, once) for SwiftTerm's shaders.
 
 The pre-monorepo design is preserved on the `legacy/classic-design` branch (== tag `v0.1.32`);
 recall it with `git worktree add ../leogit-classic legacy/classic-design`.
