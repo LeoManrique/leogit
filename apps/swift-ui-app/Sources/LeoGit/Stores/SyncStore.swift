@@ -8,6 +8,7 @@ enum NetworkOperation {
     case fetch
     case pull
     case push
+    case publish
 }
 
 /// Observable state for the sync flow: which network operation is in flight
@@ -96,6 +97,27 @@ final class SyncStore {
                 setUpstream: setUpstream,
                 forceWithLease: forceWithLease,
                 onProgress: self.progressHandler()
+            )
+        }
+    }
+
+    /// Publish a remote-less repository to GitHub via `gh repo create` —
+    /// create the repo, wire `origin`, push the current branch. Claims the
+    /// same single slot as push/pull (the Tauri client's `'publish'` op), so
+    /// every background refresh pauses for its duration. `gh` streams no
+    /// parseable progress: the banner stays indeterminate.
+    func publish(
+        repoPath: String,
+        name: String,
+        description: String,
+        isPrivate: Bool
+    ) async -> String? {
+        await run(.publish) {
+            try await GitBridge.publishToGitHub(
+                repoPath: repoPath,
+                name: name,
+                description: description,
+                isPrivate: isPrivate
             )
         }
     }

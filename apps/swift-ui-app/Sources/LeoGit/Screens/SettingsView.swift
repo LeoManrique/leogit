@@ -21,6 +21,7 @@ struct SettingsView: View {
     var body: some View {
         Form {
             gitSection
+            pullRequestsSection
             discoverySection
             terminalSection
             aiSection
@@ -60,6 +61,19 @@ struct SettingsView: View {
         } footer: {
             Text("Applies to the open repository within one interval — no restart needed.")
                 .settingsFooter()
+        }
+    }
+
+    private var pullRequestsSection: some View {
+        Section {
+            Toggle("Show Pull Requests tab", isOn: saving($store.showPullRequests))
+        } header: {
+            Text("Pull Requests")
+        } footer: {
+            Text(
+                "Lists, creates, and checks out pull requests through the GitHub CLI. Turn off for mostly local work — the tab disappears and no gh calls are made. The tab also hides itself for repositories without a remote."
+            )
+            .settingsFooter()
         }
     }
 

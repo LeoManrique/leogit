@@ -66,7 +66,7 @@ final class TerminalController {
         self.onExit = onExit
         let relay = TerminalRelay(
             deliver: { [weak self] bytes in self?.feed(bytes) },
-            closed: { [weak self] in self?.sessionDidClose() }
+            closed: { [weak self] exit in self?.sessionDidClose(exit) }
         )
         self.relay = relay
 
@@ -145,9 +145,22 @@ final class TerminalController {
         terminalView?.feed(byteArray: bytes[...])
     }
 
-    private func sessionDidClose() {
+    /// The child exited. A clean exit tears the panel down as before;
+    /// anything else keeps the dead terminal on screen with the reason,
+    /// VS Code-style, so a shell that dies instantly (a broken `.zshrc`) no
+    /// longer flashes its error away. Either way the pid is nulled first, so
+    /// `shutdown()` — and the dock's ✕, which unmounts this view — never
+    /// double-closes a session core has already dropped.
+    private func sessionDidClose(_ exit: TerminalExit) {
         pid = nil
-        onExit?()
+        if exit.exitCode == 0, exit.signal == nil {
+            onExit?()
+        } else {
+            let reason =
+                exit.signal.map { "terminated by signal: \($0)" }
+                ?? "exited with code \(exit.exitCode)"
+            feed(Array("\r\n\u{1B}[31m[Process \(reason)]\u{1B}[0m\r\n".utf8))
+        }
     }
 }
 
@@ -166,11 +179,11 @@ private final class TerminalRelay: TerminalEventListener, @unchecked Sendable {
     private var drainScheduled = false
 
     private let deliver: @MainActor ([UInt8]) -> Void
-    private let closed: @MainActor () -> Void
+    private let closed: @MainActor (TerminalExit) -> Void
 
     init(
         deliver: @escaping @MainActor ([UInt8]) -> Void,
-        closed: @escaping @MainActor () -> Void
+        closed: @escaping @MainActor (TerminalExit) -> Void
     ) {
         self.deliver = deliver
         self.closed = closed
@@ -186,12 +199,12 @@ private final class TerminalRelay: TerminalEventListener, @unchecked Sendable {
         Task { @MainActor in self.drain() }
     }
 
-    func onClosed(pid _: UInt32) {
+    func onClosed(pid _: UInt32, exit: TerminalExit) {
         Task { @MainActor in
             // Flush whatever the shell printed on its way out before
             // reporting the exit.
             self.drain()
-            self.closed()
+            self.closed(exit)
         }
     }
 

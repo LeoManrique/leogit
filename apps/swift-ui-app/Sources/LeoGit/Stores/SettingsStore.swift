@@ -28,6 +28,9 @@ final class SettingsStore {
     var autoFetch = true
     var fetchIntervalSeconds = 30
 
+    // Pull Requests — off hides the tab and with it every `gh pr` call.
+    var showPullRequests = true
+
     // Repository discovery
     var scanDepth = 3
     var scanPathsText = ""
@@ -64,6 +67,7 @@ final class SettingsStore {
         }
         autoFetch = config.autoFetch
         fetchIntervalSeconds = max(Int(config.fetchIntervalMs) / 1000, 1)
+        showPullRequests = config.showPullRequests
         scanDepth = Int(config.scanDepth)
         scanPathsText = config.scanPaths.joined(separator: "\n")
         // A stored id whose shell is gone renders as Automatic, exactly like
@@ -100,13 +104,16 @@ final class SettingsStore {
         Task { await save() }
     }
 
-    /// Load the file fresh, overlay the managed fields, write it back.
+    /// Load the file fresh, overlay the managed fields, write it back, and
+    /// tell open windows — the Settings scene and the main window share no
+    /// store, so the notification is what makes a toggle apply live.
     private func save() async {
         guard isLoaded else { return }
         do {
             let fresh = try await GitBridge.appConfig()
             try await GitBridge.saveAppConfig(applying(to: fresh))
             errorMessage = nil
+            NotificationCenter.default.post(name: .leogitConfigDidSave, object: nil)
         } catch {
             errorMessage = error.displayMessage
         }
@@ -136,7 +143,8 @@ final class SettingsStore {
             tabSize: fresh.tabSize,
             claudeTimeoutSecs: fresh.claudeTimeoutSecs,
             ollamaServerUrl: trimmedURL.isEmpty ? Self.defaultOllamaURL : trimmedURL,
-            terminalShell: shellSelection.isEmpty ? nil : shellSelection
+            terminalShell: shellSelection.isEmpty ? nil : shellSelection,
+            showPullRequests: showPullRequests
         )
     }
 
@@ -155,4 +163,11 @@ extension Int {
     func clamped(to range: ClosedRange<Int>) -> Int {
         Swift.min(Swift.max(self, range.lowerBound), range.upperBound)
     }
+}
+
+extension Notification.Name {
+    /// Posted after the Settings window writes the shared config file, so
+    /// other windows re-read the fields they consume without waiting for a
+    /// poll tick — what makes the Pull Requests toggle apply immediately.
+    static let leogitConfigDidSave = Notification.Name("leogitConfigDidSave")
 }

@@ -35,8 +35,10 @@ impl EventSink for TauriEventSink {
             CoreEvent::TerminalOutput { pid, data } => {
                 let _ = self.app.emit(&format!("terminal-output-{pid}"), data);
             }
-            CoreEvent::TerminalClosed { pid } => {
-                let _ = self.app.emit(&format!("terminal-closed-{pid}"), ());
+            // `TerminalExit` derives `Serialize` with the fields the frontend
+            // reads (`exit_code` / `signal`).
+            CoreEvent::TerminalClosed { pid, exit } => {
+                let _ = self.app.emit(&format!("terminal-closed-{pid}"), exit);
             }
         }
     }

@@ -27,6 +27,33 @@ pub struct GitProgress {
     pub text: String,
 }
 
+/// How a terminal session's child ended — the payload of
+/// [`CoreEvent::TerminalClosed`], collected by `child.wait()` after the PTY
+/// reaches EOF. Serialized verbatim by the Tauri host, so the field names are
+/// load-bearing.
+///
+/// The UIs key off it VS Code-style: a clean exit closes the panel, anything
+/// else keeps the dead terminal on screen with the reason, so a shell that
+/// dies instantly (a broken `.zshrc`) no longer flashes its error away.
+#[derive(Debug, Clone, Serialize)]
+pub struct TerminalExit {
+    /// The child's exit code. When the child died to a signal this is a
+    /// fabricated `1` — the real information is in `signal`.
+    pub exit_code: u32,
+    /// Name of the fatal signal (`"Hangup"` after a kill via the panel's ✕,
+    /// since the escalation starts with SIGHUP), `None` on a normal exit.
+    pub signal: Option<String>,
+}
+
+impl TerminalExit {
+    /// Whether the child ended by exiting zero — the one case the UIs treat
+    /// as "nothing to report" and close the panel on.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.exit_code == 0 && self.signal.is_none()
+    }
+}
+
 /// An event core wants delivered to the host UI. Each variant carries exactly
 /// the data the host needs to reproduce today's Tauri payloads.
 #[derive(Debug, Clone)]
@@ -36,9 +63,9 @@ pub enum CoreEvent {
     /// A chunk of decoded terminal output for session `pid`.
     /// Host → `terminal-output-{pid}`.
     TerminalOutput { pid: u32, data: String },
-    /// Terminal session `pid` reached EOF and was torn down.
-    /// Host → `terminal-closed-{pid}`.
-    TerminalClosed { pid: u32 },
+    /// Terminal session `pid` reached EOF and was torn down; `exit` is the
+    /// reaped child's status. Host → `terminal-closed-{pid}`.
+    TerminalClosed { pid: u32, exit: TerminalExit },
 }
 
 /// Host-provided delivery channel for [`CoreEvent`]s.

@@ -197,6 +197,12 @@ export interface Config {
   ollama_server_url: string
   /** Shell id the embedded terminal launches; absent = best available. */
   terminal_shell?: string
+  /**
+   * Show the Pull Requests tab (native client only — this client has no PR
+   * view). Listed so the type matches the wire shape; the settings overlay
+   * round-trips it untouched.
+   */
+  show_pull_requests?: boolean
 }
 
 export interface ReposState {

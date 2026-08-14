@@ -220,19 +220,3 @@ struct CloneSheet: View {
         }
     }
 }
-
-/// Label above the control, full-width — the sheet's field layout.
-private struct VerticalLabeledContentStyle: LabeledContentStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            configuration.label
-                .font(.callout)
-            configuration.content
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-}
-
-extension LabeledContentStyle where Self == VerticalLabeledContentStyle {
-    fileprivate static var vertical: VerticalLabeledContentStyle { VerticalLabeledContentStyle() }
-}

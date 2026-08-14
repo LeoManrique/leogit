@@ -235,7 +235,8 @@ fed only by real attempts against real remotes; both loops also pause while the 
 inactive — a deliberate native improvement the activation resync makes safe.
 
 The embedded terminal crosses as the bridge's second foreign callback trait:
-`TerminalEventListener { on_output(pid, data), on_closed(pid) }`, adapted to core's
+`TerminalEventListener { on_output(pid, data), on_closed(pid, exit) }` — `exit` is a
+`TerminalExit { exit_code, signal }` mirror of the reaped child's status — adapted to core's
 `EventSink` by a private `TerminalSink` — its own trait rather than variants bolted onto
 `SyncProgressListener`, because the two event shapes share nothing and each sink is scoped
 to what its operation can emit. Everything is synchronous (core's PTY sessions run on plain
@@ -253,8 +254,11 @@ floods batch into a single `feed` — the port plan's byte-stream-throughput que
 answered. Session lifecycle rides structural identity: `TerminalSessionView` mounts under
 `.id("repoPath:generation")` while `TerminalStore.generation > 0`, so New Session and repo
 switches unmount the old view (whose `onDisappear` kills the PTY) — the native `{#key}`
-remount — and a natural shell exit nulls the pid *before* collapsing the dock, so unmount
-never double-closes a session core already dropped. Collapsing only hides the view and
+remount — and a shell exit nulls the pid *before* anything else, so unmount never
+double-closes a session core already dropped; a *clean* exit then collapses the dock,
+while a non-zero code or fatal signal instead prints `[Process exited with code N]` in
+red and keeps the dead terminal on screen for reading (✕ and ＋ still work — the pid is
+nil, so their teardown is a no-op against core). Collapsing only hides the view and
 skips the degenerate resize it produces, so re-expanding restores the exact prompt; ⌘`
 toggles, and terminal focus (SwiftTerm's view as first responder) suppresses auto-fetch
 exactly like the field-editor check.
@@ -290,6 +294,31 @@ emptied Ollama URL back to the default (Tauri persists `""` for both). And the n
 auto-fetch loop now re-reads the config every tick — a cheap TOML load — so interval and
 toggle changes apply within one interval, the live re-arm the Tauri client still lacks
 (its ROADMAP entry).
+
+Publish and pull requests closed the gh surface. `gh_publish_repo` crossed like
+`gh_clone` (already core-async over the blocking pool; no listener — `gh repo create`
+streams nothing parseable, so the sheet and the toolbar banner stay indeterminate), and
+`SyncStore` gained a `.publish` case in the same single `activeOperation` slot as
+push/pull — Tauri's `'publish'` network op — so every background loop pauses for its
+duration. The PR surface is `PullRequest` + `PrCheck` mirrors with four exports:
+`list_prs`/`get_pr_checks`/`create_pr` async over `spawn_blocking` (20 s gh queries, the
+`gh_repo_list` pattern) and `checkout_pr` core-async (a transfer). Swift-side,
+`PullRequestStore` loads the list lazily — tab visit, filter change, explicit reload;
+never polled — keeps a per-PR checks cache keyed by number (loaded on selection,
+dropped on list reload), and `PullRequestsView` renders the list/detail split with
+`CreatePullRequestSheet` seeding its title from the head commit's summary, the closest
+native equivalent of `gh pr create --fill`. `check_auth` remains unexported: every gh
+call's own error text already distinguishes "gh missing" from "not authenticated", so
+the tab's failure state simply shows it, with Retry. The tab is doubly gated: the shared
+config's `show_pull_requests` (default on, `#[serde(default)]` so old files parse; a
+Settings toggle under its own *Pull Requests* section) and the repo actually having a
+remote — a remote-less repo can't have PRs, so the tab hides instead of sitting empty.
+Off means off entirely: every `gh pr` call originates in the tab's views, so hiding it
+guarantees zero GitHub subprocesses. The toggle applies live across scenes through a
+`leogitConfigDidSave` notification posted by `SettingsStore.save()` — the Settings
+window and the main window share no store — and `ContentView` re-reads the flag on it
+(and on every repo open), snapping the selection back to Changes if the tab vanishes
+from under it.
 
 `scripts/build-rust.sh` builds the static lib and regenerates the bindings, and Xcode runs it as
 a pre-build phase — so the Swift API can never be stale relative to the Rust it calls.
@@ -540,11 +569,11 @@ Both providers run with a 120 s timeout (`DEFAULT_TIMEOUT_SECS`). Diff caps: 20 
 1. Opens a PTY at 24×80 via `portable-pty`.
 2. Resolves the shell via `shell::resolve(shell_id)` — see *Shell discovery* below.
 3. Spawns it with cwd = repo path, adding only `TERM=xterm-256color`, `COLORTERM=truecolor`, and (Git Bash only) `CHERE_INVOKING=1`.
-4. Stores the session, then spawns a reader thread that loops on `read()`, feeds bytes through a `Utf8Decoder`, and emits `terminal-output-<pid>` events. On EOF the session is removed and `terminal-closed-<pid>` is emitted.
+4. Stores the session, then spawns a reader thread that loops on `read()`, feeds bytes through a `Utf8Decoder`, and emits `terminal-output-<pid>` events. On EOF the reader removes the session, **reaps the child with `child.wait()`** — safe to block there: post-EOF the child is already dead (or its status was cached by a kill's internal `try_wait`), and the session is out of the map so nothing else can want its mutex — and emits `terminal-closed-<pid>` carrying a `TerminalExit { exit_code, signal }` payload. Both clients key off it VS Code-style: a clean exit closes the panel as before; a non-zero code or a fatal signal keeps the dead terminal on screen with `[Process exited with code N]`, so a shell that dies instantly (a broken `.zshrc`) no longer flashes its error away. The wait is also what stops each session leaving a zombie behind, which the old drop-without-wait teardown did.
 
 It returns `StartedTerminal { pid, shell_id, shell_label }` — the label is resolved backend-side because the stored preference may name an uninstalled shell, and the panel header shows what actually launched.
 
-`write_terminal` / `resize_terminal` / `close_terminal` go through `session_for(pid)`, which locks the session map, clones the `Arc`, and drops the map lock before the caller touches the session. `close_terminal` calls `child.kill()` and removes the entry.
+`write_terminal` / `resize_terminal` / `close_terminal` go through `session_for(pid)`, which locks the session map, clones the `Arc`, and drops the map lock before the caller touches the session. `close_terminal` calls `child.kill()` (portable-pty's escalation: SIGHUP → a short `try_wait` grace loop → SIGKILL) but deliberately does **not** remove the entry — the reader thread owns teardown, and it needs the child handle still in the session to collect the exit status after the kill (which then reports the fatal signal rather than a clean exit).
 
 ### Child environment — do not forward the parent env
 
@@ -573,14 +602,13 @@ The frontend mounts `<Terminal>` keyed by `${repoPath}:${terminalSessionId}` so 
 
 ## GitHub layer
 
-Everything in `gh.rs` shells out to the `gh` CLI:
+Everything in `gh.rs` shells out to the `gh` CLI, time-boxed through `process::run_timed` (20 s for metadata queries, 600 s for transfers), with errors as gh's own stderr verbatim (a `stderr_or` fallback covers the rare silent failure) and spawn failures mapped to "GitHub CLI (gh) is not installed.":
 
-- `check_auth` → `gh auth status` (exit code only).
-- `list_prs` → `gh pr list --json <fields> --state <s> --limit 30`.
-- `get_pr_checks` → `gh pr checks <n> --json name,state,bucket,link,workflow`. Special-cased: `gh` exits non-zero when any check is pending/failing but still writes valid JSON; we parse stdout first and only treat it as a hard error if parsing also fails.
-- `create_pr` / `create_pr_fill` → `gh pr create [--title --body | --fill] [--base] [--draft]`. Returns the PR URL.
-- `checkout_pr` → `gh pr checkout <n>`.
-- `get_current_branch_pr` → `gh pr list --head <branch> --state open` (returns the first match or `None`).
+- `check_auth` → `gh auth status` (exit code only; total — missing, unauthenticated, and timed out all collapse to `false`). Currently unread by either client; kept for future gh-backed gating.
+- `gh_repo_list` → `gh repo list --no-archived --json <fields>` (the Clone dialog's GitHub tab).
+- `gh_publish_repo` → `gh repo create <name> --source <repo> --remote origin --push [--private|--public]` (see the bullet under *Design decisions*).
+- `gh_clone` → `gh repo clone <owner/name> <target>` through the same `prepare_clone_target` guard as `git clone`.
+- The **pull-request surface** (native client only — the Tauri PR view was retired, and these were re-derived under the current conventions): `list_prs` → `gh pr list --json <fields> --state <s> --limit 30`; `get_pr_checks` → `gh pr checks <n> --json name,state,bucket,link,workflow` — special-cased: `gh` exits non-zero when any check is pending/failing but still writes valid JSON, so stdout is parsed first (a pure `parse_pr_checks`, pinned by test) and only unparseable output falls through to the stderr error; `create_pr` → `gh pr create --title --body [--base] [--draft]`, returning the PR URL; `checkout_pr` → `gh pr checkout <n>` (a transfer: blocking pool + the generous budget). The `gh pr` subcommands resolve their repository from the working directory — they have no path flag — so this is the one gh section that sets `current_dir`. The subprocess has no TTY, which makes gh disable its interactive prompts by itself: an unpushed branch fails with gh's message instead of hanging on "where should we push?".
 
 ## OS integration layer
 

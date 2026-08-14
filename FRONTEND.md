@@ -161,13 +161,19 @@ progress (§4.1) and can be slow.
 |---|---|---|
 | `highlight_diff` | `fileDiff, source?: BlobSource` | `string[]` (per-line, see §7) |
 
-### 3.12 GitHub (`gh` CLI) — 4
+### 3.12 GitHub (`gh` CLI) — 4 (+ 4 PR commands, native client only)
 | Command | Args | Returns |
 |---|---|---|
 | `check_auth` | – | `boolean` |
 | `gh_repo_list` (net) | `limit` | `GhRepo[]` |
 | `gh_clone` (net) | `nameWithOwner, targetPath` | `string` |
 | `gh_publish_repo` (net) | `repoPath, name, description, isPrivate` | `void` |
+
+Core also exposes a pull-request surface — `list_prs(repoPath, state) → PullRequest[]`,
+`get_pr_checks(repoPath, number) → PrCheck[]`, `create_pr(repoPath, title, body, base,
+draft) → string` (the PR URL), `checkout_pr(repoPath, number)` — currently consumed only
+by the SwiftUI client's Pull Requests tab; the Tauri host does not register them (its PR
+view was retired and returns with the re-skin).
 
 ### 3.13 AI — 2
 | Command | Args | Returns |
@@ -203,7 +209,7 @@ representation (preferred for the SwiftUI/daemon path).
 |---|---|---|---|
 | `git-progress` | `GitProgressEvent {op:'push'\|'pull'\|'clone', path, percent, text}` | streamed during push/pull/clone | drive a progress indicator; final state from the command's `Result` |
 | `terminal-output` (per-PID) | raw bytes | PTY stdout/stderr | feed the terminal emulator |
-| `terminal-closed` (per-PID) | – | child exited | mark session closed |
+| `terminal-closed` (per-PID) | `TerminalExit {exit_code, signal}` | child exited and was reaped | clean exit (`0`, no signal) → close the panel; otherwise print `[Process exited with code N]` and keep the dead terminal on screen (VS Code behavior) |
 | `open-repo` | `LaunchTarget {path, is_repo}` | warm-start / second-instance target | open that repo in the running window |
 
 ### 4.1 Progress reliability convention (recommended, from `leosync-src`)
@@ -233,7 +239,7 @@ codegen decision is open (plan §10.7).
 | Branches / remote | `BranchInfo` (name, is_remote, is_current); `AheadBehind`; `RepoSync` (ahead, behind, has_remote, fetched, dirty); `RepoIdentifier` (owner, name); `MergeResult` (success, fast_forward, conflicts[], error_message?) |
 | Diff | `DiffLine` (incl. `intra_line_diff: IntraLineRange`), `IntraLineRange`, `HunkHeader`, `Hunk`, `FileDiff` (old_path, new_path, file_header, hunks[], is_binary); `SbsPair`; `ParsedDiff` (file_diff, html[], sbs_pairs[], additions, deletions); `Token` (start, end, class: `TokenClass`) / `TokenLine` — the structured highlight layer under the HTML (§7); `DiffSelection` |
 | Commit composer | `CommitMessage` (title, description) |
-| Config / persistence | `Config` (theme, fetch_interval_ms, ai_provider, ai_model, ai_api_key, auto_fetch, syntax_highlighting, scan_paths[], scan_depth, side_by_side_diff, hide_whitespace, wrap_long_lines, tab_size, claude_timeout_secs, ollama_server_url, terminal_shell?); `ReposState`; `ReposStatePatch` |
+| Config / persistence | `Config` (theme, fetch_interval_ms, ai_provider, ai_model, ai_api_key, auto_fetch, syntax_highlighting, scan_paths[], scan_depth, side_by_side_diff, hide_whitespace, wrap_long_lines, tab_size, claude_timeout_secs, ollama_server_url, terminal_shell?, show_pull_requests); `ReposState`; `ReposStatePatch` |
 | GitHub | `GhRepo` (name_with_owner, name, description, is_private, pushed_at) |
 | AI | `AiProviderConfig` (provider, model?, api_key?, base_url?) |
 | Terminal | `ShellOption`; `PtyInfo` (backend, build_number); `StartedTerminal` (pid, shell_id, shell_label) |

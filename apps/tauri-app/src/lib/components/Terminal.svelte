@@ -156,11 +156,26 @@
       })
       // The shell exited on its own (`exit`, Ctrl+D, or a crash). Null the pid
       // first so unmount cleanup skips close_terminal — the backend already
-      // dropped the session before emitting — then let the parent tear down.
-      const u2 = await listen(`terminal-closed-${pid}`, () => {
-        pid = null
-        onExit?.()
-      })
+      // dropped the session before emitting. A clean exit lets the parent tear
+      // the panel down as before; anything else keeps the dead terminal on
+      // screen with the reason, VS Code-style, so a shell that dies instantly
+      // (a broken .zshrc) no longer flashes its error away. The panel's own ✕
+      // still closes it — unmount cleanup is a no-op once the pid is null.
+      const u2 = await listen<{ exit_code: number; signal: string | null }>(
+        `terminal-closed-${pid}`,
+        (e) => {
+          pid = null
+          const { exit_code, signal } = e.payload
+          if (exit_code === 0 && !signal) {
+            onExit?.()
+          } else {
+            const reason = signal
+              ? `terminated by signal: ${signal}`
+              : `exited with code ${exit_code}`
+            term?.writeln(`\r\n\x1b[31m[Process ${reason}]\x1b[0m`)
+          }
+        }
+      )
       unlisteners.push(u1, u2)
 
       term.onData((data) => {

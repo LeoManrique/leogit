@@ -23,6 +23,7 @@ struct SyncControls: View {
     /// message, verbatim, like the Tauri error modal.
     @State private var alertMessage: String?
     @State private var isConfirmingForcePush = false
+    @State private var isPublishSheetPresented = false
 
     private var branch: String { status?.branch ?? "" }
     private var hasUpstream: Bool { status?.hasUpstream ?? false }
@@ -30,8 +31,10 @@ struct SyncControls: View {
     private var behind: Int32 { status?.behind ?? 0 }
     private var isDetached: Bool { status?.detached ?? false }
 
-    /// No remote at all: the Tauri client publishes the repo to GitHub via
-    /// `gh` here — not ported, so the button explains itself instead.
+    /// No remote at all: the button becomes "Publish", opening the sheet
+    /// that creates the GitHub repo and pushes in one shot — the Tauri
+    /// header's morph. Gating on a non-empty branch avoids flashing
+    /// "Publish" before the first status load resolves.
     private var hasNoRemote: Bool {
         guard let status, !status.branch.isEmpty else { return false }
         return !status.hasRemote
@@ -60,27 +63,45 @@ struct SyncControls: View {
         }
 
         Menu {
-            Button(pushActionTitle) { push() }
-                .disabled(isBusy)
+            if hasNoRemote {
+                // The dropdown collapses to the one thing that makes sense
+                // without a remote — the Tauri chevron does the same.
+                Button("Publish to GitHub…") { isPublishSheetPresented = true }
+                    .disabled(isBusy)
+            } else {
+                Button(pushActionTitle) { push() }
+                    .disabled(isBusy)
 
-            if hasDiverged {
-                Button("Force Push (with Lease)…", role: .destructive) {
-                    isConfirmingForcePush = true
+                if hasDiverged {
+                    Button("Force Push (with Lease)…", role: .destructive) {
+                        isConfirmingForcePush = true
+                    }
+                    .disabled(isBusy)
                 }
-                .disabled(isBusy)
+
+                Divider()
+
+                Button("Fetch", action: fetch)
+                    .disabled(isBusy)
             }
-
-            Divider()
-
-            Button("Fetch", action: fetch)
-                .disabled(isBusy)
         } label: {
             Label(pushTitle, systemImage: pushIcon)
         } primaryAction: {
-            push()
+            if hasNoRemote {
+                isPublishSheetPresented = true
+            } else {
+                push()
+            }
         }
-        .disabled(isBusy || isDetached || hasNoRemote)
+        .disabled(isBusy || isDetached)
         .help(pushHelp)
+        .sheet(isPresented: $isPublishSheetPresented) {
+            PublishSheet(
+                store: store,
+                repoPath: repoPath,
+                onPublished: onWorkingTreeChanged
+            )
+        }
         .confirmationDialog(
             "Force Push with Lease?",
             isPresented: $isConfirmingForcePush
@@ -116,6 +137,8 @@ struct SyncControls: View {
 
     private var pushTitle: String {
         if store.activeOperation == .push { return "Pushing…" }
+        if store.activeOperation == .publish { return "Publishing…" }
+        if hasNoRemote { return "Publish" }
         if isPublishingBranch { return "Publish Branch" }
         return ahead > 0 ? "Push (\(ahead))" : "Push"
     }
@@ -133,7 +156,7 @@ struct SyncControls: View {
     private var pushHelp: String {
         if isDetached { return "Detached HEAD — check out a branch to push" }
         if hasNoRemote {
-            return "This repository has no remote. Publish to GitHub from the Tauri client, or add a remote in a terminal."
+            return "Publish this repository to GitHub — creates the remote repo and pushes this branch"
         }
         if isPublishingBranch { return "Publish this branch to the remote and start tracking it" }
         if ahead > 0 { return "Push \(ahead) commit\(ahead == 1 ? "" : "s") to the remote" }
@@ -191,6 +214,7 @@ struct SyncProgressBanner: View {
         case .fetch: "Fetching"
         case .pull: "Pulling"
         case .push: "Pushing"
+        case .publish: "Publishing to GitHub"
         }
     }
 

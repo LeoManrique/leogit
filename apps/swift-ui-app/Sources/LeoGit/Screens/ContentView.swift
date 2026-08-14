@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 enum RepoTab: String, CaseIterable, Identifiable {
     case changes = "Changes"
     case history = "History"
+    case pullRequests = "Pull Requests"
 
     var id: Self { self }
 }
@@ -27,6 +28,7 @@ struct ContentView: View {
     @State private var syncStore = SyncStore()
     @State private var directoryStore = RepoDirectoryStore()
     @State private var terminalStore = TerminalStore()
+    @State private var pullRequestStore = PullRequestStore()
     @State private var isChoosingFolder = false
     @State private var isCloneSheetPresented = false
     @State private var tab: RepoTab = .changes
@@ -35,6 +37,10 @@ struct ContentView: View {
     /// file. A flag rather than derived state so a failed restore leaves
     /// Welcome up instead of retrying forever.
     @State private var hasRestoredLastRepo = false
+
+    /// The shared config's `show_pull_requests` — read on repo open and
+    /// re-read when the Settings window saves, so the toggle applies live.
+    @State private var isPullRequestsTabEnabled = true
 
     /// Dedupes the activate resync — activation notifications can burst.
     @State private var isResyncing = false
@@ -79,12 +85,17 @@ struct ContentView: View {
             }
 
             Picker("View", selection: $tab) {
-                ForEach(RepoTab.allCases) { Text($0.rawValue).tag($0) }
+                ForEach(availableTabs) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
+            .onChange(of: availableTabs) { _, tabs in
+                // The tab under the selection can disappear — the setting
+                // turned off, or a switch to a remote-less repo.
+                if !tabs.contains(tab) { tab = .changes }
+            }
 
             Divider()
 
@@ -98,6 +109,19 @@ struct ContentView: View {
                 )
             case .history:
                 HistoryView(commits: store.commits)
+            case .pullRequests:
+                PullRequestsView(
+                    repoPath: repoPath,
+                    store: pullRequestStore,
+                    headCommitSummary: store.commits.first?.summary ?? "",
+                    currentBranch: store.status?.branch ?? "",
+                    onWorkingTreeChanged: {
+                        // A checkout moved HEAD: status, log, and the
+                        // branch menu all need to reflect the new branch.
+                        await store.refresh()
+                        await branchStore.load(repoPath: repoPath)
+                    }
+                )
             }
 
             TerminalDock(repoPath: repoPath, store: terminalStore)
@@ -107,6 +131,8 @@ struct ContentView: View {
         .task(id: repoPath) {
             branchStore.reset()
             syncStore.reset()
+            pullRequestStore.reset()
+            await refreshPullRequestsTabSetting()
             // Sessions never survive a repo switch — a shell from the prior
             // repo would be a leak wearing the new repo's dock.
             terminalStore.closeSession()
@@ -131,6 +157,9 @@ struct ContentView: View {
             )
         ) { _ in
             Task { await resyncOnActivate() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .leogitConfigDidSave)) { _ in
+            Task { await refreshPullRequestsTabSetting() }
         }
         .toolbar {
             ToolbarItem(placement: .navigation) {
@@ -195,6 +224,25 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity)
             }
         }
+    }
+
+    /// The tabs the segmented picker offers. Pull Requests needs both the
+    /// setting on and a repo with a remote — a remote-less repo can't have
+    /// PRs, so the tab hides rather than sitting there empty (nil status,
+    /// before the first load resolves, counts as remote-less: the tab pops
+    /// in rather than flashing away).
+    private var availableTabs: [RepoTab] {
+        var tabs: [RepoTab] = [.changes, .history]
+        if isPullRequestsTabEnabled, store.status?.hasRemote == true {
+            tabs.append(.pullRequests)
+        }
+        return tabs
+    }
+
+    /// Re-read `show_pull_requests` from the shared config.
+    @MainActor
+    private func refreshPullRequestsTabSetting() async {
+        isPullRequestsTabEnabled = (try? await GitBridge.appConfig())?.showPullRequests ?? true
     }
 
     /// Branch, plus ahead/behind counts when the branch tracks a remote, plus

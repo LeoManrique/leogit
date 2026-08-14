@@ -45,7 +45,8 @@ use leogit_core::{ai, config, diff, gh, git, highlight, process, shell, terminal
 pub use leogit_core::ai::{AiProviderConfig, CommitMessage};
 pub use leogit_core::config::{Config, ReposState, ReposStatePatch};
 pub use leogit_core::diff::{DiffLine, FileDiff, Hunk, HunkHeader, IntraLineRange, LineType};
-pub use leogit_core::gh::GhRepo;
+pub use leogit_core::events::TerminalExit;
+pub use leogit_core::gh::{GhRepo, PrCheck, PullRequest};
 pub use leogit_core::git::{
     BranchInfo, CommitInfo, FileEntry, FileStatus, LogOptions, MergeResult, RepoStatus, RepoSync,
 };
@@ -753,17 +754,15 @@ pub async fn clone_repo(
 }
 
 // ---------------------------------------------------------------------------
-// Exported functions — GitHub CLI (Clone dialog's GitHub tab)
+// Exported functions — GitHub CLI (clone, publish, pull requests)
 // ---------------------------------------------------------------------------
 //
-// List the signed-in user's repositories and clone by `owner/name`, both
-// shelling out to `gh` so its stored auth is ambient — private repos clone
-// without a prompt. `gh repo clone` reports no parseable progress, so
-// `gh_clone` takes no listener and the UI shows an indeterminate bar, as the
-// Tauri dialog does. `check_auth` and `gh_publish_repo` stay unexported (the
-// dead-surface rule): the native client has no publish UI yet, and
-// `gh_repo_list`'s own error text already distinguishes "gh missing" from
-// "not authenticated".
+// Everything here shells out to `gh` so its stored auth is ambient — private
+// repos work without a prompt. None of it streams progress: `gh` reports
+// nothing parseable, so the UIs show indeterminate bars for the transfers
+// (clone, publish, PR checkout). `check_auth` stays unexported (the
+// dead-surface rule): neither client reads it — every gh call's own error
+// text already distinguishes "gh missing" from "not authenticated".
 
 /// Mirrors [`leogit_core::gh::GhRepo`] — one row of the Clone dialog's
 /// GitHub tab. `pushed_at` is an ISO-8601 last-push timestamp; the "recent"
@@ -808,6 +807,142 @@ pub async fn gh_repo_list(limit: u32) -> Result<Vec<GhRepo>, GitError> {
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn gh_clone(name_with_owner: String, target_path: String) -> Result<String, GitError> {
     gh::gh_clone(name_with_owner, target_path)
+        .await
+        .map_err(GitError::from)
+}
+
+/// `gh repo create <name> --source <repo_path> --remote origin --push` — the
+/// one-shot "Publish Repository" flow for a remote-less repo: creates the
+/// GitHub repository under the signed-in account (`name` may be
+/// `owner/name` to target an organisation), wires it up as `origin`, and
+/// pushes the current branch with tracking. The next status refresh sees
+/// `has_remote`/`has_upstream` flip, which is how the UI learns it worked.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when the trimmed name is empty, `gh` is missing or
+/// the operation times out (600 s cap), or `gh repo create` fails — auth,
+/// name collision, push rejection — with gh's own stderr verbatim.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn gh_publish_repo(
+    repo_path: String,
+    name: String,
+    description: String,
+    is_private: bool,
+) -> Result<(), GitError> {
+    gh::gh_publish_repo(repo_path, name, description, is_private)
+        .await
+        .map_err(GitError::from)
+}
+
+/// Mirrors [`leogit_core::gh::PullRequest`] — one row of the Pull Requests
+/// tab. `state` is gh's own `"OPEN"`/`"CLOSED"`/`"MERGED"`;
+/// `review_decision` is `None` when the repo requires no review.
+#[uniffi::remote(Record)]
+pub struct PullRequest {
+    pub number: u32,
+    pub title: String,
+    pub state: String,
+    pub author: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub url: String,
+    pub body: String,
+    pub is_draft: bool,
+    pub base_ref_name: String,
+    pub head_ref_name: String,
+    pub review_decision: Option<String>,
+    pub additions: u32,
+    pub deletions: u32,
+    pub changed_files: u32,
+}
+
+/// Mirrors [`leogit_core::gh::PrCheck`] — one CI check row. `bucket` is
+/// gh's rollup (`"pass"`/`"fail"`/`"pending"`/`"skipping"`/`"cancel"`),
+/// which is what the UI colours by.
+#[uniffi::remote(Record)]
+pub struct PrCheck {
+    pub name: String,
+    pub state: String,
+    pub bucket: String,
+    pub link: Option<String>,
+    pub workflow: Option<String>,
+}
+
+/// The repository's pull requests, in gh's order (newest first), capped at
+/// 30. `state` filters: `"open"`, `"closed"`, `"merged"`, or `"all"`. Async
+/// over `spawn_blocking` like [`gh_repo_list`] — the query can hold its
+/// thread for its full 20 s timeout.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when `gh` is missing/unauthenticated, the repo has
+/// no GitHub remote, or the output cannot be parsed.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn list_prs(repo_path: String, state: String) -> Result<Vec<PullRequest>, GitError> {
+    tokio::task::spawn_blocking(move || gh::list_prs(&repo_path, &state))
+        .await
+        .map_err(|join_error| GitError::Failed {
+            message: format!("gh pr list did not complete: {join_error}"),
+        })?
+        .map_err(GitError::from)
+}
+
+/// CI status for one PR. Core parses stdout before looking at the exit
+/// code — `gh pr checks` exits non-zero while a check is pending or
+/// failing — so pending/failing checks arrive as data, not as an error.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when `gh` is missing or produced no check data
+/// (its "no checks reported…" stderr for a PR without CI).
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn get_pr_checks(repo_path: String, number: u32) -> Result<Vec<PrCheck>, GitError> {
+    tokio::task::spawn_blocking(move || gh::get_pr_checks(&repo_path, number))
+        .await
+        .map_err(|join_error| GitError::Failed {
+            message: format!("gh pr checks did not complete: {join_error}"),
+        })?
+        .map_err(GitError::from)
+}
+
+/// Open a pull request from the current branch, returning its URL. An
+/// empty `base` targets the repository's default branch. The branch must
+/// already be pushed — gh runs promptless here and fails otherwise with
+/// its own message.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when the trimmed title is empty, `gh` is
+/// missing/unauthenticated, or `gh pr create` fails (unpushed branch, a PR
+/// already exists, …).
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn create_pr(
+    repo_path: String,
+    title: String,
+    body: String,
+    base: String,
+    draft: bool,
+) -> Result<String, GitError> {
+    tokio::task::spawn_blocking(move || gh::create_pr(&repo_path, &title, &body, &base, draft))
+        .await
+        .map_err(|join_error| GitError::Failed {
+            message: format!("gh pr create did not complete: {join_error}"),
+        })?
+        .map_err(GitError::from)
+}
+
+/// Check out a PR's branch — fetches the head ref (from a fork too) and
+/// creates or switches to a local tracking branch. A transfer (600 s cap)
+/// with no progress stream; callers show an indeterminate state.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when `gh` is missing, the fetch fails, or git
+/// refuses the switch (dirty working tree) — the message verbatim.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn checkout_pr(repo_path: String, number: u32) -> Result<(), GitError> {
+    gh::checkout_pr(repo_path, number)
         .await
         .map_err(GitError::from)
 }
@@ -983,6 +1118,7 @@ pub struct Config {
     pub claude_timeout_secs: u32,
     pub ollama_server_url: String,
     pub terminal_shell: Option<String>,
+    pub show_pull_requests: bool,
 }
 
 /// Mirrors [`leogit_core::config::ReposState`] — the shared
@@ -1160,13 +1296,16 @@ pub async fn repo_sync_status(repo_path: String, do_fetch: bool) -> Result<RepoS
 ///
 /// `on_closed` is emitted by the same reader thread when the child exits —
 /// on its own or via [`close_terminal`] — after core has already dropped the
-/// session. It is the only end-of-session signal; there is no exit code.
+/// session and reaped the child. It is the only end-of-session signal, and
+/// `exit` carries the child's status: a clean exit closes the panel, anything
+/// else keeps the dead terminal on screen with the reason (a kill surfaces as
+/// a fatal signal, `"Hangup"`, since the escalation starts with SIGHUP).
 #[uniffi::export(foreign)]
 pub trait TerminalEventListener: Send + Sync {
     /// Deliver one chunk of decoded PTY output.
     fn on_output(&self, pid: u32, data: String);
-    /// The session's child exited; `pid` is no longer valid.
-    fn on_closed(&self, pid: u32);
+    /// The session's child exited with `exit`; `pid` is no longer valid.
+    fn on_closed(&self, pid: u32, exit: TerminalExit);
 }
 
 /// Adapts core's [`EventSink`] to a [`TerminalEventListener`]. Git progress
@@ -1180,10 +1319,19 @@ impl EventSink for TerminalSink {
     fn emit(&self, event: CoreEvent) {
         match event {
             CoreEvent::TerminalOutput { pid, data } => self.listener.on_output(pid, data),
-            CoreEvent::TerminalClosed { pid } => self.listener.on_closed(pid),
+            CoreEvent::TerminalClosed { pid, exit } => self.listener.on_closed(pid, exit),
             CoreEvent::GitProgress(_) => {}
         }
     }
+}
+
+/// Mirrors [`leogit_core::events::TerminalExit`] — how a session's child
+/// ended, reaped by core's reader thread after PTY EOF. `exit_code` is a
+/// fabricated `1` when `signal` names the fatal signal instead.
+#[uniffi::remote(Record)]
+pub struct TerminalExit {
+    pub exit_code: u32,
+    pub signal: Option<String>,
 }
 
 #[uniffi::remote(Record)]
@@ -1242,7 +1390,8 @@ pub fn resize_terminal(pid: u32, cols: u16, rows: u16) -> Result<(), GitError> {
 
 /// Kill the session's child. The reader thread then reaches EOF and emits
 /// `on_closed`, exactly as when the shell exits on its own — callers treat
-/// that event, never this return, as the end of the session.
+/// that event, never this return, as the end of the session. A killed shell
+/// reports its fatal signal in the close payload rather than a clean exit.
 ///
 /// # Errors
 ///
@@ -1984,15 +2133,26 @@ mod tests {
     #[derive(Default)]
     struct TerminalProbe {
         output: std::sync::Mutex<String>,
-        closed: std::sync::Mutex<Vec<u32>>,
+        closed: std::sync::Mutex<Vec<(u32, TerminalExit)>>,
+    }
+
+    impl TerminalProbe {
+        fn exit_for(&self, pid: u32) -> Option<TerminalExit> {
+            self.closed
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(closed_pid, _)| *closed_pid == pid)
+                .map(|(_, exit)| exit.clone())
+        }
     }
 
     impl TerminalEventListener for TerminalProbe {
         fn on_output(&self, _pid: u32, data: String) {
             self.output.lock().unwrap().push_str(&data);
         }
-        fn on_closed(&self, pid: u32) {
-            self.closed.lock().unwrap().push(pid);
+        fn on_closed(&self, pid: u32, exit: TerminalExit) {
+            self.closed.lock().unwrap().push((pid, exit));
         }
     }
 
@@ -2031,7 +2191,7 @@ mod tests {
             "the launch names its shell"
         );
 
-        write_terminal(started.pid, "printf 'seam:%s\\n' ok; exit\n".to_string())
+        write_terminal(started.pid, "printf 'seam:%s\\n' ok; exit 7\n".to_string())
             .expect("write reaches the pty");
 
         assert!(
@@ -2040,9 +2200,15 @@ mod tests {
             probe.output.lock().unwrap()
         );
         assert!(
-            wait_until(10, || probe.closed.lock().unwrap().contains(&started.pid)),
+            wait_until(10, || probe.exit_for(started.pid).is_some()),
             "the shell's own exit emitted on_closed"
         );
+        let exit = probe.exit_for(started.pid).expect("closed entry");
+        assert_eq!(
+            exit.exit_code, 7,
+            "the widened payload carries the shell's own exit code"
+        );
+        assert!(exit.signal.is_none(), "a natural exit names no signal");
         assert!(
             write_terminal(started.pid, "x".to_string()).is_err(),
             "a closed session's pid no longer accepts writes"
@@ -2072,8 +2238,13 @@ mod tests {
         close_terminal(started.pid).expect("close succeeds");
 
         assert!(
-            wait_until(10, || probe.closed.lock().unwrap().contains(&started.pid)),
+            wait_until(10, || probe.exit_for(started.pid).is_some()),
             "a kill still ends in on_closed"
+        );
+        let exit = probe.exit_for(started.pid).expect("closed entry");
+        assert!(
+            exit.signal.is_some() || exit.exit_code != 0,
+            "a killed shell must not report a clean exit: {exit:?}"
         );
         assert!(
             resize_terminal(started.pid, 80, 24).is_err(),
@@ -2180,6 +2351,41 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// `gh_publish_repo`'s empty-name guard fires before `gh` is spawned —
+    /// the one binary-free assertion the publish flow offers (the repo path
+    /// is deliberately not validated; `gh` itself reports everything else).
+    /// The whitespace name also pins that the *trimmed* name is what counts.
+    #[tokio::test]
+    async fn gh_publish_repo_requires_a_name_before_running_gh() {
+        let err = gh_publish_repo(
+            "/nonexistent".to_string(),
+            "   ".to_string(),
+            String::new(),
+            true,
+        )
+        .await
+        .expect_err("a blank name is refused");
+        let GitError::Failed { message } = err;
+        assert_eq!(message, "Repository name is required.");
+    }
+
+    /// `create_pr`'s empty-title guard fires before `gh` is spawned — the
+    /// PR surface's one binary-free assertion, same pattern as publish.
+    #[tokio::test]
+    async fn create_pr_requires_a_title_before_running_gh() {
+        let err = create_pr(
+            "/nonexistent".to_string(),
+            " \n ".to_string(),
+            "body".to_string(),
+            String::new(),
+            false,
+        )
+        .await
+        .expect_err("a blank title is refused");
+        let GitError::Failed { message } = err;
+        assert_eq!(message, "Pull request title is required.");
     }
 
     /// The Settings shell picker's data source: probe-based, so every row it

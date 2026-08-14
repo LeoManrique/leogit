@@ -30,7 +30,7 @@ use std::thread;
 
 use super::paths;
 use super::shell::{self, ShellOption};
-use crate::events::{CoreEvent, EventSink};
+use crate::events::{CoreEvent, EventSink, TerminalExit};
 
 /// Holds the master PTY (must stay alive to keep the PTY open),
 /// its writer (for stdin), and the child process handle.
@@ -272,13 +272,16 @@ pub fn start_terminal(
                 }
             }
         }
-        // Clean up session on EOF/error and notify frontend. A poisoned lock
-        // means another session's teardown panicked; the frontend still needs
-        // its close event, so don't unwind this thread over it.
-        if let Ok(mut sessions) = SESSIONS.lock() {
-            sessions.remove(&pid);
-        }
-        sink.emit(CoreEvent::TerminalClosed { pid });
+        // Clean up session on EOF/error, reap the child for its exit status,
+        // and notify the frontend. A poisoned lock means another session's
+        // teardown panicked; the frontend still needs its close event, so
+        // don't unwind this thread over it.
+        let session = SESSIONS
+            .lock()
+            .ok()
+            .and_then(|mut sessions| sessions.remove(&pid));
+        let exit = reap_child(pid, session.as_ref());
+        sink.emit(CoreEvent::TerminalClosed { pid, exit });
     });
 
     Ok(StartedTerminal {
@@ -286,6 +289,40 @@ pub fn start_terminal(
         shell_id: chosen.id,
         shell_label: chosen.label,
     })
+}
+
+/// Reap the exited child and translate its status for the close event.
+///
+/// Runs on the reader thread after EOF, once the session is out of the map —
+/// so nothing else can reach this mutex and the `wait()` cannot block anyone:
+/// at EOF the child is already dead (or its status was cached by a kill's
+/// internal `try_wait`), making the wait effectively instant. This is also
+/// what reaps the zombie the old teardown left behind — the child used to be
+/// dropped without ever being waited on.
+///
+/// The deliberate ordering — EOF first, then `wait()` — matters for the one
+/// case where they diverge: a detached background process holding the PTY
+/// open keeps the master readable after the shell itself exited, and waiting
+/// on EOF first keeps "session over" meaning "output over".
+fn reap_child(pid: u32, session: Option<&Arc<Mutex<PtySession>>>) -> TerminalExit {
+    let status = session
+        .and_then(|session| session.lock().ok())
+        .and_then(|mut s| s.child.wait().ok());
+    if let Some(status) = status {
+        TerminalExit {
+            exit_code: status.exit_code(),
+            signal: status.signal().map(str::to_string),
+        }
+    } else {
+        // No status (poisoned lock or a failed wait): report a clean exit
+        // so the panel closes normally instead of parking a phantom error
+        // on screen.
+        println!("[terminal] session {pid} exit status unavailable; reporting clean exit");
+        TerminalExit {
+            exit_code: 0,
+            signal: None,
+        }
+    }
 }
 
 /// Look up a live session by id, releasing the map lock before the caller
@@ -330,13 +367,25 @@ pub fn resize_terminal(pid: u32, cols: u16, rows: u16) -> Result<(), String> {
     Ok(())
 }
 
-/// Kill the child process and remove the session.
+/// Kill the child process. The session stays in the map: the reader thread
+/// owns teardown — its EOF removes the entry, `wait()`s the child for the
+/// exit status (which a killed shell reports as its fatal signal), and emits
+/// the close event. Removing the session here would strand that thread
+/// without the child handle and lose the status.
+///
+/// `kill()` is `portable-pty`'s escalation — SIGHUP, a short `try_wait`
+/// grace loop, then SIGKILL — and can block ~250 ms, so the map lock is
+/// released first; only this session's mutex is held across it.
 ///
 /// # Errors
 /// Returns `Err` only if the session map lock is poisoned.
 pub fn close_terminal(pid: u32) -> Result<(), String> {
-    let mut sessions = SESSIONS.lock().map_err(|_| "sessions lock poisoned")?;
-    if let Some(session) = sessions.remove(&pid)
+    let session = SESSIONS
+        .lock()
+        .map_err(|_| "sessions lock poisoned")?
+        .get(&pid)
+        .cloned();
+    if let Some(session) = session
         && let Ok(mut s) = session.lock()
     {
         let _ = s.child.kill();

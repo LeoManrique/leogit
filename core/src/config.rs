@@ -43,6 +43,12 @@ pub struct Config {
     /// wedge the terminal.
     #[serde(default)]
     pub terminal_shell: Option<String>,
+    /// Show the Pull Requests tab (native client). Off hides the tab and with
+    /// it every `gh pr` call — mostly-local development gets a quieter UI and
+    /// a guarantee of zero GitHub traffic. Defaults on; the tab additionally
+    /// hides itself for repos with no remote, independent of this setting.
+    #[serde(default = "default_show_pull_requests")]
+    pub show_pull_requests: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -113,6 +119,10 @@ fn default_ollama_url() -> String {
     "http://localhost:11434".to_string()
 }
 
+fn default_show_pull_requests() -> bool {
+    true
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -132,6 +142,7 @@ impl Default for Config {
             claude_timeout_secs: default_claude_timeout(),
             ollama_server_url: default_ollama_url(),
             terminal_shell: None,
+            show_pull_requests: default_show_pull_requests(),
         }
     }
 }
@@ -388,6 +399,23 @@ mod tests {
             state.recent_repos,
             Some(vec![r"C:\Dev\a".to_string(), r"C:\Dev\b".to_string()])
         );
+    }
+
+    /// A config file written before `show_pull_requests` existed parses with
+    /// the field defaulted on — the PR tab is opt-out, never silently gone.
+    /// (The five listed fields are the ones with no serde default; a real
+    /// pre-existing file always carries them.)
+    #[test]
+    fn config_missing_show_pull_requests_defaults_on() {
+        let toml = r#"
+            theme = "dark"
+            fetch_interval_ms = 30000
+            ai_provider = "claude"
+            auto_fetch = true
+            syntax_highlighting = true
+        "#;
+        let config: Config = toml::from_str(toml).expect("an older config still parses");
+        assert!(config.show_pull_requests);
     }
 
     #[test]
