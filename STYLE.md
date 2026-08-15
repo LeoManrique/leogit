@@ -139,7 +139,7 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
   - Line 2 — `[author] · [relative date]` in 11.5px `--text-muted`, tabular nums on the date. The author ellipsizes first; the date never truncates.
 - No SHA in the row — it's copied via the right-click menu's "Copy SHA" and shown in the detail card.
 - Selected row: `--bg-tertiary`, 6px radius. Hover: `--surface-hover`.
-- The right pane (commit detail + changed files) gets its own thin 1px left border. Layout matches the changes view: file list on top, diff below. Consistent geometry across tabs.
+- The right pane (commit detail + changed files) gets its own thin 1px left border. Below the detail card the geometry matches the changes view: changed-file list on the left, per-file diff on the right, the file column independently resizable.
 
 ### Commit message composer
 

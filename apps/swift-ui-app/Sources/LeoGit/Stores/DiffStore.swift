@@ -10,6 +10,21 @@ struct DiffRow: Identifiable {
     let line: DiffLine
 }
 
+/// Where a file's diff is read from.
+///
+/// The two sources the Tauri client's `DiffViewer` serves: the working tree
+/// (the Changes tab) and a commit against its first parent (the History
+/// detail). Carried whole through `DiffView` into `DiffStore`, so the raw-diff
+/// read and the blob source the tokenizer uses can never disagree.
+enum DiffTarget: Equatable {
+    /// `HEAD` against the working tree. `epoch` is `RepoStore.statusEpoch`:
+    /// it changes on every status reload, which is what re-keys the view and
+    /// re-reads a diff whose file row looks unchanged.
+    case workingTree(epoch: Int)
+    /// One commit's changes, first-parent for merges.
+    case commit(sha: String)
+}
+
 /// Observable state for the diff of one selected file.
 ///
 /// Loads in two phases, same as the Tauri client: the parsed structure renders
@@ -33,8 +48,8 @@ final class DiffStore {
     /// after `.task(id:)` has already started its replacement.
     private var generation = 0
 
-    /// Load the working-tree diff for `file`, replacing whatever was shown.
-    func load(repoPath: String, file: FileEntry) async {
+    /// Load `file`'s diff from `target`, replacing whatever was shown.
+    func load(repoPath: String, file: FileEntry, target: DiffTarget) async {
         generation += 1
         let current = generation
         isLoading = true
@@ -45,7 +60,13 @@ final class DiffStore {
         errorMessage = nil
 
         do {
-            let raw = try await GitBridge.rawDiff(of: repoPath, for: file)
+            let raw: String
+            switch target {
+            case .workingTree:
+                raw = try await GitBridge.rawDiff(of: repoPath, for: file)
+            case .commit(let sha):
+                raw = try await GitBridge.commitDiff(in: repoPath, sha: sha, filePath: file.path)
+            }
             guard current == generation else { return }
 
             guard let parsed = await GitBridge.parsedDiff(from: raw) else {
@@ -63,7 +84,7 @@ final class DiffStore {
             // screen; failure here just leaves the diff plain.
             let tokenLines = await GitBridge.diffTokens(
                 for: parsed.fileDiff,
-                source: .workingTree(repoPath: repoPath)
+                source: blobSource(repoPath: repoPath, target: target)
             )
             guard current == generation else { return }
             tokens = tokenLines
@@ -71,6 +92,16 @@ final class DiffStore {
             guard current == generation else { return }
             errorMessage = error.displayMessage
             isLoading = false
+        }
+    }
+
+    /// Where the tokenizer reads whole blobs from — disk for the working
+    /// tree, the commit's own trees for history, so a file later rewritten
+    /// still colours as it was at that commit.
+    private func blobSource(repoPath: String, target: DiffTarget) -> BlobSource {
+        switch target {
+        case .workingTree: .workingTree(repoPath: repoPath)
+        case .commit(let sha): .commit(repoPath: repoPath, sha: sha)
         }
     }
 

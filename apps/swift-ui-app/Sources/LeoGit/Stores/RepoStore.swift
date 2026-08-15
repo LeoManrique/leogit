@@ -21,9 +21,15 @@ extension FileEntry: Identifiable {
 @MainActor
 @Observable
 final class RepoStore {
-    /// How many commits the first page loads. History paging comes later; this
-    /// slice only needs enough rows to prove the bridge carries real data.
+    /// How many commits each history page loads; the list appends another
+    /// page whenever its last row scrolls into view.
     private static let historyPageSize: Int32 = 100
+
+    /// How deep a refresh re-reads. A reload keeps the depth the user has
+    /// scrolled to, but capped — the Tauri client's `MAX_COMMITS` — so a
+    /// head move while thousands of rows are loaded doesn't re-fetch them
+    /// all; scrolling re-grows the list on demand.
+    private static let historyRefreshCap = 500
 
     private(set) var repoPath: String?
     private(set) var repoName = ""
@@ -31,6 +37,11 @@ final class RepoStore {
     private(set) var commits: [CommitInfo] = []
     private(set) var isLoading = false
     private(set) var coreVersionText = ""
+
+    /// False once a fetch returned fewer commits than requested — the end of
+    /// the repository's history.
+    private(set) var hasMoreHistory = true
+    private var isLoadingMoreHistory = false
 
     /// Whether a merge is in progress (`MERGE_HEAD` exists). Refreshed with
     /// status, like the Tauri client folds `is_merging` into its poll; drives
@@ -62,7 +73,9 @@ final class RepoStore {
             repoPath = root
             repoName = await GitBridge.name(of: root)
             errorMessage = nil
-            await loadRepoData(root)
+            // A fresh repository starts at page one, whatever depth the
+            // previous one had been scrolled to.
+            await loadRepoData(root, historyLimit: Self.historyPageSize)
         } catch {
             // Leave any previously open repo intact — a failed open should not
             // blank out what the user was already looking at.
@@ -75,7 +88,7 @@ final class RepoStore {
         guard let repoPath else { return }
         isLoading = true
         defer { isLoading = false }
-        await loadRepoData(repoPath)
+        await loadRepoData(repoPath, historyLimit: currentHistoryLimit)
     }
 
     /// The background poll's tick — the silent counterpart of `refresh()`,
@@ -103,11 +116,41 @@ final class RepoStore {
             statusEpoch += 1
         }
         isMerging = (try? await GitBridge.mergeInProgress(in: repoPath)) ?? false
-        if headMoved,
-            let newCommits = try? await GitBridge.log(of: repoPath, limit: Self.historyPageSize)
-        {
-            commits = newCommits
+        if headMoved {
+            let limit = currentHistoryLimit
+            if let newCommits = try? await GitBridge.log(of: repoPath, limit: limit) {
+                commits = newCommits
+                hasMoreHistory = newCommits.count == Int(limit)
+            }
         }
+    }
+
+    /// Append the next page of history — the commit list's reaching its last
+    /// row calls this. In-flight and end-of-history guarded, so `onAppear`
+    /// can fire it freely.
+    func loadMoreHistory() async {
+        guard let repoPath, hasMoreHistory, !isLoadingMoreHistory else { return }
+        isLoadingMoreHistory = true
+        defer { isLoadingMoreHistory = false }
+
+        guard
+            let page = try? await GitBridge.log(
+                of: repoPath,
+                limit: Self.historyPageSize,
+                skip: Int32(commits.count)
+            )
+        else { return }
+        // The 2 s poll can slide the window under a page in flight; keying
+        // out already-known shas keeps every row's identity unique.
+        let known = Set(commits.map(\.sha))
+        commits += page.filter { !known.contains($0.sha) }
+        hasMoreHistory = page.count == Int(Self.historyPageSize)
+    }
+
+    /// The depth a reload should keep: what the user has scrolled to, floored
+    /// at one page and capped at the refresh limit.
+    private var currentHistoryLimit: Int32 {
+        Int32(min(max(commits.count, Int(Self.historyPageSize)), Self.historyRefreshCap))
     }
 
     /// Report which Rust build the UI is linked against.
@@ -117,15 +160,16 @@ final class RepoStore {
 
     /// Status and history are independent reads, so run them concurrently and
     /// let each report its own failure.
-    private func loadRepoData(_ path: String) async {
+    private func loadRepoData(_ path: String, historyLimit: Int32) async {
         async let statusResult = GitBridge.status(of: path)
-        async let logResult = GitBridge.log(of: path, limit: Self.historyPageSize)
+        async let logResult = GitBridge.log(of: path, limit: historyLimit)
         async let mergingResult = GitBridge.mergeInProgress(in: path)
 
         do {
             let (newStatus, newCommits) = try await (statusResult, logResult)
             status = newStatus
             commits = newCommits
+            hasMoreHistory = newCommits.count == Int(historyLimit)
             statusEpoch += 1
             errorMessage = nil
         } catch {

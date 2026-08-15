@@ -80,6 +80,32 @@ enum GitBridge {
         tokenizeDiff(fileDiff: fileDiff, source: source)
     }
 
+    // MARK: - Commit history detail
+
+    /// The files a commit changed — the same row shape as the status list.
+    /// Renames carry `origPath`; the working-tree-only flags (`embedded`,
+    /// `submoduleDirty`) are always false here. First-parent for merges.
+    @concurrent
+    static func commitFiles(in repoPath: String, sha: String) async throws -> [FileEntry] {
+        try getCommitFiles(repoPath: repoPath, sha: sha)
+    }
+
+    /// A commit's total added/deleted line counts, summed across its files;
+    /// binary files count zero.
+    @concurrent
+    static func commitStats(in repoPath: String, sha: String) async throws -> CommitStats {
+        try getCommitStats(repoPath: repoPath, sha: sha)
+    }
+
+    /// Raw unified diff of one file within a commit — the commit against its
+    /// first parent, so a merge commit shows coherent per-file changes. Feeds
+    /// the same `parsedDiff`/`diffTokens` pipeline as the working tree, with
+    /// `BlobSource.commit` so blobs are read at the commit, not from disk.
+    @concurrent
+    static func commitDiff(in repoPath: String, sha: String, filePath: String) async throws -> String {
+        try getCommitDiff(repoPath: repoPath, sha: sha, filePath: filePath)
+    }
+
     /// The full commit message: summary, optional description, and
     /// `Co-authored-by` trailers, joined the way `commitChanges` expects.
     @concurrent

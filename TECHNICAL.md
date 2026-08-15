@@ -95,7 +95,7 @@ leogit/
 │           ├── IPC/GitBridge.swift  # The only place Swift calls Rust (@concurrent wrappers)
 │           ├── Stores/RepoStore.swift  # @MainActor @Observable state for the open repo
 │           ├── Screens/             # ContentView, WelcomeView, ChangesView, HistoryView
-│           └── Design/              # Date formatting, FileStatus + path presentation
+│           └── Design/              # Date formatting, FileStatus, path + shared file list
 ├── justfile                         # install / dev / build / check / format / mac-*
 └── DESIGN.md / TECHNICAL.md / STYLE.md / FRONTEND.md / ROADMAP.md / README.md
 ```
@@ -262,6 +262,28 @@ measuring span the Svelte component uses. It is greedy horizontally (the compone
 `flex: 1 1 0`), so its width never depends on its own text and the measurement cannot feed
 back into layout; the fit is recomputed from `onGeometryChange`, which only fires when the
 width actually changes.
+
+The History detail crosses as three reads with the Tauri client's exact split:
+`get_commit_files` + `get_commit_stats` (a new `CommitStats` mirror) on selecting a commit —
+metadata never loads, it rides in the `CommitInfo` the list already holds — and per selected
+file `get_commit_diff`, which feeds the *same* `parse_diff`/`tokenize_diff` pipeline as the
+working tree. That reuse is structural on the Swift side: `DiffStore`/`DiffView` take a
+`DiffTarget` (`.workingTree(epoch:)` or `.commit(sha:)`) that picks both the raw-diff read and
+the tokenizer's `BlobSource` in one value, so the two can never disagree, and the commit case
+reads blobs at the commit's own trees — a file later rewritten still colours as it was then.
+`CommitDetailStore` awaits the file list but treats the +/− totals as non-critical chrome
+(fetched concurrently, failure keeps the header quiet — the Tauri client's exact policy),
+guarded by the same generation counter as `DiffStore` against superseded loads. The changed-file
+rows themselves are `Design/ChangedFileList.swift`, extracted from the Changes tab so both tabs
+share one row implementation (the Tauri `FileList.svelte` arrangement) — the Changes tab injects
+its checkbox through a `@ViewBuilder` leading slot, History injects nothing. All three core
+functions use `--first-parent`, so a merge commit shows its first-parent changes instead of
+`diff-tree`'s empty output; `get_commit_diff` now also passes `--root` like its two siblings
+(without it, a `log.showRoot=false` user got a populated file list whose every diff was empty on
+the repository's first commit — pinned by `commit_diff_covers_the_root_commit_regardless_of_show_root`).
+The history list itself pages: `get_log`'s `skip` appends a page whenever the last row
+materialises, and quiet refreshes re-fetch at the scrolled depth capped at 500 (the Tauri
+window's `MAX_COMMITS`), with appends de-duplicated by sha against a poll's concurrent reload.
 
 The embedded terminal crosses as the bridge's second foreign callback trait:
 `TerminalEventListener { on_output(pid, data), on_closed(pid, exit) }` — `exit` is a

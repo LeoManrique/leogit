@@ -112,49 +112,18 @@ struct ChangesView: View {
     }
 
     private var fileList: some View {
-        List(files, selection: $selectedPath) { file in
-            HStack(spacing: 10) {
-                Toggle("Include \(file.displayName)", isOn: includedBinding(for: file))
-                    .toggleStyle(.checkbox)
-                    .labelsHidden()
-                    .disabled(!CommitStore.isCommittable(file))
-
-                FileStatusBadge(status: file.status)
-
-                // Greedy, so it also supplies the gap before the trailing tag —
-                // a Spacer here would split the slack with it and shorten the
-                // path for no reason.
-                PathText(path: file.path)
-
-                // Entries the parent repo cannot stage — surfaced here so the
-                // list never implies an action that would silently no-op.
-                // `.fixedSize` keeps the tag whole: the path is the flexible
-                // one, and it already knows how to shorten itself gracefully.
-                if file.submoduleDirty {
-                    Text("submodule")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .fixedSize()
-                        .help("Changes live inside the submodule and must be committed there")
-                } else if file.embedded {
-                    Text("embedded repo")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .fixedSize()
-                        .help("A nested repository; committing stages a gitlink, not its files")
-                }
-            }
-            .padding(.vertical, 2)
-            .help(file.path)
+        ChangedFileList(files: files, selectedPath: $selectedPath) { file in
+            Toggle("Include \(file.displayName)", isOn: includedBinding(for: file))
+                .toggleStyle(.checkbox)
+                .labelsHidden()
+                .disabled(!CommitStore.isCommittable(file))
         }
-        .listStyle(.inset)
-        .alternatingRowBackgrounds()
     }
 
     @ViewBuilder
     private var detail: some View {
         if let file = files.first(where: { $0.path == selectedPath }) {
-            DiffView(repoPath: repoPath, file: file, statusEpoch: statusEpoch)
+            DiffView(repoPath: repoPath, file: file, target: .workingTree(epoch: statusEpoch))
         } else {
             ContentUnavailableView(
                 "No File Selected",

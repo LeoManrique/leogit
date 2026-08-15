@@ -48,7 +48,8 @@ pub use leogit_core::diff::{DiffLine, FileDiff, Hunk, HunkHeader, IntraLineRange
 pub use leogit_core::events::TerminalExit;
 pub use leogit_core::gh::{GhRepo, PrCheck, PullRequest};
 pub use leogit_core::git::{
-    BranchInfo, CommitInfo, FileEntry, FileStatus, LogOptions, MergeResult, RepoStatus, RepoSync,
+    BranchInfo, CommitInfo, CommitStats, FileEntry, FileStatus, LogOptions, MergeResult,
+    RepoStatus, RepoSync,
 };
 pub use leogit_core::highlight::{BlobSource, Token, TokenClass};
 pub use leogit_core::shell::ShellOption;
@@ -160,6 +161,13 @@ pub struct CommitInfo {
 pub struct LogOptions {
     pub max_count: i32,
     pub skip: i32,
+}
+
+/// Mirrors [`leogit_core::git::CommitStats`].
+#[uniffi::remote(Record)]
+pub struct CommitStats {
+    pub additions: u32,
+    pub deletions: u32,
 }
 
 /// Mirrors [`leogit_core::git::BranchInfo`].
@@ -415,6 +423,57 @@ pub fn parse_diff(raw: String) -> Option<DiffPayload> {
 #[uniffi::export]
 pub fn tokenize_diff(file_diff: FileDiff, source: Option<BlobSource>) -> Vec<Vec<Token>> {
     highlight::tokenize_diff(&file_diff, source.as_ref())
+}
+
+// ---------------------------------------------------------------------------
+// Exported functions — commit history detail
+// ---------------------------------------------------------------------------
+//
+// The History detail pane's three reads, same split as the Tauri client:
+// commit metadata rides in the `CommitInfo` the list already holds, so
+// selecting a commit only fetches its changed files, its +/− totals, and —
+// per selected file — a raw diff that feeds the same `parse_diff` /
+// `tokenize_diff` pipeline as the working tree (with `BlobSource::Commit` so
+// blobs are read at the commit, not from disk). All three use `--first-parent`
+// in core, so a merge commit shows its first-parent changes rather than
+// `diff-tree`'s empty output.
+
+/// The files a commit changed, in the same shape as `get_status`'s list.
+/// Renames carry `orig_path`; `embedded`/`submodule_dirty` are always false
+/// here (they are working-tree concepts).
+///
+/// # Errors
+///
+/// Returns [`GitError`] when `git log` fails — an unknown sha, most likely.
+#[uniffi::export]
+pub fn get_commit_files(repo_path: String, sha: String) -> Result<Vec<FileEntry>, GitError> {
+    git::get_commit_files(repo_path, sha).map_err(GitError::from)
+}
+
+/// A commit's total added/deleted line counts, summed across its files.
+/// Binary files count zero — a binary-only commit reports `0/0`.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when `git log` fails.
+#[uniffi::export]
+pub fn get_commit_stats(repo_path: String, sha: String) -> Result<CommitStats, GitError> {
+    git::get_commit_stats(repo_path, sha).map_err(GitError::from)
+}
+
+/// The raw unified diff of one file within a commit (that commit against its
+/// first parent). An empty `file_path` yields the whole-commit diff.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when `git log` fails.
+#[uniffi::export]
+pub fn get_commit_diff(
+    repo_path: String,
+    sha: String,
+    file_path: String,
+) -> Result<String, GitError> {
+    git::get_commit_diff(repo_path, sha, file_path).map_err(GitError::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -1627,6 +1686,69 @@ mod tests {
         let repo = dir.to_string_lossy().to_string();
         let default = run_git_stdout(&dir, &["symbolic-ref", "--short", "HEAD"]);
         (dir, repo, default)
+    }
+
+    /// The History detail reads exactly as the Swift client drives them:
+    /// select a commit → `get_commit_files` + `get_commit_stats`, then per
+    /// file `get_commit_diff` → `parse_diff` → `tokenize_diff` with
+    /// `BlobSource::Commit`. Pins rename detection crossing the bridge
+    /// (`orig_path`), binary files counting zero in the stats, and the
+    /// commit-sourced tokenizer path — none of which had coverage before.
+    #[test]
+    fn commit_detail_reads_files_stats_and_per_file_diffs() {
+        let (dir, repo, _) = seeded_repo("commit-detail");
+        run_git(&dir, &["mv", "base.txt", "renamed.txt"]);
+        std::fs::create_dir_all(dir.join("src")).expect("mkdir");
+        std::fs::write(
+            dir.join("src/new.rs"),
+            "pub fn added() {}\npub fn more() {}\n",
+        )
+        .expect("write");
+        std::fs::write(dir.join("bin.dat"), [0u8, 159, 146, 150]).expect("write");
+        run_git(&dir, &["add", "."]);
+        run_git(&dir, &["commit", "-m", "second"]);
+        let sha = run_git_stdout(&dir, &["rev-parse", "HEAD"]);
+
+        let files = get_commit_files(repo.clone(), sha.clone()).expect("commit files");
+        assert_eq!(files.len(), 3, "rename + source file + binary: {files:?}");
+        let renamed = files
+            .iter()
+            .find(|f| f.path == "renamed.txt")
+            .expect("renamed entry");
+        assert!(matches!(renamed.status, FileStatus::Renamed));
+        assert_eq!(renamed.orig_path.as_deref(), Some("base.txt"));
+        let added = files
+            .iter()
+            .find(|f| f.path == "src/new.rs")
+            .expect("added entry");
+        assert!(matches!(added.status, FileStatus::New));
+
+        // The pure rename moves no lines and numstat reports the binary file
+        // as `-`, so the two source lines are the whole count.
+        let stats = get_commit_stats(repo.clone(), sha.clone()).expect("stats");
+        assert_eq!((stats.additions, stats.deletions), (2, 0));
+
+        let raw = get_commit_diff(repo.clone(), sha.clone(), added.path.clone()).expect("diff");
+        let payload = parse_diff(raw).expect("parses");
+        assert_eq!(payload.additions, 2);
+        let flat: usize = payload.file_diff.hunks.iter().map(|h| h.lines.len()).sum();
+        let tokens = tokenize_diff(
+            payload.file_diff,
+            Some(BlobSource::Commit {
+                repo_path: repo.clone(),
+                sha: sha.clone(),
+            }),
+        );
+        assert_eq!(tokens.len(), flat, "one token line per diff line");
+        assert!(
+            tokens.iter().any(|line| !line.is_empty()),
+            "rust source read at the commit produces tokens"
+        );
+
+        let whole = get_commit_diff(repo, sha, String::new()).expect("whole-commit diff");
+        assert!(whole.contains("renamed.txt") && whole.contains("src/new.rs"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The branch lifecycle exactly as the Swift client drives it: list →

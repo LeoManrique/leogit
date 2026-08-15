@@ -108,7 +108,12 @@ struct ContentView: View {
                     onCommitted: { await store.refresh() }
                 )
             case .history:
-                HistoryView(commits: store.commits)
+                HistoryView(
+                    repoPath: repoPath,
+                    commits: store.commits,
+                    unpushedShas: Set(store.status?.unpushedShas ?? []),
+                    onReachEnd: { Task { await store.loadMoreHistory() } }
+                )
             case .pullRequests:
                 PullRequestsView(
                     repoPath: repoPath,

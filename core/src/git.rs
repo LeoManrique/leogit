@@ -916,6 +916,9 @@ pub fn get_commit_diff(
     sha: String,
     file_path: String,
 ) -> Result<String, String> {
+    // `--root` matches `get_commit_files`/`get_commit_stats`: without it, a
+    // user with `log.showRoot=false` gets an empty patch for the repository's
+    // first commit while the file list and stats stay populated.
     if file_path.is_empty() {
         // Full commit diff
         run_git(
@@ -926,6 +929,7 @@ pub fn get_commit_diff(
                 "-1",
                 "--first-parent",
                 "-p",
+                "--root",
                 "--no-color",
                 "--format=",
             ],
@@ -942,6 +946,7 @@ pub fn get_commit_diff(
                 "-1",
                 "--first-parent",
                 "-p",
+                "--root",
                 "--no-color",
                 "--format=",
                 "--",
@@ -3169,6 +3174,43 @@ mod tests {
         let log = get_log(repo_path, default_log_opts()).expect("get_log");
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].summary, "First");
+    }
+
+    /// Regression: the repository's first commit must diff like any other,
+    /// even for a user with `log.showRoot=false` — `git log -p` honours that
+    /// setting unless `--root` is passed, and `get_commit_files`/
+    /// `get_commit_stats` already pass it. Without the flag, the History
+    /// detail showed a populated file list whose every diff was empty.
+    #[test]
+    fn commit_diff_covers_the_root_commit_regardless_of_show_root() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_test_repo(repo);
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+        run_git(&repo_path, &["config", "log.showRoot", "false"]).expect("set showRoot");
+
+        fs::write(repo.join("a.txt"), "hello\n").expect("write file");
+        commit(
+            repo_path.clone(),
+            "Root".to_string(),
+            vec![new_file("a.txt")],
+            None,
+        )
+        .expect("commit");
+        let sha = get_head_sha(repo_path.clone()).expect("head sha");
+
+        let per_file = get_commit_diff(repo_path.clone(), sha.clone(), "a.txt".to_string())
+            .expect("per-file diff");
+        assert!(
+            per_file.contains("+hello"),
+            "root-commit diff empty: {per_file:?}"
+        );
+
+        let whole = get_commit_diff(repo_path, sha, String::new()).expect("whole-commit diff");
+        assert!(
+            whole.contains("+hello"),
+            "whole-commit diff empty: {whole:?}"
+        );
     }
 
     /// Regression: viewing a staged file's diff on a fresh repo (unborn HEAD)

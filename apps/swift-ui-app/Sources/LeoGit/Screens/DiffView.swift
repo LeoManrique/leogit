@@ -1,21 +1,21 @@
 import SwiftUI
 
-/// The diff for one selected working-tree file: a header naming the file and
-/// its +/− totals, then one row per diff line.
+/// The diff for one selected file: a header naming the file and its +/−
+/// totals, then one row per diff line. Serves both the Changes tab (working
+/// tree) and the History detail (a commit) — `target` says which.
 struct DiffView: View {
     let repoPath: String
     let file: FileEntry
-    /// Bumped by `RepoStore` on every successful status reload, so an open
-    /// diff re-reads after Refresh even though the selected path is unchanged.
-    let statusEpoch: Int
+    let target: DiffTarget
 
     @State private var store = DiffStore()
     @Environment(\.colorScheme) private var colorScheme
 
-    /// Reload whenever the selection or the working tree changes.
+    /// Reload whenever the selection or the source changes — a new file, a
+    /// status epoch bump, or a different commit.
     private struct LoadKey: Equatable {
         let path: String
-        let epoch: Int
+        let target: DiffTarget
     }
 
     var body: some View {
@@ -24,8 +24,8 @@ struct DiffView: View {
             Divider()
             content
         }
-        .task(id: LoadKey(path: file.path, epoch: statusEpoch)) {
-            await store.load(repoPath: repoPath, file: file)
+        .task(id: LoadKey(path: file.path, target: target)) {
+            await store.load(repoPath: repoPath, file: file, target: target)
         }
     }
 
