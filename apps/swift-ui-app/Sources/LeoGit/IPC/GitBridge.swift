@@ -452,10 +452,11 @@ enum GitBridge {
 
     /// Walk the configured scan folders for git repositories — a pure
     /// filesystem walk, no git subprocesses. An empty list falls back to
-    /// core's default folders.
+    /// core's default folders. The walk itself runs on a Rust blocking
+    /// thread, so a deep scan tree can't park a cooperative one.
     @concurrent
     static func discoverRepositories(scanPaths: [String], depth: UInt32) async throws -> [String] {
-        try discoverRepos(scanPaths: scanPaths, maxDepth: depth)
+        try await discoverRepos(scanPaths: scanPaths, maxDepth: depth)
     }
 
     /// The folders discovery would actually walk, tilde-expanded — for the

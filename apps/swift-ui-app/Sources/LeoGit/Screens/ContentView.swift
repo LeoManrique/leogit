@@ -151,6 +151,18 @@ struct ContentView: View {
         .task(id: repoPath) {
             await directoryStore.runScheduler(activePath: repoPath, isPaused: backgroundPaused)
         }
+        .task {
+            // Discovery is a filesystem walk that takes a moment on a deep
+            // scan tree, so it starts as soon as this screen exists rather
+            // than when the switcher first opens — otherwise that first open
+            // shows only the active repo and looks broken until reopened.
+            // Deliberately not keyed on `repoPath`: the walk covers every
+            // repo, so it belongs to the screen's lifetime, not a repo's, and
+            // the popover re-runs it on open for freshness. Independent of
+            // the `.task(id: repoPath)` chain above, so it runs alongside
+            // opening the repo instead of delaying it.
+            await directoryStore.refreshDirectory()
+        }
         .onReceive(
             NotificationCenter.default.publisher(
                 for: NSApplication.didBecomeActiveNotification

@@ -121,29 +121,26 @@ struct ChangesView: View {
 
                 FileStatusBadge(status: file.status)
 
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(file.displayName)
-                        .font(.body)
-                    if !file.displayDir.isEmpty {
-                        Text(file.displayDir)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                Spacer(minLength: 0)
+                // Greedy, so it also supplies the gap before the trailing tag —
+                // a Spacer here would split the slack with it and shorten the
+                // path for no reason.
+                PathText(path: file.path)
 
                 // Entries the parent repo cannot stage — surfaced here so the
                 // list never implies an action that would silently no-op.
+                // `.fixedSize` keeps the tag whole: the path is the flexible
+                // one, and it already knows how to shorten itself gracefully.
                 if file.submoduleDirty {
                     Text("submodule")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+                        .fixedSize()
                         .help("Changes live inside the submodule and must be committed there")
                 } else if file.embedded {
                     Text("embedded repo")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+                        .fixedSize()
                         .help("A nested repository; committing stages a gitlink, not its files")
                 }
             }

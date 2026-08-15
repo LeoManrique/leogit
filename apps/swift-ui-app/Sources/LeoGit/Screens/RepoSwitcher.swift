@@ -74,7 +74,14 @@ private struct RepoSwitcherList: View {
             Divider()
 
             if directory.repos.isEmpty {
-                emptyState
+                // Only a cold launch reaches the loading state: once a pass
+                // has published rows, later refreshes replace them in place
+                // rather than blinking the list through a spinner.
+                if directory.isRefreshing {
+                    loadingState
+                } else {
+                    emptyState
+                }
             } else if filteredRepos.isEmpty {
                 Text("No matches")
                     .font(.callout)
@@ -117,6 +124,18 @@ private struct RepoSwitcherList: View {
             await directory.refreshDirectory()
             await directory.sweepVisible(activePath: activePath, isPaused: isPaused)
         }
+    }
+
+    private var loadingState: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Looking for repositories…")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 20)
     }
 
     private var emptyState: some View {

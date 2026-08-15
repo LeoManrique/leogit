@@ -43,9 +43,21 @@ final class RepoDirectoryStore {
     /// names them so "no repositories" is diagnosable.
     private(set) var scanFolders: [String] = []
 
+    /// True while a directory refresh is running, so the switcher can say
+    /// "still looking" instead of "found nothing" during the first walk.
+    private(set) var isRefreshing = false
+
     /// Shared by everything that fetches in the background: the tier loop
     /// here and the active repo's auto-fetch loop both consult and feed it.
     let breaker = ConnectivityBreaker()
+
+    /// The most recent walk's result, kept so a refresh in progress can
+    /// republish the MRU without dropping rows the last walk found.
+    private var discovered: [String] = []
+
+    /// The refresh pass in flight, if any — concurrent callers await it
+    /// instead of walking the tree a second time.
+    private var refreshPass: Task<Void, Never>?
 
     private var inFlight: Set<String> = []
     private var lastFullSweep = Date.distantPast
@@ -57,30 +69,72 @@ final class RepoDirectoryStore {
         URL(fileURLWithPath: path).lastPathComponent
     }
 
-    /// Re-read config, run discovery, and reload the shared MRU — the
-    /// switcher calls this every time it opens, so repos created or cloned
-    /// since the last look appear without a restart.
+    /// Re-read config, reload the shared MRU, and re-run discovery. Called
+    /// once when the repository screen appears, so the switcher's first open
+    /// finds a populated list, and again whenever the popover opens, so repos
+    /// created or cloned since the last look show up without a restart.
+    ///
+    /// Concurrent callers share one pass — the popover opening mid-prime
+    /// awaits the running walk rather than starting a second one.
     func refreshDirectory() async {
-        let config = try? await GitBridge.appConfig()
-        let scanPaths = config?.scanPaths ?? []
-        let depth = config?.scanDepth ?? 3
+        if let pass = refreshPass {
+            await pass.value
+            return
+        }
+        let pass = Task { await loadDirectory() }
+        refreshPass = pass
+        await pass.value
+        refreshPass = nil
+    }
 
-        let discovered = (try? await GitBridge.discoverRepositories(scanPaths: scanPaths, depth: depth)) ?? []
-        scanFolders = await GitBridge.scanFolders(for: scanPaths)
+    /// One refresh pass, published in two phases so a slow walk never leaves
+    /// the switcher looking empty: the shared MRU lands first (a small JSON
+    /// read, and the repos the user actually cycles between), then the
+    /// filesystem walk — the slow half on a deep scan tree — replaces the
+    /// list when it finishes.
+    private func loadDirectory() async {
+        isRefreshing = true
+        defer { isRefreshing = false }
+
         if let state = try? await GitBridge.reposState() {
-            recentRepos = state.recentRepos ?? recentRepos
+            adoptRecents(state.recentRepos ?? [])
+            publishRepos()
         }
 
+        let config = try? await GitBridge.appConfig()
+        let scanPaths = config?.scanPaths ?? []
+        scanFolders = await GitBridge.scanFolders(for: scanPaths)
+        if let found = try? await GitBridge.discoverRepositories(
+            scanPaths: scanPaths,
+            depth: config?.scanDepth ?? 3
+        ) {
+            discovered = found
+            publishRepos()
+        }
+    }
+
+    /// Rebuild the row list from the two sources: discovery order first (core
+    /// returns it sorted), then MRU entries discovery didn't cover — a repo
+    /// opened via "Open Other…" keeps its row even from outside the scan
+    /// folders, provided it still exists (an MRU entry can name a folder that
+    /// has since been moved or deleted).
+    private func publishRepos() {
         var merged = discovered
         var seen = Set(discovered)
         for recent in recentRepos where !seen.contains(recent) {
-            // MRU entries can be stale (moved, deleted) or live outside the
-            // scan folders; only ones still on disk earn a row.
             guard FileManager.default.fileExists(atPath: recent) else { continue }
             merged.append(recent)
             seen.insert(recent)
         }
         repos = merged
+    }
+
+    /// Take the persisted MRU, keeping any locally-known entry it doesn't
+    /// carry yet: `noteOpened` updates this list before its write lands, and
+    /// a refresh racing that write must not make the repo the user just
+    /// opened disappear from the switcher.
+    private func adoptRecents(_ persisted: [String]) {
+        recentRepos = persisted + recentRepos.filter { !persisted.contains($0) }
     }
 
     /// Record that `path` is now the open repo: front of the local MRU
@@ -90,11 +144,10 @@ final class RepoDirectoryStore {
     func noteOpened(_ path: String) async {
         recentRepos.removeAll { $0 == path }
         recentRepos.insert(path, at: 0)
-        if !repos.contains(path) {
-            repos.append(path)
-        }
+        publishRepos()
         if let state = try? await GitBridge.recordRecent(repoPath: path) {
-            recentRepos = state.recentRepos ?? recentRepos
+            adoptRecents(state.recentRepos ?? [])
+            publishRepos()
         }
         try? await GitBridge.setLastOpened(repoPath: path)
     }
@@ -141,9 +194,11 @@ final class RepoDirectoryStore {
     /// each tier first fires after its short kick, then repeats on its
     /// interval. Cancellation (repo switch, repo closed) ends it.
     func runScheduler(activePath: String, isPaused: @MainActor () -> Bool) async {
-        // The tiers need the MRU even if the switcher was never opened.
-        if recentRepos.isEmpty, let state = try? await GitBridge.reposState() {
-            recentRepos = state.recentRepos ?? []
+        // The tiers need the MRU. Normally the screen's prime pass has it
+        // already; if that failed or is still running, this coalesces with it
+        // rather than loading the list a second way.
+        if recentRepos.isEmpty {
+            await refreshDirectory()
         }
         var due = Self.tierKicks.map { Date.now.addingTimeInterval($0) }
         while !Task.isCancelled {

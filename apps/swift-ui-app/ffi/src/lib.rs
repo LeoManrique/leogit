@@ -1222,16 +1222,30 @@ pub fn record_recent_repo(path: String) -> Result<ReposState, GitError> {
 
 /// Walk the scan folders for git repositories — a pure filesystem walk, no
 /// git subprocesses. An empty `scan_paths` falls back to core's defaults;
-/// results are canonicalized and sorted. Blocking and potentially slow on
-/// deep trees: call off the main actor.
+/// results are canonicalized and sorted.
+///
+/// Async over `spawn_blocking` for the same reason as [`repo_sync_status`]:
+/// core's walk is synchronous and, over several roots at the configured
+/// depth, stats enough directories to hold its thread for a noticeable
+/// stretch. Swift's cooperative pool has one thread per core, so that wait
+/// belongs on a blocking thread — the hop `#[tauri::command(async)]` performs
+/// implicitly for the Tauri host.
 ///
 /// # Errors
 ///
 /// Returns [`GitError`] only on walk-level failures; unreadable folders are
 /// skipped, not fatal.
-#[uniffi::export]
-pub fn discover_repos(scan_paths: Vec<String>, max_depth: u32) -> Result<Vec<String>, GitError> {
-    git::discover_repos(scan_paths, max_depth).map_err(GitError::from)
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn discover_repos(
+    scan_paths: Vec<String>,
+    max_depth: u32,
+) -> Result<Vec<String>, GitError> {
+    tokio::task::spawn_blocking(move || git::discover_repos(scan_paths, max_depth))
+        .await
+        .map_err(|join_error| GitError::Failed {
+            message: format!("discover_repos did not complete: {join_error}"),
+        })?
+        .map_err(GitError::from)
 }
 
 /// The folders discovery would actually walk for this configuration,
@@ -2037,8 +2051,8 @@ mod tests {
     /// reports tilde-expanded folders. The config/state read-write functions
     /// are deliberately untested here — they operate on the user's real
     /// shared files, like the AI config load/save paths.
-    #[test]
-    fn discovery_finds_repos_and_reports_scan_folders() {
+    #[tokio::test]
+    async fn discovery_finds_repos_and_reports_scan_folders() {
         let root = std::env::temp_dir().join(format!("leogit-ffi-discover-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let direct = root.join("direct");
@@ -2057,6 +2071,7 @@ mod tests {
             ],
             3,
         )
+        .await
         .expect("discover");
         // Compare by suffix: results are canonicalized, and /tmp resolves
         // through /private on macOS.

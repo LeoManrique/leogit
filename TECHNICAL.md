@@ -95,7 +95,7 @@ leogit/
 │           ├── IPC/GitBridge.swift  # The only place Swift calls Rust (@concurrent wrappers)
 │           ├── Stores/RepoStore.swift  # @MainActor @Observable state for the open repo
 │           ├── Screens/             # ContentView, WelcomeView, ChangesView, HistoryView
-│           └── Design/              # Date formatting + FileStatus presentation
+│           └── Design/              # Date formatting, FileStatus + path presentation
 ├── justfile                         # install / dev / build / check / format / mac-*
 └── DESIGN.md / TECHNICAL.md / STYLE.md / FRONTEND.md / ROADMAP.md / README.md
 ```
@@ -214,12 +214,13 @@ client already had: `load_config` (a full `Config` mirror — the native client 
 `last_opened_repo` is patched on every switch and restored at launch by *either* client,
 and the MRU list feeds the tiered badge scheduler — `discover_repos`/`effective_scan_paths`
 (pure filesystem walk, no git subprocesses), and `repo_sync_status` returning a `RepoSync`
-mirror, the per-repo dirty/behind/ahead badge summary. That last one is the bridge's one
-async-over-sync export: core's function is synchronous, but an opted-in fetch can hold its
-thread for the full 12 s background timeout, so the bridge wraps it in
-`tokio::task::spawn_blocking` under `async_runtime = "tokio"` — the same worker-thread hop
-`#[tauri::command(async)]` performs implicitly — keeping Swift's cooperative pool
-unparked. On the Swift side, all refresh timing is structured concurrency instead
+mirror, the per-repo dirty/behind/ahead badge summary. The last two are async-over-sync
+exports: core's functions are synchronous, but `repo_sync_status`'s opted-in fetch can hold
+its thread for the full 12 s background timeout and `discover_repos` stats whole directory
+trees, so both are wrapped in `tokio::task::spawn_blocking` under `async_runtime = "tokio"`
+— the same worker-thread hop `#[tauri::command(async)]` performs implicitly — keeping
+Swift's cooperative pool (one thread per core) unparked. On the Swift side, all refresh
+timing is structured concurrency instead
 of timers: `ContentView` owns `.task(id: repoPath)` loops — the 2 s status poll, the
 config-driven auto-fetch, and `RepoDirectoryStore`'s tier scheduler (Tauri's cadence
 number-for-number: 2/5/10 min over the MRU with 1.5/4/8 s launch kicks, sequential, active
@@ -233,6 +234,34 @@ can change on disk without its status row changing. A `ConnectivityBreaker` (Tau
 numbers: 2 failures → 30 s backoff doubling to a 5 min cap) gates every background fetch,
 fed only by real attempts against real remotes; both loops also pause while the app is
 inactive — a deliberate native improvement the activation resync makes safe.
+
+`RepoDirectoryStore.refreshDirectory` owns the switcher's row list and is deliberately not
+lazy: a `.task` on the repository screen primes it when that screen appears, so the walk
+overlaps opening the repo instead of starting when the popover first opens (which left the
+first open showing only the active repo until the scan landed, and looking correct only on
+a second open). It is unkeyed — the walk spans every repo, so it belongs to the screen's
+lifetime rather than a repo's, and the popover still re-runs it on open so freshly cloned
+repos appear. One pass publishes twice: the shared MRU first (a small JSON read, and the
+repos the user actually cycles between), then the walk's result, with the previous walk's
+output retained so republishing can't momentarily drop discovered rows. Concurrent callers
+(prime and popover, or the tier scheduler bootstrapping an empty MRU) await the single
+in-flight `Task` rather than walking the tree twice, and the persisted MRU is unioned with
+the local one on adoption, so a refresh racing `noteOpened`'s not-yet-landed write cannot
+drop the repo that was just opened. `isRefreshing` lets the popover say "Looking for
+repositories…" instead of the diagnosable "no repositories found" empty state, which is
+only correct once a pass has actually finished.
+
+`Design/PathText.swift` is a straight port of the Tauri client's `PathText.svelte`, algorithm
+included: `PathTruncation` restates the rule (the directory collapses to a trailing `…/`
+bridge, never below a first-letter hint, and the filename middle-truncates only when even that
+won't fit), and its output was diffed against the original's across every path/budget pair
+before shipping. SwiftUI's own `.truncationMode` can't express it — it has no idea which half
+of a path carries the file's identity — so the view binary-searches the largest budget whose
+rendered width fits, measuring with the very `NSFont` it draws with, mirroring the hidden
+measuring span the Svelte component uses. It is greedy horizontally (the component's
+`flex: 1 1 0`), so its width never depends on its own text and the measurement cannot feed
+back into layout; the fit is recomputed from `onGeometryChange`, which only fires when the
+width actually changes.
 
 The embedded terminal crosses as the bridge's second foreign callback trait:
 `TerminalEventListener { on_output(pid, data), on_closed(pid, exit) }` — `exit` is a
