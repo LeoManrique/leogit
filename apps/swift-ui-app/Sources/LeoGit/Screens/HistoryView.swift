@@ -96,9 +96,15 @@ private struct CommitRow: View {
                 }
 
                 if isUnpushed {
+                    // A 16×16 plate rather than a bare glyph — the Tauri
+                    // list's unpushed badge, which shares the tag chips'
+                    // height and corner radius so the row's indicator
+                    // cluster reads as one family.
                     Image(systemName: "arrow.up")
                         .font(.system(size: 9, weight: .bold))
                         .foregroundStyle(.secondary)
+                        .frame(width: 16, height: 16)
+                        .background(.quaternary, in: .rect(cornerRadius: 5))
                         .help("Not yet pushed")
                 }
             }

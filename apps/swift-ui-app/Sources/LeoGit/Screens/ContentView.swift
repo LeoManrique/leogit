@@ -85,7 +85,7 @@ struct ContentView: View {
             }
 
             Picker("View", selection: $tab) {
-                ForEach(availableTabs) { Text($0.rawValue).tag($0) }
+                ForEach(availableTabs) { Text(tabTitle($0)).tag($0) }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
@@ -250,6 +250,19 @@ struct ContentView: View {
             tabs.append(.pullRequests)
         }
         return tabs
+    }
+
+    /// Segment titles. Changes carries the working-tree file count — every
+    /// row the list shows, untracked and conflicted included, hidden at zero
+    /// and never capped, visible from any tab — the Tauri tab bar's count
+    /// badge, folded into the segment text since a segmented control can't
+    /// host a separate pill.
+    private func tabTitle(_ tab: RepoTab) -> String {
+        let fileCount = store.status?.files.count ?? 0
+        if tab == .changes, fileCount > 0 {
+            return "\(tab.rawValue) (\(fileCount))"
+        }
+        return tab.rawValue
     }
 
     /// Re-read `show_pull_requests` from the shared config.

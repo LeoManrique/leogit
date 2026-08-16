@@ -96,6 +96,10 @@ struct SyncControls: View {
                 splitButton { pull() }
             }
         }
+        // The macOS toolbar renders labels icon-only by default, which
+        // swallowed the state word and the commit count — the whole point of
+        // an adaptive button. This is the documented opt-in to show both.
+        .labelStyle(.titleAndIcon)
         .help(helpText)
         .sheet(isPresented: $isPublishSheetPresented) {
             PublishSheet(
