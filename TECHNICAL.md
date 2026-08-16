@@ -730,6 +730,7 @@ just mac-generate    # project.yml → LeoGit.xcodeproj
 just mac-bindings    # cargo build -p leogit-ffi + regenerate Swift bindings
 just mac-build       # xcodebuild (runs mac-bindings first, via a pre-build phase)
 just mac-run         # build, then launch LeoGit.app
+just mac-run --no-build  # relaunch the last build, skipping xcodebuild
 ```
 
 `just check` covers the whole Cargo workspace, so `leogit-ffi` type-checks alongside core and

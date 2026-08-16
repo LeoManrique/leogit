@@ -1,5 +1,6 @@
 app := "apps/tauri-app"
 mac := "apps/swift-ui-app"
+mac_app := mac / "build/Build/Products/Debug/LeoGit.app"
 
 # `just` runs every recipe with `sh`, including on Windows. Git for Windows ships
 # it at C:\Program Files\Git\usr\bin; keep that directory on PATH so the POSIX
@@ -59,9 +60,25 @@ mac-generate: mac-bindings
 mac-build: mac-generate
     cd {{mac}} && xcodebuild -project LeoGit.xcodeproj -scheme LeoGit -configuration Debug -derivedDataPath build build
 
-# Build and launch the macOS app
-mac-run: mac-build
-    open {{mac}}/build/Build/Products/Debug/LeoGit.app
+# `mac-build` is invoked from the body rather than declared as a dependency,
+# because just resolves dependencies before the recipe runs and so cannot skip
+# one conditionally.
+# Build and launch the macOS app; pass `--no-build` to relaunch the last build
+mac-run *flags:
+    #!/bin/sh
+    set -eu
+    case "{{flags}}" in
+        "") just mac-build ;;
+        --no-build)
+            [ -d "{{mac_app}}" ] || {
+                echo "mac-run: no build at {{mac_app}}; run 'just mac-run' first" >&2
+                exit 1
+            } ;;
+        *)
+            echo "mac-run: unknown argument '{{flags}}' (expected --no-build)" >&2
+            exit 1 ;;
+    esac
+    open "{{mac_app}}"
 
 # The Cargo workspace target/ lives at the repo root, so `cargo clean` wipes it
 # for every crate at once; the macOS app's generated project and bindings go too.
