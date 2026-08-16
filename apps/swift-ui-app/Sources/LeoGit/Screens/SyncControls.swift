@@ -96,9 +96,8 @@ struct SyncControls: View {
                 splitButton { pull() }
             }
         }
-        // The macOS toolbar renders labels icon-only by default, which
-        // swallowed the state word and the commit count — the whole point of
-        // an adaptive button. This is the documented opt-in to show both.
+        // macOS toolbars render Labels icon-only unless told otherwise, and
+        // the state word is the whole point of an adaptive button.
         .labelStyle(.titleAndIcon)
         .help(helpText)
         .sheet(isPresented: $isPublishSheetPresented) {
@@ -147,6 +146,14 @@ struct SyncControls: View {
     /// The split states: the proposed action on the button face, plus a
     /// chevron menu that always offers Fetch and — only while diverged —
     /// force push with lease.
+    ///
+    /// Deliberately the stock `Menu(primaryAction:)` split button, nothing
+    /// hand-built. macOS bridges a toolbar control's label to a system
+    /// control that renders only its text and icon, so no custom view — a
+    /// count pill included — can ride the face; and no system API badges a
+    /// macOS toolbar item (the 26 SDKs' toolbar badges are iOS-only). The
+    /// pending counts live where the platform can show them: the window
+    /// subtitle, the Changes tab pill, and this button's tooltip.
     private func splitButton(primaryAction: @escaping () -> Void) -> some View {
         Menu {
             Button("Fetch", action: fetch)
@@ -181,8 +188,8 @@ struct SyncControls: View {
         case .detached: return "Push"
         case .publishRepository: return "Publish"
         case .publishBranch: return "Publish Branch"
-        case .pull: return "Pull (\(behind))"
-        case .push: return "Push (\(ahead))"
+        case .pull: return "Pull"
+        case .push: return "Push"
         }
     }
 

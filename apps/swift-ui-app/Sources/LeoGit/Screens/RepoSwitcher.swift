@@ -24,6 +24,10 @@ struct RepoSwitcher: View {
         } label: {
             Label(RepoDirectoryStore.displayName(of: activePath), systemImage: "folder")
         }
+        // macOS toolbars render Labels icon-only by default; the active
+        // repo's name is half the chip's value (and the toolbar title no
+        // longer shows it).
+        .labelStyle(.titleAndIcon)
         .help("Switch repository")
         .popover(isPresented: $isPresented, arrowEdge: .bottom) {
             RepoSwitcherList(

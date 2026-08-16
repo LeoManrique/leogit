@@ -237,8 +237,8 @@ inactive — a deliberate native improvement the activation resync makes safe.
 
 The sync toolbar consuming all of this is one adaptive control (`SyncControls`), GitHub
 Desktop's model: a precedence ladder — loading → detached → publish repository → publish
-branch → pull → push → fetch — renders a plain button for the no-menu states and a
-`Menu`+`primaryAction` split button for the rest, whose chevron always offers Fetch and,
+branch → pull → push → fetch — renders a plain button for the no-menu states and a split
+button for the rest, whose chevron always offers Fetch and,
 only while diverged, force push with lease (the ladder makes divergence reachable only in
 the pull state, so the item lands exactly where GitHub Desktop puts it). The old toolbar
 Refresh button is gone; its jobs are split between View ▸ Refresh (⌘R), which posts
@@ -250,7 +250,33 @@ poll's own recovery clears it (an explicit action's failure text is never swept 
 background tick), and the branch list stays fresh because `BranchMenu`'s content reloads
 on open (menu content is built when the menu opens) while the 2 s poll reloads it whenever
 `head_sha` moved — both through `BranchStore.load`, which never touches `isBusy`, so an
-open menu doesn't flicker.
+open menu doesn't flicker. The split button is the stock `Menu`+`primaryAction` control
+with `.labelStyle(.titleAndIcon)` (macOS toolbars render labels icon-only by default), and
+it deliberately carries **no count pill**: macOS bridges a toolbar menu's or button's
+label to a system control that renders only its text and icon, silently dropping any other
+view, no system API badges a macOS toolbar item (the 26 SDKs' toolbar `.badge` is
+iOS-only), and a hand-built imitation of the control never matches the real one's chrome
+or hover behavior — that route was tried and reverted. The pending counts render instead
+as standalone `↑N ↓N` text in their own toolbar item declared just before (so rendered
+just left of) the sync button, with `sharedBackgroundVisibility(.hidden)` removing the
+item's glass capsule so it reads as status rather than a control; the spelled-out counts
+ride its tooltip. Toolbar layout follows the macOS 26 grouping model: capsule sharing is
+decided by `ToolbarSpacer` boundaries — adjacent items with no spacer between them form
+one logical grouping drawn with a shared glass background — so the repo switcher and
+branch menu are two plain adjacent `ToolbarItem`s at the leading edge, and a
+`ToolbarSpacer(.flexible)` after them pushes the counts + sync cluster to the trailing
+edge (necessary once the title is removed: no title area separates leading from trailing
+otherwise). Neither `ControlGroup` in one item nor `ToolbarItemGroup` merges backgrounds
+here, and the `.navigation` placement isolates each item in its own capsule — all three
+were tried and rendered separate chips. Both controls carry `.labelStyle(.titleAndIcon)`
+so repo name and branch name sit on their faces (toolbar labels render icon-only by
+default), and the branch menu hides its indicator (`.menuIndicator(.hidden)`) so the
+pair reads consistently — the repo chip's popover has no chevron either. With the repo name on the chip
+the toolbar title became duplication, so `.toolbar(removing: .title)` hides it
+(`navigationTitle` still names the window for Mission Control and the Window menu), the
+`navigationSubtitle` is gone entirely, and its exceptional states moved into
+`BranchMenu.menuLabel` ("Detached at <sha7>", "<branch> · merging"): repo name, branch,
+and counts each appear exactly once in the toolbar.
 
 `RepoDirectoryStore.refreshDirectory` owns the switcher's row list and is deliberately not
 lazy: a `.task` on the repository screen primes it when that screen appears, so the walk

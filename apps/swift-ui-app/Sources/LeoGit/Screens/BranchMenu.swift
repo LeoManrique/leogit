@@ -99,6 +99,12 @@ struct BranchMenu: View {
         } label: {
             Label(menuLabel, systemImage: "arrow.triangle.branch")
         }
+        // macOS toolbars render Labels icon-only by default; the branch name
+        // is this control's whole value.
+        .labelStyle(.titleAndIcon)
+        // The repo chip beside this one opens a popover with no indicator,
+        // so a chevron on only half the pair reads as an inconsistency.
+        .menuIndicator(.hidden)
         .disabled(store.isBusy)
         .help(isDetached ? "Detached HEAD — pick a branch to return to" : "Switch branch")
         .sheet(isPresented: $isCreating) {
@@ -151,9 +157,18 @@ struct BranchMenu: View {
         }
     }
 
+    /// The exceptional states ride the label too — the window subtitle that
+    /// used to carry them is gone, since the toolbar title area no longer
+    /// renders (the repo name lives on the switcher chip).
     private var menuLabel: String {
-        if isDetached { return "Detached" }
-        return currentBranch.isEmpty ? "Branches" : currentBranch
+        if isDetached {
+            if let sha = status?.headSha, !sha.isEmpty {
+                return "Detached at \(String(sha.prefix(7)))"
+            }
+            return "Detached"
+        }
+        guard !currentBranch.isEmpty else { return "Branches" }
+        return isMerging ? "\(currentBranch) · merging" : currentBranch
     }
 
     /// Selection drives the switch: reading reflects status, writing checks

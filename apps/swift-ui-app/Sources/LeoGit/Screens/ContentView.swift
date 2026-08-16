@@ -84,13 +84,11 @@ struct ContentView: View {
                 ErrorBanner(message: errorMessage)
             }
 
-            Picker("View", selection: $tab) {
-                ForEach(availableTabs) { Text(tabTitle($0)).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            RepoTabBar(
+                tabs: availableTabs,
+                selection: $tab,
+                changesCount: store.status?.files.count ?? 0
+            )
             .onChange(of: availableTabs) { _, tabs in
                 // The tab under the selection can disappear — the setting
                 // turned off, or a switch to a remote-less repo.
@@ -132,7 +130,10 @@ struct ContentView: View {
             TerminalDock(repoPath: repoPath, store: terminalStore)
         }
         .navigationTitle(store.repoName)
-        .navigationSubtitle(branchSubtitle)
+        // The repo name renders inside the switcher chip, so the toolbar
+        // title would duplicate it; the title still names the window for
+        // Mission Control and the Window menu.
+        .toolbar(removing: .title)
         .task(id: repoPath) {
             branchStore.reset()
             syncStore.reset()
@@ -191,7 +192,13 @@ struct ContentView: View {
             }
         }
         .toolbar {
-            ToolbarItem(placement: .navigation) {
+            // One "where am I" cluster at the leading edge. On the macOS 26
+            // toolbar, capsule grouping follows `ToolbarSpacer` boundaries:
+            // adjacent items with no spacer between them form one logical
+            // grouping drawn with a shared glass background. (`ControlGroup`
+            // and the `.navigation` placement both rendered separate
+            // capsules instead.) Both controls stay stock.
+            ToolbarItem {
                 RepoSwitcher(
                     activePath: repoPath,
                     directory: directoryStore,
@@ -205,7 +212,7 @@ struct ContentView: View {
                 .disabled(syncStore.activeOperation != nil)
             }
 
-            ToolbarItem(placement: .principal) {
+            ToolbarItem {
                 BranchMenu(
                     store: branchStore,
                     repoPath: repoPath,
@@ -215,7 +222,27 @@ struct ContentView: View {
                 )
             }
 
-            ToolbarItem(placement: .primaryAction) {
+            // With the toolbar title removed, no title area separates
+            // leading from trailing, so the break is explicit — this pushes
+            // the sync cluster to the trailing edge.
+            ToolbarSpacer(.flexible)
+
+            // Ahead/behind as standalone informative text beside the sync
+            // button — a toolbar control can't host a count badge on macOS,
+            // so the counts stand next to the action they feed. The hidden
+            // shared background keeps it reading as status, not a button
+            // (and out of the sync button's grouping).
+            ToolbarItem {
+                if !syncCountsText.isEmpty {
+                    Text(syncCountsText)
+                        .font(.body.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .help(syncCountsHelp)
+                }
+            }
+            .sharedBackgroundVisibility(.hidden)
+
+            ToolbarItem {
                 SyncControls(
                     store: syncStore,
                     repoPath: repoPath,
@@ -252,39 +279,32 @@ struct ContentView: View {
         return tabs
     }
 
-    /// Segment titles. Changes carries the working-tree file count — every
-    /// row the list shows, untracked and conflicted included, hidden at zero
-    /// and never capped, visible from any tab — the Tauri tab bar's count
-    /// badge, folded into the segment text since a segmented control can't
-    /// host a separate pill.
-    private func tabTitle(_ tab: RepoTab) -> String {
-        let fileCount = store.status?.files.count ?? 0
-        if tab == .changes, fileCount > 0 {
-            return "\(tab.rawValue) (\(fileCount))"
-        }
-        return tab.rawValue
-    }
-
     /// Re-read `show_pull_requests` from the shared config.
     @MainActor
     private func refreshPullRequestsTabSetting() async {
         isPullRequestsTabEnabled = (try? await GitBridge.appConfig())?.showPullRequests ?? true
     }
 
-    /// Branch, plus ahead/behind counts when the branch tracks a remote, plus
-    /// a merging marker while `MERGE_HEAD` exists.
-    private var branchSubtitle: String {
+    /// `↑N ↓N` — pending pushes and pulls, empty when in sync (or detached,
+    /// where neither direction exists).
+    private var syncCountsText: String {
+        guard let status = store.status, !status.detached else { return "" }
+        var parts: [String] = []
+        if status.ahead > 0 { parts.append("↑\(status.ahead)") }
+        if status.behind > 0 { parts.append("↓\(status.behind)") }
+        return parts.joined(separator: " ")
+    }
+
+    private var syncCountsHelp: String {
         guard let status = store.status else { return "" }
         var parts: [String] = []
-        if status.detached {
-            parts.append("Detached at \(String(status.headSha.prefix(7)))")
-        } else {
-            parts.append(status.branch)
-            if status.ahead > 0 { parts.append("↑\(status.ahead)") }
-            if status.behind > 0 { parts.append("↓\(status.behind)") }
+        if status.ahead > 0 {
+            parts.append("\(status.ahead) commit\(status.ahead == 1 ? "" : "s") to push")
         }
-        if store.isMerging { parts.append("· merging") }
-        return parts.joined(separator: " ")
+        if status.behind > 0 {
+            parts.append("\(status.behind) commit\(status.behind == 1 ? "" : "s") to pull")
+        }
+        return parts.joined(separator: ", ")
     }
 
     // MARK: Background refresh
