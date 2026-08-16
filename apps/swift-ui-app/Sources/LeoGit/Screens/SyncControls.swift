@@ -99,6 +99,10 @@ struct SyncControls: View {
         // macOS toolbars render Labels icon-only unless told otherwise, and
         // the state word is the whole point of an adaptive button.
         .labelStyle(.titleAndIcon)
+        // The trailing action region emphasizes its label (bold text, heavier
+        // symbol); the repo and branch chips at the leading edge render
+        // regular. One chip family, one weight.
+        .fontWeight(.regular)
         .help(helpText)
         .sheet(isPresented: $isPublishSheetPresented) {
             PublishSheet(

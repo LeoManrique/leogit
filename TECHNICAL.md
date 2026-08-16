@@ -271,7 +271,10 @@ here, and the `.navigation` placement isolates each item in its own capsule — 
 were tried and rendered separate chips. Both controls carry `.labelStyle(.titleAndIcon)`
 so repo name and branch name sit on their faces (toolbar labels render icon-only by
 default), and the branch menu hides its indicator (`.menuIndicator(.hidden)`) so the
-pair reads consistently — the repo chip's popover has no chevron either. With the repo name on the chip
+pair reads consistently — the repo chip's popover has no chevron either. The sync
+control carries `.fontWeight(.regular)`: the trailing action region emphasizes its
+label (bold text, heavier symbol) while the leading chips render regular, and the
+control belongs to the same chip family. With the repo name on the chip
 the toolbar title became duplication, so `.toolbar(removing: .title)` hides it
 (`navigationTitle` still names the window for Mission Control and the Window menu), the
 `navigationSubtitle` is gone entirely, and its exceptional states moved into
