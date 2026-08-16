@@ -48,6 +48,15 @@ struct BranchMenu: View {
                 }
             }
             .pickerStyle(.inline)
+            // Menu content is built when the menu opens, so this reloads the
+            // list at the moment of intent — how branches created or deleted
+            // from an outside terminal appear without a manual refresh (the
+            // status poll only catches the ones that move HEAD). `load`
+            // replaces rows in place on success and never touches `isBusy`,
+            // so the open menu doesn't flicker.
+            .onAppear {
+                Task { await store.load(repoPath: repoPath) }
+            }
 
             if !store.remoteBranches.isEmpty {
                 Section("Remote Branches") {

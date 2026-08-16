@@ -58,6 +58,19 @@ final class RepoStore {
     /// the next successful load.
     var errorMessage: String?
 
+    /// Consecutive silent-refresh failures. One is usually a transient lock
+    /// mid-write and stays invisible, but a streak means the repository is
+    /// genuinely unreadable (deleted, permissions, corrupted), so the poll
+    /// surfaces it — the error path the toolbar Refresh button used to be
+    /// the only way to reach.
+    private var quietFailureStreak = 0
+    private static let quietFailureThreshold = 3
+
+    /// Whether the current `errorMessage` came from the poll, so only the
+    /// poll's own recovery clears it — an explicit action's failure text is
+    /// never silently swept away by a background tick.
+    private var errorSurfacedByPoll = false
+
     var isRepoOpen: Bool { repoPath != nil }
 
     /// Open the repository containing `url`, then load its status and history.
@@ -93,11 +106,13 @@ final class RepoStore {
 
     /// The background poll's tick — the silent counterpart of `refresh()`,
     /// mirroring the Tauri client's 2 s loop: no `isLoading` (the progress
-    /// bar must not flash every 2 s), failures swallowed (`errorMessage`
-    /// stays whatever the last real action left), history refetched only
-    /// when HEAD actually moved (how commits made in an outside terminal
-    /// appear), and `statusEpoch` bumped only when the status changed — so
-    /// an idle tick never makes the open diff reload.
+    /// bar must not flash every 2 s), one-off failures swallowed
+    /// (`errorMessage` stays whatever the last real action left — only a
+    /// failure *streak* surfaces a banner, and only the poll's recovery
+    /// clears it), history refetched only when HEAD actually moved (how
+    /// commits made in an outside terminal appear), and `statusEpoch` bumped
+    /// only when the status changed — so an idle tick never makes the open
+    /// diff reload.
     ///
     /// `forceDiffReload` is the refocus path: files may have been edited on
     /// disk without their status rows changing, so coming back to the app
@@ -105,7 +120,23 @@ final class RepoStore {
     /// `reloadActiveDiff` on focus.
     func refreshQuietly(forceDiffReload: Bool = false) async {
         guard let repoPath else { return }
-        guard let newStatus = try? await GitBridge.status(of: repoPath) else { return }
+        let newStatus: RepoStatus
+        do {
+            newStatus = try await GitBridge.status(of: repoPath)
+        } catch {
+            quietFailureStreak += 1
+            if quietFailureStreak >= Self.quietFailureThreshold, errorMessage == nil {
+                errorMessage = error.displayMessage
+                errorSurfacedByPoll = true
+            }
+            return
+        }
+        quietFailureStreak = 0
+        if errorSurfacedByPoll {
+            // The repo is readable again; retire the poll's own banner.
+            errorMessage = nil
+            errorSurfacedByPoll = false
+        }
 
         let headMoved = newStatus.headSha != status?.headSha
         let statusChanged = newStatus != status
@@ -175,6 +206,9 @@ final class RepoStore {
         } catch {
             errorMessage = error.displayMessage
         }
+        // Whatever the outcome, the banner now reflects an explicit load,
+        // not the poll — the poll must not clear another action's failure.
+        errorSurfacedByPoll = false
         // Best-effort, like the Tauri client's poll: failure reads as "not
         // merging" rather than an error.
         isMerging = (try? await mergingResult) ?? false

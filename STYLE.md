@@ -101,7 +101,7 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 - **Two-column layout**: 320px sidebar on the left (file list + commit composer), flexible main content on the right ([MainLayout.svelte:490](apps/tauri-app/src/lib/views/MainLayout.svelte#L490)).
 - Sidebar background: `--bg-secondary`. Main content background: `--bg-primary`. The 1px right border on the sidebar is `--border-inactive`.
 - **Terminal pane** docks at the bottom of the main content, ~280px tall, separated by a 1px border. Its own background can stay slightly darker than `--bg-primary` (use `#000` or `--bg-primary` — never an arbitrary off-color).
-- The header strip at the top of the main content carries repo name, branch dropdown, and the quick-action button (Pull / Push, or Publish branch / Publish when the branch or repo isn't on a remote yet). Keep it ~36–40px tall.
+- The header strip at the top of the main content carries repo name, branch dropdown, and the **adaptive sync button** — one control whose face shows Fetch, Pull, Push, Publish branch, or Publish depending on where the branch stands relative to its remote, GitHub-Desktop style. There is no separate refresh button. Keep the strip ~36–40px tall.
 
 ### Tab bar (Changes / History)
 
@@ -203,7 +203,7 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 
 ### Repo-less chrome
 
-- The header bar is **the same component** in every phase, not a reduced copy. When no repository is open it simply drops everything that acts on one (repo/branch chips, status area, Pull, Push, Refresh) and keeps Settings, Help, and the update chip. Never build a second, simpler header — the two would drift, and the user would notice the app "changing shape" between launch and main view.
+- The header bar is **the same component** in every phase, not a reduced copy. When no repository is open it simply drops everything that acts on one (repo/branch chips, status area, the sync button) and keeps Settings, Help, and the update chip. Never build a second, simpler header — the two would drift, and the user would notice the app "changing shape" between launch and main view.
 - App-level chrome (Settings, Help, update availability) is reachable in *every* phase. A phase that can't be escaped without restarting the app is a bug, not a layout.
 
 ### Status indicators
@@ -219,7 +219,7 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 - SF Symbols–style line icons at 12–14px in chrome (header buttons, dropdown delete, modal close), 14–16px for standalone toolbar buttons. Stroke icons over filled icons for chrome. Filled icons for status only (the green sync dot, the conflict triangle).
 - **Inline SVGs**, not unicode glyphs. `⎇`, `↑`, `↓`, `⟳`, `↻`, `⚙`, `?`, `✕`, `●` and similar TUI-flavored characters render at OS-default weight in whatever font happens to be available, look misaligned in dense rows, and are inconsistent across themes. Hand-rolled SVG paths with `stroke-width="1.4–1.6"` and `stroke-linecap="round"` match the macOS line-icon weight and inherit `currentColor` from the parent button. Reusable patterns currently inlined: branch glyph (header), up/down arrows (Pull/Push, ahead/behind), upload-over-baseline (Publish branch) and cloud-up (Publish repo), refresh swirl (spins via `@keyframes spin` when an op is in flight), gear (Settings), circled-question (Help), close X (modals + delete), checkmark (copied state), clipboard (copy SHA).
 - **Don't put icons in tinted square backgrounds** anywhere — not for section headers, not for the app logo block, not for the AI button.
-- **Don't lead buttons with icons** by default. "Commit", "Create branch", "Merge" are text-only. The Pull/Push buttons are the principled exception: the arrow direction *is* the affordance, and they sit next to count badges that need an anchor. Ghost icon-only buttons (close X, gear, sparkle, refresh) are fine — those are *icon* buttons, not icon-led text buttons.
+- **Don't lead buttons with icons** by default. "Commit", "Create branch", "Merge" are text-only. The sync button is the principled exception: the arrow direction *is* the affordance, and it sits next to a count that needs an anchor. Ghost icon-only buttons (close X, gear, sparkle, refresh) are fine — those are *icon* buttons, not icon-led text buttons.
 
 ## Anti-patterns (don't ship these)
 

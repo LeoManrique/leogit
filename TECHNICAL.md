@@ -235,6 +235,23 @@ numbers: 2 failures → 30 s backoff doubling to a 5 min cap) gates every backgr
 fed only by real attempts against real remotes; both loops also pause while the app is
 inactive — a deliberate native improvement the activation resync makes safe.
 
+The sync toolbar consuming all of this is one adaptive control (`SyncControls`), GitHub
+Desktop's model: a precedence ladder — loading → detached → publish repository → publish
+branch → pull → push → fetch — renders a plain button for the no-menu states and a
+`Menu`+`primaryAction` split button for the rest, whose chevron always offers Fetch and,
+only while diverged, force push with lease (the ladder makes divergence reachable only in
+the pull state, so the item lands exactly where GitHub Desktop puts it). The old toolbar
+Refresh button is gone; its jobs are split between View ▸ Refresh (⌘R), which posts
+`leogitRefreshRequested` for `ContentView` — where the stores live — to perform the
+visible reload (the same scene-to-window notification pattern as `leogitConfigDidSave`),
+and the automatics: `refreshQuietly` now counts consecutive status failures and surfaces
+the error banner after three, with a flag marking the message poll-owned so only the
+poll's own recovery clears it (an explicit action's failure text is never swept away by a
+background tick), and the branch list stays fresh because `BranchMenu`'s content reloads
+on open (menu content is built when the menu opens) while the 2 s poll reloads it whenever
+`head_sha` moved — both through `BranchStore.load`, which never touches `isBusy`, so an
+open menu doesn't flicker.
+
 `RepoDirectoryStore.refreshDirectory` owns the switcher's row list and is deliberately not
 lazy: a `.task` on the repository screen primes it when that screen appears, so the walk
 overlaps opening the repo instead of starting when the popover first opens (which left the

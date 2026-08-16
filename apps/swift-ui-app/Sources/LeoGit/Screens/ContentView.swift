@@ -178,6 +178,18 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .leogitConfigDidSave)) { _ in
             Task { await refreshPullRequestsTabSetting() }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .leogitRefreshRequested)) { _ in
+            // ⌘R from the View menu — the keyboard-only successor of the
+            // toolbar Refresh button: a full visible reload of status,
+            // history, and branches. Held back during a network operation,
+            // the way the Tauri client pauses its status poll: `git status`
+            // racing a pull can trip over transient lock files.
+            guard !store.isLoading, syncStore.activeOperation == nil else { return }
+            Task {
+                await store.refresh()
+                await branchStore.load(repoPath: repoPath)
+            }
+        }
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 RepoSwitcher(
@@ -203,29 +215,13 @@ struct ContentView: View {
                 )
             }
 
-            ToolbarItemGroup(placement: .primaryAction) {
+            ToolbarItem(placement: .primaryAction) {
                 SyncControls(
                     store: syncStore,
                     repoPath: repoPath,
                     status: store.status,
                     onWorkingTreeChanged: { await store.refresh() }
                 )
-            }
-
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    Task {
-                        await store.refresh()
-                        await branchStore.load(repoPath: repoPath)
-                    }
-                } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                // Also held back during a network operation, the way the
-                // Tauri client pauses its status poll: `git status` racing a
-                // pull can trip over transient lock files.
-                .disabled(store.isLoading || syncStore.activeOperation != nil)
-                .help("Reload status, history, and branches")
             }
         }
         .overlay(alignment: .top) {
@@ -310,11 +306,19 @@ struct ContentView: View {
             try? await Task.sleep(for: .seconds(2))
             if Task.isCancelled { return }
             guard !backgroundPaused(), !store.isLoading else { continue }
+            let previousHead = store.status?.headSha
             await store.refreshQuietly()
             if let repoPath = store.repoPath, let status = store.status {
                 // Feeds the switcher's badge for the open repo for free —
                 // the reason the scheduler excludes it from every tier.
                 directoryStore.noteActiveStatus(repoPath, status)
+                if status.headSha != previousHead {
+                    // HEAD moved outside the app — a terminal checkout,
+                    // commit, or merge: the branch menu's checkmark and each
+                    // branch's metadata are stale, so the list reloads with
+                    // the history the poll already refetched.
+                    await branchStore.load(repoPath: repoPath)
+                }
             }
         }
     }

@@ -1,16 +1,20 @@
 import SwiftUI
 
-/// Toolbar pull/push controls — the native port of the Tauri header's sync
-/// buttons.
+/// The toolbar's sync control — one adaptive split button, the GitHub
+/// Desktop model running on LeoGit's own workflow machinery.
 ///
-/// Same semantics, native shapes: Pull renders only when the branch has real
-/// upstream tracking; Push is a split button whose primary action re-labels
-/// to "Publish Branch" when a remote exists but the branch is untracked
-/// (routing through the same push with `--set-upstream`); force push with
-/// lease is offered only in the menu, only while the branch has diverged, and
-/// only behind a destructive confirmation. Fetch — invisible auto-fetch in
-/// the Tauri client — is an explicit menu item here, since the native client
-/// has no background polling yet.
+/// A strict precedence ladder picks the single action that makes sense right
+/// now (GitHub Desktop's order, adapted): detached HEAD → publish repository
+/// (no remote) → publish branch (no upstream) → pull (behind) → push (ahead)
+/// → fetch (in sync). Pull outranks push, so a diverged branch proposes the
+/// step that must happen first — the ahead count stays visible in the window
+/// subtitle meanwhile. Force push with lease is menu-only, offered only
+/// while diverged, and behind a destructive confirmation. Fetch is the
+/// primary action once nothing needs pulling or pushing — the manual "check
+/// the remote" — and a menu item in every split state, which is what let the
+/// separate toolbar Refresh button go (⌘R in the View menu still forces the
+/// local reload). Underneath, nothing changed: single-slot operations,
+/// `--ff`-only pull, gh-based publish, and the progress banner.
 struct SyncControls: View {
     let store: SyncStore
     let repoPath: String
@@ -25,76 +29,74 @@ struct SyncControls: View {
     @State private var isConfirmingForcePush = false
     @State private var isPublishSheetPresented = false
 
+    /// What the button proposes. One state at a time, decided by `action`'s
+    /// precedence ladder.
+    private enum ProposedAction {
+        /// Status not loaded yet: a neutral disabled Fetch, so the button
+        /// never flashes "Publish" before the first load resolves.
+        case loading
+        /// Detached HEAD — nothing can be pushed or pulled; disabled.
+        case detached
+        /// No remote at all: create the GitHub repo and push in one shot.
+        case publishRepository
+        /// A remote exists but the branch is untracked — the first push must
+        /// carry `--set-upstream`, and the button says what it will do.
+        case publishBranch
+        /// Behind the upstream: pulling comes first, whatever else is
+        /// pending.
+        case pull
+        /// Ahead only: push.
+        case push
+        /// In sync: check the remote.
+        case fetch
+    }
+
     private var branch: String { status?.branch ?? "" }
     private var hasUpstream: Bool { status?.hasUpstream ?? false }
     private var ahead: Int32 { status?.ahead ?? 0 }
     private var behind: Int32 { status?.behind ?? 0 }
-    private var isDetached: Bool { status?.detached ?? false }
-
-    /// No remote at all: the button becomes "Publish", opening the sheet
-    /// that creates the GitHub repo and pushes in one shot — the Tauri
-    /// header's morph. Gating on a non-empty branch avoids flashing
-    /// "Publish" before the first status load resolves.
-    private var hasNoRemote: Bool {
-        guard let status, !status.branch.isEmpty else { return false }
-        return !status.hasRemote
-    }
-
-    /// A remote exists but the branch is untracked — the first push must
-    /// carry `--set-upstream`, and the button says what it will do.
-    private var isPublishingBranch: Bool {
-        guard let status, !status.branch.isEmpty else { return false }
-        return status.hasRemote && !status.hasUpstream
-    }
 
     /// Force push is offered only for a truly diverged branch: real upstream
-    /// tracking plus commits on both sides.
+    /// tracking plus commits on both sides. By the precedence ladder this can
+    /// only be true in the `.pull` state, so the menu item appears exactly
+    /// where GitHub Desktop puts it.
     private var hasDiverged: Bool { hasUpstream && ahead > 0 && behind > 0 }
 
     private var isBusy: Bool { store.activeOperation != nil }
 
+    private var action: ProposedAction {
+        // A detached HEAD has an empty branch name, so it passes its own way.
+        guard let status, !status.branch.isEmpty || status.detached else { return .loading }
+        // Detached before the remote checks — GitHub Desktop orders these the
+        // other way round, but publishing would push a branch that does not
+        // exist, so the honest state wins.
+        if status.detached { return .detached }
+        if !status.hasRemote { return .publishRepository }
+        if !status.hasUpstream { return .publishBranch }
+        if status.behind > 0 { return .pull }
+        if status.ahead > 0 { return .push }
+        return .fetch
+    }
+
     var body: some View {
-        if hasUpstream {
-            Button(action: pull) {
-                Label(pullTitle, systemImage: "arrow.down")
-            }
-            .disabled(isBusy)
-            .help(behind > 0 ? "Pull \(behind) commit\(behind == 1 ? "" : "s") from the remote" : "Pull from the remote")
-        }
-
-        Menu {
-            if hasNoRemote {
-                // The dropdown collapses to the one thing that makes sense
-                // without a remote — the Tauri chevron does the same.
-                Button("Publish to GitHub…") { isPublishSheetPresented = true }
+        Group {
+            switch action {
+            case .loading, .detached:
+                plainButton {}
+                    .disabled(true)
+            case .publishRepository:
+                plainButton { isPublishSheetPresented = true }
                     .disabled(isBusy)
-            } else {
-                Button(pushActionTitle) { push() }
+            case .fetch:
+                plainButton(action: fetch)
                     .disabled(isBusy)
-
-                if hasDiverged {
-                    Button("Force Push (with Lease)…", role: .destructive) {
-                        isConfirmingForcePush = true
-                    }
-                    .disabled(isBusy)
-                }
-
-                Divider()
-
-                Button("Fetch", action: fetch)
-                    .disabled(isBusy)
-            }
-        } label: {
-            Label(pushTitle, systemImage: pushIcon)
-        } primaryAction: {
-            if hasNoRemote {
-                isPublishSheetPresented = true
-            } else {
-                push()
+            case .publishBranch, .push:
+                splitButton { push() }
+            case .pull:
+                splitButton { pull() }
             }
         }
-        .disabled(isBusy || isDetached)
-        .help(pushHelp)
+        .help(helpText)
         .sheet(isPresented: $isPublishSheetPresented) {
             PublishSheet(
                 store: store,
@@ -130,37 +132,83 @@ struct SyncControls: View {
         }
     }
 
-    private var pullTitle: String {
-        if store.activeOperation == .pull { return "Pulling…" }
-        return behind > 0 ? "Pull (\(behind))" : "Pull"
-    }
-
-    private var pushTitle: String {
-        if store.activeOperation == .push { return "Pushing…" }
-        if store.activeOperation == .publish { return "Publishing…" }
-        if hasNoRemote { return "Publish" }
-        if isPublishingBranch { return "Publish Branch" }
-        return ahead > 0 ? "Push (\(ahead))" : "Push"
-    }
-
-    private var pushIcon: String {
-        if hasNoRemote { return "icloud.and.arrow.up" }
-        if isPublishingBranch { return "arrow.up.circle" }
-        return "arrow.up"
-    }
-
-    private var pushActionTitle: String {
-        isPublishingBranch ? "Publish Branch" : "Push"
-    }
-
-    private var pushHelp: String {
-        if isDetached { return "Detached HEAD — check out a branch to push" }
-        if hasNoRemote {
-            return "Publish this repository to GitHub — creates the remote repo and pushes this branch"
+    /// The states with no meaningful secondary action — GitHub Desktop's
+    /// no-dropdown states.
+    private func plainButton(action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: icon)
         }
-        if isPublishingBranch { return "Publish this branch to the remote and start tracking it" }
-        if ahead > 0 { return "Push \(ahead) commit\(ahead == 1 ? "" : "s") to the remote" }
-        return "Push to the remote"
+    }
+
+    /// The split states: the proposed action on the button face, plus a
+    /// chevron menu that always offers Fetch and — only while diverged —
+    /// force push with lease.
+    private func splitButton(primaryAction: @escaping () -> Void) -> some View {
+        Menu {
+            Button("Fetch", action: fetch)
+                .disabled(isBusy)
+
+            if hasDiverged {
+                Divider()
+                Button("Force Push (with Lease)…", role: .destructive) {
+                    isConfirmingForcePush = true
+                }
+                .disabled(isBusy)
+            }
+        } label: {
+            Label(title, systemImage: icon)
+        } primaryAction: {
+            primaryAction()
+        }
+        .disabled(isBusy)
+    }
+
+    private var title: String {
+        if let operation = store.activeOperation {
+            switch operation {
+            case .fetch: return "Fetching…"
+            case .pull: return "Pulling…"
+            case .push: return "Pushing…"
+            case .publish: return "Publishing…"
+            }
+        }
+        switch action {
+        case .loading, .fetch: return "Fetch"
+        case .detached: return "Push"
+        case .publishRepository: return "Publish"
+        case .publishBranch: return "Publish Branch"
+        case .pull: return "Pull (\(behind))"
+        case .push: return "Push (\(ahead))"
+        }
+    }
+
+    private var icon: String {
+        switch action {
+        case .loading, .fetch: "arrow.triangle.2.circlepath"
+        case .detached, .push: "arrow.up"
+        case .publishRepository: "icloud.and.arrow.up"
+        case .publishBranch: "arrow.up.circle"
+        case .pull: "arrow.down"
+        }
+    }
+
+    private var helpText: String {
+        switch action {
+        case .loading:
+            "Loading repository status"
+        case .detached:
+            "Detached HEAD — check out a branch to push"
+        case .publishRepository:
+            "Publish this repository to GitHub — creates the remote repo and pushes this branch"
+        case .publishBranch:
+            "Publish this branch to the remote and start tracking it"
+        case .pull:
+            "Pull \(behind) commit\(behind == 1 ? "" : "s") from the remote"
+        case .push:
+            "Push \(ahead) commit\(ahead == 1 ? "" : "s") to the remote"
+        case .fetch:
+            "Fetch from the remote — updates the ahead/behind counts without touching your files"
+        }
     }
 
     private func pull() {
