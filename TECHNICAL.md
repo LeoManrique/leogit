@@ -309,6 +309,20 @@ measuring span the Svelte component uses. It is greedy horizontally (the compone
 back into layout; the fit is recomputed from `onGeometryChange`, which only fires when the
 width actually changes.
 
+The commit composer's two fields carry the Tauri pair's behaviors.
+`Design/WheelScrollableTextField.swift` is the summary input: SwiftUI's `TextField` (an
+`NSTextField` underneath) moves overflowing text only with the caret, so — as the Tauri
+client maps wheel deltas onto the input's `scrollLeft` — the wrapped field forwards
+`scrollWheel` to the field editor's clip view (dominant axis; the event passes to ancestors
+when nothing overflows) and overrides `intrinsicContentSize` so a long summary cannot demand
+width from the split. The description is a `TextEditor` — the only text control that is a
+real scroll view, so it grows a scrollbar past its fixed five-line height — wearing a
+hand-drawn bezel and prompt, which it lacks natively. The single-file auto-summary lives in
+`CommitStore.autoSummary(for:)` and is used twice: as the summary field's prompt, and as
+`commit`'s fallback message when nothing was typed — recomputed from the embedded-repo
+confirmation's file snapshot, not the live list, so the message describes what the commit
+actually contains.
+
 The History detail crosses as three reads with the Tauri client's exact split:
 `get_commit_files` + `get_commit_stats` (a new `CommitStats` mirror) on selecting a commit —
 metadata never loads, it rides in the `CommitInfo` the list already holds — and per selected

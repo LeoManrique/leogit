@@ -41,8 +41,10 @@ struct ChangesView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 HSplitView {
+                    // Capped tighter than the History list: this pane is a
+                    // checklist plus composer, and the diff should dominate.
                     changesPane
-                        .frame(minWidth: 260, idealWidth: 320, maxWidth: 520)
+                        .frame(minWidth: 260, idealWidth: 280, maxWidth: 420)
                     detail
                         .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
                 }
@@ -87,6 +89,7 @@ struct ChangesView: View {
             CommitComposer(
                 store: commitStore,
                 includedCount: includedFiles.count,
+                autoSummary: CommitStore.autoSummary(for: includedFiles),
                 onSubmit: submit,
                 onGenerate: generate
             )
@@ -176,7 +179,10 @@ struct ChangesView: View {
 
     private func performCommit(_ files: [FileEntry]) {
         Task {
-            if await commitStore.commit(repoPath: repoPath, files: files) {
+            // Recomputed from the snapshot, not the live list — the message
+            // must describe what this commit contains.
+            let fallback = CommitStore.autoSummary(for: files)
+            if await commitStore.commit(repoPath: repoPath, files: files, autoSummary: fallback) {
                 await onCommitted()
             }
         }

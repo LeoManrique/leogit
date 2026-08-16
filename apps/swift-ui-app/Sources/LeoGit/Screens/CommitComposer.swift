@@ -11,13 +11,25 @@ struct CommitComposer: View {
     /// How many files the next commit would contain, for the button label.
     let includedCount: Int
 
+    /// Default message when exactly one file is checked ("Update foo.txt"),
+    /// empty otherwise. Shown as the summary placeholder, and committed
+    /// verbatim when the user types nothing.
+    let autoSummary: String
+
     let onSubmit: () -> Void
 
     /// Generate a commit message with AI from the checked files' diff.
     let onGenerate: () -> Void
 
+    /// What Commit would use: the typed summary, or the single-file
+    /// auto-summary backing the placeholder.
+    private var effectiveSummary: String {
+        let typed = store.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        return typed.isEmpty ? autoSummary : typed
+    }
+
     private var canCommit: Bool {
-        !store.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !effectiveSummary.isEmpty
             && includedCount > 0
             && !isBusy
     }
@@ -31,14 +43,13 @@ struct CommitComposer: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            TextField("Summary (required)", text: $store.summary)
-                .textFieldStyle(.roundedBorder)
-                .disabled(isBusy)
+            WheelScrollableTextField(
+                prompt: autoSummary.isEmpty ? "Summary (required)" : autoSummary,
+                text: $store.summary
+            )
+            .disabled(isBusy)
 
-            TextField("Description", text: $store.details, axis: .vertical)
-                .textFieldStyle(.roundedBorder)
-                .lineLimit(2...6)
-                .disabled(isBusy)
+            descriptionEditor
 
             if let errorMessage = store.errorMessage {
                 Text(errorMessage)
@@ -83,6 +94,34 @@ struct CommitComposer: View {
             }
         }
         .padding(10)
+    }
+
+    /// The native counterpart of the Tauri textarea: five lines tall,
+    /// scrolling with a scrollbar once the text outgrows it. `TextEditor`
+    /// rather than a vertical-axis `TextField` because only the editor is a
+    /// real scroll view; it brings no bezel or placeholder of its own, so
+    /// both are drawn here to match the summary field above.
+    private var descriptionEditor: some View {
+        ZStack(alignment: .topLeading) {
+            TextEditor(text: $store.details)
+                .font(.body)
+                .scrollContentBackground(.hidden)
+                .contentMargins(4, for: .scrollContent)
+                .frame(height: 88)
+                .disabled(isBusy)
+
+            if store.details.isEmpty {
+                Text("Description")
+                    .foregroundStyle(Color(nsColor: .placeholderTextColor))
+                    .padding(.top, 4)
+                    // The editor's line fragment padding plus its content
+                    // margin — keeps the prompt on the first character's spot.
+                    .padding(.leading, 9)
+                    .allowsHitTesting(false)
+            }
+        }
+        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.separator))
     }
 
     /// The picker writes through the store so a change persists to the

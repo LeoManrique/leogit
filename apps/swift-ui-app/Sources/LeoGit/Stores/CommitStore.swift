@@ -42,6 +42,20 @@ final class CommitStore {
         !file.submoduleDirty
     }
 
+    /// GitHub-Desktop-style default message when the commit would contain
+    /// exactly one file — "Create/Delete/Update <name>" — so the most common
+    /// commit needs zero typing (the Tauri composer's `autoSummary` rule).
+    /// Empty for zero or several files: those still require a real summary.
+    static func autoSummary(for files: [FileEntry]) -> String {
+        guard files.count == 1, let file = files.first else { return "" }
+        let verb = switch file.status {
+        case .new: "Create"
+        case .deleted: "Delete"
+        default: "Update"
+        }
+        return "\(verb) \(file.displayName)"
+    }
+
     func isIncluded(_ file: FileEntry) -> Bool {
         Self.isCommittable(file) && !excludedPaths.contains(file.path)
     }
@@ -77,12 +91,14 @@ final class CommitStore {
         errorMessage = nil
     }
 
-    /// Format the message and commit `files`. On success the composer is
-    /// cleared and the caller should reload status + history; on failure the
-    /// draft is kept for another attempt and `errorMessage` carries core's
-    /// own text. Returns whether the commit landed.
-    func commit(repoPath: String, files: [FileEntry]) async -> Bool {
-        let trimmedSummary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// Format the message and commit `files`, falling back to `autoSummary`
+    /// when nothing was typed. On success the composer is cleared and the
+    /// caller should reload status + history; on failure the draft is kept
+    /// for another attempt and `errorMessage` carries core's own text.
+    /// Returns whether the commit landed.
+    func commit(repoPath: String, files: [FileEntry], autoSummary: String = "") async -> Bool {
+        let typed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedSummary = typed.isEmpty ? autoSummary : typed
         // `!isGenerating`: committing mid-generation would clear both drafts
         // and then have the late AI result overwrite the empty composer. The
         // Tauri client leaves that race open; the busy-guard closes it, like
