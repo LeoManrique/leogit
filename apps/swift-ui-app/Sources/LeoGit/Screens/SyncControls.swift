@@ -29,28 +29,6 @@ struct SyncControls: View {
     @State private var isConfirmingForcePush = false
     @State private var isPublishSheetPresented = false
 
-    /// What the button proposes. One state at a time, decided by `action`'s
-    /// precedence ladder.
-    private enum ProposedAction {
-        /// Status not loaded yet: a neutral disabled Fetch, so the button
-        /// never flashes "Publish" before the first load resolves.
-        case loading
-        /// Detached HEAD — nothing can be pushed or pulled; disabled.
-        case detached
-        /// No remote at all: create the GitHub repo and push in one shot.
-        case publishRepository
-        /// A remote exists but the branch is untracked — the first push must
-        /// carry `--set-upstream`, and the button says what it will do.
-        case publishBranch
-        /// Behind the upstream: pulling comes first, whatever else is
-        /// pending.
-        case pull
-        /// Ahead only: push.
-        case push
-        /// In sync: check the remote.
-        case fetch
-    }
-
     private var branch: String { status?.branch ?? "" }
     private var hasUpstream: Bool { status?.hasUpstream ?? false }
     private var ahead: Int32 { status?.ahead ?? 0 }
@@ -64,36 +42,19 @@ struct SyncControls: View {
 
     private var isBusy: Bool { store.activeOperation != nil }
 
-    private var action: ProposedAction {
-        // A detached HEAD has an empty branch name, so it passes its own way.
-        guard let status, !status.branch.isEmpty || status.detached else { return .loading }
-        // Detached before the remote checks — GitHub Desktop orders these the
-        // other way round, but publishing would push a branch that does not
-        // exist, so the honest state wins.
-        if status.detached { return .detached }
-        if !status.hasRemote { return .publishRepository }
-        if !status.hasUpstream { return .publishBranch }
-        if status.behind > 0 { return .pull }
-        if status.ahead > 0 { return .push }
-        return .fetch
-    }
+    private var action: SyncProposal { SyncProposal(status: status) }
 
     var body: some View {
         Group {
             switch action {
             case .loading, .detached:
-                plainButton {}
+                plainButton(action: perform)
                     .disabled(true)
-            case .publishRepository:
-                plainButton { isPublishSheetPresented = true }
+            case .publishRepository, .fetch:
+                plainButton(action: perform)
                     .disabled(isBusy)
-            case .fetch:
-                plainButton(action: fetch)
-                    .disabled(isBusy)
-            case .publishBranch, .push:
-                splitButton { push() }
-            case .pull:
-                splitButton { pull() }
+            case .publishBranch, .push, .pull:
+                splitButton(primaryAction: perform)
             }
         }
         // macOS toolbars render Labels icon-only unless told otherwise, and
@@ -104,6 +65,16 @@ struct SyncControls: View {
         // regular. One chip family, one weight.
         .fontWeight(.regular)
         .help(helpText)
+        // Repository ▸ <action> (⌘P) lands here. The menu item can't call
+        // `perform()` directly — its focused value is published by the
+        // window content, which doesn't own this view's sheet and alert
+        // state — so it posts, and this view runs the exact click path.
+        .onReceive(NotificationCenter.default.publisher(for: .leogitSyncActionRequested)) { _ in
+            // The buttons express this as `.disabled`; the notification
+            // path has to guard it itself.
+            guard !isBusy else { return }
+            perform()
+        }
         .sheet(isPresented: $isPublishSheetPresented) {
             PublishSheet(
                 store: store,
@@ -187,14 +158,7 @@ struct SyncControls: View {
             case .publish: return "Publishing…"
             }
         }
-        switch action {
-        case .loading, .fetch: return "Fetch"
-        case .detached: return "Push"
-        case .publishRepository: return "Publish"
-        case .publishBranch: return "Publish Branch"
-        case .pull: return "Pull"
-        case .push: return "Push"
-        }
+        return action.title
     }
 
     private var icon: String {
@@ -223,6 +187,19 @@ struct SyncControls: View {
             "Push \(ahead) commit\(ahead == 1 ? "" : "s") to the remote"
         case .fetch:
             "Fetch from the remote — updates the ahead/behind counts without touching your files"
+        }
+    }
+
+    /// Runs whatever the ladder proposes. The single entry point for the
+    /// button face, the split button's primary action, and the menu command,
+    /// so a state can never be reachable by one and not the others.
+    private func perform() {
+        switch action {
+        case .loading, .detached: break
+        case .publishRepository: isPublishSheetPresented = true
+        case .publishBranch, .push: push()
+        case .pull: pull()
+        case .fetch: fetch()
         }
     }
 
@@ -258,6 +235,101 @@ struct SyncControls: View {
             if let failure { alertMessage = failure }
         }
     }
+}
+
+/// What the sync control proposes. One state at a time, decided by a strict
+/// precedence ladder over the repository status (GitHub Desktop's order,
+/// adapted). A standalone type because two views read the same ladder: the
+/// toolbar button renders it, and the repository screen republishes it to
+/// the menu bar as the ⌘P command — one implementation, so the button and
+/// the menu item can never disagree about the proposed action.
+enum SyncProposal {
+    /// Status not loaded yet: a neutral disabled Fetch, so the button never
+    /// flashes "Publish" before the first load resolves.
+    case loading
+    /// Detached HEAD — nothing can be pushed or pulled; disabled.
+    case detached
+    /// No remote at all: create the GitHub repo and push in one shot.
+    case publishRepository
+    /// A remote exists but the branch is untracked — the first push must
+    /// carry `--set-upstream`, and the button says what it will do.
+    case publishBranch
+    /// Behind the upstream: pulling comes first, whatever else is pending.
+    case pull
+    /// Ahead only: push.
+    case push
+    /// In sync: check the remote.
+    case fetch
+
+    init(status: RepoStatus?) {
+        // A detached HEAD has an empty branch name, so it passes its own way.
+        guard let status, !status.branch.isEmpty || status.detached else {
+            self = .loading
+            return
+        }
+        // Detached before the remote checks — GitHub Desktop orders these
+        // the other way round, but publishing would push a branch that does
+        // not exist, so the honest state wins.
+        if status.detached {
+            self = .detached
+        } else if !status.hasRemote {
+            self = .publishRepository
+        } else if !status.hasUpstream {
+            self = .publishBranch
+        } else if status.behind > 0 {
+            self = .pull
+        } else if status.ahead > 0 {
+            self = .push
+        } else {
+            self = .fetch
+        }
+    }
+
+    /// The state word: the button face's title when idle, and the menu
+    /// item's title always (a disabled "Pull" mid-pull reads better in a
+    /// menu than "Pulling…").
+    var title: String {
+        switch self {
+        case .loading, .fetch: "Fetch"
+        case .detached: "Push"
+        case .publishRepository: "Publish"
+        case .publishBranch: "Publish Branch"
+        case .pull: "Pull"
+        case .push: "Push"
+        }
+    }
+
+    /// Whether the proposal can be run at all — the two informational states
+    /// have nothing to do, and both the button and the menu item say so by
+    /// staying disabled.
+    var isActionable: Bool {
+        switch self {
+        case .loading, .detached: false
+        case .publishRepository, .publishBranch, .pull, .push, .fetch: true
+        }
+    }
+}
+
+/// The sync control's proposed action, published to the scene so the menu
+/// bar can offer it under a keyboard shortcut. Carrying the title alongside
+/// the closure is what lets the menu item rename itself — Publish, Pull,
+/// Push, Fetch — instead of guessing at the state the toolbar is showing.
+struct SyncCommand {
+    let title: String
+    let isEnabled: Bool
+    let perform: () -> Void
+}
+
+extension FocusedValues {
+    /// Set by the repository screen while a repository is open; `nil` on the
+    /// welcome screen, which is what disables the menu item there.
+    ///
+    /// Deliberately published from the window content, not from
+    /// `SyncControls` itself: a focused scene value set on a toolbar-hosted
+    /// view never propagates to the scene — toolbar items render in their
+    /// own hosting hierarchy — which left the menu item permanently
+    /// disabled when this was first wired there.
+    @Entry var syncCommand: SyncCommand?
 }
 
 /// Thin strip surfacing the in-flight network operation at the top of the

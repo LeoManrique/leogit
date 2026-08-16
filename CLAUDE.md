@@ -12,7 +12,7 @@ Constantly update these documents without repeating information between them.
 
 ## Implementation order
 
-Don't implement too multiple features at once, make the feature implementation order what the user flow is, and make sure it is tested before proceeding to the next one.
+Don't implement too many multiple features at once, make the feature implementation order what the user flow is, and make sure it is tested before proceeding to the next one.
 
 ## Long-term correctness over immediate fixes
 

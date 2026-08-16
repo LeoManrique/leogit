@@ -281,6 +281,23 @@ the toolbar title became duplication, so `.toolbar(removing: .title)` hides it
 `BranchMenu.menuLabel` ("Detached at <sha7>", "<branch> · merging"): repo name, branch,
 and counts each appear exactly once in the toolbar.
 
+The ladder also reaches the menu bar. Its states live in `SyncProposal`, a pure type over
+`RepoStatus` (ladder, title, actionability) that two views read: `SyncControls` renders it
+and runs every state through one `perform()` — the button face and the split button's
+primary action both call it, so no state is reachable by one and not the others — and the
+repository screen republishes it as a `SyncCommand` (title, enabled, closure) through
+`focusedSceneValue(\.syncCommand)`. Publishing from the window content is load-bearing: a
+focused scene value set on a toolbar-hosted view never propagates to the scene (toolbar
+items render in their own hosting hierarchy — tried first, and the menu item sat
+permanently disabled with a nil value). `RepositoryCommands` reads it back with
+`@FocusedValue` and renders Repository ▸ *action* under **⌘P**, renaming and disabling the
+item with the button (Publish, Publish Branch, Pull, Push, Fetch); its closure posts
+`leogitSyncActionRequested` back to `SyncControls`, whose sheet, alert, and busy guard
+live with the button, so ⌘P runs the exact click path. The title is why this is a focused
+value and not just a notification like ⌘R: a notification can fire an action but cannot
+label it, and the menu item's title has to track repository state or it lies about what
+⌘P does.
+
 `RepoDirectoryStore.refreshDirectory` owns the switcher's row list and is deliberately not
 lazy: a `.task` on the repository screen primes it when that screen appears, so the walk
 overlaps opening the repo instead of starting when the popover first opens (which left the

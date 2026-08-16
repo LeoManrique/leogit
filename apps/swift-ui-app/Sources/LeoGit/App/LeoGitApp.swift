@@ -33,6 +33,8 @@ struct LeoGitApp: App {
                 }
                 .keyboardShortcut("r")
             }
+
+            RepositoryCommands()
         }
 
         // Gives the app the standard "LeoGit ▸ Settings…" menu item and ⌘,
@@ -44,8 +46,39 @@ struct LeoGitApp: App {
     }
 }
 
+/// The menu-bar home of the toolbar's adaptive sync button: one item that
+/// renames itself to whatever the button proposes — Publish, Publish Branch,
+/// Pull, Push, Fetch — and runs the same closure under ⌘P.
+///
+/// The action arrives as a focused scene value — unlike ⌘R's plain
+/// notification — because this item's *title* depends on repository state:
+/// a notification could fire the action but not label it, and a menu item
+/// that lies about what it does is worse than no shortcut. Its perform
+/// closure still hops through a notification, since the sheet and alert
+/// the action may open live with the toolbar button.
+private struct RepositoryCommands: Commands {
+    @FocusedValue(\.syncCommand) private var syncCommand: SyncCommand?
+
+    var body: some Commands {
+        CommandMenu("Repository") {
+            // Titled for the neutral state while no repository is open, so
+            // the item reads sensibly even though it's disabled there.
+            Button(syncCommand?.title ?? "Fetch") {
+                syncCommand?.perform()
+            }
+            .keyboardShortcut("p")
+            .disabled(syncCommand?.isEnabled != true)
+        }
+    }
+}
+
 extension Notification.Name {
     /// Posted by the View ▸ Refresh command (⌘R); the main window's content
     /// view performs the actual reload, since the stores live there.
     static let leogitRefreshRequested = Notification.Name("leogitRefreshRequested")
+
+    /// Posted by Repository ▸ <sync action> (⌘P); `SyncControls` performs
+    /// the proposed action, so its sheet, alert, and busy handling stay on
+    /// the same path a button click takes.
+    static let leogitSyncActionRequested = Notification.Name("leogitSyncActionRequested")
 }

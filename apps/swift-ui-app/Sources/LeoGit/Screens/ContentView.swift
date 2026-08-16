@@ -251,6 +251,13 @@ struct ContentView: View {
                 )
             }
         }
+        // The sync ladder's menu-bar face (Repository ▸ <action>, ⌘P),
+        // published from the window content because a focused scene value
+        // set inside `.toolbar` never reaches the scene — toolbar items
+        // render in their own hosting hierarchy. The closure posts back to
+        // `SyncControls`, whose sheet, alert, and busy guard live with the
+        // button, so ⌘P runs the exact click path.
+        .focusedSceneValue(\.syncCommand, syncMenuCommand)
         .overlay(alignment: .top) {
             if let operation = syncStore.activeOperation {
                 SyncProgressBanner(
@@ -263,6 +270,20 @@ struct ContentView: View {
                     .progressViewStyle(.linear)
                     .frame(maxWidth: .infinity)
             }
+        }
+    }
+
+    /// The ⌘P menu item's content: the ladder's proposal by title, enabled
+    /// only when it's runnable and no operation holds the slot. The perform
+    /// closure posts rather than acting — the sheet and alert the action may
+    /// open belong to `SyncControls`.
+    private var syncMenuCommand: SyncCommand {
+        let proposal = SyncProposal(status: store.status)
+        return SyncCommand(
+            title: proposal.title,
+            isEnabled: proposal.isActionable && syncStore.activeOperation == nil
+        ) {
+            NotificationCenter.default.post(name: .leogitSyncActionRequested, object: nil)
         }
     }
 
