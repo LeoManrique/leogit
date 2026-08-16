@@ -391,6 +391,22 @@ skips the degenerate resize it produces, so re-expanding restores the exact prom
 toggles, and terminal focus (SwiftTerm's view as first responder) suppresses auto-fetch
 exactly like the field-editor check.
 
+The dock's header strip is a stock **accessory bar**: `.buttonStyle(.accessoryBar)` over the
+whole row, which AppKit draws as `NSBezelStyleAccessoryBar` — the renamed *recessed* bezel
+behind every scope bar in the system — so hover, press, and on-states come from the control
+class instead of being painted here. The strip has to be hand-assembled because
+`ToolbarItemPlacement.bottomBar` is `@available(macOS, unavailable)` in the macOS 26 SDK
+(`.status` is the top toolbar's centre, and `.accessoryBar(id:)` sits *below the title bar* —
+both the wrong end of the window); the accessory-bar *style*, however, is reusable in plain
+window content, which is what makes the strip native without imitation. The shell label is a
+`Toggle(isOn:).toggleStyle(.button)` over a binding whose setter calls `store.toggle()`
+rather than assigning, so the lazy first PTY spawn still happens on the way up, and the
+right-hand buttons are `Label`s under `.labelStyle(.iconOnly)` — icon-only on screen, titled
+for VoiceOver. Deliberately *no* `glassEffect`: the HIG restricts Liquid Glass to the
+navigation layer, and this bar lives in content, so it keeps the `.bar` material. The dock
+also stays a plain `VStack` child rather than a `safeAreaInset`, since nothing should scroll
+under an opaque 280 pt panel.
+
 Cloning and the Settings window crossed together. `clone_repo` is exported like `pull`
 (async over tokio, progress through the same `SyncProgressListener` seam — `ProgressSink`
 needed no change, since core aggregates clone's phase weights before emitting) and the gh

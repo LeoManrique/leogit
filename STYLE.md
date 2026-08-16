@@ -192,8 +192,11 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 ### Terminal
 
 - Background `#000` (or `--bg-primary` in light, but real terminals are dark — `#000` is fine on both themes). Mono font, 12–13px.
-- Header strip ~28px: `Terminal — /path/to/repo` in 11px `--text-secondary` on `--bg-secondary`, X close button on the right.
-- **Active shell name** sits beside the prompt glyph in the header at 10px, muted. It reports what actually launched (which can differ from the configured preference when that shell isn't installed), so it's an observation, not a control — no chevron, no pill, and it stays muted even while the label button is hovered. Hidden when no session is running.
+- The emulator sits on a small gutter — ~8px horizontal, ~6px vertical — painted the same black, so it reads as part of the terminal. Terminal emulators draw edge to edge, which leaves the first column touching the header strip above and running into the window's rounded bottom corner, where it gets clipped.
+- Header strip ~28px on a toolbar material, with a 1px rule above it. It is an **accessory bar** — the recessed scope-bar control class macOS uses for Finder's search scopes and Safari's favourites bar (SwiftUI's `.accessoryBar` button style, at `.controlSize(.small)`). The shell name leads on the left; New Session `+`, the expand/collapse chevron, and the session-killing `✕` sit icon-only on the right, with `✕` disabled while no session exists.
+- **Never hand-style the strip's controls.** The accessory bar draws hover, press, and selected states itself; a strip of plain/borderless buttons with a forced secondary foreground renders as inert glyphs that give no feedback on mouse-over, which is exactly what reads as non-native. Same rule as the toolbar: use the system control, don't imitate it.
+- **Active shell name** is the label of a button-styled toggle beside a terminal glyph (`apple.terminal` — the current-era symbol, not the older generic `terminal`), so the strip carries the panel's open state the way a scope bar carries a selected scope. It reports what actually launched, which can differ from the configured preference when that shell isn't installed, and reads `Terminal` until a session names itself.
+- Icon-only buttons are still built from labels, so every one has a tooltip and an accessibility name. There is no bottom-toolbar placement on macOS (`.bottomBar` is unavailable there), so this strip is hand-assembled by necessity — but out of stock controls.
 - No scrollbar styling — let the platform draw it.
 
 ### Empty states

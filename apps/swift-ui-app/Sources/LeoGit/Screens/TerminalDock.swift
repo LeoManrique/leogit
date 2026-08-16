@@ -11,6 +11,13 @@ struct TerminalDock: View {
     let repoPath: String
     let store: TerminalStore
 
+    /// Drives the label toggle. Reading reports whether the panel is open;
+    /// writing routes through `toggle()` rather than assigning, so the lazy
+    /// first spawn still happens on the way up.
+    private var isExpanded: Binding<Bool> {
+        Binding(get: { store.isExpanded }, set: { _ in store.toggle() })
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             Divider()
@@ -26,6 +33,13 @@ struct TerminalDock: View {
                 // repo unmounts the old session (killing its PTY) and
                 // mounts a fresh one.
                 .id("\(repoPath):\(store.generation)")
+                // SwiftTerm draws edge to edge — its layer has no inset — so
+                // the first column sat against the strip above and against
+                // the window's own rounded bottom corner, which clipped it.
+                // The backdrop below is the same black the view paints, so
+                // the gutter reads as part of the terminal.
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
                 .frame(maxWidth: .infinity)
                 .frame(height: store.isExpanded ? 280 : 0)
                 .background(.black)
@@ -34,48 +48,62 @@ struct TerminalDock: View {
         }
     }
 
+    /// A macOS accessory bar — the control class AppKit draws recessed for
+    /// scope bars (Finder's search scopes, Safari's favourites bar), which is
+    /// what a docked panel's strip is. `.accessoryBar` supplies the hover,
+    /// press, and on-state treatments, so nothing here paints its own: the
+    /// previous hand-styled `.plain`/`.borderless` buttons were inert glyphs
+    /// with no feedback at all.
     private var header: some View {
-        HStack(spacing: 8) {
-            // The label doubles as the toggle and carries ⌘` — like the
-            // Tauri client, where first expand lazily spawns the shell.
-            Button(action: store.toggle) {
-                HStack(spacing: 6) {
-                    Image(systemName: "terminal")
-                    Text(store.activeShellLabel.isEmpty ? "Terminal" : store.activeShellLabel)
-                        .font(.caption)
-                }
-                .foregroundStyle(.secondary)
+        HStack(spacing: 2) {
+            // The shell name doubles as the panel toggle and carries ⌘` —
+            // like the Tauri client, where the first expand lazily spawns the
+            // shell. A button-styled Toggle rather than a Button so the strip
+            // shows the panel's on-state the way a scope bar does.
+            Toggle(isOn: isExpanded) {
+                Label(
+                    store.activeShellLabel.isEmpty ? "Terminal" : store.activeShellLabel,
+                    systemImage: "apple.terminal"
+                )
             }
-            .buttonStyle(.plain)
+            .toggleStyle(.button)
             .keyboardShortcut("`", modifiers: .command)
             .help("Toggle terminal (⌘`)")
 
             Spacer(minLength: 0)
 
-            Button {
-                store.startNewSession()
-            } label: {
-                Image(systemName: "plus")
-            }
-            .help("New terminal session")
+            // Icon-only, but built from `Label`s: the titles become the
+            // accessibility labels the bare `Image`s never had.
+            HStack(spacing: 2) {
+                Button {
+                    store.startNewSession()
+                } label: {
+                    Label("New Session", systemImage: "plus")
+                }
+                .help("New terminal session")
 
-            Button(action: store.toggle) {
-                Image(systemName: store.isExpanded ? "chevron.down" : "chevron.up")
-            }
-            .help(store.isExpanded ? "Minimize terminal" : "Expand terminal")
+                Button(action: store.toggle) {
+                    Label(
+                        store.isExpanded ? "Minimize Terminal" : "Expand Terminal",
+                        systemImage: store.isExpanded ? "chevron.down" : "chevron.up"
+                    )
+                }
+                .help(store.isExpanded ? "Minimize terminal" : "Expand terminal")
 
-            Button {
-                store.closeSession()
-            } label: {
-                Image(systemName: "xmark")
+                Button {
+                    store.closeSession()
+                } label: {
+                    Label("Close Session", systemImage: "xmark")
+                }
+                .disabled(!store.hasSession)
+                .help("Kill terminal session")
             }
-            .disabled(!store.hasSession)
-            .help("Kill terminal session")
+            .labelStyle(.iconOnly)
         }
-        .buttonStyle(.borderless)
+        .buttonStyle(.accessoryBar)
         .controlSize(.small)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
+        .padding(.horizontal, 6)
+        .frame(height: 28)
         .background(.bar)
     }
 }
