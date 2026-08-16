@@ -29,7 +29,9 @@ struct HistoryView: View {
         } else {
             HSplitView {
                 commitList
-                    .frame(minWidth: 260, idealWidth: 320, maxWidth: 520)
+                    // Same frame as the Changes pane, so the divider sits in
+                    // the same place across tabs and the diff dominates.
+                    .frame(minWidth: 260, idealWidth: 280, maxWidth: 420)
                 detail
                     .frame(minWidth: 400, maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -170,8 +172,10 @@ private struct CommitDetailView: View {
             }
         } else {
             HSplitView {
+                // Tighter than the outer panes — plain path rows need less
+                // room, and this diff should dominate its split too.
                 ChangedFileList(files: store.files, selectedPath: $store.selectedPath)
-                    .frame(minWidth: 200, idealWidth: 260, maxWidth: 480)
+                    .frame(minWidth: 200, idealWidth: 240, maxWidth: 360)
                 fileDiff
                     .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
             }

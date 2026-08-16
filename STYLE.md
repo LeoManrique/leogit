@@ -98,7 +98,7 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 
 ### App chrome / layout
 
-- **Two-column layout**: 320px sidebar on the left (file list + commit composer), flexible main content on the right ([MainLayout.svelte:490](apps/tauri-app/src/lib/views/MainLayout.svelte#L490)).
+- **Two-column layout**: a resizable left column (~280px, never past ~420px) carrying the list — changed files plus the commit composer, or the commit history — and flexible main content on the right. Both tabs use the same column width so the divider doesn't jump when switching, and the diff always keeps the majority of the window.
 - Sidebar background: `--bg-secondary`. Main content background: `--bg-primary`. The 1px right border on the sidebar is `--border-inactive`.
 - **Terminal pane** docks at the bottom of the main content, ~280px tall, separated by a 1px border. Its own background can stay slightly darker than `--bg-primary` (use `#000` or `--bg-primary` — never an arbitrary off-color).
 - The header strip at the top of the main content carries repo name, branch dropdown, and the **adaptive sync button** — one control whose face shows Fetch, Pull, Push, Publish branch, or Publish depending on where the branch stands relative to its remote, GitHub-Desktop style. There is no separate refresh button. Keep the strip ~36–40px tall.
@@ -139,7 +139,7 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
   - Line 2 — `[author] · [relative date]` in 11.5px `--text-muted`, tabular nums on the date. The author ellipsizes first; the date never truncates.
 - No SHA in the row — it's copied via the right-click menu's "Copy SHA" and shown in the detail card.
 - Selected row: `--bg-tertiary`, 6px radius. Hover: `--surface-hover`.
-- The right pane (commit detail + changed files) gets its own thin 1px left border. Below the detail card the geometry matches the changes view: changed-file list on the left, per-file diff on the right, the file column independently resizable.
+- The right pane (commit detail + changed files) gets its own thin 1px left border. Below the detail card the geometry matches the changes view: changed-file list on the left, per-file diff on the right, the file column independently resizable — and narrower than the outer column (~240px, capped ~360px), since these rows carry only a path and this diff should dominate its split too.
 
 ### Commit message composer
 

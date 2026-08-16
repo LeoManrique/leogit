@@ -41,8 +41,8 @@ struct ChangesView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 HSplitView {
-                    // Capped tighter than the History list: this pane is a
-                    // checklist plus composer, and the diff should dominate.
+                    // Same frame as the History commit list, so the divider
+                    // sits in the same place across tabs; the diff dominates.
                     changesPane
                         .frame(minWidth: 260, idealWidth: 280, maxWidth: 420)
                     detail
