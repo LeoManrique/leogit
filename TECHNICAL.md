@@ -314,6 +314,39 @@ drop the repo that was just opened. `isRefreshing` lets the popover say "Looking
 repositories…" instead of the diagnosable "no repositories found" empty state, which is
 only correct once a pass has actually finished.
 
+**Repo search** is one rule with two implementations that must agree:
+[RepoSearch.swift](apps/swift-ui-app/Sources/LeoGit/Services/RepoSearch.swift) and
+[repoSearch.ts](apps/tauri-app/src/lib/utils/repoSearch.ts) (the latter shared by
+`RepoDropdown` and `RepoPicker`, which had hand-rolled a matcher each). Both replace the
+original rule — the query as a subsequence of the name, the `owner/name` label, **or the
+full path** — whose last clause is fatal once every row shares an ancestry: under
+`/Users/leo/Dev/LeoManrique/Desktop`, `llm` matched all fourteen repositories, satisfied by
+the `l` of `leo`, the `l` of `LeoManrique`, and that word's `m` before any repo name was
+consulted, so the field appeared not to filter at all. The fix separates the two halves of a
+path by how much signal each carries: a name keeps the scattered-subsequence match a fuzzy
+finder is expected to have, while the path must contain the query *contiguously* and is
+first trimmed to what lies below the deepest scan folder containing it, since everything
+above that is common to every row. `match` returns the strongest of six ordered cases rather
+than a `Bool` — exact name, name prefix, name substring, name initials (`gpm` →
+`git-projects-manager`), name subsequence, path substring — and every caller sorts on that
+before anything else, falling back to its own order (active/MRU/alphabetical natively, the
+persisted recent/name sort in Tauri, discovery order in the picker) only within a tier. The
+ranking is load-bearing rather than polish: both clients act on the first row — Return
+natively, the keyboard cursor in Tauri — and the old orders put the already-open repository
+there, so Enter re-opened what was already on screen instead of the match. The two
+implementations were diffed against each other over the real repo list before shipping,
+identical across twenty queries including case, whitespace, and the ancestry queries
+(`users`, `desktop`) that must now match nothing; `llm` went 15 → 1 and `leo` 15 → 5 with
+the three `leo*` repos leading. They differ in exactly one documented place: when a repo
+lies outside every scan folder the Swift side falls back to trimming the home directory,
+which the frontend can't resolve, so it searches the whole path.
+
+Feeding the Tauri half needed the expanded scan folders in the frontend, which only
+`App.svelte` had — fetched twice, and only on the paths that reach the picker.
+`stores/config.ts` now owns them: `refreshConfig` resolves `effective_scan_paths` alongside
+the config it derives from, so both pickers and the picker's "Searched these folders" empty
+state read one store that re-resolves whenever settings change.
+
 `Design/PathText.swift` is a straight port of the Tauri client's `PathText.svelte`, algorithm
 included: `PathTruncation` restates the rule (the directory collapses to a trailing `…/`
 bridge, never below a first-letter hint, and the filename middle-truncates only when even that
@@ -891,7 +924,7 @@ The frontend builds warning-free (`pnpm check` and `vite build` both report 0 a1
 - **`use:autofocus`, never the `autofocus` attribute.** The attribute is flagged (`a11y_autofocus`) and is unreliable for inputs that mount inside `{#if}` blocks. The [autofocus action](apps/tauri-app/src/lib/actions/autofocus.ts) calls `node.focus()` on mount instead.
 - **Autocorrect is disabled once, at the root.** `<html>` in [index.html](apps/tauri-app/index.html) carries `autocorrect="off" autocapitalize="off" spellcheck="false"`. All three are inheritable HTML attributes, so every descendant input/textarea/contenteditable inherits them — no field opts out individually, and WebKit's macOS autocorrect pills, inline predictions, and spell squiggles stay off app-wide. Only add these attributes to a specific field if it needs to *re-enable* the behavior.
 - **Keyboard shortcuts attach to the interactive field, not the container.** The commit composer's Cmd+Enter / Cmd+G handler lives on the summary `<input>` and description `<textarea>`, because Svelte treats `<div>` and `<form>` as non-interactive and warns on listeners attached to them. The container stays a plain `role="form"` landmark. Truly global shortcuts (Cmd+P push/publish in [Header](apps/tauri-app/src/lib/components/Header.svelte), Cmd+R / Cmd+L in [MainLayout](apps/tauri-app/src/lib/views/MainLayout.svelte)) bind a `window` `keydown` listener in `onMount` instead, so they fire regardless of focus.
-- **Searchable repo lists share one keyboard-nav helper.** The startup picker ([RepoPicker](apps/tauri-app/src/lib/views/RepoPicker.svelte)), header switcher ([RepoDropdown](apps/tauri-app/src/lib/views/RepoDropdown.svelte)), and Clone dialog ([CloneOverlay](apps/tauri-app/src/lib/views/CloneOverlay.svelte)) all let you type-then-arrow: ↑/↓ move a keyboard cursor (`activeIndex`, reset to the top match whenever the query changes) and Enter picks the highlighted row (opens it, or in Clone sets the clone target). The two reusable pieces live in [listNavigation.ts](apps/tauri-app/src/lib/actions/listNavigation.ts) — `nextActiveIndex()` (wrapping index math) and the `scrollIntoViewWhenActive` action (`block: 'nearest'`, so already-visible rows never jump). The active row shows a `--border-active` inset ring, distinct from hover/selected fills. MainLayout's global `keydown` never interferes because it early-returns when focus is in a field and only handles Escape + meta-combos.
+- **Searchable repo lists share one keyboard-nav helper** (and, for the two that search repo *paths*, one match rule — see *Repo search* above). The startup picker ([RepoPicker](apps/tauri-app/src/lib/views/RepoPicker.svelte)), header switcher ([RepoDropdown](apps/tauri-app/src/lib/views/RepoDropdown.svelte)), and Clone dialog ([CloneOverlay](apps/tauri-app/src/lib/views/CloneOverlay.svelte)) all let you type-then-arrow: ↑/↓ move a keyboard cursor (`activeIndex`, reset to the top match whenever the query changes) and Enter picks the highlighted row (opens it, or in Clone sets the clone target). The two reusable pieces live in [listNavigation.ts](apps/tauri-app/src/lib/actions/listNavigation.ts) — `nextActiveIndex()` (wrapping index math) and the `scrollIntoViewWhenActive` action (`block: 'nearest'`, so already-visible rows never jump). The active row shows a `--border-active` inset ring, distinct from hover/selected fills. MainLayout's global `keydown` never interferes because it early-returns when focus is in a field and only handles Escape + meta-combos.
 - **The Clone dialog list is one tab stop, not one-per-row.** Its repo rows are `role="option" tabindex="-1"` inside a `role="listbox" tabindex="0"` container, so Tab flows filter input → sort button → list → Local path → Browse → Cancel/Clone (rows are reached by arrows, not Tab). The filter input is a `role="combobox"` with `aria-controls`/`aria-activedescendant` pointing at the listbox and its active option, and `handleListKeyDown` is shared by the input and the listbox so arrows/Enter work from either.
 
 ## Notable invariants

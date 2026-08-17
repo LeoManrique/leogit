@@ -280,7 +280,16 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    composes summary + description + co-authors.
 8. **History** — commit history is a **flat linear list** (no DAG/graph layout),
    loaded in a sliding window via `get_log` `{max_count, skip}`.
-9. **Relative dates** — commit timestamps arrive as ISO-8601 strings
+9. **Repo search** — the filter over a repository list is **loose on names, strict on
+   paths**: the query may appear as a scattered subsequence in a repo's name(s), but a
+   path must contain it contiguously and only below the scan folder that found the repo
+   (every row shares the folders above, so matching them matches everything). Results
+   are ranked — exact name, prefix, substring, initials, subsequence, path — and each
+   list's own sort order only breaks ties, because the first row is what Return or the
+   keyboard cursor acts on. One implementation per frontend
+   (`lib/utils/repoSearch.ts`, `Services/RepoSearch.swift`), kept tier-for-tier
+   identical; the only sanctioned difference is in §8.
+10. **Relative dates** — commit timestamps arrive as ISO-8601 strings
    (`author_date`/`committer_date`, e.g. `2026-08-12T14:03:11+0200`; the core is
    deliberately chrono-free) and each frontend renders them as relative ("5 minutes
    ago"), ticking live.
@@ -320,6 +329,7 @@ every deliberate difference here.
 | Terminal widget | `xterm.js` | SwiftTerm (PTY backend reused) |
 | Virtualized lists | hand-rolled windowing | native `List`/`LazyVStack`/`Table` |
 | Pane widths persistence | `localStorage` (3 keys) | `UserDefaults` |
+| Repo-search path root (§6.9) | scan folders only — the frontend can't resolve `~`, so a repo outside them is searched by its whole path | scan folders, then `NSHomeDirectory()` |
 
 ## 9. Non-goals / intentionally absent
 

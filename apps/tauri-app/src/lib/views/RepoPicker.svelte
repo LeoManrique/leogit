@@ -1,6 +1,8 @@
 <script lang="ts">
   import { autofocus } from '$lib/actions/autofocus'
   import { nextActiveIndex, scrollIntoViewWhenActive } from '$lib/actions/listNavigation'
+  import { matchRepo } from '$lib/utils/repoSearch'
+  import { basename } from '$lib/utils/path'
 
   interface Props {
     repos: string[]
@@ -8,7 +10,8 @@
     /** Opens Settings, for the empty state's call to action. The app header
      *  above carries the persistent entry point; this is the contextual one. */
     onOpenSettings: () => void
-    /** Folders discovery actually searched, shown when nothing was found. */
+    /** Folders discovery actually searched: named by the empty state, and
+     *  trimmed off a repo's path before the filter searches it. */
     scannedPaths?: string[]
   }
 
@@ -16,21 +19,20 @@
 
   let searchInput = $state('')
 
+  /**
+   * Rows to show, best match first — the sort is stable, so equally-matched
+   * repos keep discovery's order. Enter picks the highlighted row, which
+   * starts on the top match, so the ranking is what it acts on.
+   */
   function filterRepos(query: string): string[] {
     if (!query.trim()) return repos
-
-    const lower = query.toLowerCase()
-    return repos.filter((repo) => {
-      const lowerRepo = repo.toLowerCase()
-      // Fuzzy match: check if all characters in query appear in repo in order
-      let queryIdx = 0
-      for (let i = 0; i < lowerRepo.length && queryIdx < lower.length; i++) {
-        if (lowerRepo[i] === lower[queryIdx]) {
-          queryIdx++
-        }
-      }
-      return queryIdx === lower.length
-    })
+    return repos
+      .flatMap((repo) => {
+        const match = matchRepo(query, repo, [basename(repo)], scannedPaths)
+        return match === null ? [] : [{ repo, match }]
+      })
+      .sort((a, b) => a.match - b.match)
+      .map((r) => r.repo)
   }
 
   function handleSelect(repo: string) {

@@ -156,20 +156,29 @@ private struct RepoSwitcherList: View {
         .padding(12)
     }
 
-    /// Active repo first, then most-recently-opened order, then the rest by
-    /// name — so the repos the user actually cycles between stay at the top.
-    /// (The Tauri picker sorts by last-commit time instead; recency-of-use
-    /// serves quick switching better and costs no extra git calls.)
+    /// Rows to show. Unfiltered: active repo first, then most-recently-opened
+    /// order, then the rest by name — so the repos the user actually cycles
+    /// between stay at the top. (The Tauri picker sorts by last-commit time
+    /// instead; recency-of-use serves quick switching better and costs no
+    /// extra git calls.) Filtered: `RepoSearch`'s match quality leads and that
+    /// order only breaks ties, because Return opens the first row — pinning
+    /// the open repository there would hide the repo the user just typed.
     private var filteredRepos: [String] {
-        let ranked = directory.repos.sorted { lhs, rhs in
-            rank(of: lhs) < rank(of: rhs)
+        let query = filter.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else {
+            return directory.repos.sorted { rank(of: $0) < rank(of: $1) }
         }
-        let query = filter.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !query.isEmpty else { return ranked }
-        return ranked.filter { path in
-            isSubsequence(query, of: RepoDirectoryStore.displayName(of: path).lowercased())
-                || isSubsequence(query, of: path.lowercased())
-        }
+        return directory.repos
+            .compactMap { path in
+                RepoSearch.match(query: query, for: path, scanFolders: directory.scanFolders)
+                    .map { (path: path, match: $0) }
+            }
+            .sorted { lhs, rhs in
+                lhs.match == rhs.match
+                    ? rank(of: lhs.path) < rank(of: rhs.path)
+                    : lhs.match < rhs.match
+            }
+            .map(\.path)
     }
 
     /// Sort key: 0 for the active repo, 1+index for MRU entries, then a
@@ -182,19 +191,6 @@ private struct RepoSwitcherList: View {
             return (1 + index, "")
         }
         return (Int.max, RepoDirectoryStore.displayName(of: path).lowercased())
-    }
-
-    /// The Tauri picker's fuzzy rule: every character of `needle` appears in
-    /// `haystack`, in order, not necessarily adjacent.
-    private func isSubsequence(_ needle: String, of haystack: String) -> Bool {
-        var index = needle.startIndex
-        for character in haystack {
-            guard index < needle.endIndex else { break }
-            if character == needle[index] {
-                index = needle.index(after: index)
-            }
-        }
-        return index == needle.endIndex
     }
 }
 

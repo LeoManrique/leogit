@@ -3,7 +3,7 @@
   import { get } from 'svelte/store'
   import { listen } from '@tauri-apps/api/event'
   import { appState } from '$lib/stores/app'
-  import { config, refreshConfig } from '$lib/stores/config'
+  import { config, refreshConfig, scanFolders } from '$lib/stores/config'
   import { ghApi, gitApi, configApi, appApi, type LaunchTarget } from '$lib/api/commands'
   import { patchReposState, recordRecentRepo } from '$lib/stores/reposState'
   import { updateChecker } from '$lib/services/updateChecker'
@@ -22,8 +22,6 @@
   // nothing can't reach the setting that would fix it.
   let showSettings = $state(false)
   let showHelp = $state(false)
-  // Folders discovery searched, surfaced by the picker's empty state.
-  let scannedPaths = $state<string[]>([])
 
   // `leogit <dir>` pointed at a folder that isn't a repository yet. The prompt
   // lives here rather than in MainLayout because it isn't scoped to the open
@@ -145,11 +143,6 @@
         return
       }
 
-      // Only needed for the empty state; a failure here must not block the
-      // picker, which still works — it just can't say where it looked.
-      scannedPaths = await gitApi
-        .effectiveScanPaths(cfg?.scan_paths ?? [])
-        .catch(() => [] as string[])
       appState.update((s) => ({ ...s, phase: 'repo-picker', repos }))
     } catch (error) {
       appState.update((s) => ({ ...s, phase: 'error', error: String(error) }))
@@ -174,11 +167,9 @@
   async function rediscoverRepos() {
     const cfg = get(config)
     try {
-      const [repos, paths] = await Promise.all([
-        gitApi.discoverRepos(cfg?.scan_paths ?? [], cfg?.scan_depth ?? 3),
-        gitApi.effectiveScanPaths(cfg?.scan_paths ?? []).catch(() => [] as string[]),
-      ])
-      scannedPaths = paths
+      // Settings saved before closing, and `refreshConfig` re-resolved the
+      // scan folders with it — only the walk itself is left to redo.
+      const repos = await gitApi.discoverRepos(cfg?.scan_paths ?? [], cfg?.scan_depth ?? 3)
       appState.update((s) => ({ ...s, repos }))
     } catch (error) {
       console.error('[repos] rediscovery after settings failed', error)
@@ -248,7 +239,7 @@
           repos={$appState.repos}
           onSelect={handleRepoSelect}
           onOpenSettings={() => (showSettings = true)}
-          {scannedPaths}
+          scannedPaths={$scanFolders}
         />
       {/if}
     </div>

@@ -6,6 +6,8 @@
   import { repoSortMode, setRepoSortMode } from '$lib/stores/reposState'
   import type { RepoIdentifier } from '$lib/api/commands'
   import RepoTooltip from '$lib/components/RepoTooltip.svelte'
+  import { scanFolders } from '$lib/stores/config'
+  import { matchRepo } from '$lib/utils/repoSearch'
   import { autofocus } from '$lib/actions/autofocus'
   import { nextActiveIndex, scrollIntoViewWhenActive } from '$lib/actions/listNavigation'
   import { basename } from '$lib/utils/path'
@@ -33,16 +35,6 @@
   // Show only after a brief dwell so quick scans don't flash tooltips.
   const TOOLTIP_DELAY_MS = 500
   let tooltipTimer: ReturnType<typeof setTimeout> | null = null
-
-  function fuzzyMatch(query: string, target: string): boolean {
-    const q = query.toLowerCase()
-    const t = target.toLowerCase()
-    let i = 0
-    for (let j = 0; j < t.length && i < q.length; j++) {
-      if (t[j] === q[i]) i++
-    }
-    return i === q.length
-  }
 
   // Fetch identifiers (labels) and last-commit timestamps (recency sort) for
   // every repo whenever the list changes. Both caches are module-level, so
@@ -90,18 +82,22 @@
     return list
   })
 
+  // Best match first, and only then the chosen sort order — the keyboard
+  // cursor starts on the top row, so a query has to put the repo the user
+  // typed there. `sort` is stable, so equal matches keep `sortedRepos` order.
   const filteredRepos = $derived.by(() => {
     const q = filter.trim()
     if (!q) return sortedRepos
     const ids = $repoIdentifiers
-    return sortedRepos.filter((p) => {
-      const id = ids.get(p)
-      return (
-        fuzzyMatch(q, primaryLabel(p, id)) ||
-        fuzzyMatch(q, fullLabel(p, id)) ||
-        fuzzyMatch(q, p)
-      )
-    })
+    const folders = $scanFolders
+    return sortedRepos
+      .flatMap((p) => {
+        const id = ids.get(p)
+        const match = matchRepo(q, p, [primaryLabel(p, id), fullLabel(p, id)], folders)
+        return match === null ? [] : [{ path: p, match }]
+      })
+      .sort((a, b) => a.match - b.match)
+      .map((r) => r.path)
   })
 
   // Map primary label → count, so rows that collide get an `owner/` prefix
