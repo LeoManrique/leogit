@@ -127,6 +127,60 @@ enum GitBridge {
         try commit(repoPath: repoPath, message: message, files: files, amend: amend)
     }
 
+    // MARK: - Row context actions
+
+    /// Throw away the working-tree changes to `files`. Tracked entries are
+    /// restored from `HEAD`; entries with no committed version — untracked
+    /// files and a rename's new side — go to the Trash, recoverable but gone
+    /// from the working tree, which is why callers confirm first.
+    @concurrent
+    static func discardChanges(in repoPath: String, files: [FileEntry]) async throws {
+        try discardFiles(repoPath: repoPath, files: files)
+    }
+
+    /// Add literal file paths to the repository's root `.gitignore`. Core
+    /// escapes each path's glob metacharacters, so the rule matches that file
+    /// and nothing else, and skips rules already present.
+    @concurrent
+    static func ignoreFiles(in repoPath: String, paths: [String]) async throws {
+        try ignorePaths(repoPath: repoPath, paths: paths)
+    }
+
+    /// Add ready-to-write patterns (`*.log`) to the root `.gitignore`,
+    /// verbatim — the "ignore every file of this type" action.
+    @concurrent
+    static func ignorePatterns(in repoPath: String, patterns: [String]) async throws {
+        try appendToGitignore(repoPath: repoPath, patterns: patterns)
+    }
+
+    /// Reveal a working-tree file in Finder, selected in its folder.
+    @concurrent
+    static func revealInFileManager(in repoPath: String, relativePath: String) async throws {
+        try revealPath(repoPath: repoPath, relPath: relativePath)
+    }
+
+    /// Open a working-tree file with whatever application the system
+    /// associates with its type.
+    @concurrent
+    static func openWithDefaultApp(in repoPath: String, relativePath: String) async throws {
+        try openPath(repoPath: repoPath, relPath: relativePath)
+    }
+
+    /// Check out a commit by sha, detaching `HEAD` — the next status reports
+    /// `detached`, and the branch menu is how the user reattaches.
+    @concurrent
+    static func checkout(in repoPath: String, commit sha: String) async throws {
+        try checkoutCommit(repoPath: repoPath, sha: sha)
+    }
+
+    /// Drop the last commit (`git reset --mixed HEAD~1`), leaving its changes
+    /// in the working tree to be edited and re-committed. Core refuses on a
+    /// repository whose only commit is the initial one.
+    @concurrent
+    static func undoCommit(in repoPath: String) async throws {
+        try undoLastCommit(repoPath: repoPath)
+    }
+
     // MARK: - Branches
 
     /// Local and remote branches in one flat list, most recent commit first.

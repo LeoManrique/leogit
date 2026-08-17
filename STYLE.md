@@ -148,6 +148,13 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 - **No label above the inputs.** The placeholder ("Summary", "Description") is enough. Reserve labels for forms with mixed field types.
 - Action row at the bottom: `[Commit]` primary (accent fill, right-aligned), `[AI ✨]` ghost-icon button to its left if AI commit messages are enabled. No leading icon on Commit itself.
 - **Description is *not* monospace.** The current implementation may render it in mono — switch it to the system font. Reserve mono for content that benefits from fixed-width alignment.
+- **Amend notice** — while the composer is rewriting the last commit, a caption-sized band sits above the summary field: "Your changes will modify your **most recent commit**." with a link-styled *Stop Amending* on the trailing edge. Marked by a 2px `--status-yellow` rule on its leading edge, not a filled block — the composer is already a dense stack of bordered fields, and a tinted panel here reads as another one. It never names the commit: the message it seeded is in the fields directly below.
+
+### Context menus
+
+- Row context menus are **stock system menus** — plain items, `Divider()` between groups, the destructive role on the one item that destroys work. Nothing here is hand-drawn or re-themed; the platform owns the look, the same rule that governs the toolbar and the terminal's accessory bar.
+- **Disable, don't hide.** An action that doesn't apply to this row (reveal a deleted file, amend a commit that isn't HEAD) stays in place greyed out, so the menu has one shape and its items keep one position.
+- Order runs destructive → repository-changing → copy → hand-off to the OS, separated by dividers, so the item that can lose work is never adjacent to the one people click most.
 
 ### Buttons
 

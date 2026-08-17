@@ -38,7 +38,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use leogit_core::events::{CoreEvent, EventSink};
-use leogit_core::{ai, config, diff, gh, git, highlight, process, shell, terminal};
+use leogit_core::{ai, config, diff, gh, git, highlight, os, process, shell, terminal};
 
 // Re-exported so Swift sees the real core types. Names are used by the
 // `#[uniffi::remote]` declarations below.
@@ -514,6 +514,113 @@ pub fn commit(
     amend: Option<bool>,
 ) -> Result<(), GitError> {
     git::commit(repo_path, message, files, amend).map_err(GitError::from)
+}
+
+// ---------------------------------------------------------------------------
+// Exported functions — row context actions (discard / ignore / reveal / open,
+// checkout commit, undo commit)
+// ---------------------------------------------------------------------------
+//
+// What the Tauri client hangs off a right-clicked file row or commit row. All
+// of them already shipped there as registered commands; they simply had no
+// bridge export until the native client grew the same menus. Sync, like every
+// other git call here: each is a short-lived local operation, so the Swift
+// wrappers' `@concurrent` hop is enough to keep them off the main actor —
+// `spawn_blocking` stays reserved for the calls that block for many seconds by
+// design (`repo_sync_status`, `discover_repos`).
+//
+// `os::open_url` is deliberately NOT exported: SwiftUI opens URLs itself (the
+// PR view's `Link`), so the native client has no caller for it.
+
+/// Throw away the working-tree changes to `files`, restoring each to its
+/// committed state.
+///
+/// Tracked files (modified, deleted, conflicted, and a rename's original side)
+/// are restored from `HEAD` in both index and working tree. Files with no
+/// committed version — untracked entries and a rename's new side — have no
+/// state to restore, so their working-tree copy goes to the OS trash, which is
+/// why the UI must confirm first. An empty list is a no-op.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when the underlying `git reset`/`git checkout` fails. A
+/// file that can't be trashed is skipped, not fatal.
+#[uniffi::export]
+pub fn discard_files(repo_path: String, files: Vec<FileEntry>) -> Result<(), GitError> {
+    git::discard_files(&repo_path, files).map_err(GitError::from)
+}
+
+/// Add literal file paths to the repository's root `.gitignore`, escaping each
+/// path's glob metacharacters so the rule matches that file and nothing else.
+/// Rules already present are skipped, so repeated use can't pile up duplicates.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when `.gitignore` can't be written.
+#[uniffi::export]
+pub fn ignore_paths(repo_path: String, paths: Vec<String>) -> Result<(), GitError> {
+    git::ignore_paths(&repo_path, paths).map_err(GitError::from)
+}
+
+/// Append ready-to-write patterns (globs like `*.log`) to the repository's root
+/// `.gitignore`. Literal paths belong in [`ignore_paths`], which escapes them
+/// first.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when `.gitignore` can't be written.
+#[uniffi::export]
+pub fn append_to_gitignore(repo_path: String, patterns: Vec<String>) -> Result<(), GitError> {
+    git::append_to_gitignore(&repo_path, patterns).map_err(GitError::from)
+}
+
+/// Reveal `rel_path` (relative to `repo_path`) in the platform file manager,
+/// selecting the item — Finder's `open -R` on macOS.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when the file manager can't be spawned or doesn't
+/// return within core's 15 s hand-off timeout.
+#[uniffi::export]
+pub fn reveal_path(repo_path: String, rel_path: String) -> Result<(), GitError> {
+    os::reveal_path(repo_path, rel_path).map_err(GitError::from)
+}
+
+/// Open `rel_path` (relative to `repo_path`) with the OS's default application
+/// for that file type.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when the handler can't be spawned or doesn't return
+/// within core's 15 s hand-off timeout.
+#[uniffi::export]
+pub fn open_path(repo_path: String, rel_path: String) -> Result<(), GitError> {
+    os::open_path(repo_path, rel_path).map_err(GitError::from)
+}
+
+/// Check out a commit by sha, detaching `HEAD`. `get_status` then reports
+/// `detached = true`; the branch picker is how the user reattaches.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when git refuses — most commonly because uncommitted
+/// changes would be overwritten. Git's message is surfaced verbatim.
+#[uniffi::export]
+pub fn checkout_commit(repo_path: String, sha: String) -> Result<(), GitError> {
+    git::checkout_commit(&repo_path, &sha).map_err(GitError::from)
+}
+
+/// Undo the last commit: `git reset --mixed HEAD~1`. The commit is removed,
+/// the index matches the new `HEAD`, and its changes re-appear in the working
+/// tree as ordinary unstaged edits, ready to be re-committed.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when `HEAD` has no parent (the initial commit, which
+/// core refuses to undo) or the reset fails.
+#[uniffi::export]
+pub fn undo_last_commit(repo_path: String) -> Result<(), GitError> {
+    git::undo_last_commit(repo_path).map_err(GitError::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -1666,6 +1773,116 @@ mod tests {
         assert!(
             matches!(err, GitError::Failed { ref message } if message.contains("no files")),
             "empty selection surfaces core's own error"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Changes-tab row menu's two write actions against a real repository:
+    /// discard restores a tracked file to `HEAD`, and the ignore pair appends
+    /// escaped literal paths and raw globs to `.gitignore` without duplicating
+    /// rules that are already there.
+    ///
+    /// Discarding an *untracked* file is deliberately left out: core moves it
+    /// to the OS trash, and a test has no business putting anything in the
+    /// user's Trash. Core owns that branch and covers it itself.
+    #[test]
+    fn discard_restores_tracked_files_and_ignore_appends_rules() {
+        let (dir, repo, _) = seeded_repo("context-discard");
+
+        std::fs::write(dir.join("base.txt"), "edited\n").expect("write");
+        let status = get_status(repo.clone()).expect("status");
+        assert_eq!(status.files.len(), 1, "the edit is the only change");
+
+        discard_files(repo.clone(), status.files).expect("discard");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("base.txt")).expect("read"),
+            "base\n",
+            "the committed content is back"
+        );
+        assert!(
+            get_status(repo.clone()).expect("status").files.is_empty(),
+            "the working tree is clean again"
+        );
+
+        // Glob metacharacters in a literal path are escaped, so the rule
+        // matches that one file rather than acting as a pattern.
+        ignore_paths(repo.clone(), vec!["logs/weird[1].txt".to_string()]).expect("ignore path");
+        // Raw patterns go through untouched, and a repeat is a no-op.
+        append_to_gitignore(repo.clone(), vec!["*.log".to_string()]).expect("ignore extension");
+        append_to_gitignore(repo.clone(), vec!["*.log".to_string()]).expect("ignore again");
+
+        let rules = std::fs::read_to_string(dir.join(".gitignore")).expect("read .gitignore");
+        let lines: Vec<&str> = rules.lines().collect();
+        assert_eq!(
+            lines,
+            vec![r"logs/weird\[1\].txt", "*.log"],
+            "escaped path first, glob verbatim, no duplicate"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The History row menu's two navigational actions: checking out an older
+    /// commit detaches HEAD at that sha, and undoing the last commit drops it
+    /// from history while its changes survive in the working tree. Also pins
+    /// core's refusal to undo the initial commit, which is what makes the
+    /// menu item safe to offer on a one-commit repository.
+    #[test]
+    fn checkout_commit_detaches_and_undo_keeps_the_changes() {
+        let (dir, repo, branch) = seeded_repo("context-history");
+
+        std::fs::write(dir.join("second.txt"), "second\n").expect("write");
+        run_git(&dir, &["add", "."]);
+        run_git(&dir, &["commit", "-m", "add second"]);
+
+        let log = get_log(
+            repo.clone(),
+            LogOptions {
+                max_count: 10,
+                skip: 0,
+            },
+        )
+        .expect("log");
+        assert_eq!(log.len(), 2, "two commits");
+        let root = log[1].sha.clone();
+
+        checkout_commit(repo.clone(), root.clone()).expect("checkout commit");
+        let detached = get_status(repo.clone()).expect("status detached");
+        assert!(detached.detached, "HEAD is detached");
+        assert_eq!(detached.head_sha, root, "detached at the requested commit");
+        assert!(
+            !dir.join("second.txt").exists(),
+            "the older commit's tree is what's checked out"
+        );
+
+        switch_branch(repo.clone(), branch).expect("reattach");
+        undo_last_commit(repo.clone()).expect("undo");
+
+        let after = get_log(
+            repo.clone(),
+            LogOptions {
+                max_count: 10,
+                skip: 0,
+            },
+        )
+        .expect("log after undo");
+        assert_eq!(after.len(), 1, "the commit is gone from history");
+        let status = get_status(repo.clone()).expect("status after undo");
+        assert_eq!(
+            status
+                .files
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["second.txt"],
+            "its changes came back as a pending change"
+        );
+
+        let err = undo_last_commit(repo).unwrap_err();
+        assert!(
+            matches!(err, GitError::Failed { ref message } if message.contains("initial commit")),
+            "core refuses to undo the root commit: {err}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

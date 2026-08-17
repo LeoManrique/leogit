@@ -28,9 +28,12 @@ struct CommitComposer: View {
         return typed.isEmpty ? autoSummary : typed
     }
 
+    /// Amending relaxes the file requirement: `git commit --amend` with
+    /// nothing staged is the message-only edit, which is the whole point of
+    /// amending a commit on a clean working tree.
     private var canCommit: Bool {
         !effectiveSummary.isEmpty
-            && includedCount > 0
+            && (includedCount > 0 || store.isAmending)
             && !isBusy
     }
 
@@ -43,6 +46,10 @@ struct CommitComposer: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if store.isAmending {
+                amendNotice
+            }
+
             WheelScrollableTextField(
                 prompt: autoSummary.isEmpty ? "Summary (required)" : autoSummary,
                 text: $store.summary
@@ -90,10 +97,41 @@ struct CommitComposer: View {
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.return, modifiers: .command)
                 .disabled(!canCommit)
-                .help("Commit the checked files (⌘↩)")
+                .help(
+                    store.isAmending
+                        ? "Rewrite the most recent commit (⌘↩)"
+                        : "Commit the checked files (⌘↩)"
+                )
             }
         }
         .padding(10)
+    }
+
+    /// Amend mode is a state the composer can sit in indefinitely, so it says
+    /// so above the fields — with the way out right there, since the only
+    /// other exit is committing. Deliberately doesn't name the commit: the
+    /// message it seeded is already on screen, in the fields below.
+    private var amendNotice: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text("Your changes will modify your \(Text("most recent commit").bold()).")
+
+            Spacer(minLength: 0)
+
+            Button("Stop Amending") { store.stopAmending() }
+                .buttonStyle(.link)
+                .disabled(isBusy)
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .padding(.leading, 8)
+        .padding(.vertical, 4)
+        // A leading rule instead of a filled banner: the composer is a dense
+        // stack of fields, and a tinted block here would read as another one.
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(.yellow)
+                .frame(width: 2)
+        }
     }
 
     /// The native counterpart of the Tauri textarea: five lines tall,
@@ -135,7 +173,10 @@ struct CommitComposer: View {
     }
 
     private var commitLabel: String {
-        switch includedCount {
+        if store.isAmending {
+            return store.isCommitting ? "Amending…" : "Amend Commit"
+        }
+        return switch includedCount {
         case 0: "Commit"
         case 1: "Commit 1 File"
         default: "Commit \(includedCount) Files"

@@ -395,6 +395,35 @@ The history list itself pages: `get_log`'s `skip` appends a page whenever the la
 materialises, and quiet refreshes re-fetch at the scrolled depth capped at 500 (the Tauri
 window's `MAX_COMMITS`), with appends de-duplicated by sha against a poll's concurrent reload.
 
+**Row context menus** are the per-item actions both lists hang off a right-click. Their seven
+core functions had shipped in the Tauri host for months without a bridge export — `discard_files`,
+`ignore_paths`, `append_to_gitignore`, `reveal_path`, `open_path`, `checkout_commit`,
+`undo_last_commit` — and now cross as plain sync exports; none needs a new type mirror, and none
+belongs in the `spawn_blocking` category (`repo_sync_status`, `discover_repos`), since each is a
+short local operation and the Swift wrapper's `@concurrent` hop already keeps it off the main
+actor. The menus themselves use `contextMenu(forSelectionType:)` on the *list* rather than one
+`.contextMenu` per row: it makes the right-clicked row the selection before building the menu, so
+the menu and the diff pane always describe the same item — the re-select the Tauri `FileList`
+performs by hand — and returning nothing from its builder deactivates it, which is how the History
+detail's file list keeps its rows menu-less while sharing `ChangedFileList` with the Changes tab.
+Whether a menu exists at all is a stored flag rather than an empty builder, so the modifier is
+never attached where there is nothing to show.
+
+Amend mode lives in `CommitStore` (`amendTarget` plus the commit's `co_authors`, which the
+composer has no field for and simply re-attaches to the next message). Two behaviours are
+load-bearing: re-entering amend on the same sha is a no-op, so right-clicking Amend twice can't
+wipe edits in progress, and leaving it clears the seeded draft so an amended message can't be
+re-submitted as a new commit. `commit` then relaxes its empty-file guard, because
+`git commit --amend` with nothing staged *is* the message-only edit. This forced one structural
+fix: `CommitStore` moved from `ChangesView` to `ContentView`, since the tab bar swaps panes by
+rebuilding them — which discarded any in-progress message on every tab switch, and would have
+made amend impossible, as amend is started from the History tab and finished in the Changes tab.
+Which commit is `HEAD` comes from `status.head_sha`, not from the row's index: the Tauri list
+compares against index 0 of its loaded page, so after its sliding window advances, row 0 is no
+longer HEAD yet still offers Amend and Undo. Undo's own gate is ported as-is — offered only when
+the commit is provably unpushed, or when no upstream resolved at all and nothing can prove it was
+pushed either.
+
 The embedded terminal crosses as the bridge's second foreign callback trait:
 `TerminalEventListener { on_output(pid, data), on_closed(pid, exit) }` — `exit` is a
 `TerminalExit { exit_code, signal }` mirror of the reaped child's status — adapted to core's

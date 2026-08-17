@@ -289,7 +289,17 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    keyboard cursor acts on. One implementation per frontend
    (`lib/utils/repoSearch.ts`, `Services/RepoSearch.swift`), kept tier-for-tier
    identical; the only sanctioned difference is in §8.
-10. **Relative dates** — commit timestamps arrive as ISO-8601 strings
+10. **Row context actions** — right-clicking a changed file offers discard (always
+   confirmed), ignore-this-file / ignore-this-extension, copy absolute + relative
+   path, and reveal / open-with-default (both disabled when the file is deleted, since
+   nothing is left on disk). Right-clicking a commit offers amend and undo — enabled
+   only on the actual `HEAD`, compared by `head_sha` and never by the row's index into a
+   paged list — plus checkout (confirmed; anything but `HEAD`), copy SHA, and copy tag.
+   Undo is further gated on the commit being provably unpushed, *or* on no upstream
+   resolving at all, in which case nothing can prove it was pushed either. Discarding a
+   never-committed file moves it to the OS trash rather than deleting it, and the
+   confirmation must say so.
+11. **Relative dates** — commit timestamps arrive as ISO-8601 strings
    (`author_date`/`committer_date`, e.g. `2026-08-12T14:03:11+0200`; the core is
    deliberately chrono-free) and each frontend renders them as relative ("5 minutes
    ago"), ticking live.
@@ -330,6 +340,7 @@ every deliberate difference here.
 | Virtualized lists | hand-rolled windowing | native `List`/`LazyVStack`/`Table` |
 | Pane widths persistence | `localStorage` (3 keys) | `UserDefaults` |
 | Repo-search path root (§6.9) | scan folders only — the frontend can't resolve `~`, so a repo outside them is searched by its whole path | scan folders, then `NSHomeDirectory()` |
+| Context-menu scope (§6.10) | multi-row selection, so discard also acts on a whole selection | single-selection lists, so every item acts on the right-clicked row |
 
 ## 9. Non-goals / intentionally absent
 

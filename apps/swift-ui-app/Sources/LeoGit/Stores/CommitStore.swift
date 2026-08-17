@@ -35,6 +35,21 @@ final class CommitStore {
     /// Cleared when the next attempt starts, on success, and on `reset()`.
     private(set) var errorMessage: String?
 
+    /// The commit being rewritten, when the History row menu put the composer
+    /// in amend mode. The whole `CommitInfo` rather than a sha: its message
+    /// seeds the draft, and its co-author trailers have to be re-applied to
+    /// the amended commit.
+    private(set) var amendTarget: CommitInfo?
+
+    /// `Co-authored-by` values carried over from an amended or undone commit.
+    /// Invisible state — the composer has no co-author field, so these are
+    /// simply re-attached to the next message rather than silently dropped
+    /// (core pre-parses them off the commit's trailers, so nothing is parsed
+    /// here). Other trailers are the user's to re-add, matching Tauri.
+    private var coAuthors: [String] = []
+
+    var isAmending: Bool { amendTarget != nil }
+
     /// Whether the parent repository can stage this entry at all. A dirty
     /// submodule can't be committed from here — its changes live inside the
     /// submodule and only a pointer move would be recorded.
@@ -89,6 +104,49 @@ final class CommitStore {
         details = ""
         excludedPaths = []
         errorMessage = nil
+        amendTarget = nil
+        coAuthors = []
+    }
+
+    // MARK: Amend
+
+    /// Rewrite `commit` instead of creating a new one: its message seeds the
+    /// draft, overwriting whatever was there, and Commit becomes `--amend`.
+    ///
+    /// Re-entering on the same commit is a no-op, so right-clicking Amend
+    /// again while already amending doesn't wipe the edits in progress — the
+    /// sha guard the Tauri composer uses for the same reason. The checkbox
+    /// state is deliberately left alone: an amend commits HEAD's message plus
+    /// whatever the working tree currently has checked, which is what lets it
+    /// fold new changes into the last commit.
+    func startAmending(_ commit: CommitInfo) {
+        guard amendTarget?.sha != commit.sha else { return }
+        amendTarget = commit
+        summary = commit.summary
+        details = commit.bodyWithoutCoauthors
+        coAuthors = commit.coAuthors
+        errorMessage = nil
+    }
+
+    /// Leave amend mode and clear the draft it seeded, so the amended message
+    /// can't be re-submitted as a brand-new commit by accident.
+    func stopAmending() {
+        guard isAmending else { return }
+        amendTarget = nil
+        summary = ""
+        details = ""
+        coAuthors = []
+    }
+
+    /// Seed the composer from a commit that was just undone, so its message
+    /// isn't lost with it. Not amend mode — the commit is gone, and what
+    /// follows is an ordinary commit of the changes it left behind.
+    func restoreDraft(from commit: CommitInfo) {
+        amendTarget = nil
+        summary = commit.summary
+        details = commit.bodyWithoutCoauthors
+        coAuthors = commit.coAuthors
+        errorMessage = nil
     }
 
     /// Format the message and commit `files`, falling back to `autoSummary`
@@ -96,6 +154,10 @@ final class CommitStore {
     /// caller should reload status + history; on failure the draft is kept
     /// for another attempt and `errorMessage` carries core's own text.
     /// Returns whether the commit landed.
+    ///
+    /// While amending, an empty file list is legal — `git commit --amend`
+    /// with nothing staged rewrites just the message — so only the summary is
+    /// required there.
     func commit(repoPath: String, files: [FileEntry], autoSummary: String = "") async -> Bool {
         let typed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedSummary = typed.isEmpty ? autoSummary : typed
@@ -103,24 +165,29 @@ final class CommitStore {
         // and then have the late AI result overwrite the empty composer. The
         // Tauri client leaves that race open; the busy-guard closes it, like
         // BranchStore's double-fire guard.
-        guard !trimmedSummary.isEmpty, !files.isEmpty, !isCommitting, !isGenerating else {
-            return false
-        }
+        guard !trimmedSummary.isEmpty, !isCommitting, !isGenerating else { return false }
+        guard !files.isEmpty || isAmending else { return false }
         isCommitting = true
         errorMessage = nil
+        let amending = isAmending
         defer { isCommitting = false }
 
         let message = await GitBridge.commitMessage(
             summary: trimmedSummary,
             description: details.trimmingCharacters(in: .whitespacesAndNewlines),
-            coAuthors: []
+            coAuthors: coAuthors
         )
         do {
-            try await GitBridge.commitChanges(in: repoPath, message: message, files: files)
+            try await GitBridge.commitChanges(
+                in: repoPath,
+                message: message,
+                files: files,
+                amend: amending
+            )
             reset()
             return true
         } catch {
-            errorMessage = error.displayMessage
+            errorMessage = "\(amending ? "Amend" : "Commit") failed: \(error.displayMessage)"
             return false
         }
     }

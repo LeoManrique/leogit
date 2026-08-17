@@ -29,6 +29,11 @@ struct ContentView: View {
     @State private var directoryStore = RepoDirectoryStore()
     @State private var terminalStore = TerminalStore()
     @State private var pullRequestStore = PullRequestStore()
+    /// Lives here, not in `ChangesView`: switching tabs rebuilds that pane,
+    /// which would drop an in-progress commit message — and amend mode is
+    /// started from the *History* tab, so it has to survive the switch that
+    /// puts the composer on screen.
+    @State private var commitStore = CommitStore()
     @State private var isChoosingFolder = false
     @State private var isCloneSheetPresented = false
     @State private var tab: RepoTab = .changes
@@ -103,14 +108,19 @@ struct ContentView: View {
                     repoPath: repoPath,
                     files: store.status?.files ?? [],
                     statusEpoch: store.statusEpoch,
-                    onCommitted: { await store.refresh() }
+                    commitStore: commitStore,
+                    onWorkingTreeChanged: { await store.refresh() },
+                    onError: { store.errorMessage = $0 }
                 )
             case .history:
                 HistoryView(
                     repoPath: repoPath,
                     commits: store.commits,
-                    unpushedShas: Set(store.status?.unpushedShas ?? []),
-                    onReachEnd: { Task { await store.loadMoreHistory() } }
+                    status: store.status,
+                    onReachEnd: { Task { await store.loadMoreHistory() } },
+                    onAmend: startAmending,
+                    onUndo: { undoCommit($0, in: repoPath) },
+                    onCheckout: { checkoutCommit($0, in: repoPath) }
                 )
             case .pullRequests:
                 PullRequestsView(
@@ -138,6 +148,9 @@ struct ContentView: View {
             branchStore.reset()
             syncStore.reset()
             pullRequestStore.reset()
+            // A different repository must not inherit the previous one's
+            // draft message, checkbox opt-outs, or amend target.
+            commitStore.reset()
             await refreshPullRequestsTabSetting()
             // Sessions never survive a repo switch — a shell from the prior
             // repo would be a leak wearing the new repo's dock.
@@ -432,6 +445,51 @@ struct ContentView: View {
             activePath: store.repoPath,
             isPaused: backgroundPaused
         )
+    }
+
+    // MARK: History row actions
+
+    /// Seed the composer from the commit and show it — the rewrite itself
+    /// happens when the user commits, so this only changes what's on screen.
+    @MainActor
+    private func startAmending(_ commit: CommitInfo) {
+        commitStore.startAmending(commit)
+        tab = .changes
+    }
+
+    /// Drop the last commit and hand its message to the composer, so the
+    /// changes it left in the working tree can be re-committed without
+    /// retyping. Runs immediately: nothing is lost that the composer and the
+    /// working tree don't now hold.
+    @MainActor
+    private func undoCommit(_ commit: CommitInfo, in repoPath: String) {
+        Task {
+            do {
+                try await GitBridge.undoCommit(in: repoPath)
+                commitStore.restoreDraft(from: commit)
+                tab = .changes
+                await store.refresh()
+                await branchStore.load(repoPath: repoPath)
+            } catch {
+                store.errorMessage = error.displayMessage
+            }
+        }
+    }
+
+    /// Check out a past commit. HEAD detaches, so the branch menu's checkmark
+    /// and the sync ladder both change — hence the branch reload alongside
+    /// the status refresh.
+    @MainActor
+    private func checkoutCommit(_ commit: CommitInfo, in repoPath: String) {
+        Task {
+            do {
+                try await GitBridge.checkout(in: repoPath, commit: commit.sha)
+                await store.refresh()
+                await branchStore.load(repoPath: repoPath)
+            } catch {
+                store.errorMessage = error.displayMessage
+            }
+        }
     }
 
     // MARK: Repo switching

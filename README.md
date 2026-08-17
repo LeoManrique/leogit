@@ -4,9 +4,9 @@ A calm desktop Git client built with Tauri 2, Rust, and Svelte 5. Designed to ge
 
 ## What it does
 
-- **Stage and commit** via a checkbox file list with live unified diffs (native syntect syntax highlighting, optional side-by-side, optional whitespace-hidden).
+- **Stage and commit** via a checkbox file list with live unified diffs (native syntect syntax highlighting, optional side-by-side, optional whitespace-hidden). Right-click a file to discard it (never-committed files go to the Trash, not oblivion), add it or its extension to `.gitignore`, copy its path, or hand it to Finder.
 - **AI commit messages** generated from the selected diff via the local `claude` CLI or a self-hosted Ollama instance.
-- **Browse history** with a virtualized commit list, per-commit file diffs, trailers/SHA copy, and checkout of any past commit (detached HEAD).
+- **Browse history** with a virtualized commit list, per-commit file diffs, trailers/SHA copy, and checkout of any past commit (detached HEAD). Right-click the last commit to amend it (its message and co-authors reload into the composer) or undo it, keeping its changes.
 - **Manage branches** (create / switch / delete) and **merge** (regular or squash) with conflict detection.
 - **Push / pull** with ahead-behind badges, live transfer progress (an in-button progress fill plus git's own `Writing objects… MiB/s` line in the header), and force-push-with-lease (offered only when the branch has diverged) — or **publish a remote-less repo to GitHub** in one click via the GitHub CLI.
 - **Pull requests** through the GitHub CLI — a filterable list with CI check status, create, and checkout (native macOS client; the Tauri client regains its PR view with the re-skin).
