@@ -22,7 +22,13 @@ struct DiffView: View {
         VStack(spacing: 0) {
             header
             Divider()
+            // Every branch of `content` must claim the pane. An empty state
+            // sized to its own ideal height leaves the whole stack shorter
+            // than the split slot, which then centres it — pushing the header
+            // into the middle of the pane, where it reads as an oversized
+            // header rather than as a short body.
             content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .task(id: LoadKey(path: file.path, target: target)) {
             await store.load(repoPath: repoPath, file: file, target: target)
@@ -83,7 +89,6 @@ struct DiffView: View {
             // First load; kept quiet unless it actually takes long enough for
             // the spinner to be information rather than flicker.
             ProgressView()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             diffRows
         }

@@ -210,6 +210,7 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 
 - **An empty state that a setting can fix must carry the fix.** "No repositories found" alone is a dead end; name what was searched, then offer the action. Pattern: a plain title in `--text-faint`, an 11px explanatory line inheriting it, the searched values as an 11px mono list in `--text-muted` (paths are data — mono), then a single tertiary button. Left-aligned text would fight the centred modal, so the whole stack stays centred.
 - Don't stack more than one action. The contextual button and the persistent header control are enough; a third route reads as uncertainty about which one works.
+- **An empty state that replaces only part of a pane must still claim the whole pane.** Sized to its own content, it leaves the pane's stack shorter than the slot it sits in, so the layout centres the stack — and a header meant to sit at the top drifts to the middle, where it reads as oversized chrome rather than as a short body. The header stays pinned; the empty state takes the rest and centres inside it. This is what the binary-file and "no textual changes" diff bodies do.
 
 ### Repo-less chrome
 
