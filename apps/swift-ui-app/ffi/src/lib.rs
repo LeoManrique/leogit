@@ -46,7 +46,7 @@ pub use leogit_core::ai::{AiProviderConfig, CommitMessage};
 pub use leogit_core::config::{Config, ReposState, ReposStatePatch};
 pub use leogit_core::diff::{DiffLine, FileDiff, Hunk, HunkHeader, IntraLineRange, LineType};
 pub use leogit_core::events::TerminalExit;
-pub use leogit_core::gh::{GhRepo, PrCheck, PullRequest};
+pub use leogit_core::gh::GhRepo;
 pub use leogit_core::git::{
     BranchInfo, CommitInfo, CommitStats, FileEntry, FileStatus, LogOptions, MergeResult,
     RepoStatus, RepoSync,
@@ -529,8 +529,8 @@ pub fn commit(
 // `spawn_blocking` stays reserved for the calls that block for many seconds by
 // design (`repo_sync_status`, `discover_repos`).
 //
-// `os::open_url` is deliberately NOT exported: SwiftUI opens URLs itself (the
-// PR view's `Link`), so the native client has no caller for it.
+// `os::open_url` is deliberately NOT exported: SwiftUI opens URLs itself
+// (`Link` / `openURL`), so the native client has no caller for it.
 
 /// Throw away the working-tree changes to `files`, restoring each to its
 /// committed state.
@@ -920,13 +920,13 @@ pub async fn clone_repo(
 }
 
 // ---------------------------------------------------------------------------
-// Exported functions — GitHub CLI (clone, publish, pull requests)
+// Exported functions — GitHub CLI (clone, publish)
 // ---------------------------------------------------------------------------
 //
 // Everything here shells out to `gh` so its stored auth is ambient — private
 // repos work without a prompt. None of it streams progress: `gh` reports
 // nothing parseable, so the UIs show indeterminate bars for the transfers
-// (clone, publish, PR checkout). `check_auth` stays unexported (the
+// (clone, publish). `check_auth` stays unexported (the
 // dead-surface rule): neither client reads it — every gh call's own error
 // text already distinguishes "gh missing" from "not authenticated".
 
@@ -997,118 +997,6 @@ pub async fn gh_publish_repo(
     is_private: bool,
 ) -> Result<(), GitError> {
     gh::gh_publish_repo(repo_path, name, description, is_private)
-        .await
-        .map_err(GitError::from)
-}
-
-/// Mirrors [`leogit_core::gh::PullRequest`] — one row of the Pull Requests
-/// tab. `state` is gh's own `"OPEN"`/`"CLOSED"`/`"MERGED"`;
-/// `review_decision` is `None` when the repo requires no review.
-#[uniffi::remote(Record)]
-pub struct PullRequest {
-    pub number: u32,
-    pub title: String,
-    pub state: String,
-    pub author: String,
-    pub created_at: String,
-    pub updated_at: String,
-    pub url: String,
-    pub body: String,
-    pub is_draft: bool,
-    pub base_ref_name: String,
-    pub head_ref_name: String,
-    pub review_decision: Option<String>,
-    pub additions: u32,
-    pub deletions: u32,
-    pub changed_files: u32,
-}
-
-/// Mirrors [`leogit_core::gh::PrCheck`] — one CI check row. `bucket` is
-/// gh's rollup (`"pass"`/`"fail"`/`"pending"`/`"skipping"`/`"cancel"`),
-/// which is what the UI colours by.
-#[uniffi::remote(Record)]
-pub struct PrCheck {
-    pub name: String,
-    pub state: String,
-    pub bucket: String,
-    pub link: Option<String>,
-    pub workflow: Option<String>,
-}
-
-/// The repository's pull requests, in gh's order (newest first), capped at
-/// 30. `state` filters: `"open"`, `"closed"`, `"merged"`, or `"all"`. Async
-/// over `spawn_blocking` like [`gh_repo_list`] — the query can hold its
-/// thread for its full 20 s timeout.
-///
-/// # Errors
-///
-/// Returns [`GitError`] when `gh` is missing/unauthenticated, the repo has
-/// no GitHub remote, or the output cannot be parsed.
-#[uniffi::export(async_runtime = "tokio")]
-pub async fn list_prs(repo_path: String, state: String) -> Result<Vec<PullRequest>, GitError> {
-    tokio::task::spawn_blocking(move || gh::list_prs(&repo_path, &state))
-        .await
-        .map_err(|join_error| GitError::Failed {
-            message: format!("gh pr list did not complete: {join_error}"),
-        })?
-        .map_err(GitError::from)
-}
-
-/// CI status for one PR. Core parses stdout before looking at the exit
-/// code — `gh pr checks` exits non-zero while a check is pending or
-/// failing — so pending/failing checks arrive as data, not as an error.
-///
-/// # Errors
-///
-/// Returns [`GitError`] when `gh` is missing or produced no check data
-/// (its "no checks reported…" stderr for a PR without CI).
-#[uniffi::export(async_runtime = "tokio")]
-pub async fn get_pr_checks(repo_path: String, number: u32) -> Result<Vec<PrCheck>, GitError> {
-    tokio::task::spawn_blocking(move || gh::get_pr_checks(&repo_path, number))
-        .await
-        .map_err(|join_error| GitError::Failed {
-            message: format!("gh pr checks did not complete: {join_error}"),
-        })?
-        .map_err(GitError::from)
-}
-
-/// Open a pull request from the current branch, returning its URL. An
-/// empty `base` targets the repository's default branch. The branch must
-/// already be pushed — gh runs promptless here and fails otherwise with
-/// its own message.
-///
-/// # Errors
-///
-/// Returns [`GitError`] when the trimmed title is empty, `gh` is
-/// missing/unauthenticated, or `gh pr create` fails (unpushed branch, a PR
-/// already exists, …).
-#[uniffi::export(async_runtime = "tokio")]
-pub async fn create_pr(
-    repo_path: String,
-    title: String,
-    body: String,
-    base: String,
-    draft: bool,
-) -> Result<String, GitError> {
-    tokio::task::spawn_blocking(move || gh::create_pr(&repo_path, &title, &body, &base, draft))
-        .await
-        .map_err(|join_error| GitError::Failed {
-            message: format!("gh pr create did not complete: {join_error}"),
-        })?
-        .map_err(GitError::from)
-}
-
-/// Check out a PR's branch — fetches the head ref (from a fork too) and
-/// creates or switches to a local tracking branch. A transfer (600 s cap)
-/// with no progress stream; callers show an indeterminate state.
-///
-/// # Errors
-///
-/// Returns [`GitError`] when `gh` is missing, the fetch fails, or git
-/// refuses the switch (dirty working tree) — the message verbatim.
-#[uniffi::export(async_runtime = "tokio")]
-pub async fn checkout_pr(repo_path: String, number: u32) -> Result<(), GitError> {
-    gh::checkout_pr(repo_path, number)
         .await
         .map_err(GitError::from)
 }
@@ -1284,7 +1172,6 @@ pub struct Config {
     pub claude_timeout_secs: u32,
     pub ollama_server_url: String,
     pub terminal_shell: Option<String>,
-    pub show_pull_requests: bool,
 }
 
 /// Mirrors [`leogit_core::config::ReposState`] — the shared
@@ -2723,23 +2610,6 @@ mod tests {
         .expect_err("a blank name is refused");
         let GitError::Failed { message } = err;
         assert_eq!(message, "Repository name is required.");
-    }
-
-    /// `create_pr`'s empty-title guard fires before `gh` is spawned — the
-    /// PR surface's one binary-free assertion, same pattern as publish.
-    #[tokio::test]
-    async fn create_pr_requires_a_title_before_running_gh() {
-        let err = create_pr(
-            "/nonexistent".to_string(),
-            " \n ".to_string(),
-            "body".to_string(),
-            String::new(),
-            false,
-        )
-        .await
-        .expect_err("a blank title is refused");
-        let GitError::Failed { message } = err;
-        assert_eq!(message, "Pull request title is required.");
     }
 
     /// The Settings shell picker's data source: probe-based, so every row it

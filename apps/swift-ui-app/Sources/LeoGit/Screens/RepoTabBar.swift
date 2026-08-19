@@ -6,7 +6,6 @@ import SwiftUI
 /// structural reason: a segment can only hold text or an image, and the
 /// Changes tab carries a count pill.
 struct RepoTabBar: View {
-    let tabs: [RepoTab]
     @Binding var selection: RepoTab
     /// The working-tree file count shown on the Changes tab — every row the
     /// list shows, untracked and conflicted included, hidden at zero and
@@ -17,7 +16,7 @@ struct RepoTabBar: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            ForEach(tabs) { tab in
+            ForEach(RepoTab.allCases) { tab in
                 tabButton(tab)
             }
             Spacer(minLength: 0)

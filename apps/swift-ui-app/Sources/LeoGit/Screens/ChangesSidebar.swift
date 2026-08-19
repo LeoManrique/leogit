@@ -1,22 +1,31 @@
 import SwiftUI
 
-/// Working-tree changes for the open repository: the changed-file list and
-/// commit box on the left, the selected file's diff on the right.
+/// The Changes tab's half of the sidebar: the changed-file list with its
+/// include-all header, the row context menu, and the commit composer pinned
+/// underneath. Always on screen while the tab is selected — a clean working
+/// tree empties the list but keeps the composer, exactly like the Tauri
+/// sidebar, so an amend (which may carry no files at all) and a draft
+/// message have somewhere to live.
 ///
 /// Checkboxes mean "include this file in the next commit" — there is no
 /// staging-area concept, matching the Tauri client: nothing touches the index
 /// until Commit, and core's `commit` then resets and re-stages exactly the
 /// checked files.
-struct ChangesView: View {
+struct ChangesSidebar: View {
     let repoPath: String
     let files: [FileEntry]
-    let statusEpoch: Int
 
     /// Owned by the repository screen, not by this view: the tab bar swaps
     /// tabs by rebuilding the pane, which would take an in-progress draft —
     /// and amend mode, which the History tab is what puts the composer into —
     /// down with it.
     @Bindable var commitStore: CommitStore
+
+    /// The file whose diff the detail pane shows, keyed by repo-relative
+    /// path (`FileEntry.id`) so it survives a status reload that replaces
+    /// every row value. Owned by the repository screen: the diff lives on the
+    /// far side of the split, and the selection must outlive a tab switch.
+    @Binding var selectedPath: String?
 
     /// Called after a commit, discard, or ignore so the owner reloads status
     /// and history.
@@ -25,10 +34,6 @@ struct ChangesView: View {
     /// Failures from the row actions, which have nowhere of their own to
     /// report: the owner shows them in the screen's error banner.
     let onError: (String) -> Void
-
-    /// Selection is the file's repo-relative path (`FileEntry.id`), so it
-    /// survives a status reload that replaces every row value.
-    @State private var selectedPath: String?
 
     /// Snapshot of the files to commit while the embedded-repo confirmation
     /// is up, so the commit operates on what the user was shown.
@@ -39,37 +44,31 @@ struct ChangesView: View {
     @State private var fileToDiscard: FileEntry?
 
     var body: some View {
-        Group {
-            // Amending keeps the pane up on a clean tree: a message-only
-            // amend has no files by definition, and the composer is the only
-            // way to finish — or abandon — the mode the History tab started.
-            if files.isEmpty, !commitStore.isAmending {
-                ContentUnavailableView(
-                    "No Changes",
-                    systemImage: "checkmark.circle",
-                    description: Text("The working tree is clean.")
-                )
-                // Must claim the full space like the split view it replaces:
-                // left to its own (small) ideal size, the surrounding VStack
-                // would center vertically, shoving the tab picker into the
-                // middle of the window and re-sizing it after a commit.
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        VStack(spacing: 0) {
+            if files.isEmpty {
+                // No header either: "0 of 0 files included" is a sentence
+                // about nothing, and the Tauri sidebar drops its select-all
+                // row the same way.
+                EmptyListPlaceholder(text: "No changes")
             } else {
-                HSplitView {
-                    // Same frame as the History commit list, so the divider
-                    // sits in the same place across tabs; the diff dominates.
-                    changesPane
-                        .frame(minWidth: 260, idealWidth: 280, maxWidth: 420)
-                    detail
-                        .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
-                }
-                .onChange(of: files.map(\.path), initial: true) {
-                    // Keep something selected: first file on arrival, and again
-                    // when a reload drops the previously selected path.
-                    if selectedPath == nil || !files.contains(where: { $0.path == selectedPath }) {
-                        selectedPath = files.first?.path
-                    }
-                }
+                listHeader
+                Divider()
+                fileList
+            }
+            Divider()
+            CommitComposer(
+                store: commitStore,
+                includedCount: includedFiles.count,
+                autoSummary: CommitStore.autoSummary(for: includedFiles),
+                onSubmit: submit,
+                onGenerate: generate
+            )
+        }
+        .onChange(of: files.map(\.path), initial: true) {
+            // Keep something selected: first file on arrival, and again
+            // when a reload drops the previously selected path.
+            if selectedPath == nil || !files.contains(where: { $0.path == selectedPath }) {
+                selectedPath = files.first?.path
             }
         }
         .task {
@@ -98,23 +97,7 @@ struct ChangesView: View {
         }
     }
 
-    // MARK: Left pane
-
-    private var changesPane: some View {
-        VStack(spacing: 0) {
-            listHeader
-            Divider()
-            fileList
-            Divider()
-            CommitComposer(
-                store: commitStore,
-                includedCount: includedFiles.count,
-                autoSummary: CommitStore.autoSummary(for: includedFiles),
-                onSubmit: submit,
-                onGenerate: generate
-            )
-        }
-    }
+    // MARK: List
 
     private var listHeader: some View {
         HStack(spacing: 8) {
@@ -246,19 +229,6 @@ struct ChangesView: View {
         let name = path.lastIndex(of: "/").map { String(path[path.index(after: $0)...]) } ?? path
         guard let dot = name.lastIndex(of: "."), dot != name.startIndex else { return nil }
         return String(name[dot...])
-    }
-
-    @ViewBuilder
-    private var detail: some View {
-        if let file = files.first(where: { $0.path == selectedPath }) {
-            DiffView(repoPath: repoPath, file: file, target: .workingTree(epoch: statusEpoch))
-        } else {
-            ContentUnavailableView(
-                "No File Selected",
-                systemImage: "doc.text",
-                description: Text("Select a file to see its changes.")
-            )
-        }
     }
 
     // MARK: Inclusion state

@@ -364,48 +364,6 @@ enum GitBridge {
             repoPath: repoPath, name: name, description: description, isPrivate: isPrivate)
     }
 
-    // MARK: - Pull requests
-
-    /// The repository's pull requests via `gh pr list`, in gh's own order
-    /// (newest first), capped at 30. `state` filters by gh's values:
-    /// `"open"`, `"closed"`, `"merged"`, or `"all"`.
-    @concurrent
-    static func pullRequests(in repoPath: String, state: String) async throws -> [PullRequest] {
-        try await listPrs(repoPath: repoPath, state: state)
-    }
-
-    /// CI status for one PR. Pending or failing checks arrive as data, not
-    /// as an error — core parses gh's stdout before its exit code, since
-    /// `gh pr checks` exits non-zero while anything is unfinished. The
-    /// error path is "no check data at all" (a PR without CI).
-    @concurrent
-    static func pullRequestChecks(in repoPath: String, number: UInt32) async throws -> [PrCheck] {
-        try await getPrChecks(repoPath: repoPath, number: number)
-    }
-
-    /// Open a pull request from the current branch, returning the new PR's
-    /// URL. The branch must already be pushed — gh runs promptless here and
-    /// fails otherwise with its own message. An empty `base` targets the
-    /// repository's default branch.
-    @concurrent
-    static func openPullRequest(
-        in repoPath: String,
-        title: String,
-        body: String,
-        base: String,
-        draft: Bool
-    ) async throws -> String {
-        try await createPr(repoPath: repoPath, title: title, body: body, base: base, draft: draft)
-    }
-
-    /// Check out a PR's branch — fetches the head ref (fork-aware) and
-    /// creates or switches to a local tracking branch. A transfer with no
-    /// progress stream; callers show an indeterminate busy state.
-    @concurrent
-    static func checkoutPullRequest(in repoPath: String, number: UInt32) async throws {
-        try await checkoutPr(repoPath: repoPath, number: number)
-    }
-
     /// Persist the folder the user last cloned into — the parent directory,
     /// not the repo path — so the next Clone sheet (in either client)
     /// pre-fills it.

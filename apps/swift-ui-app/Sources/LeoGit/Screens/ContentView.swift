@@ -7,7 +7,6 @@ import UniformTypeIdentifiers
 enum RepoTab: String, CaseIterable, Identifiable {
     case changes = "Changes"
     case history = "History"
-    case pullRequests = "Pull Requests"
 
     var id: Self { self }
 }
@@ -28,24 +27,26 @@ struct ContentView: View {
     @State private var syncStore = SyncStore()
     @State private var directoryStore = RepoDirectoryStore()
     @State private var terminalStore = TerminalStore()
-    @State private var pullRequestStore = PullRequestStore()
-    /// Lives here, not in `ChangesView`: switching tabs rebuilds that pane,
-    /// which would drop an in-progress commit message — and amend mode is
-    /// started from the *History* tab, so it has to survive the switch that
-    /// puts the composer on screen.
+    /// Lives here, not in `ChangesSidebar`: switching tabs rebuilds that
+    /// pane, which would drop an in-progress commit message — and amend mode
+    /// is started from the *History* tab, so it has to survive the switch
+    /// that puts the composer on screen.
     @State private var commitStore = CommitStore()
     @State private var isChoosingFolder = false
     @State private var isCloneSheetPresented = false
     @State private var tab: RepoTab = .changes
 
+    /// Each tab's selection, keyed by path / sha so a reload that replaces
+    /// every row value keeps it. Held here because each tab's list and its
+    /// detail sit on opposite sides of the split — and so a round trip
+    /// through the other tab comes back to the same file or commit.
+    @State private var selectedPath: String?
+    @State private var selectedSha: String?
+
     /// One attempt per launch: reopen the repo recorded in the shared state
     /// file. A flag rather than derived state so a failed restore leaves
     /// Welcome up instead of retrying forever.
     @State private var hasRestoredLastRepo = false
-
-    /// The shared config's `show_pull_requests` — read on repo open and
-    /// re-read when the Settings window saves, so the toggle applies live.
-    @State private var isPullRequestsTabEnabled = true
 
     /// Dedupes the activate resync — activation notifications can burst.
     @State private var isResyncing = false
@@ -83,61 +84,30 @@ struct ContentView: View {
         }
     }
 
+    /// The Tauri client's two-column screen: one permanent split whose left
+    /// column is the sidebar (tab bar, then the tab's list, then — on Changes
+    /// — the composer) and whose right column is the main content (the tab's
+    /// detail, then the terminal dock). The split lives here, above the
+    /// tabs, so its divider is one control that neither a tab switch nor an
+    /// empty list can rebuild or hide: only what's *inside* each column
+    /// swaps. Both columns hold the tab-switched content in place, which is
+    /// what keeps the composer on a clean tree and the dock under the diff
+    /// rather than under the whole window.
     private func repositoryScreen(repoPath: String) -> some View {
         VStack(spacing: 0) {
             if let errorMessage = store.errorMessage {
                 ErrorBanner(message: errorMessage)
             }
 
-            RepoTabBar(
-                tabs: availableTabs,
-                selection: $tab,
-                changesCount: store.status?.files.count ?? 0
-            )
-            .onChange(of: availableTabs) { _, tabs in
-                // The tab under the selection can disappear — the setting
-                // turned off, or a switch to a remote-less repo.
-                if !tabs.contains(tab) { tab = .changes }
+            HSplitView {
+                sidebar(repoPath: repoPath)
+                    // The Tauri sidebar's range: 320 by default, never
+                    // narrower than the composer's control row needs, and
+                    // capped so the diff keeps most of the window.
+                    .frame(minWidth: 280, idealWidth: 320, maxWidth: 640)
+                mainContent(repoPath: repoPath)
+                    .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
             }
-
-            Divider()
-
-            switch tab {
-            case .changes:
-                ChangesView(
-                    repoPath: repoPath,
-                    files: store.status?.files ?? [],
-                    statusEpoch: store.statusEpoch,
-                    commitStore: commitStore,
-                    onWorkingTreeChanged: { await store.refresh() },
-                    onError: { store.errorMessage = $0 }
-                )
-            case .history:
-                HistoryView(
-                    repoPath: repoPath,
-                    commits: store.commits,
-                    status: store.status,
-                    onReachEnd: { Task { await store.loadMoreHistory() } },
-                    onAmend: startAmending,
-                    onUndo: { undoCommit($0, in: repoPath) },
-                    onCheckout: { checkoutCommit($0, in: repoPath) }
-                )
-            case .pullRequests:
-                PullRequestsView(
-                    repoPath: repoPath,
-                    store: pullRequestStore,
-                    headCommitSummary: store.commits.first?.summary ?? "",
-                    currentBranch: store.status?.branch ?? "",
-                    onWorkingTreeChanged: {
-                        // A checkout moved HEAD: status, log, and the
-                        // branch menu all need to reflect the new branch.
-                        await store.refresh()
-                        await branchStore.load(repoPath: repoPath)
-                    }
-                )
-            }
-
-            TerminalDock(repoPath: repoPath, store: terminalStore)
         }
         .navigationTitle(store.repoName)
         // The repo name renders inside the switcher chip, so the toolbar
@@ -147,11 +117,12 @@ struct ContentView: View {
         .task(id: repoPath) {
             branchStore.reset()
             syncStore.reset()
-            pullRequestStore.reset()
             // A different repository must not inherit the previous one's
-            // draft message, checkbox opt-outs, or amend target.
+            // draft message, checkbox opt-outs, or amend target — nor its
+            // selections, which the sidebars re-seed from the new lists.
             commitStore.reset()
-            await refreshPullRequestsTabSetting()
+            selectedPath = nil
+            selectedSha = nil
             // Sessions never survive a repo switch — a shell from the prior
             // repo would be a leak wearing the new repo's dock.
             terminalStore.closeSession()
@@ -188,9 +159,6 @@ struct ContentView: View {
             )
         ) { _ in
             Task { await resyncOnActivate() }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .leogitConfigDidSave)) { _ in
-            Task { await refreshPullRequestsTabSetting() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .leogitRefreshRequested)) { _ in
             // ⌘R from the View menu — the keyboard-only successor of the
@@ -286,6 +254,62 @@ struct ContentView: View {
         }
     }
 
+    private func sidebar(repoPath: String) -> some View {
+        VStack(spacing: 0) {
+            RepoTabBar(
+                selection: $tab,
+                changesCount: store.status?.files.count ?? 0
+            )
+
+            Divider()
+
+            switch tab {
+            case .changes:
+                ChangesSidebar(
+                    repoPath: repoPath,
+                    files: store.status?.files ?? [],
+                    commitStore: commitStore,
+                    selectedPath: $selectedPath,
+                    onWorkingTreeChanged: { await store.refresh() },
+                    onError: { store.errorMessage = $0 }
+                )
+            case .history:
+                HistorySidebar(
+                    commits: store.commits,
+                    status: store.status,
+                    selectedSha: $selectedSha,
+                    onReachEnd: { Task { await store.loadMoreHistory() } },
+                    onAmend: startAmending,
+                    onUndo: { undoCommit($0, in: repoPath) },
+                    onCheckout: { checkoutCommit($0, in: repoPath) }
+                )
+            }
+        }
+    }
+
+    private func mainContent(repoPath: String) -> some View {
+        VStack(spacing: 0) {
+            switch tab {
+            case .changes:
+                ChangesDetailPane(
+                    repoPath: repoPath,
+                    files: store.status?.files ?? [],
+                    selectedPath: selectedPath,
+                    statusEpoch: store.statusEpoch
+                )
+            case .history:
+                HistoryDetailPane(
+                    repoPath: repoPath,
+                    commits: store.commits,
+                    selectedSha: selectedSha
+                )
+            }
+
+            // Outside the tab switch, so the shell survives a tab change.
+            TerminalDock(repoPath: repoPath, store: terminalStore)
+        }
+    }
+
     /// The ⌘P menu item's content: the ladder's proposal by title, enabled
     /// only when it's runnable and no operation holds the slot. The perform
     /// closure posts rather than acting — the sheet and alert the action may
@@ -298,25 +322,6 @@ struct ContentView: View {
         ) {
             NotificationCenter.default.post(name: .leogitSyncActionRequested, object: nil)
         }
-    }
-
-    /// The tabs the segmented picker offers. Pull Requests needs both the
-    /// setting on and a repo with a remote — a remote-less repo can't have
-    /// PRs, so the tab hides rather than sitting there empty (nil status,
-    /// before the first load resolves, counts as remote-less: the tab pops
-    /// in rather than flashing away).
-    private var availableTabs: [RepoTab] {
-        var tabs: [RepoTab] = [.changes, .history]
-        if isPullRequestsTabEnabled, store.status?.hasRemote == true {
-            tabs.append(.pullRequests)
-        }
-        return tabs
-    }
-
-    /// Re-read `show_pull_requests` from the shared config.
-    @MainActor
-    private func refreshPullRequestsTabSetting() async {
-        isPullRequestsTabEnabled = (try? await GitBridge.appConfig())?.showPullRequests ?? true
     }
 
     /// `↑N ↓N` — pending pushes and pulls, empty when in sync (or detached,
