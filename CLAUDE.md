@@ -44,7 +44,7 @@ Do not use screenshots for testing, ask to visually check the result of a change
 
 Before making non-trivial changes in this repo to Swift UI app, pull current documentation via the **context7** MCP server or `WebFetch` against developer.apple.com. Built-in knowledge lags Apple's SDK churn.
 
-- **Latest Swift version** (strict concurrency). Resolve `swift` on context7 and fetch docs for whatever API you're touching — actor isolation, `Sendable` conformance, and the `Observable` macro have evolved each major release.
+- **Latest Swift version**. Resolve `swift` on context7 and fetch docs for whatever API you're touching.
 - **Latest SwiftUI / AppKit / Darwin libproc** (latest macOS SDK). Always:
   1. Identify the precise type/function you're using
   2. Fetch its current docs before writing code that depends on its signature or behavior.
