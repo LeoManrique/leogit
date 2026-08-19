@@ -2,7 +2,7 @@
 
 Small day-to-day polish toward lms-github-desktop parity.
 
-Big features (PR/CI, clone, stash, native menus, rebase, auto-update) are intentionally OUT of scope and tracked in ROADMAP.md.
+Big features (CI, clone, stash, native menus, rebase, auto-update) are intentionally OUT of scope and tracked in ROADMAP.md.
 
 ## Already built — just switch it on
 
@@ -117,8 +117,8 @@ These are the cheapest wins: the backend/handlers/UI already exist and only need
   - _Change:_ In MainLayout `onMount`, `const unlisten = await getCurrentWindow().onFocusChanged(({ payload: focused }) => { if (focused && $appState.phase === 'main') { refreshStatus({silent:true}); pollHeadSha(); refreshBranches() } })`; call `unlisten()` in cleanup. Keep `visibilitychange`, and add `refreshBranches()` to `handleVisibilityChange` too.  ·  _Files:_ `src/lib/views/MainLayout.svelte`  ·  _Effort:_ small
 - [ ] **Platform-aware keyboard shortcut labels in HelpOverlay** — shortcuts read correctly per-OS (⌘ on macOS) instead of the clunky "Ctrl/Cmd + X" dual label.
   - _Change:_ Detect mac via `navigator.platform`/`userAgent` once, and render the modifier as '⌘' on mac vs 'Ctrl' elsewhere; replace the literal 'Ctrl/Cmd + ' prefixes with a small mod string. Bindings were verified accurate — purely presentational.  ·  _Files:_ `src/lib/views/HelpOverlay.svelte`  ·  _Effort:_ small
-- [ ] **Fix README's false pull-request support claim** — stops the docs promising a feature the app can't do (no PR commands or UI exist).
-  - _Change:_ Edit the README bullet that claims "Open pull requests through the GitHub CLI…" — delete it or replace with the truthful capability ("Detects `gh` auth for future GitHub features"). Doc-only edit.  ·  _Files:_ `README.md`  ·  _Effort:_ small
+- [x] **Fix README's false pull-request support claim** — done by retiring the feature outright: the PR tab, its core/bridge surface, and the README bullet are gone (PRs are a GitHub feature, not a git one).
+  - _Done:_ The claim was true when written (the native client had a PR tab); the feature was then retired on request, and the bullet went with it.  ·  _Files:_ `README.md`, `core/src/gh.rs`, `apps/swift-ui-app/**`  ·  _Effort:_ small
 - [ ] **Add `tauri-plugin-opener` as the foundation for open-in-browser / reveal-in-Finder** — unlocks every external-open action (browser, Finder, editor) with one dependency; leogit currently has no way to open a URL or path.
   - _Change:_ Add `tauri-plugin-opener = "2"` to src-tauri/Cargo.toml, `.plugin(tauri_plugin_opener::init())` to the Builder in main.rs, `opener:default` (+ `opener:allow-open-url` / `opener:allow-reveal-item-in-dir`) to capabilities/default.json, and `@tauri-apps/plugin-opener` to package.json. Enabling step only — no UI yet. **The two consumer items below depend on this; the commit-detail "View file on GitHub" action also depends on it.**  ·  _Files:_ `src-tauri/Cargo.toml`, `src-tauri/src/main.rs`, `src-tauri/capabilities/default.json`, `package.json`  ·  _Effort:_ small-medium
 - [ ] **"View commit on GitHub" in the commit context menu** _(depends on the opener foundation)_ — jump from a local commit straight to its GitHub page.

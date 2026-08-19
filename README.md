@@ -9,8 +9,7 @@ A calm desktop Git client built with Tauri 2, Rust, and Svelte 5. Designed to ge
 - **Browse history** with a virtualized commit list, per-commit file diffs, trailers/SHA copy, and checkout of any past commit (detached HEAD). Right-click the last commit to amend it (its message and co-authors reload into the composer) or undo it, keeping its changes.
 - **Manage branches** (create / switch / delete) and **merge** (regular or squash) with conflict detection.
 - **Push / pull** with ahead-behind badges, live transfer progress (an in-button progress fill plus git's own `Writing objects… MiB/s` line in the header), and force-push-with-lease (offered only when the branch has diverged) — or **publish a remote-less repo to GitHub** in one click via the GitHub CLI.
-- **Pull requests** through the GitHub CLI — a filterable list with CI check status, create, and checkout (native macOS client; the Tauri client regains its PR view with the re-skin).
-- **Embedded terminal** docked at the bottom of the window, running the user's `$SHELL` in the repo directory.
+- **Embedded terminal** docked under the diff pane, running the user's `$SHELL` in the repo directory.
 - **Auto-fetch** + 2 s status polling so the UI stays in sync with anything the user does in another terminal.
 - **Light / dark themes**, persistent layout, and a TOML config in the platform config dir (`~/Library/Application Support/leogit/` on macOS, `~/.config/leogit/` on Linux).
 

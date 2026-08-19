@@ -5,6 +5,11 @@ import SwiftUI
 /// lives in `CommitStore`, and the actual commit and generation are the
 /// owner's closures so it can gate them (e.g. behind the embedded-repo
 /// confirmation) and pass the checked files.
+///
+/// Sized by the owner: the summary and control rows take their natural
+/// height and the description editor absorbs the rest, so the box grows and
+/// shrinks with the sidebar's resize handle the way the Tauri commit section
+/// does — a taller box is more description, never more chrome.
 struct CommitComposer: View {
     @Bindable var store: CommitStore
 
@@ -134,8 +139,9 @@ struct CommitComposer: View {
         }
     }
 
-    /// The native counterpart of the Tauri textarea: five lines tall,
-    /// scrolling with a scrollbar once the text outgrows it. `TextEditor`
+    /// The native counterpart of the Tauri textarea: fills whatever height
+    /// the owner leaves after the fixed rows, scrolling with a scrollbar once
+    /// the text outgrows it. `TextEditor`
     /// rather than a vertical-axis `TextField` because only the editor is a
     /// real scroll view; it brings no bezel or placeholder of its own, so
     /// both are drawn here to match the summary field above.
@@ -145,7 +151,7 @@ struct CommitComposer: View {
                 .font(.body)
                 .scrollContentBackground(.hidden)
                 .contentMargins(4, for: .scrollContent)
-                .frame(height: 88)
+                .frame(maxHeight: .infinity)
                 .disabled(isBusy)
 
             if store.details.isEmpty {

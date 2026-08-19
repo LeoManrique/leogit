@@ -89,7 +89,7 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 - **Radius scale:** 6px for inputs, buttons, file rows when selected; 8px for menu items, dropdown items, terminal pane; 10px for modals and the branch picker; 12px for the app icon. Avoid larger than 12px in chrome — corners shouldn't shout.
 - **Padding for controls:** ~4×8px (inputs), ~3×12px (buttons), ~6×10px (dropdown items). System-native controls are surprisingly tight.
 - **Row height in dense lists:** ~22–24px effective. Vertical padding of 4px with 13px text matches macOS Finder list view. This applies to the file list and the branch list. The commit list is the deliberate exception — its rows are 50px because each commit stacks a summary line and an author/date line (see Commit list).
-- **Pane gutters:** 1px borders, never wider. The sidebar/content separator and tab-bar underline are both 1px `--border-inactive`. No 2px divider, no double rule.
+- **Pane gutters:** 1px borders, never wider. The sidebar/content separator and tab-bar underline are both 1px `--border-inactive`. No 2px divider, no double rule. A resize handle's *grab zone* may be wider (~7px) — its rule stays 1px.
 - **The window never scrolls.** `html`/`body`/`#app` are locked to the viewport (`height: 100%`, `overflow: hidden`, `overscroll-behavior: none`) so only inner panes scroll and a trackpad drag at an edge can't rubber-band the whole app. New top-level layout must fit the viewport, not extend it.
 - **Focus ring:** 2px ring at accent color with low alpha (~0.2, i.e. `--cursor-bg`). No glowing shadows, no `0 0 20px` halos. Current CSS uses `box-shadow: 0 0 0 3px var(--cursor-bg)` ([app.css:95](apps/tauri-app/src/app.css#L95)) — that's the right shape; tighten to 2px and ensure alpha stays low in both themes.
 - **Shadows:** subtle. `0 4px 12px rgba(0,0,0,0.4)` for popovers/dropdowns/modals in dark; lower-alpha (`0 4px 12px rgba(0,0,0,0.12)`) in light. Never combine shadow + gradient.
@@ -98,16 +98,17 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 
 ### App chrome / layout
 
-- **Two-column layout**: a resizable left column (~280px, never past ~420px) carrying the list — changed files plus the commit composer, or the commit history — and flexible main content on the right. Both tabs use the same column width so the divider doesn't jump when switching, and the diff always keeps the majority of the window.
+- **Two-column layout**: one permanent split. The left column is the **sidebar** — the tab bar, then the tab's list (changed files or commit history), then on Changes the commit composer — resizable from 280 to 640px and 320 by default; the right column is the **main content** — the tab's detail over the terminal dock. The split sits above the tabs, so switching tabs or emptying a list swaps only what's *inside* each column: the divider never moves or disappears, the composer stays on a clean tree, and the diff always keeps the majority of the window. A nested split inside the detail (History's commit files ‖ diff) is the detail's own.
+- **The commit composer is resizable from its top edge**: the 1px divider above it is the handle (~7px grab zone, system row-resize pointer on hover). Range 180–600px, default 220, remembered per client. A taller composer is more description, never more chrome — the summary field and the button row keep their height and the description editor absorbs the rest. Both the drag and the rendered height are capped so the list above keeps a floor (~80px) in a short window.
 - Sidebar background: `--bg-secondary`. Main content background: `--bg-primary`. The 1px right border on the sidebar is `--border-inactive`.
-- **Terminal pane** docks at the bottom of the main content, ~280px tall, separated by a 1px border. Its own background can stay slightly darker than `--bg-primary` (use `#000` or `--bg-primary` — never an arbitrary off-color).
-- The header strip at the top of the main content carries repo name, branch dropdown, and the **adaptive sync button** — one control whose face shows Fetch, Pull, Push, Publish branch, or Publish depending on where the branch stands relative to its remote, GitHub-Desktop style. There is no separate refresh button. Keep the strip ~36–40px tall.
+- **Terminal pane** docks at the bottom of the main content — under the diff, never under the sidebar — ~280px tall, separated by a 1px border. Its own background can stay slightly darker than `--bg-primary` (use `#000` or `--bg-primary` — never an arbitrary off-color).
+- The header strip at the top of the main content (Tauri; the native client carries the same three controls in the window toolbar) carries repo name, branch dropdown, and the **adaptive sync button** — one control whose face shows Fetch, Pull, Push, Publish branch, or Publish depending on where the branch stands relative to its remote, GitHub-Desktop style. There is no separate refresh button. Keep the strip ~36–40px tall.
 
 ### Tab bar (Changes / History)
 
 - Plain text tabs, left-aligned, with a 2px accent underline under the active tab. No filled pill backgrounds, no rounded corners on tabs.
 - Active tab: 13px semibold `--text-primary` + accent underline. Inactive: 13px regular `--text-muted`. Hover on inactive: `--text-secondary`.
-- The whole tab bar sits on `--bg-secondary` with a 1px bottom border in `--border-inactive`.
+- The whole tab bar sits on `--bg-secondary` with a 1px bottom border in `--border-inactive`. It is the top of the sidebar column, so it spans the sidebar only — never the main content.
 
 ### File list (staging)
 
@@ -210,6 +211,7 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 
 - **An empty state that a setting can fix must carry the fix.** "No repositories found" alone is a dead end; name what was searched, then offer the action. Pattern: a plain title in `--text-faint`, an 11px explanatory line inheriting it, the searched values as an 11px mono list in `--text-muted` (paths are data — mono), then a single tertiary button. Left-aligned text would fight the centred modal, so the whole stack stays centred.
 - Don't stack more than one action. The contextual button and the persistent header control are enough; a third route reads as uncertainty about which one works.
+- **A sidebar list with no rows shows one faint centred line** (`No changes`, `No commits`), never the icon-and-headline treatment: that is sized for a pane, and the pane-sized story ("The working tree is clean.") is the detail column's to tell. The composer stays put underneath — the placeholder claims exactly the list's slot.
 - **An empty state that replaces only part of a pane must still claim the whole pane.** Sized to its own content, it leaves the pane's stack shorter than the slot it sits in, so the layout centres the stack — and a header meant to sit at the top drifts to the middle, where it reads as oversized chrome rather than as a short body. The header stays pinned; the empty state takes the rest and centres inside it. This is what the binary-file and "no textual changes" diff bodies do.
 
 ### Repo-less chrome

@@ -94,7 +94,7 @@ leogit/
 │           ├── App/                 # @main App + scene setup
 │           ├── IPC/GitBridge.swift  # The only place Swift calls Rust (@concurrent wrappers)
 │           ├── Stores/RepoStore.swift  # @MainActor @Observable state for the open repo
-│           ├── Screens/             # ContentView, WelcomeView, ChangesView, HistoryView
+│           ├── Screens/             # ContentView, WelcomeView, the tab panes (Changes/History × Sidebar/DetailPane)
 │           └── Design/              # Date formatting, FileStatus, path + shared file list
 ├── justfile                         # install / dev / build / check / format / mac-*
 └── DESIGN.md / TECHNICAL.md / STYLE.md / FRONTEND.md / ROADMAP.md / README.md
@@ -243,7 +243,8 @@ only while diverged, force push with lease (the ladder makes divergence reachabl
 the pull state, so the item lands exactly where GitHub Desktop puts it). The old toolbar
 Refresh button is gone; its jobs are split between View ▸ Refresh (⌘R), which posts
 `leogitRefreshRequested` for `ContentView` — where the stores live — to perform the
-visible reload (the same scene-to-window notification pattern as `leogitConfigDidSave`),
+visible reload — a scene-to-window notification, the pattern the Settings window used
+before its live-propagating field was retired —
 and the automatics: `refreshQuietly` now counts consecutive status failures and surfaces
 the error banner after three, with a flag marking the message poll-owned so only the
 poll's own recovery clears it (an explicit action's failure text is never swept away by a
@@ -359,6 +360,29 @@ measuring span the Svelte component uses. It is greedy horizontally (the compone
 back into layout; the fit is recomputed from `onGeometryChange`, which only fires when the
 width actually changes.
 
+The repository screen is one `HSplitView` hosted by `ContentView` *above* the tabs — the
+Tauri two-column grid: the sidebar column (`RepoTabBar`, then `ChangesSidebar` or
+`HistorySidebar`, framed 280/320/640 like the Tauri sidebar) beside the main-content column
+(`ChangesDetailPane` or `HistoryDetailPane` over `TerminalDock`, min 380). Each column is a
+stable `VStack` whose *content* switches on the tab, so the split — and its divider position
+— is never rebuilt by a tab change or an empty list. The previous shape, a per-tab
+`HSplitView` swapped out wholesale and replaced by a full-width empty state on a clean tree,
+is what made the composer vanish and the terminal span the window. Each tab's selection
+(`selectedPath`, `selectedSha`) is `@State` in `ContentView` because the list and its detail
+now sit on opposite sides of the split; the sidebars re-seed it on list change and the detail
+panes only read it. The composer's height is `@AppStorage("commitComposerHeight")` in
+`ChangesSidebar` (220 pt default, 180–600 — Tauri's `commitHeight` bounds), applied as a
+fixed `.frame(height:)` with the description `TextEditor` on `maxHeight: .infinity`, so extra
+height becomes description; `Design/RowResizeHandle.swift` turns a drag on the padded
+divider above it into that value (start − translation, clamped, `.pointerStyle(.rowResize)`).
+Both the drag range and the rendered height are capped at the pane's measured height minus an
+80 pt list floor (`onGeometryChange`), so a tall stored height can't overflow a short window
+and grows back when the window does — and capping the *drag* keeps the stored value within
+reach, so a drag back down moves at once instead of first spending an invisible surplus.
+`Design/EmptyListPlaceholder.swift` is the sidebars' faint centred line; the pane-sized
+`ContentUnavailableView`s live in the detail panes, each claiming its slot so the dock stays
+pinned.
+
 The commit composer's two fields carry the Tauri pair's behaviors.
 `Design/WheelScrollableTextField.swift` is the summary input: SwiftUI's `TextField` (an
 `NSTextField` underneath) moves overflowing text only with the caret, so — as the Tauri
@@ -366,7 +390,8 @@ client maps wheel deltas onto the input's `scrollLeft` — the wrapped field for
 `scrollWheel` to the field editor's clip view (dominant axis; the event passes to ancestors
 when nothing overflows) and overrides `intrinsicContentSize` so a long summary cannot demand
 width from the split. The description is a `TextEditor` — the only text control that is a
-real scroll view, so it grows a scrollbar past its fixed five-line height — wearing a
+real scroll view, so it grows a scrollbar once the text outgrows whatever height the
+sidebar's resize handle leaves it — wearing a
 hand-drawn bezel and prompt, which it lacks natively. The single-file auto-summary lives in
 `CommitStore.autoSummary(for:)` and is used twice: as the summary field's prompt, and as
 `commit`'s fallback message when nothing was typed — recomputed from the embedded-repo
@@ -415,7 +440,7 @@ load-bearing: re-entering amend on the same sha is a no-op, so right-clicking Am
 wipe edits in progress, and leaving it clears the seeded draft so an amended message can't be
 re-submitted as a new commit. `commit` then relaxes its empty-file guard, because
 `git commit --amend` with nothing staged *is* the message-only edit. This forced one structural
-fix: `CommitStore` moved from `ChangesView` to `ContentView`, since the tab bar swaps panes by
+fix: `CommitStore` moved from the Changes pane (now `ChangesSidebar`) to `ContentView`, since the tab bar swaps panes by
 rebuilding them — which discarded any in-progress message on every tab switch, and would have
 made amend impossible, as amend is started from the History tab and finished in the Changes tab.
 Which commit is `HEAD` comes from `status.head_sha`, not from the row's index: the Tauri list
@@ -466,8 +491,9 @@ rather than assigning, so the lazy first PTY spawn still happens on the way up, 
 right-hand buttons are `Label`s under `.labelStyle(.iconOnly)` — icon-only on screen, titled
 for VoiceOver. Deliberately *no* `glassEffect`: the HIG restricts Liquid Glass to the
 navigation layer, and this bar lives in content, so it keeps the `.bar` material. The dock
-also stays a plain `VStack` child rather than a `safeAreaInset`, since nothing should scroll
-under an opaque 280 pt panel.
+is the last child of the main-content column's `VStack` — under the diff, beside the sidebar,
+and outside the tab switch so the shell survives a tab change — rather than a
+`safeAreaInset`, since nothing should scroll under an opaque 280 pt panel.
 
 Cloning and the Settings window crossed together. `clone_repo` is exported like `pull`
 (async over tokio, progress through the same `SyncProgressListener` seam — `ProgressSink`
@@ -501,30 +527,17 @@ auto-fetch loop now re-reads the config every tick — a cheap TOML load — so 
 toggle changes apply within one interval, the live re-arm the Tauri client still lacks
 (its ROADMAP entry).
 
-Publish and pull requests closed the gh surface. `gh_publish_repo` crossed like
-`gh_clone` (already core-async over the blocking pool; no listener — `gh repo create`
-streams nothing parseable, so the sheet and the toolbar banner stay indeterminate), and
-`SyncStore` gained a `.publish` case in the same single `activeOperation` slot as
-push/pull — Tauri's `'publish'` network op — so every background loop pauses for its
-duration. The PR surface is `PullRequest` + `PrCheck` mirrors with four exports:
-`list_prs`/`get_pr_checks`/`create_pr` async over `spawn_blocking` (20 s gh queries, the
-`gh_repo_list` pattern) and `checkout_pr` core-async (a transfer). Swift-side,
-`PullRequestStore` loads the list lazily — tab visit, filter change, explicit reload;
-never polled — keeps a per-PR checks cache keyed by number (loaded on selection,
-dropped on list reload), and `PullRequestsView` renders the list/detail split with
-`CreatePullRequestSheet` seeding its title from the head commit's summary, the closest
-native equivalent of `gh pr create --fill`. `check_auth` remains unexported: every gh
-call's own error text already distinguishes "gh missing" from "not authenticated", so
-the tab's failure state simply shows it, with Retry. The tab is doubly gated: the shared
-config's `show_pull_requests` (default on, `#[serde(default)]` so old files parse; a
-Settings toggle under its own *Pull Requests* section) and the repo actually having a
-remote — a remote-less repo can't have PRs, so the tab hides instead of sitting empty.
-Off means off entirely: every `gh pr` call originates in the tab's views, so hiding it
-guarantees zero GitHub subprocesses. The toggle applies live across scenes through a
-`leogitConfigDidSave` notification posted by `SettingsStore.save()` — the Settings
-window and the main window share no store — and `ContentView` re-reads the flag on it
-(and on every repo open), snapping the selection back to Changes if the tab vanishes
-from under it.
+Publish closed the gh surface. `gh_publish_repo` crossed like `gh_clone` (already
+core-async over the blocking pool; no listener — `gh repo create` streams nothing parseable,
+so the sheet and the toolbar banner stay indeterminate), and `SyncStore` gained a `.publish`
+case in the same single `activeOperation` slot as push/pull — Tauri's `'publish'` network op
+— so every background loop pauses for its duration. `check_auth` remains unexported: every gh
+call's own error text already distinguishes "gh missing" from "not authenticated". A
+pull-request surface (`list_prs`/`get_pr_checks`/`create_pr`/`checkout_pr`, a native tab, and
+a `show_pull_requests` config gate) shipped here and was **retired** on request — PRs are a
+GitHub feature, not a git one, and the web UI serves them. The config key is now an ignored
+unknown, pinned by `config_ignores_retired_keys`, which also guards against a future
+`deny_unknown_fields` invalidating every file already on disk.
 
 `scripts/build-rust.sh` builds the static lib and regenerates the bindings, and Xcode runs it as
 a pre-build phase — so the Swift API can never be stale relative to the Rust it calls.
@@ -814,7 +827,6 @@ Everything in `gh.rs` shells out to the `gh` CLI, time-boxed through `process::r
 - `gh_repo_list` → `gh repo list --no-archived --json <fields>` (the Clone dialog's GitHub tab).
 - `gh_publish_repo` → `gh repo create <name> --source <repo> --remote origin --push [--private|--public]` (see the bullet under *Design decisions*).
 - `gh_clone` → `gh repo clone <owner/name> <target>` through the same `prepare_clone_target` guard as `git clone`.
-- The **pull-request surface** (native client only — the Tauri PR view was retired, and these were re-derived under the current conventions): `list_prs` → `gh pr list --json <fields> --state <s> --limit 30`; `get_pr_checks` → `gh pr checks <n> --json name,state,bucket,link,workflow` — special-cased: `gh` exits non-zero when any check is pending/failing but still writes valid JSON, so stdout is parsed first (a pure `parse_pr_checks`, pinned by test) and only unparseable output falls through to the stderr error; `create_pr` → `gh pr create --title --body [--base] [--draft]`, returning the PR URL; `checkout_pr` → `gh pr checkout <n>` (a transfer: blocking pool + the generous budget). The `gh pr` subcommands resolve their repository from the working directory — they have no path flag — so this is the one gh section that sets `current_dir`. The subprocess has no TTY, which makes gh disable its interactive prompts by itself: an unpushed branch fails with gh's message instead of hanging on "where should we push?".
 
 ## OS integration layer
 

@@ -43,6 +43,22 @@ struct ChangesSidebar: View {
     /// The file the discard confirmation is about; `nil` when it's closed.
     @State private var fileToDiscard: FileEntry?
 
+    /// The composer's height — the one piece of sidebar geometry the user
+    /// sets by hand, persisted like the Tauri client's `leogit:commitHeight`
+    /// (same default and bounds). `UserDefaults` rather than the shared
+    /// config: layout is per client, and the Tauri client keeps its own in
+    /// `localStorage`. Lives here rather than in `CommitComposer` so the
+    /// list and the handle, which share the space, read the same value.
+    @AppStorage("commitComposerHeight") private var composerHeight = 220.0
+
+    /// Measured height of this pane, so a tall stored height can't overflow
+    /// a short window: the list keeps a floor and the composer yields.
+    @State private var availableHeight: CGFloat = 0
+
+    private static let composerHeightRange: ClosedRange<CGFloat> = 180...600
+    /// The least the list keeps when the composer is at its tallest.
+    private static let listMinHeight: CGFloat = 80
+
     var body: some View {
         VStack(spacing: 0) {
             if files.isEmpty {
@@ -55,7 +71,7 @@ struct ChangesSidebar: View {
                 Divider()
                 fileList
             }
-            Divider()
+            RowResizeHandle(height: composerHeightBinding, range: composerHeightBounds)
             CommitComposer(
                 store: commitStore,
                 includedCount: includedFiles.count,
@@ -63,6 +79,12 @@ struct ChangesSidebar: View {
                 onSubmit: submit,
                 onGenerate: generate
             )
+            .frame(height: effectiveComposerHeight)
+        }
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.height
+        } action: { height in
+            availableHeight = height
         }
         .onChange(of: files.map(\.path), initial: true) {
             // Keep something selected: first file on arrival, and again
@@ -94,6 +116,38 @@ struct ChangesSidebar: View {
             Button("Cancel", role: .cancel) {}
         } message: { file in
             Text(discardWarning(for: file))
+        }
+    }
+
+    // MARK: Composer height
+
+    /// What the handle may drag to right now: the fixed range, capped by
+    /// what fits above the list's floor. Capping the *drag* too — not only
+    /// the rendered height — keeps the stored value within reach, so a drag
+    /// back down moves the divider at once instead of first spending an
+    /// invisible surplus. Unmeasured (the first frame) means uncapped, so
+    /// the stored height doesn't flash through the minimum before geometry
+    /// arrives.
+    private var composerHeightBounds: ClosedRange<CGFloat> {
+        let range = Self.composerHeightRange
+        guard availableHeight > 0 else { return range }
+        let cap = max(range.lowerBound, availableHeight - Self.listMinHeight)
+        return range.lowerBound...min(range.upperBound, cap)
+    }
+
+    /// The stored height, clamped into today's bounds — a window that grows
+    /// again gets the user's full height back without a fresh drag.
+    private var effectiveComposerHeight: CGFloat {
+        let bounds = composerHeightBounds
+        return min(max(composerHeight, bounds.lowerBound), bounds.upperBound)
+    }
+
+    /// `@AppStorage` stores a `Double`; the handle speaks geometry.
+    private var composerHeightBinding: Binding<CGFloat> {
+        Binding {
+            CGFloat(composerHeight)
+        } set: { height in
+            composerHeight = Double(height)
         }
     }
 

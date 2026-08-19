@@ -161,19 +161,13 @@ progress (§4.1) and can be slow.
 |---|---|---|
 | `highlight_diff` | `fileDiff, source?: BlobSource` | `string[]` (per-line, see §7) |
 
-### 3.12 GitHub (`gh` CLI) — 4 (+ 4 PR commands, native client only)
+### 3.12 GitHub (`gh` CLI) — 4
 | Command | Args | Returns |
 |---|---|---|
 | `check_auth` | – | `boolean` |
 | `gh_repo_list` (net) | `limit` | `GhRepo[]` |
 | `gh_clone` (net) | `nameWithOwner, targetPath` | `string` |
 | `gh_publish_repo` (net) | `repoPath, name, description, isPrivate` | `void` |
-
-Core also exposes a pull-request surface — `list_prs(repoPath, state) → PullRequest[]`,
-`get_pr_checks(repoPath, number) → PrCheck[]`, `create_pr(repoPath, title, body, base,
-draft) → string` (the PR URL), `checkout_pr(repoPath, number)` — currently consumed only
-by the SwiftUI client's Pull Requests tab; the Tauri host does not register them (its PR
-view was retired and returns with the re-skin).
 
 ### 3.13 AI — 2
 | Command | Args | Returns |
@@ -239,7 +233,7 @@ codegen decision is open (plan §10.7).
 | Branches / remote | `BranchInfo` (name, is_remote, is_current); `AheadBehind`; `RepoSync` (ahead, behind, has_remote, fetched, dirty); `RepoIdentifier` (owner, name); `MergeResult` (success, fast_forward, conflicts[], error_message?) |
 | Diff | `DiffLine` (incl. `intra_line_diff: IntraLineRange`), `IntraLineRange`, `HunkHeader`, `Hunk`, `FileDiff` (old_path, new_path, file_header, hunks[], is_binary); `SbsPair`; `ParsedDiff` (file_diff, html[], sbs_pairs[], additions, deletions); `Token` (start, end, class: `TokenClass`) / `TokenLine` — the structured highlight layer under the HTML (§7); `DiffSelection` |
 | Commit composer | `CommitMessage` (title, description) |
-| Config / persistence | `Config` (theme, fetch_interval_ms, ai_provider, ai_model, ai_api_key, auto_fetch, syntax_highlighting, scan_paths[], scan_depth, side_by_side_diff, hide_whitespace, wrap_long_lines, tab_size, claude_timeout_secs, ollama_server_url, terminal_shell?, show_pull_requests); `ReposState`; `ReposStatePatch` |
+| Config / persistence | `Config` (theme, fetch_interval_ms, ai_provider, ai_model, ai_api_key, auto_fetch, syntax_highlighting, scan_paths[], scan_depth, side_by_side_diff, hide_whitespace, wrap_long_lines, tab_size, claude_timeout_secs, ollama_server_url, terminal_shell?); `ReposState`; `ReposStatePatch` |
 | GitHub | `GhRepo` (name_with_owner, name, description, is_private, pushed_at) |
 | AI | `AiProviderConfig` (provider, model?, api_key?, base_url?) |
 | Terminal | `ShellOption`; `PtyInfo` (backend, build_number); `StartedTerminal` (pid, shell_id, shell_label) |
@@ -338,7 +332,7 @@ every deliberate difference here.
 | Diff rendering | HTML spans (`{@html}`) | structured runs → `AttributedString` |
 | Terminal widget | `xterm.js` | SwiftTerm (PTY backend reused) |
 | Virtualized lists | hand-rolled windowing | native `List`/`LazyVStack`/`Table` |
-| Pane widths persistence | `localStorage` (3 keys) | `UserDefaults` |
+| Pane geometry persistence | `localStorage` (sidebar width, composer height, commit-files width) | `UserDefaults` (composer height, `commitComposerHeight`); sidebar and commit-files widths are per-session |
 | Repo-search path root (§6.9) | scan folders only — the frontend can't resolve `~`, so a repo outside them is searched by its whole path | scan folders, then `NSHomeDirectory()` |
 | Context-menu scope (§6.10) | multi-row selection, so discard also acts on a whole selection | single-selection lists, so every item acts on the right-clicked row |
 
