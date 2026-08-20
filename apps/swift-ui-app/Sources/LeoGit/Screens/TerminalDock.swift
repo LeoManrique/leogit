@@ -56,10 +56,12 @@ struct TerminalDock: View {
     /// with no feedback at all.
     private var header: some View {
         HStack(spacing: 2) {
-            // The shell name doubles as the panel toggle and carries ⌘` —
-            // like the Tauri client, where the first expand lazily spawns the
-            // shell. A button-styled Toggle rather than a Button so the strip
-            // shows the panel's on-state the way a scope bar does.
+            // The shell name doubles as the panel toggle and carries ⌃` —
+            // VS Code's binding, and deliberately not ⌘`, which macOS owns
+            // for cycling an app's windows. The first expand lazily spawns
+            // the shell, like the Tauri client. A button-styled Toggle rather
+            // than a Button so the strip shows the panel's on-state the way a
+            // scope bar does.
             Toggle(isOn: isExpanded) {
                 Label(
                     store.activeShellLabel.isEmpty ? "Terminal" : store.activeShellLabel,
@@ -67,8 +69,8 @@ struct TerminalDock: View {
                 )
             }
             .toggleStyle(.button)
-            .keyboardShortcut("`", modifiers: .command)
-            .help("Toggle terminal (⌘`)")
+            .keyboardShortcut("`", modifiers: .control)
+            .help("Toggle terminal (⌃`)")
 
             Spacer(minLength: 0)
 

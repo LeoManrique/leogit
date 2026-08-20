@@ -28,9 +28,16 @@ struct TerminalSessionView: View {
             }
             .onDisappear { controller.shutdown() }
             .onChange(of: isExpanded) { _, expanded in
-                // Whenever the panel is shown the terminal grabs keyboard
-                // focus, so typing works without clicking into it.
-                if expanded { controller.focus() }
+                // Focus follows the panel: showing it hands the terminal the
+                // keyboard so typing works without clicking into it, and
+                // collapsing hands it back — a collapsed panel is zero-height
+                // but still mounted, so a terminal that kept first responder
+                // would swallow keystrokes into an invisible shell.
+                if expanded {
+                    controller.focus()
+                } else {
+                    controller.resignFocus()
+                }
             }
     }
 }
@@ -54,6 +61,14 @@ final class TerminalController {
     private let ioQueue = DispatchQueue(label: "com.leomanrique.leogit.terminal-io")
     private var onExit: (() -> Void)?
     private var relay: TerminalRelay?
+
+    /// A focus request that could not be honoured yet. The dock asks for
+    /// focus as the panel opens, which on the first expand is before AppKit
+    /// has attached the emulator to a window — and `makeFirstResponder` on a
+    /// windowless view is a silent no-op, which is why the terminal used to
+    /// come up unfocused. The request is remembered and replayed from
+    /// `viewDidAttach()`.
+    private var wantsFocus = false
 
     /// Read the shared config's shell preference and spawn the PTY. On
     /// failure the error is printed into the emulator in red — the Tauri
@@ -128,9 +143,37 @@ final class TerminalController {
         ioQueue.async { try? GitBridge.killTerminal(pid: pid) }
     }
 
+    /// Give the terminal the keyboard, now or as soon as it can hold it.
     func focus() {
-        guard let terminalView else { return }
-        terminalView.window?.makeFirstResponder(terminalView)
+        wantsFocus = true
+        applyPendingFocus()
+    }
+
+    /// AppKit attached the emulator to a window: the earliest moment it can
+    /// become first responder, so a request made before the mount finished
+    /// lands here.
+    func viewDidAttach() {
+        applyPendingFocus()
+    }
+
+    /// Drop the keyboard when the panel closes, leaving the window itself as
+    /// first responder. A pending request is dropped too: a panel collapsed
+    /// before it ever drew must not steal focus later.
+    func resignFocus() {
+        wantsFocus = false
+        guard let terminalView, let window = terminalView.window,
+            window.firstResponder === terminalView
+        else { return }
+        window.makeFirstResponder(nil)
+    }
+
+    private func applyPendingFocus() {
+        guard wantsFocus, let terminalView, let window = terminalView.window else { return }
+        wantsFocus = false
+        // Queued behind the update that mounted or revealed the view: SwiftUI
+        // settles its own first responder as the pass ends, so a synchronous
+        // call here can be undone a moment later.
+        Task { @MainActor in window.makeFirstResponder(terminalView) }
     }
 
     /// The PTY opens at 80×24; push the grid the emulator actually laid out.
@@ -232,7 +275,8 @@ private struct TerminalHostView: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> TerminalView {
-        let view = TerminalView(frame: .zero)
+        let view = HostedTerminalView(frame: .zero)
+        view.onAttach = { [controller] in controller.viewDidAttach() }
         view.terminalDelegate = context.coordinator
         view.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
         view.nativeBackgroundColor = .black
@@ -242,6 +286,18 @@ private struct TerminalHostView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: TerminalView, context: Context) {}
+
+    /// SwiftTerm's view plus the one hook it does not expose: notice of the
+    /// moment AppKit puts it in a window, which is when a focus request made
+    /// during the mount can finally be honoured.
+    private final class HostedTerminalView: TerminalView {
+        var onAttach: (() -> Void)?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window != nil { onAttach?() }
+        }
+    }
 
     @MainActor
     final class Coordinator: NSObject, @preconcurrency TerminalViewDelegate {

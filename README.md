@@ -75,7 +75,7 @@ CLI or Ollama sharing the Tauri client's config) → branches (switch / create /
 and merge or squash-merge, with conflict + abort handling) → sync (pull / push / fetch with
 live transfer progress, publish-branch first push, force-push-with-lease, and one-click
 publish of a remote-less repo to GitHub, plus auto-fetch, 2 s status polling, and resync
-on app re-activation) → history → an embedded terminal (SwiftTerm, ⌘` to toggle, fed by
+on app re-activation) → history → an embedded terminal (SwiftTerm, ⌃` to toggle, fed by
 the same core PTY as the Tauri client, staying open with the exit code when the shell
 dies) → cloning (your GitHub repos via `gh` or any URL, with live progress) → pull
 requests (list with CI checks, create, checkout — optional, and a tab the Tauri client

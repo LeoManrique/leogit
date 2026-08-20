@@ -474,9 +474,19 @@ double-closes a session core already dropped; a *clean* exit then collapses the 
 while a non-zero code or fatal signal instead prints `[Process exited with code N]` in
 red and keeps the dead terminal on screen for reading (✕ and ＋ still work — the pid is
 nil, so their teardown is a no-op against core). Collapsing only hides the view and
-skips the degenerate resize it produces, so re-expanding restores the exact prompt; ⌘`
-toggles, and terminal focus (SwiftTerm's view as first responder) suppresses auto-fetch
-exactly like the field-editor check.
+skips the degenerate resize it produces, so re-expanding restores the exact prompt, and
+terminal focus (SwiftTerm's view as first responder) suppresses auto-fetch exactly like the
+field-editor check. The dock toggles on **⌃`** — VS Code's binding, and deliberately not the
+⌘` the Tauri handler also accepts through its cross-platform `ctrlKey || metaKey`, because on
+macOS that combination belongs to the system's window cycling. Focus is a *request*, not a
+call:
+the dock asks as the panel opens, which on the first expand is before AppKit has attached the
+emulator to a window, and `makeFirstResponder` on a windowless view is a silent no-op — so
+`TerminalController` holds the request and replays it from the host view's
+`viewDidMoveToWindow`, then makes it first responder one main-actor hop later, after SwiftUI
+has settled its own responder for the pass. Collapsing releases it (the window becomes first
+responder again), because a collapsed panel is zero-height but still mounted and would
+otherwise keep typing out of sight.
 
 The dock's header strip is a stock **accessory bar**: `.buttonStyle(.accessoryBar)` over the
 whole row, which AppKit draws as `NSBezelStyleAccessoryBar` — the renamed *recessed* bezel
