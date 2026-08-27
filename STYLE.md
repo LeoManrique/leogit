@@ -102,7 +102,7 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 - **The commit composer is resizable from its top edge**: the 1px divider above it is the handle (~7px grab zone, system row-resize pointer on hover). Range 180–600px, default 220, remembered per client. A taller composer is more description, never more chrome — the summary field and the button row keep their height and the description editor absorbs the rest. Both the drag and the rendered height are capped so the list above keeps a floor (~80px) in a short window.
 - Sidebar background: `--bg-secondary`. Main content background: `--bg-primary`. The 1px right border on the sidebar is `--border-inactive`.
 - **Terminal pane** docks at the bottom of the main content — under the diff, never under the sidebar — ~280px tall, separated by a 1px border. Its own background can stay slightly darker than `--bg-primary` (use `#000` or `--bg-primary` — never an arbitrary off-color).
-- The header strip at the top of the main content (Tauri; the native client carries the same three controls in the window toolbar) carries repo name, branch dropdown, and the **adaptive sync button** — one control whose face shows Fetch, Pull, Push, Publish branch, or Publish depending on where the branch stands relative to its remote, GitHub-Desktop style. There is no separate refresh button. Keep the strip ~36–40px tall.
+- **The where-am-I controls lead, the one action trails.** Repo name and branch sit at the leading edge; the trailing edge carries a single **adaptive sync button** whose face shows Fetch, Pull, Push, Publish branch, or Publish depending on where the branch stands relative to its remote, GitHub-Desktop style, with the pending counts beside it as plain `↑N ↓N` text rather than a second control. No separate refresh button: the 2 s poll keeps the view current and a forced reload belongs on a key equivalent, not a button. The native window toolbar is built this way. The Tauri client's header strip is the same slot on a different shape: separate Pull and Push controls, a Refresh button, and Settings/Help icons. Keep the strip ~36–40px tall.
 
 ### Tab bar (Changes / History)
 
@@ -113,8 +113,9 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 ### File list (staging)
 
 - One row per changed file. 22–24px row height, 4px vertical padding, 12px horizontal padding.
-- Layout: `[checkbox] [status marker] [filename] ····  [+N -N]` — checkbox for staging, single-character status marker (`M` / `+` / `−` / `R` / `!`) in the appropriate status color, filename in `--text-primary` medium-weight, line-delta on the right in 11px mono `--text-muted` with tabular nums.
-- **Status as a colored letter, not a pill.** No background, no border, no rounded-full chrome. The letter *is* the badge.
+- Layout: `[checkbox] [status marker] [path]` — checkbox for staging, single-character status marker in the appropriate status color, then the repo-relative path with the filename in `--text-primary` medium-weight and the directory muted. The row carries **no per-file line counts**: `FileEntry` has no additions/deletions to render, and `+N -N` totals belong to the commit detail card, where they are per commit.
+- **Status letters** are git's own porcelain vocabulary: `A` added, `M` modified, `D` deleted, `R` renamed. A conflicted entry is `U` in the Tauri list and `!` in the native one — the two clients have not settled on one glyph.
+- **Status as a single colored letter on a soft tint plate.** An 18×18 rounded-rect plate tinted at 15% of the status color, the letter centered in it — the native `FileStatusBadge` look, and the shared target. No full-word chips (`[Modified]`), no rounded-full outlines: the letter carries the meaning; the plate only gives it a consistent footprint in dense rows.
 - Hover row: `--surface-hover` tint, nothing more. No left-edge accent bar, no scale transform.
 - Selected (active diff) row: `--bg-tertiary` background, 6px radius, no border. The selection state, not the staging state, gets visual emphasis.
 - Checkbox: native-feeling square, 14px, accent fill when checked. Mixed-state (some hunks staged) uses an em-dash glyph, not a "minus" pill.
@@ -236,7 +237,7 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 
 ## Anti-patterns (don't ship these)
 
-- GitHub-style colored pill badges on file rows (`[Modified]`, `[Conflict]` in a rounded-full tinted chip). Use a single colored letter instead.
+- GitHub-style colored pill badges on file rows (`[Modified]`, `[Conflict]` in a rounded-full tinted chip). Use the single-letter tint plate instead.
 - Gradient mesh / aurora backgrounds anywhere in the app.
 - Accent-color glow shadows around buttons, inputs, or cards.
 - Icon-in-tinted-rounded-square next to every section title.

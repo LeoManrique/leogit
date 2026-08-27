@@ -4,8 +4,8 @@ This document is the **single behavioral contract** shared by LeoGit's two
 frontends. Both are built against it and must not diverge except where §8 records an
 explicit per-platform exception.
 
-- **Tauri + Svelte** — Windows and Linux (the current app).
-- **SwiftUI** — macOS (planned; see [`docs/plans/swiftui-macos-frontend.md`](docs/plans/swiftui-macos-frontend.md)).
+- **Tauri + Svelte** — Windows and Linux.
+- **SwiftUI** — macOS, over a UniFFI bridge into the same core.
 
 The **visual/interaction design language** both frontends target lives in
 [`STYLE.md`](STYLE.md); this document is the **functional/data** contract (commands,
@@ -34,9 +34,28 @@ static-linking or a local daemon (that decision is open; see the plan).
 - The backend **categorizes and computes**; frontends **render and orchestrate**.
   Frontends never re-derive git state the core already returns (e.g. file status
   categories, ahead/behind, merge conflicts).
-- Today's surface: **69 commands, 4 events, ~30 DTOs**. All 69 command wrappers live
-  frontend-side in `tauri-app/src/lib/api/commands.ts` (Svelte) and must have a
-  matching wrapper in the SwiftUI IPC client.
+- Today's surface: **4 events, ~30 DTOs**, and a command catalogue (§3) each host exposes
+  **to the extent it consumes it**. The Tauri host registers **69** `#[tauri::command]`s,
+  each with a wrapper in `apps/tauri-app/src/lib/api/commands.ts`; the UniFFI bridge
+  exports **57** functions. The two sets are deliberately not identical, and a command
+  reaching one host does not oblige the other — what is required is that the difference be
+  recorded, here or in §8, never left silent.
+  - No native export: `check_auth`, `check_for_update`, `check_provider_available`,
+    `delete_remote_branch`, `generate_patch`, `generate_inverse_patch`, `get_ahead_behind`,
+    `get_head_sha`, `get_last_commit_timestamp`, `get_repo_identifier`, `get_repo_name`,
+    `has_staged_changes`, `highlight_diff`, `init_repo`, `is_git_repo`, `open_url`,
+    `rename_branch`, `take_pending_launch_target`, `terminal_pty_info`. Three of those the
+    native client reaches under another name (`repo_display_name` for `get_repo_name`,
+    `resolve_repo_root` for `is_git_repo`, the structured `tokenize_diff` for the
+    HTML-shaped `highlight_diff`); `get_head_sha` is redundant against `get_status`
+    (§6.1); `take_pending_launch_target` and `init_repo` serve the launch path, which is
+    Tauri-only (§8); and the rest the bridge omits because it carries no surface a client
+    does not call.
+  - No Tauri command: `core_version`, `fix_path_env`, `load_ai_config`,
+    `repo_display_name`, `resolve_repo_root`, `save_ai_provider`, `tokenize_diff`.
+  - Registered Tauri-side but called by nothing in the Svelte client:
+    `check_provider_available`, `generate_patch`, `generate_inverse_patch`,
+    `get_ahead_behind`, `has_staged_changes`, `rename_branch`, `delete_remote_branch`.
 
 ## 2. System context & architecture
 
@@ -47,7 +66,7 @@ static-linking or a local daemon (that decision is open; see the plan).
                                   terminal/config)        (bridge, macOS)
 ```
 
-- **Request/response** — 69 commands, each `args → Result<T, Error>`. The
+- **Request/response** — the §3 catalogue, each `args → Result<T, Error>`. The
   frontend→backend direction is **only** request/response; there are no
   frontend→backend events.
 - **Push (backend→frontend)** — 4 events (§4). Best-effort; a frontend must be able
@@ -59,7 +78,9 @@ static-linking or a local daemon (that decision is open; see the plan).
 
 Grouped by namespace. `args` are the logical inputs (camelCase on the wire);
 `→` is the return DTO (§5). "async/net" marks network operations that may stream
-progress (§4.1) and can be slow.
+progress (§4.1) and can be slow. This is the catalogue of operations core offers a
+frontend — the Tauri host registers all 69; the native bridge exposes the subset it
+consumes, plus seven of its own (§1).
 
 ### 3.1 Config & state — 5
 | Command | Args | Returns |
@@ -252,12 +273,13 @@ The backend does the git work; these are the **frontend orchestration rules** th
 define LeoGit's behavior and must match on both platforms. (Today they live in
 `MainLayout.svelte`, `lib/services/`, `lib/stores/`.)
 
-1. **Status polling** — poll `get_status` every **2s** and `get_head_sha`
-   periodically while a repo is open. Auto-fetch (`fetch`/`repo_sync_status`) every
-   **30s** when `auto_fetch` is on. **Pause all polling** while a network op is in
-   flight; resync on refocus. What happens while the window is hidden or blurred is
-   platform policy — §8 (Tauri pauses everything; native slows a cadence ladder
-   instead of stopping).
+1. **Status polling** — poll `get_status` every **2s** while a repo is open, and refresh
+   the commit log whenever **HEAD moved since the last tick**. `RepoStatus.head_sha` is
+   what answers that: porcelain v2 emits the HEAD OID as `# branch.oid`, so `get_status`
+   already carries it at no cost and the rule mandates no second command. Auto-fetch
+   (`fetch`/`repo_sync_status`) every **30s** when `auto_fetch` is on. **Pause all
+   polling** while a network op is in flight; resync on refocus. What happens while the
+   window is hidden or blurred is platform policy — §8.
 2. **Network-op mutual exclusion** — push/pull/publish are mutually exclusive; only
    one runs at a time, with a shared progress slot fed by `git-progress`.
 3. **Seamless diff loads** — loading a file/commit diff must **guard stale responses**
@@ -268,9 +290,12 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    a result equal to what's shown, so scroll and tokens survive; a permitted refinement,
    not a divergence (the observable rule — no flash under the threshold — is shared).
 4. **File selection semantics** — maintain selection as `selectedFiles` **plus**
-   `userDeselected` so the 2s poll does not re-check files the user just unchecked.
-   Support shift-click range and keyboard (arrows/Home/End/Space). Staging is
-   **whole-file** today (partial-hunk staging is scaffolded but inactive).
+   `userDeselected` so the 2s poll does not re-check files the user just unchecked. The
+   list is keyboard-navigable: arrows move the active row and load its diff. Staging is
+   **whole-file** today (partial-hunk staging is scaffolded but inactive). How far the
+   keyboard and the pointer go beyond that — range selection, a Space toggle, Home/End —
+   is platform policy (§8): the shared floor is one row active at a time, reachable by
+   arrow keys.
 5. **Connectivity circuit-breaker** — after consecutive failures, back off
    (30s→5min) and gate background git ops on connectivity; recover on reconnect.
 6. **Tiered background refresh** — repos refresh in tiers (2/5/10 min) with staggered
@@ -278,8 +303,11 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
 7. **Commit composer** — AI generation via `generate_commit_message`; auto-summary
    from a single changed file; amend/undo re-seed the message. `format_commit_message`
    composes summary + description + co-authors.
-8. **History** — commit history is a **flat linear list** (no DAG/graph layout),
-   loaded in a sliding window via `get_log` `{max_count, skip}`.
+8. **History** — commit history is a **flat linear list** (no DAG/graph layout), paged
+   through `get_log` `{max_count, skip}`. Two invariants are shared: a refresh re-reads at
+   most **500** commits however deep the user has scrolled (deeper rows re-grow on demand),
+   and the log is refetched when HEAD moves rather than patched. The paging model itself is
+   platform policy (§8) — one client slides a fixed window, the other appends.
 9. **Repo search** — the filter over a repository list is **loose on names, strict on
    paths**: the query may appear as a scattered subsequence in a repo's name(s), but a
    path must contain it contiguously and only below the scan folder that found the repo
@@ -302,7 +330,8 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
 11. **Relative dates** — commit timestamps arrive as ISO-8601 strings
    (`author_date`/`committer_date`, e.g. `2026-08-12T14:03:11+0200`; the core is
    deliberately chrono-free) and each frontend renders them as relative ("5 minutes
-   ago"), ticking live.
+   ago"), recomputed on every refresh. Whether an idle list also re-ticks between
+   refreshes is platform policy (§8).
 
 ## 7. Diff rendering contract
 
@@ -331,10 +360,10 @@ every deliberate difference here.
 |---|---|---|
 | Window chrome | Tauri window | native `WindowGroup` / AppKit |
 | Theme | CSS tokens in `app.css`, dark/light via `data-theme`, driven by the `theme` config field | `Color` assets, system appearance — the `theme` field is never read (permanent exemption: a stored theme is a web-only concept) |
-| Folder picker | `plugin-dialog.open` | `NSOpenPanel` / `.fileImporter` |
+| Opening a repository from disk | no picker — repositories arrive from discovery under `scan_paths`, from the startup `RepoPicker`, or from `leogit <dir>`; the one `plugin-dialog.open` call chooses a *clone destination* | `.fileImporter` on Welcome (⌘O) and *Open Other…* in the repo switcher's footer, so a repo outside the scan folders opens directly (and keeps its row across launches) |
 | Home dir / path join | `@tauri-apps/api/path` | `FileManager` |
 | Reveal / open / open-url | core `os::*` commands (unchanged) | core `os::*` commands (unchanged) |
-| Second-instance / open-repo | `plugin-single-instance` → `open-repo` | AppKit app-activation / URL open → `open-repo` |
+| Launch target / second instance | the whole contract: `leogit <dir>` resolves through `core::launch`, a cold start claims it with `take_pending_launch_target`, and a second invocation focuses the window and forwards an `open-repo` event via `plugin-single-instance` | not implemented — no app delegate, no `onOpenURL`, no `CFBundleURLTypes`/`CFBundleDocumentTypes`, and neither launch command is exported to the bridge. The native client restores `last_opened_repo` at launch and otherwise waits on Welcome |
 | Diff rendering | HTML spans (`{@html}`) | structured runs → `AttributedString` |
 | Terminal widget | `xterm.js` | SwiftTerm (PTY backend reused) |
 | Virtualized lists | hand-rolled windowing | native `List`/`LazyVStack`/`Table` |
@@ -342,7 +371,10 @@ every deliberate difference here.
 | Repo-search path root (§6.9) | scan folders only — the frontend can't resolve `~`, so a repo outside them is searched by its whole path | scan folders, then `NSHomeDirectory()` |
 | Context-menu scope (§6.10) | multi-row selection, so discard also acts on a whole selection | single-selection lists, so every item acts on the right-clicked row |
 | Open-diff freshness | stale until reselect — the poll never reloads the open diff (adopting `stat_stamp` the same way would fix it; ROADMAP) | reloads within a poll tick: `stat_stamp` makes the status comparison see content edits, `workingTreeEpoch` re-keys the load, the equality skip absorbs no-ops |
-| Background cadence while unfocused/hidden (§6.1) | pauses all polling while the window is hidden/blurred (DOM `focus`/`visibilitychange`) | the active repo never stops: status poll 2 s frontmost / 10 s visible-unfocused / 30 s hidden; auto-fetch interval ×3 while hidden; only the multi-repo sweeps pause when inactive (`BackgroundSchedulingPolicy` + an App Nap assertion held while a repo is open) |
+| Background cadence while unfocused/hidden (§6.1) | no explicit pause and no visibility term: the status poll is a flat 2 s `setInterval` and auto-fetch a flat `fetch_interval_ms` one, so the hidden-window cadence is whatever the host WebView's timer throttling makes it. `document.hidden` is read only to *trigger* the on-activation resync | the active repo never stops, and the cadence is explicit: status poll 2 s frontmost / 10 s visible-unfocused / 30 s hidden, auto-fetch interval ×3 while hidden, only the multi-repo sweeps pausing when inactive (`BackgroundSchedulingPolicy`), with an App Nap assertion held while a repo is open so the timers are not coalesced away |
+| File-list selection & keyboard (§6.4) | shift-click extends a multi-row selection (a separate anchor for the checkbox column, Finder/Gmail semantics), Space toggles the focused row's checkbox and bulk-toggles a multi-selection, Home/End jump to first/last | single-selection `List`: arrow keys move the active row, and there is no range selection, Space toggle, or Home/End |
+| History paging (§6.8) | 50-commit pages into a bidirectional **sliding window** capped at 500: scrolling past either end drops from the far end and `windowStartOffset` tracks the absolute index of row 0, with `scrollTop` compensated so the visible row stays pinned | 100-commit pages **appended** without dropping, de-duplicated by sha against what is already loaded; only a *refresh* is capped, at the same 500 |
+| Relative-date ticking (§6.11) | a 10 s tick re-renders the visible rows, skipped while the History pane is hidden or the window is backgrounded, so an open list never goes stale | formatted once per refresh and not re-ticked; the 2 s poll is what moves the labels on |
 | Side-by-side diff (`side_by_side_diff`) | split layout toggle, honoured by `DiffViewer` | not implemented — unified only; a layout feature awaiting its own design pass (ROADMAP), the config field crosses saves untouched |
 
 ## 9. Non-goals / intentionally absent

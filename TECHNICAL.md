@@ -214,10 +214,13 @@ which is async for a different reason than sync: no `spawn_blocking`, but core d
 `claude` CLI through `tokio::process` and Ollama through async `reqwest`, so it carries the
 same `async_runtime = "tokio"`. No `EventSink`, no streaming, no cancel — plain
 request/response returning a pre-split `CommitMessage { title, description }` (mirrored 1:1,
-as is `AiProviderConfig`). The one mapping the Tauri client keeps in TypeScript — assembling
-`AiProviderConfig` from the shared `config.toml` (`ai_provider` normalised to
-claude/ollama, `ai_model`, `ai_api_key`, `ollama_server_url` as `base_url`) — lives in the
-bridge as `load_ai_config`, where core drift is a compile error; `save_ai_provider` persists
+as is `AiProviderConfig`). Assembling `AiProviderConfig` from the shared `config.toml`
+(`ai_provider` normalised to claude/ollama, `ai_model`, `ai_api_key`, `ollama_server_url` as
+`base_url`) exists **twice**: inline in the Tauri composer's generate handler
+([CommitMessage.svelte](apps/tauri-app/src/lib/components/CommitMessage.svelte)), and in the
+bridge as `load_ai_config`, where core drift is at least a compile error. The two are pinned
+against each other by a bridge test rather than by sharing code, so a field added to `Config`
+has to be carried into the TypeScript copy by hand; `save_ai_provider` persists
 the composer's provider picker with a validated read-modify-write of the whole `Config`, so
 no other setting is clobbered — the pattern the native Settings window later adopted
 wholesale (see below). Core's
@@ -230,9 +233,12 @@ travels with it), the Tauri `main` now calls it from there, and the bridge expor
 `LeoGitApp.init` to run as the process's first Rust call.
 
 The repo switcher and background refresh cross as the picker/scheduler surface the Tauri
-client already had: `load_config` (a full `Config` mirror — every field except `theme` and
-`side_by_side_diff` now has a native consumer, and the mirror restates all 15 fields so it
-can't drift), `load_state`/`patch_state`/`record_recent_repo` over
+client already had: `load_config` (a full `Config` mirror — of its 15 fields the native
+client consumes all but four: `theme` and `side_by_side_diff` are the recorded native
+exemptions (FRONTEND.md §8), while `claude_timeout_secs` has no consumer in *either* client
+— core's AI calls run on a hardcoded 120 s budget — and `ai_api_key` is mapped into
+`AiProviderConfig` but read by neither provider. All four cross a save untouched, and the
+mirror restates all 15 fields so it can't drift), `load_state`/`patch_state`/`record_recent_repo` over
 `ReposState`/`ReposStatePatch` mirrors — the shared `repos-state.json`, where
 `last_opened_repo` is patched on every switch and restored at launch by *either* client,
 and the MRU list feeds the tiered badge scheduler — `discover_repos`/`effective_scan_paths`
@@ -534,9 +540,14 @@ remount — and a shell exit nulls the pid *before* anything else, so unmount ne
 double-closes a session core already dropped; a *clean* exit then collapses the dock,
 while a non-zero code or fatal signal instead prints `[Process exited with code N]` in
 red and keeps the dead terminal on screen for reading (✕ and ＋ still work — the pid is
-nil, so their teardown is a no-op against core). Collapsing only hides the view and
-skips the degenerate resize it produces, so re-expanding restores the exact prompt, and
-terminal focus (SwiftTerm's view as first responder) suppresses auto-fetch exactly like the
+nil, so their teardown is a no-op against core). Collapsing protects the *shell's* view of the terminal but not the drawn one: the dock
+applies a zero **height** at full width, so SwiftTerm still lays out and reflows its grid to
+that degenerate row count, and only the PTY resize is refused (`cols >= 2, rows >= 2` in
+`TerminalController.resize`) — the child keeps its 80×24-or-whatever geometry, but
+re-expanding does not restore the exact prompt. The Tauri client's collapse is
+`display: none` on the terminal container, which genuinely changes nothing: a hidden element
+reports no box, the debounced `fit()` is a no-op, and re-expanding paints what was there.
+Terminal focus (SwiftTerm's view as first responder) suppresses auto-fetch exactly like the
 field-editor check. The dock toggles on **⌃`** — VS Code's binding, and deliberately not the
 ⌘` the Tauri handler also accepts through its cross-platform `ctrlKey || metaKey`, because on
 macOS that combination belongs to the system's window cycling. Focus is a *request*, not a
@@ -572,7 +583,8 @@ needed no change, since core aggregates clone's phase weights before emitting) a
 pair joins it: `gh_repo_list` (a `GhRepo` mirror; async over `spawn_blocking` like
 `repo_sync_status`, since the 20 s `gh` query must not park a cooperative thread) and
 `gh_clone` (no listener — `gh repo clone` reports nothing parseable, so the sheet shows an
-indeterminate bar, as the Tauri dialog does). The destination contract is core's
+indeterminate bar; the Tauri dialog shows no bar at all in that case, only its `Cloning…`
+button state, because its bar is gated on a `git-progress` event a gh clone never emits). The destination contract is core's
 `prepare_clone_target`, shared by both paths: the caller passes the *full* target path,
 core expands `~`, refuses an existing path, and creates the parent — deriving the folder
 name from the URL/`owner-name` is the UI's job, so `CloneStore` ports the Tauri dialog's
@@ -739,9 +751,9 @@ This is what keeps polling unobtrusive: a 2 s status refresh never silently re-s
 
 `MainLayout.svelte` owns two intervals plus the tiered sync scheduler:
 
-- **Status poll** — every 2000 ms. Runs `get_status` silently + `get_head_sha`. If the HEAD SHA changed, the commit log is refreshed in place keeping the same loaded count so the user doesn't lose scroll position. Each run also pushes the active repo's ahead/behind + dirty flag into the `repoSync` store (via `setRepoSync`) so the picker badges and dot for the open repo stay live without a dedicated fetch. An in-flight guard skips a tick while the previous cycle is still running (cycles can outlive the interval when the repo's disk is busy), and the poll pauses entirely while `activeNetworkOp` is set.
-- **Auto-fetch** — every `fetch_interval_ms` (default 30 000). Skipped if the user is currently typing in an input/textarea, the window is hidden, or a network op is in flight. Calls `fetchActiveRemote` (`git fetch --prune --recurse-submodules=on-demand` against the first remote) then a silent `get_status`. `fetchActiveRemote` self-skips when offline / backing off and reports its outcome to the connectivity breaker (see *Network resilience*).
-- **Tiered repo-sync scheduler** ([repoSyncScheduler.ts](apps/tauri-app/src/lib/services/repoSyncScheduler.ts)) — three intervals (2 / 5 / 10 min) plus staggered startup kicks. Each tick slices the `recentRepos` list (active excluded) into tiers — next 4, next 5, next 10 — and refreshes each via `repo_sync_status` sequentially. Tier syncs are tagged `background`, so while offline / backing off each `syncRepo` consults the breaker and downgrades to a **fetch-less local recompute** instead of grinding through dead fetches — the network goes quiet but the dirty dot keeps tracking local edits, since it needs no remote. A tier bails between repos while a user transfer runs so badge fetches never steal its bandwidth. The tiers cover only the ~19 most recent repos, so the dropdown additionally calls `syncVisibleRepos` whenever its list is on screen: a sequential fetch-less sweep that always fills rows with no cached entry and, at most once per 30 s, re-checks the whole visible list. Started in `initialize` (after `hydrateReposState` resolves, so recents are seeded) and stopped on unmount.
+- **Status poll** — every 2000 ms. Runs `get_status` silently, then a second `get_head_sha`. That second call is redundant: porcelain v2 emits the HEAD OID as `# branch.oid`, so `RepoStatus.head_sha` is already filled by the first call, and comparing it costs no subprocess (this is exactly what the native poll does). If the HEAD SHA changed, the commit log is refreshed in place keeping the same loaded count so the user doesn't lose scroll position. Each run also pushes the active repo's ahead/behind + dirty flag into the `repoSync` store (via `setRepoSync`) so the picker badges and dot for the open repo stay live without a dedicated fetch. An in-flight guard skips a tick while the previous cycle is still running (cycles can outlive the interval when the repo's disk is busy), and the poll pauses entirely while `activeNetworkOp` is set.
+- **Auto-fetch** — every `fetch_interval_ms` (default 30 000). Skipped if the user is currently typing in an input/textarea or a network op is in flight; there is no visibility term, so a hidden window keeps fetching at whatever cadence the host WebView's timer throttling allows. Calls `fetchActiveRemote` (`git fetch --prune --recurse-submodules=on-demand` against the first remote) then a silent `get_status`. `fetchActiveRemote` self-skips when offline / backing off and reports its outcome to the connectivity breaker (see *Network resilience*).
+- **Tiered repo-sync scheduler** ([repoSyncScheduler.ts](apps/tauri-app/src/lib/services/repoSyncScheduler.ts)) — three intervals (2 / 5 / 10 min) plus staggered startup kicks. Each tick slices the `recentRepos` list (active excluded) into tiers — next 4, next 5, next 10 — and refreshes each via `repo_sync_status` sequentially *within* its tier. The three tiers do not coordinate: they are independent `setInterval`s with no shared lock, so on a common multiple (every 10 min) all three walk their lists at once. Tier syncs are tagged `background`, so while offline / backing off each `syncRepo` consults the breaker and downgrades to a **fetch-less local recompute** instead of grinding through dead fetches — the network goes quiet but the dirty dot keeps tracking local edits, since it needs no remote. A tier bails between repos while a user transfer runs so badge fetches never steal its bandwidth. The tiers cover only the ~19 most recent repos, so the dropdown additionally calls `syncVisibleRepos` whenever its list is on screen: a sequential fetch-less sweep that always fills rows with no cached entry and, at most once per 30 s, re-checks the whole visible list. Started in `initialize` (after `hydrateReposState` resolves, so recents are seeded) and stopped on unmount.
 
 On regaining focus (`window` `focus`) or visibility (`visibilitychange`), `MainLayout` runs a one-shot **resync** — `fetchActiveRemote` (so a moved upstream surfaces immediately, unlike before), silent `get_status`, HEAD poll, a *forced* re-fetch of the diff for the file open in the changes pane (`loadDiffForFile(file, { force: true })`), and `repoSyncScheduler.refocusSync()` (the throttled top-tier refresh). A `resyncing` guard collapses the focus+visibility double-fire (common under tiling WMs) into a single run. All listeners, intervals, and scheduler timers clear on unmount.
 
@@ -866,7 +878,7 @@ Both providers run with a 120 s timeout (`DEFAULT_TIMEOUT_SECS`). Diff caps: 20 
 1. Opens a PTY at 24×80 via `portable-pty`.
 2. Resolves the shell via `shell::resolve(shell_id)` — see *Shell discovery* below.
 3. Spawns it with cwd = repo path, adding only `TERM=xterm-256color`, `COLORTERM=truecolor`, and (Git Bash only) `CHERE_INVOKING=1`.
-4. Stores the session, then spawns a reader thread that loops on `read()`, feeds bytes through a `Utf8Decoder`, and emits `terminal-output-<pid>` events. On EOF the reader removes the session, **reaps the child with `child.wait()`** — safe to block there: post-EOF the child is already dead (or its status was cached by a kill's internal `try_wait`), and the session is out of the map so nothing else can want its mutex — and emits `terminal-closed-<pid>` carrying a `TerminalExit { exit_code, signal }` payload. Both clients key off it VS Code-style: a clean exit closes the panel as before; a non-zero code or a fatal signal keeps the dead terminal on screen with `[Process exited with code N]`, so a shell that dies instantly (a broken `.zshrc`) no longer flashes its error away. The wait is also what stops each session leaving a zombie behind, which the old drop-without-wait teardown did.
+4. Stores the session, then spawns a reader thread that loops on `read()`, feeds bytes through a `Utf8Decoder`, and emits `terminal-output-<pid>` events. On EOF the reader removes the session, **reaps the child with `child.wait()`** — safe to block there: post-EOF the child is already dead (or its status was cached by a kill's internal `try_wait`), and the session is out of the map so nothing else can want its mutex — and emits `terminal-closed-<pid>` carrying a `TerminalExit { exit_code, signal }` payload. Both clients key off it VS Code-style: a clean exit closes the panel as before; a non-zero code or a fatal signal keeps the dead terminal on screen with `[Process exited with code N]` rather than flashing it away. There is one delivery gap on the Tauri side: `Terminal.svelte` registers the output and closed listeners **two async IPC round trips after `start_terminal` returns**, and a Tauri event emitted with no listener attached is dropped rather than queued — so a shell that dies inside that window (a broken `.zshrc`) can lose both its error output and its exit notice, leaving the panel to close on nothing. The wait is also what stops each session leaving a zombie behind, which the old drop-without-wait teardown did.
 
 It returns `StartedTerminal { pid, shell_id, shell_label }` — the label is resolved backend-side because the stored preference may name an uninstalled shell, and the panel header shows what actually launched.
 

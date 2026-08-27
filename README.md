@@ -7,7 +7,7 @@ A calm desktop Git client built with Tauri 2, Rust, and Svelte 5. Designed to ge
 - **Stage and commit** via a checkbox file list with live unified diffs (native syntect syntax highlighting, optional side-by-side, optional whitespace-hidden). Right-click a file to discard it (never-committed files go to the Trash, not oblivion), add it or its extension to `.gitignore`, copy its path, or hand it to Finder.
 - **AI commit messages** generated from the selected diff via the local `claude` CLI or a self-hosted Ollama instance.
 - **Browse history** with a virtualized commit list, per-commit file diffs, trailers/SHA copy, and checkout of any past commit (detached HEAD). Right-click the last commit to amend it (its message and co-authors reload into the composer) or undo it, keeping its changes.
-- **Manage branches** (create / switch / delete) and **merge** (regular or squash) with conflict detection.
+- **Manage branches** (create / switch / delete). **Merge** (regular or squash, with conflict reporting and abort) is driven from the macOS client's branch menu; the Tauri build carries the backend and the dialog, but nothing opens it.
 - **Push / pull** with ahead-behind badges, live transfer progress (an in-button progress fill plus git's own `Writing objects… MiB/s` line in the header), and force-push-with-lease (offered only when the branch has diverged) — or **publish a remote-less repo to GitHub** in one click via the GitHub CLI.
 - **Embedded terminal** docked under the diff pane, running the user's `$SHELL` in the repo directory.
 - **Auto-fetch** + 2 s status polling so the UI stays in sync with anything the user does in another terminal.
@@ -77,9 +77,7 @@ live transfer progress, publish-branch first push, force-push-with-lease, and on
 publish of a remote-less repo to GitHub, plus auto-fetch, 2 s status polling, and resync
 on app re-activation) → history → an embedded terminal (SwiftTerm, ⌃` to toggle, fed by
 the same core PTY as the Tauri client, staying open with the exit code when the shell
-dies) → cloning (your GitHub repos via `gh` or any URL, with live progress) → pull
-requests (list with CI checks, create, checkout — optional, and a tab the Tauri client
-doesn't have; it hides for remote-less repos and behind a Settings toggle) —
+dies) → cloning (your GitHub repos via `gh` or any URL, with live progress) —
 with a toolbar repo switcher (discovered + recent repos, dirty / pull / push indicators
 per row) that restores the last opened repo at launch, and a native Settings window (⌘,)
 editing the same shared config. Every Tauri flow is now ported. Building it also needs Xcode's Metal Toolchain component
@@ -88,7 +86,7 @@ editing the same shared config. Every Tauri flow is now ported. Building it also
 The pre-monorepo design is preserved on the `legacy/classic-design` branch (== tag `v0.1.32`);
 recall it with `git worktree add ../leogit-classic legacy/classic-design`.
 
-See [DESIGN.md](DESIGN.md) for user-facing features and flows, [TECHNICAL.md](TECHNICAL.md) for architecture, [STYLE.md](STYLE.md) for the visual design language, [FRONTEND.md](FRONTEND.md) for the frontend contract shared by the Tauri and (planned) SwiftUI clients, and [ROADMAP.md](ROADMAP.md) for what's next.
+See [DESIGN.md](DESIGN.md) for user-facing features and flows, [TECHNICAL.md](TECHNICAL.md) for architecture, [STYLE.md](STYLE.md) for the visual design language, [FRONTEND.md](FRONTEND.md) for the frontend contract shared by the Tauri and SwiftUI clients, and [ROADMAP.md](ROADMAP.md) for what's next.
 
 ## License
 
