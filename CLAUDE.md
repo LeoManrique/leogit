@@ -4,20 +4,19 @@
 
 Constantly update these documents without repeating information between them.
 
-- Update `./STYLE.md` after significantly changing the frontend style. Remove obsolete information.
-- Update `./DESIGN.md` after completing any functional design feature or big change. Remove obsolete information.
-- Update `./TECHNICAL.md` after changing any technical architecture or implementation detail. Remove obsolete information.
+- Update `./STYLE.md` after significantly changing the frontend style. Remove stale information.
+- Update `./DESIGN.md` after completing any functional design feature or big change. Remove stale information.
+- Update `./TECHNICAL.md` after changing any technical architecture or implementation detail. Remove stale information.
 - Update `./ROADMAP.md` after completing any point mentioned there. Also add new features that come up while developing.
-- Update `./README.md` after completing some change that affects the escense of the project. Keep it concise and remove obsolete information.
+- Update `./README.md` after completing some change that affects the escense of the project. Keep it concise and remove stale information.
 
-"Remove obsolete information" means rewrite: these documents describe the current
+"Remove stale information" means rewrite: these documents describe the current
 state only, as if older behavior never existed. Never append retirement or
 supersede notes ("since superseded", "formerly", "was removed", "used to"), and
 never leave a stale claim standing next to its correction — delete the claim and
 say only what is true now. When an obsolete passage carried a constraint worth
 keeping, restate the constraint in present tense ("deliberately does not X,
-because…"). History and decision records belong in git and in `docs/plans/`
-as-built records — those keep their amendment notes; the living docs do not.
+because…").
 ROADMAP's checked entries log what each completed chunk did at the time and may
 be contradicted by later entries; that is fine — but never patch one with a note.
 
@@ -60,21 +59,6 @@ Before making non-trivial changes in this repo to Swift UI app, pull current doc
   1. Identify the precise type/function you're using
   2. Fetch its current docs before writing code that depends on its signature or behavior.
 
-Skip the lookup only for trivial edits (renames, comment-only changes, etc.).
+Skip the lookup only for trivial edits (small logic changes, renames, comment-only changes, etc.).
 
 Suggest to upgrade libraries to user when available. Wait for their approval to proceed with the upgrade.
-
-## English tutor
-
-The user is not a native English speaker. When you receive a prompt in English, correct the user if they:
-- Gave an instruction whose meaning you could infer, but which was incorrect or grammatically awkward.
-- Used an incorrect grammar structure.
-- Made common English mistakes.
-
-Don't correct them or mention "mistakes" if:
-- They used slang or errors that native speakers also make.
-- The mistake they made was very likely a typo.
-
-Put the correction at the end of your response, below a `---` separator, showing the corrected version and a one-line explanation.
-Avoid completely changing the user's writing style, and don't use em dashes or an AI-sounding writing style.
-Don't mention anything if there are no mistakes.
