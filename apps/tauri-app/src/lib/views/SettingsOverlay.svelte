@@ -1,5 +1,11 @@
 <script lang="ts">
-  import { configApi, terminalApi, type Config, type ShellOption } from '$lib/api/commands'
+  import {
+    configApi,
+    terminalApi,
+    type Config,
+    type ConfigBounds,
+    type ShellOption,
+  } from '$lib/api/commands'
   import { refreshConfig } from '$lib/stores/config'
 
   interface Props {
@@ -22,34 +28,22 @@
   let autoShellLabel = $derived(shells[0]?.label ?? '')
 
   /**
-   * Bounds for the numeric fields, matching the native client's
-   * `SettingsStore` ranges. The `min`/`max` attributes on `<input
-   * type=number>` are advisory only — typing 999 or clearing the field both
-   * pass straight through, and Svelte's numeric binding turns an emptied
-   * field into `null`, which used to reach the backend and fail with a raw
-   * serde error the user couldn't escape without refilling the field. Every
-   * value is clamped on the way out, and the clamped value is written back
-   * into the form so the correction is visible rather than silent.
+   * Bounds for the numeric fields, read from core — the same declaration the
+   * writer clamps against, rather than a third copy of these numbers in a
+   * third unit. The `min`/`max` attributes on `<input type=number>` are
+   * advisory only: typing 999 or clearing the field both pass straight
+   * through, and Svelte's numeric binding turns an emptied field into `null`.
+   * Core clamps and normalizes on write and hands back the corrected config,
+   * which is written straight back into the form so the correction is visible
+   * rather than silent.
    */
-  const BOUNDS = {
-    tabSize: { min: 1, max: 16, fallback: 4 },
-    // Milliseconds on the wire; 5 s–1 h, the native client's range in seconds.
-    fetchIntervalMs: { min: 5_000, max: 3_600_000, fallback: 30_000 },
-    claudeTimeoutSecs: { min: 10, max: 3_600, fallback: 120 },
-    scanDepth: { min: 1, max: 10, fallback: 3 },
-  } as const
-
-  /** The nearest in-range integer, or the default when the field is empty or
-   *  unparseable. */
-  function clamp(value: number | null | undefined, b: { min: number; max: number; fallback: number }): number {
-    if (value === null || value === undefined || !Number.isFinite(value)) return b.fallback
-    return Math.min(Math.max(Math.round(value), b.min), b.max)
-  }
+  let bounds = $state<ConfigBounds | null>(null)
 
   async function loadConfig() {
     try {
-      const [cfg, available] = await Promise.all([
+      const [cfg, limits, available] = await Promise.all([
         configApi.loadConfig(),
+        configApi.configBounds(),
         // Non-fatal: an empty list just leaves the picker with "Automatic".
         terminalApi.listShells().catch((e) => {
           console.warn('[settings] shell discovery failed', e)
@@ -57,6 +51,7 @@
         }),
       ])
       config = cfg
+      bounds = limits
       shells = available
       // A preference whose shell is no longer installed shows as Automatic,
       // matching what the backend would actually launch.
@@ -74,12 +69,30 @@
     isSaving = true
     error = ''
     try {
-      config.terminal_shell = shellChoice || undefined
-      config.tab_size = clamp(config.tab_size, BOUNDS.tabSize)
-      config.fetch_interval_ms = clamp(config.fetch_interval_ms, BOUNDS.fetchIntervalMs)
-      config.claude_timeout_secs = clamp(config.claude_timeout_secs, BOUNDS.claudeTimeoutSecs)
-      config.scan_depth = clamp(config.scan_depth, BOUNDS.scanDepth)
-      await configApi.saveConfig(config)
+      // A patch naming exactly the fields this form owns. The whole-object
+      // write it replaces posted the config as it looked when the dialog
+      // *opened*, reverting whatever the other client had saved since — and
+      // an emptied numeric field reached the backend as `null` and failed
+      // with a raw serde error. Core clamps, normalizes and returns the
+      // result, which goes straight back into the form.
+      config = await configApi.patchConfig({
+        terminal_shell: shellChoice,
+        tab_size: config.tab_size ?? undefined,
+        fetch_interval_ms: config.fetch_interval_ms ?? undefined,
+        scan_depth: config.scan_depth ?? undefined,
+        theme: config.theme,
+        ai_provider: config.ai_provider,
+        auto_fetch: config.auto_fetch,
+        syntax_highlighting: config.syntax_highlighting,
+        scan_paths: config.scan_paths,
+        side_by_side_diff: config.side_by_side_diff,
+        hide_whitespace: config.hide_whitespace,
+        claude_model: config.claude.model ?? '',
+        claude_timeout_secs: config.claude.timeout_secs ?? undefined,
+        ollama_model: config.ollama.model ?? '',
+        ollama_server_url: config.ollama.server_url,
+        ollama_timeout_secs: config.ollama.timeout_secs ?? undefined,
+      })
       await refreshConfig()
       onClose()
     } catch (e) {
@@ -158,8 +171,8 @@
               id="tab-size"
               type="number"
               bind:value={config.tab_size}
-              min={BOUNDS.tabSize.min}
-              max={BOUNDS.tabSize.max}
+              min={bounds?.tab_size.min}
+              max={bounds?.tab_size.max}
             />
           </div>
 
@@ -190,8 +203,8 @@
               id="fetch-interval"
               type="number"
               bind:value={config.fetch_interval_ms}
-              min={BOUNDS.fetchIntervalMs.min}
-              max={BOUNDS.fetchIntervalMs.max}
+              min={bounds?.fetch_interval_ms.min}
+              max={bounds?.fetch_interval_ms.max}
               step="1000"
             />
           </div>
@@ -204,24 +217,54 @@
               <option value="ollama">Ollama</option>
             </select>
           </div>
-          <div class="setting-group">
-            <label for="ai-model">Model (optional)</label>
-            <input id="ai-model" type="text" bind:value={config.ai_model} placeholder="sonnet / tavernari/git-commit-message:latest" />
-          </div>
-          <div class="setting-group">
-            <label for="ollama-url">Ollama server URL</label>
-            <input id="ollama-url" type="text" bind:value={config.ollama_server_url} />
-          </div>
-          <div class="setting-group">
-            <label for="claude-timeout">Claude timeout (s)</label>
-            <input
-              id="claude-timeout"
-              type="number"
-              bind:value={config.claude_timeout_secs}
-              min={BOUNDS.claudeTimeoutSecs.min}
-              max={BOUNDS.claudeTimeoutSecs.max}
-            />
-          </div>
+          <!-- One model field per provider: a single shared one meant a model
+               set for Claude was handed to Ollama, which has never heard of
+               it, so Generate failed with nothing on screen explaining why. -->
+          {#if config.ai_provider === 'ollama'}
+            <div class="setting-group">
+              <label for="ollama-model">Model (optional)</label>
+              <input
+                id="ollama-model"
+                type="text"
+                bind:value={config.ollama.model}
+                placeholder="tavernari/git-commit-message:latest"
+              />
+            </div>
+            <div class="setting-group">
+              <label for="ollama-url">Ollama server URL</label>
+              <input id="ollama-url" type="text" bind:value={config.ollama.server_url} />
+            </div>
+            <div class="setting-group">
+              <label for="ollama-timeout">Ollama timeout (s)</label>
+              <input
+                id="ollama-timeout"
+                type="number"
+                bind:value={config.ollama.timeout_secs}
+                min={bounds?.ai_timeout_secs.min}
+                max={bounds?.ai_timeout_secs.max}
+              />
+            </div>
+          {:else}
+            <div class="setting-group">
+              <label for="claude-model">Model (optional)</label>
+              <input
+                id="claude-model"
+                type="text"
+                bind:value={config.claude.model}
+                placeholder="sonnet"
+              />
+            </div>
+            <div class="setting-group">
+              <label for="claude-timeout">Claude timeout (s)</label>
+              <input
+                id="claude-timeout"
+                type="number"
+                bind:value={config.claude.timeout_secs}
+                min={bounds?.ai_timeout_secs.min}
+                max={bounds?.ai_timeout_secs.max}
+              />
+            </div>
+          {/if}
 
           <h3>Repository discovery</h3>
           <div class="setting-group">
@@ -230,8 +273,8 @@
               id="scan-depth"
               type="number"
               bind:value={config.scan_depth}
-              min={BOUNDS.scanDepth.min}
-              max={BOUNDS.scanDepth.max}
+              min={bounds?.scan_depth.min}
+              max={bounds?.scan_depth.max}
             />
           </div>
           <div class="setting-group">

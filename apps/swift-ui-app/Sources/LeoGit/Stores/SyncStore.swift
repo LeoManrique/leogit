@@ -67,8 +67,10 @@ final class SyncStore {
     /// without touching the working tree.
     func fetch(repoPath: String) async -> String? {
         await run(.fetch) {
-            let remote = try await GitBridge.remoteName(in: repoPath)
-            try await GitBridge.fetchRemote(in: repoPath, remote: remote)
+            guard let remote = try await GitBridge.remoteName(in: repoPath) else {
+                throw GitError.Failed(message: "This repository has no remote to fetch from.")
+            }
+            try await GitBridge.fetchRemote(in: repoPath, remote: remote, background: false)
         }
     }
 
@@ -87,14 +89,24 @@ final class SyncStore {
     /// early without `recordResult` when `get_remote` fails.)
     func silentFetch(repoPath: String) async -> Bool? {
         guard activeOperation == nil else { return nil }
+        // `try?` flattens the throw and the "no remote" answer into one `nil`,
+        // which is right here: both mean no fetch was attempted, and neither
+        // says anything about the network.
         guard let remote = try? await GitBridge.remoteName(in: repoPath) else { return nil }
-        return (try? await GitBridge.fetchRemote(in: repoPath, remote: remote)) != nil
+        // Nobody is waiting on this one, so it runs on the background budget:
+        // an unreachable remote gives up in 12 s instead of holding the single
+        // network slot — and every other repo's refresh behind it — for ten
+        // minutes.
+        return (try? await GitBridge.fetchRemote(in: repoPath, remote: remote, background: true))
+            != nil
     }
 
     /// `git pull --ff` from the repository's remote, streaming progress.
     func pull(repoPath: String) async -> String? {
         await run(.pull) {
-            let remote = try await GitBridge.remoteName(in: repoPath)
+            guard let remote = try await GitBridge.remoteName(in: repoPath) else {
+                throw GitError.Failed(message: "This repository has no remote to pull from.")
+            }
             try await GitBridge.pullRemote(
                 in: repoPath,
                 remote: remote,
@@ -113,7 +125,12 @@ final class SyncStore {
         forceWithLease: Bool = false
     ) async -> String? {
         await run(.push) {
-            let remote = try await GitBridge.remoteName(in: repoPath)
+            // Unreachable through the UI — the ladder offers Publish, not
+            // Push, for a repo with no remote — but saying so beats inventing
+            // a remote name and letting git fail with something less clear.
+            guard let remote = try await GitBridge.remoteName(in: repoPath) else {
+                throw GitError.Failed(message: "This repository has no remote to push to.")
+            }
             try await GitBridge.pushRemote(
                 in: repoPath,
                 remote: remote,

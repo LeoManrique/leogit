@@ -783,7 +783,7 @@ mod tests {
             },
             lines: vec![
                 DiffLine {
-                    text: "@@ -1 +1,2 @@".into(),
+                    text: Some("@@ -1 +1,2 @@".into()),
                     content: "@@ -1 +1,2 @@".into(),
                     line_type: LineType::Hunk,
                     old_line_no: None,
@@ -791,7 +791,7 @@ mod tests {
                     intra_line_diff: None,
                 },
                 DiffLine {
-                    text: "+fn main() {}".into(),
+                    text: None,
                     content: "fn main() {}".into(),
                     line_type: LineType::Add,
                     old_line_no: None,
@@ -799,7 +799,7 @@ mod tests {
                     intra_line_diff: None,
                 },
                 DiffLine {
-                    text: "+let x = \"hi\";".into(),
+                    text: None,
                     content: "let x = \"hi\";".into(),
                     line_type: LineType::Add,
                     old_line_no: None,
@@ -924,9 +924,7 @@ mod tests {
             .output()
             .expect("git diff");
         let raw = String::from_utf8_lossy(&out.stdout).to_string();
-        crate::diff::parse_diff(raw)
-            .expect("diff must parse")
-            .file_diff
+        crate::diff::parse_diff_with(&raw, crate::diff::DiffOptions::default()).file_diff
     }
 
     /// The regression that motivated blob-sourced highlighting: a hunk landing

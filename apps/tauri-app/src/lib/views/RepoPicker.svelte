@@ -1,7 +1,7 @@
 <script lang="ts">
   import { autofocus } from '$lib/actions/autofocus'
   import { nextActiveIndex, scrollIntoViewWhenActive } from '$lib/actions/listNavigation'
-  import { matchRepo } from '$lib/utils/repoSearch'
+  import { reposApi } from '$lib/api/commands'
   import { basename } from '$lib/utils/path'
 
   interface Props {
@@ -19,27 +19,46 @@
 
   let searchInput = $state('')
 
-  /**
-   * Rows to show, best match first — the sort is stable, so equally-matched
-   * repos keep discovery's order. Enter picks the highlighted row, which
-   * starts on the top match, so the ranking is what it acts on.
-   */
-  function filterRepos(query: string): string[] {
-    if (!query.trim()) return repos
-    return repos
-      .flatMap((repo) => {
-        const match = matchRepo(query, repo, [basename(repo)], scannedPaths)
-        return match === null ? [] : [{ repo, match }]
+  /*
+    Rows to show, best match first. Core ranks them — one crossing per
+    keystroke, not one per row — and keeps the input order within a tier, so
+    discovery's order survives filtering. Enter picks the highlighted row,
+    which starts on the top match, so the ranking is what it acts on.
+
+    The rule lives in core because this client and the native one had already
+    drifted on it, including on the very set of labels they searched.
+  */
+  let filteredRepos = $state<string[]>([])
+
+  $effect(() => {
+    const query = searchInput
+    const rows = repos
+    const folders = scannedPaths
+    if (!query.trim()) {
+      filteredRepos = rows
+      return
+    }
+    let cancelled = false
+    reposApi
+      .filterRepos(
+        query,
+        rows.map((path) => ({ path, names: [basename(path)] })),
+        folders
+      )
+      .then((matched) => {
+        if (!cancelled) filteredRepos = matched
       })
-      .sort((a, b) => a.match - b.match)
-      .map((r) => r.repo)
-  }
+      .catch(() => {
+        if (!cancelled) filteredRepos = rows
+      })
+    return () => {
+      cancelled = true
+    }
+  })
 
   function handleSelect(repo: string) {
     onSelect(repo)
   }
-
-  const filteredRepos = $derived(filterRepos(searchInput))
 
   // Keyboard cursor over the filtered list; snaps back to the top match each
   // time the query changes so Enter targets a sensible default.

@@ -3,16 +3,24 @@
 // only drift.
 #![allow(clippy::needless_pass_by_value, clippy::missing_errors_doc)]
 
-use leogit_core::config::{self, Config, ReposState, ReposStatePatch};
+use leogit_core::config::{self, Config, ConfigBounds, ConfigPatch, ReposState, ReposStatePatch};
 
 #[tauri::command]
 pub fn load_config() -> Result<Config, String> {
     config::load_config()
 }
 
+/// The range every numeric setting is clamped to — the form's `min`/`max`,
+/// read from the same declaration that enforces them.
 #[tauri::command]
-pub fn save_config(cfg: Config) -> Result<(), String> {
-    config::save_config(cfg)
+#[must_use]
+pub fn config_bounds() -> ConfigBounds {
+    config::config_bounds()
+}
+
+#[tauri::command]
+pub fn patch_config(patch: ConfigPatch) -> Result<Config, String> {
+    config::patch_config(patch)
 }
 
 #[tauri::command]

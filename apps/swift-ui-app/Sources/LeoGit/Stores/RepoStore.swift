@@ -43,10 +43,13 @@ final class RepoStore {
     private(set) var hasMoreHistory = true
     private var isLoadingMoreHistory = false
 
-    /// Whether a merge is in progress (`MERGE_HEAD` exists). Refreshed with
-    /// status, like the Tauri client folds `is_merging` into its poll; drives
-    /// the subtitle badge and the branch menu's Abort Merge item.
-    private(set) var isMerging = false
+    /// Whether a merge is in progress (`MERGE_HEAD` exists) — drives the
+    /// subtitle badge and the branch menu's Abort Merge item.
+    ///
+    /// Read straight off the status rather than asked for separately: every
+    /// refresh path needs it, one of them used to forget, and core answers it
+    /// from a file check that costs the poll nothing.
+    var isMerging: Bool { status?.merging ?? false }
 
     /// One meaning, exactly: *the working tree may differ from what any
     /// derived view shows — re-derive if you care.* Bumped when the status
@@ -201,7 +204,6 @@ final class RepoStore {
         if statusChanged || forceDiffReload {
             workingTreeEpoch += 1
         }
-        isMerging = (try? await GitBridge.mergeInProgress(in: repoPath)) ?? false
         if headMoved {
             let limit = currentHistoryLimit
             if let newCommits = try? await GitBridge.log(of: repoPath, limit: limit) {
@@ -249,7 +251,6 @@ final class RepoStore {
     private func loadRepoData(_ path: String, historyLimit: Int32) async {
         async let statusResult = GitBridge.status(of: path)
         async let logResult = GitBridge.log(of: path, limit: historyLimit)
-        async let mergingResult = GitBridge.mergeInProgress(in: path)
 
         do {
             let (newStatus, newCommits) = try await (statusResult, logResult)
@@ -268,8 +269,5 @@ final class RepoStore {
         // be a different repository: carrying it over would let two failures on
         // the previous repo plus one here raise a banner about this one.
         quietFailureStreak = 0
-        // Best-effort, like the Tauri client's poll: failure reads as "not
-        // merging" rather than an error.
-        isMerging = (try? await mergingResult) ?? false
     }
 }

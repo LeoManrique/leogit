@@ -14,7 +14,13 @@ pub enum LineType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiffLine {
-    pub text: String,
+    /// The raw patch line, prefix included — but only where something actually
+    /// reads it: a `Hunk` header (`@@ -1,3 +1,4 @@`) and a `NoNewline` marker,
+    /// whose whole meaning *is* their text. For every other row it duplicated
+    /// `content` byte for byte, once per line of every diff, in both clients'
+    /// memory and across both wires; the prefix that made it differ is exactly
+    /// what a viewer draws from `line_type` instead.
+    pub text: Option<String>,
     pub content: String,
     pub line_type: LineType,
     pub old_line_no: Option<i32>,
@@ -100,38 +106,278 @@ pub struct SbsPair {
     pub is_hunk_header: bool,
 }
 
-/// Everything the viewer needs from one `parse_diff` round trip. `file_diff`
-/// stays a lean, standalone struct because the frontend round-trips it back
-/// into `highlight_diff` / `generate_patch` — the derived render artifacts
-/// (per-line HTML, side-by-side pairing, +/- totals) ride alongside instead of
-/// on it so they're never echoed back over IPC.
+/// Why a diff has no lines to show.
+///
+/// "Nothing rendered" used to be a bare `None`, which left every viewer to
+/// invent a caption covering three unrelated situations at once. Naming them
+/// lets each one say what actually happened — and the whitespace case is common
+/// enough to matter, since hide-whitespace is a setting people leave on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EmptyDiffReason {
+    /// Git reported no difference at all — the file matches its committed
+    /// state. Reached by selecting a row whose change landed elsewhere.
+    NoChanges,
+    /// Every difference is whitespace, and whitespace is being ignored. The
+    /// diff *is* there; the current setting is hiding it.
+    WhitespaceOnly,
+    /// A file header with no hunks: a mode change, or a pure rename. Something
+    /// changed about the file, just not its contents.
+    NoTextualChanges,
+}
+
+/// Which size limit withheld a diff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DiffSizeReason {
+    /// The whole patch is larger than a viewer renders comfortably.
+    TotalBytes,
+    /// At least one line is longer than a viewer wraps gracefully — the
+    /// minified-bundle and base64-blob case, which is slow at a size the byte
+    /// total alone would wave through.
+    LineLength,
+}
+
+/// A diff too large to render eagerly, and the measurements that say so.
+///
+/// Neither client had any guard, so a pathological diff was a hang with no
+/// explanation. The thresholds live here rather than in either client so the
+/// two can't disagree about what "too large" means, and the viewer keeps a
+/// "show it anyway" escape — this withholds a diff, it never refuses one.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct DiffSizeGuard {
+    pub reason: DiffSizeReason,
+    /// Size of the raw patch in bytes — what the message quotes.
+    pub bytes: u64,
+    /// Longest single line, in bytes.
+    pub longest_line: u64,
+}
+
+/// Patch size past which the viewer asks before rendering. GitHub Desktop's
+/// "reasonable size" bar, which a diff of this size stops being.
+const MAX_REASONABLE_DIFF_BYTES: u64 = 4_194_304;
+
+/// Single-line length past which the viewer asks before rendering.
+const MAX_REASONABLE_LINE_BYTES: u64 = 5_000;
+
+/// What the caller wants built alongside the parse.
+///
+/// The parse is shared; the render artifacts are not. A `WebView` host paints
+/// from `html` on the first frame and pairs rows from `sbs_pairs` in the split
+/// layout; the native host renders straight from the line model and would only
+/// pay to build, marshal and drop both. Asking makes that explicit instead of
+/// leaving one host to throw the work away at the bridge.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct DiffOptions {
+    /// Build the phase-1 HTML array.
+    pub html: bool,
+    /// Build the side-by-side row pairing.
+    pub side_by_side: bool,
+    /// Parse and render past the size guard — the viewer's "Show diff anyway".
+    pub show_anyway: bool,
+}
+
+impl Default for DiffOptions {
+    /// The line-model-only shape: parse, no render artifacts, guard active.
+    fn default() -> Self {
+        Self {
+            html: false,
+            side_by_side: false,
+            show_anyway: false,
+        }
+    }
+}
+
+/// Everything the viewer needs from one round trip. `file_diff` stays a lean,
+/// standalone struct because the frontend round-trips it back into
+/// `highlight_diff` / `generate_patch` — the derived render artifacts (per-line
+/// HTML, side-by-side pairing, +/- totals) ride alongside instead of on it so
+/// they're never echoed back over IPC.
 #[derive(Debug, Clone, Serialize)]
 pub struct ParsedDiff {
     pub file_diff: FileDiff,
     /// Phase-1 HTML per flattened line: plain escaped text + intra-line
     /// backplate, ready for `{@html}` the same frame the diff mounts.
     /// `highlight_diff` later replaces the whole array with tokenized spans.
+    /// Empty unless [`DiffOptions::html`] asked for it.
     pub html: Vec<String>,
-    /// Precomputed rows for the side-by-side layout.
+    /// Precomputed rows for the side-by-side layout. Empty unless
+    /// [`DiffOptions::side_by_side`] asked for it.
     pub sbs_pairs: Vec<SbsPair>,
     /// Added-line total for the header badge (0 for binary diffs).
     pub additions: u32,
     /// Deleted-line total for the header badge (0 for binary diffs).
     pub deletions: u32,
+    /// Set when there are no lines to show, and why. `file_diff` is then an
+    /// empty shell — the viewer renders the reason, not the diff.
+    pub empty_reason: Option<EmptyDiffReason>,
+    /// Set when the diff was withheld rather than parsed. Re-request with
+    /// [`DiffOptions::show_anyway`] to get it.
+    pub size_guard: Option<DiffSizeGuard>,
 }
 
-pub fn parse_diff(raw: String) -> Option<ParsedDiff> {
-    let file_diff = parse_file_diff(&raw)?;
-    let html = super::render::plain_html(&file_diff);
-    let sbs_pairs = build_sbs_pairs(&file_diff.hunks);
+impl ParsedDiff {
+    /// The "nothing to show" shape: a reason and an empty diff.
+    fn empty(reason: EmptyDiffReason) -> Self {
+        Self {
+            file_diff: FileDiff {
+                old_path: String::new(),
+                new_path: String::new(),
+                file_header: String::new(),
+                hunks: Vec::new(),
+                is_binary: false,
+            },
+            html: Vec::new(),
+            sbs_pairs: Vec::new(),
+            additions: 0,
+            deletions: 0,
+            empty_reason: Some(reason),
+            size_guard: None,
+        }
+    }
+}
+
+/// Measure a raw patch against the size guard. `None` means it's fine to
+/// render.
+fn size_guard_for(raw: &str) -> Option<DiffSizeGuard> {
+    let bytes = raw.len() as u64;
+    let longest_line = raw.split('\n').map(|l| l.len() as u64).max().unwrap_or(0);
+    let reason = if bytes > MAX_REASONABLE_DIFF_BYTES {
+        DiffSizeReason::TotalBytes
+    } else if longest_line > MAX_REASONABLE_LINE_BYTES {
+        DiffSizeReason::LineLength
+    } else {
+        return None;
+    };
+    Some(DiffSizeGuard {
+        reason,
+        bytes,
+        longest_line,
+    })
+}
+
+/// Parse a raw patch, building only the render artifacts `options` asks for.
+///
+/// `empty_reason` distinguishes "git said nothing changed" from "the file
+/// changed but not its text"; the caller adds the whitespace-only case, since
+/// only it knows whether whitespace was being ignored.
+#[must_use]
+pub fn parse_diff_with(raw: &str, options: DiffOptions) -> ParsedDiff {
+    if raw.trim().is_empty() {
+        return ParsedDiff::empty(EmptyDiffReason::NoChanges);
+    }
+    if !options.show_anyway
+        && let Some(guard) = size_guard_for(raw)
+    {
+        let mut withheld = ParsedDiff::empty(EmptyDiffReason::NoChanges);
+        withheld.empty_reason = None;
+        withheld.size_guard = Some(guard);
+        return withheld;
+    }
+    let Some(file_diff) = parse_file_diff(raw) else {
+        // A header parsed but produced no hunks: a mode change or a pure
+        // rename. Something happened to the file; none of it is text.
+        return ParsedDiff::empty(EmptyDiffReason::NoTextualChanges);
+    };
+    let html = if options.html {
+        super::render::plain_html(&file_diff)
+    } else {
+        Vec::new()
+    };
+    let sbs_pairs = if options.side_by_side {
+        build_sbs_pairs(&file_diff.hunks)
+    } else {
+        Vec::new()
+    };
     let (additions, deletions) = count_changes(&file_diff.hunks);
-    Some(ParsedDiff {
+    ParsedDiff {
         file_diff,
         html,
         sbs_pairs,
         additions,
         deletions,
-    })
+        empty_reason: None,
+        size_guard: None,
+    }
+}
+
+/// Read a working-tree file's diff and parse it in one call.
+///
+/// Fusing the read and the parse removes a full round trip per file selection
+/// from each client, and gives the *whitespace-only* answer somewhere to be
+/// computed: when hide-whitespace produced nothing, the unfiltered diff decides
+/// whether the file is unchanged or merely re-indented — a second `git diff`,
+/// but only on the path where the pane would otherwise be blank.
+///
+/// # Errors
+/// When `git diff` can't run.
+pub fn get_parsed_diff(
+    repo_path: String,
+    file: super::git::FileEntry,
+    hide_whitespace: bool,
+    options: DiffOptions,
+) -> Result<ParsedDiff, String> {
+    let raw = if hide_whitespace {
+        super::git::get_diff_whitespace_ignored(repo_path.clone(), file.clone())?
+    } else {
+        super::git::get_diff(repo_path.clone(), file.clone())?
+    };
+    let parsed = parse_diff_with(&raw, options);
+    if hide_whitespace && parsed.empty_reason.is_some() {
+        // The question is not whether the unfiltered patch is non-empty — a
+        // pure rename's header is non-empty and has no lines either. It is
+        // whether the unfiltered patch has something to *render*: if it does
+        // and the filtered one doesn't, the difference is the whitespace.
+        // A patch big enough to trip the size guard plainly has content, and
+        // leaves `empty_reason` unset, so it answers this without being parsed.
+        let unfiltered = parse_diff_with(
+            &super::git::get_diff(repo_path, file)?,
+            DiffOptions::default(),
+        );
+        if unfiltered.empty_reason.is_none() {
+            return Ok(ParsedDiff::empty(EmptyDiffReason::WhitespaceOnly));
+        }
+    }
+    Ok(parsed)
+}
+
+/// Read one file's diff from a commit and parse it in one call.
+///
+/// An empty `file_path` yields the whole commit's patch, matching
+/// [`super::git::get_commit_diff`].
+///
+/// # Errors
+/// When `git log` can't run or the revision doesn't resolve.
+pub fn get_parsed_commit_diff(
+    repo_path: String,
+    sha: String,
+    file_path: String,
+    options: DiffOptions,
+) -> Result<ParsedDiff, String> {
+    let raw = super::git::get_commit_diff(repo_path, sha, file_path)?;
+    Ok(parse_diff_with(&raw, options))
+}
+
+/// Plain text of a flat line range, for the clipboard.
+///
+/// Rebuilt from the line model rather than scraped off the rendered view, so a
+/// copy can't pick up gutters, `+`/`−` prefixes, side-by-side filler cells or a
+/// viewer's tab expansion — `content` keeps the file's real tabs. `start` is
+/// inclusive, `end` exclusive, indexed the same way as `html` and `sbs_pairs`:
+/// flat across every hunk's `lines`, `@@` headers included. Out-of-range
+/// indices clamp rather than panic; the viewer's selection and the model can
+/// briefly disagree while a new diff loads.
+#[must_use]
+pub fn copy_text(file_diff: &FileDiff, start: usize, end: usize) -> String {
+    file_diff
+        .hunks
+        .iter()
+        .flat_map(|h| &h.lines)
+        .skip(start)
+        .take(end.saturating_sub(start))
+        // A hunk header and a no-newline marker *are* their text; every other
+        // row's content is the file's own line, prefix already stripped.
+        .map(|l| l.text.as_ref().unwrap_or(&l.content).as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn parse_file_diff(raw: &str) -> Option<FileDiff> {
@@ -171,7 +417,7 @@ fn parse_file_diff(raw: &str) -> Option<FileDiff> {
                     new_line_no = header.new_start;
 
                     let header_diff_line = DiffLine {
-                        text: line.to_string(),
+                        text: Some(line.to_string()),
                         content: line.to_string(),
                         line_type: LineType::Hunk,
                         old_line_no: None,
@@ -234,7 +480,7 @@ fn parse_file_diff(raw: &str) -> Option<FileDiff> {
             // `String::split('\n')` collapses a blank line into "", but in real
             // unified diff format it would be " ".
             hunk.lines.push(DiffLine {
-                text: " ".to_string(),
+                text: None,
                 content: String::new(),
                 line_type: LineType::Context,
                 old_line_no: Some(old_line_no),
@@ -252,7 +498,7 @@ fn parse_file_diff(raw: &str) -> Option<FileDiff> {
             b'+' => {
                 let content = line[1..].to_string();
                 hunk.lines.push(DiffLine {
-                    text: line.to_string(),
+                    text: None,
                     content,
                     line_type: LineType::Add,
                     old_line_no: None,
@@ -264,7 +510,7 @@ fn parse_file_diff(raw: &str) -> Option<FileDiff> {
             b'-' => {
                 let content = line[1..].to_string();
                 hunk.lines.push(DiffLine {
-                    text: line.to_string(),
+                    text: None,
                     content,
                     line_type: LineType::Delete,
                     old_line_no: Some(old_line_no),
@@ -277,7 +523,7 @@ fn parse_file_diff(raw: &str) -> Option<FileDiff> {
                 // "\ No newline at end of file" — belongs inside the current hunk,
                 // attached to whichever line it follows. Patch builder echoes it back.
                 hunk.lines.push(DiffLine {
-                    text: line.to_string(),
+                    text: Some(line.to_string()),
                     content: line.to_string(),
                     line_type: LineType::NoNewline,
                     old_line_no: None,
@@ -293,7 +539,7 @@ fn parse_file_diff(raw: &str) -> Option<FileDiff> {
                     line.to_string()
                 };
                 hunk.lines.push(DiffLine {
-                    text: line.to_string(),
+                    text: None,
                     content,
                     line_type: LineType::Context,
                     old_line_no: Some(old_line_no),
@@ -720,7 +966,7 @@ fn build_patch(
                 }
                 LineType::NoNewline => {
                     // Always echo the no-newline marker.
-                    out_lines.push(line.text.clone());
+                    out_lines.push(line.text.clone().unwrap_or_else(|| line.content.clone()));
                 }
             }
         }
@@ -838,8 +1084,17 @@ fn apply_patch(
 mod tests {
     use super::*;
 
+    /// Parse the way a `WebView` host does — every render artifact built —
+    /// since these tests assert on `html` and `sbs_pairs`.
     fn parse(raw: &str) -> ParsedDiff {
-        parse_diff(raw.to_string()).expect("diff should parse")
+        parse_diff_with(
+            raw,
+            DiffOptions {
+                html: true,
+                side_by_side: true,
+                show_anyway: false,
+            },
+        )
     }
 
     const HEADER: &str = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n";
@@ -901,5 +1156,267 @@ mod tests {
             parsed.html[2],
             "if <span class=\"diff-intra-add\">b</span> &lt; 1 {}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Render options (H-8)
+    // -----------------------------------------------------------------------
+
+    /// The parse is shared; the render artifacts are not. A host that renders
+    /// from the line model must not pay to build HTML and pairings it drops.
+    #[test]
+    fn render_artifacts_are_built_only_when_asked_for() {
+        let raw = format!("{HEADER}@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n");
+
+        let lean = parse_diff_with(&raw, DiffOptions::default());
+        assert!(lean.html.is_empty(), "no HTML unless asked");
+        assert!(lean.sbs_pairs.is_empty(), "no pairs unless asked");
+        assert_eq!(lean.additions, 1, "the counts are never optional");
+        assert_eq!(lean.deletions, 1);
+        assert!(!lean.file_diff.hunks.is_empty(), "the parse still happened");
+
+        let full = parse(&raw);
+        assert!(!full.html.is_empty());
+        assert!(!full.sbs_pairs.is_empty());
+        // Same parse either way — options change what is *derived* from it.
+        assert_eq!(full.additions, lean.additions);
+        assert_eq!(
+            full.file_diff.hunks[0].lines.len(),
+            lean.file_diff.hunks[0].lines.len()
+        );
+    }
+
+    /// `text` exists only where something reads it. Every other row carries its
+    /// content once instead of twice.
+    #[test]
+    fn line_text_is_kept_only_for_hunk_headers_and_no_newline_markers() {
+        let raw =
+            format!("{HEADER}@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n\\ No newline at end of file\n");
+        let parsed = parse_diff_with(&raw, DiffOptions::default());
+        let lines: Vec<&DiffLine> = parsed
+            .file_diff
+            .hunks
+            .iter()
+            .flat_map(|h| &h.lines)
+            .collect();
+
+        for line in &lines {
+            match line.line_type {
+                LineType::Hunk | LineType::NoNewline => assert!(
+                    line.text.is_some(),
+                    "{:?} row keeps its raw text",
+                    line.line_type
+                ),
+                _ => assert!(
+                    line.text.is_none(),
+                    "{:?} row drops the duplicate of `content`",
+                    line.line_type
+                ),
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Empty-parse reasons (H-9)
+    // -----------------------------------------------------------------------
+
+    /// An empty patch and a header-only patch are different events and get
+    /// different answers; a real diff gets neither.
+    #[test]
+    fn empty_reason_separates_no_changes_from_no_textual_changes() {
+        assert_eq!(
+            parse_diff_with("", DiffOptions::default()).empty_reason,
+            Some(EmptyDiffReason::NoChanges)
+        );
+        assert_eq!(
+            parse_diff_with("   \n \n", DiffOptions::default()).empty_reason,
+            Some(EmptyDiffReason::NoChanges)
+        );
+
+        // A pure rename: a full header, no hunks. The file changed; its text
+        // did not — which is precisely what the viewer could not say before.
+        let rename = "diff --git a/old.txt b/new.txt\nsimilarity index 100%\n\
+                      rename from old.txt\nrename to new.txt\n";
+        assert_eq!(
+            parse_diff_with(rename, DiffOptions::default()).empty_reason,
+            Some(EmptyDiffReason::NoTextualChanges)
+        );
+
+        let real = format!("{HEADER}@@ -1 +1 @@\n-a\n+b\n");
+        assert_eq!(
+            parse_diff_with(&real, DiffOptions::default()).empty_reason,
+            None
+        );
+    }
+
+    /// A binary diff has no hunks either, but it is not empty — the viewer has
+    /// a stand-in to render, so claiming "no textual changes" would hide it.
+    #[test]
+    fn a_binary_diff_is_not_reported_as_empty() {
+        let raw = "diff --git a/x.png b/x.png\nBinary files a/x.png and b/x.png differ\n";
+        let parsed = parse_diff_with(raw, DiffOptions::default());
+        assert_eq!(parsed.empty_reason, None);
+        assert!(parsed.file_diff.is_binary);
+    }
+
+    // -----------------------------------------------------------------------
+    // Size guard (H-15)
+    // -----------------------------------------------------------------------
+
+    /// One very long line is enough to withhold a diff even when the patch as
+    /// a whole is small — the minified-bundle case, which the byte total alone
+    /// waves through and which is exactly what makes a viewer crawl.
+    #[test]
+    fn size_guard_withholds_a_long_line_and_show_anyway_overrides_it() {
+        let long = "x".repeat(MAX_REASONABLE_LINE_BYTES as usize + 1);
+        let raw = format!("{HEADER}@@ -1 +1 @@\n-a\n+{long}\n");
+
+        let withheld = parse_diff_with(&raw, DiffOptions::default());
+        let guard = withheld.size_guard.expect("guard trips on the long line");
+        assert_eq!(guard.reason, DiffSizeReason::LineLength);
+        assert!(guard.longest_line > MAX_REASONABLE_LINE_BYTES);
+        assert!(withheld.file_diff.hunks.is_empty(), "nothing was parsed");
+        assert_eq!(
+            withheld.empty_reason, None,
+            "withheld is not the same as empty — the viewer offers to show it"
+        );
+
+        let shown = parse_diff_with(
+            &raw,
+            DiffOptions {
+                show_anyway: true,
+                ..DiffOptions::default()
+            },
+        );
+        assert!(shown.size_guard.is_none(), "the escape clears the guard");
+        assert!(!shown.file_diff.hunks.is_empty(), "and the diff parses");
+    }
+
+    /// A total over the byte bar trips the guard for a different reason, so the
+    /// viewer can say which limit it hit.
+    #[test]
+    fn size_guard_reports_the_byte_total_separately() {
+        let filler = "+line of some length here\n".repeat(200_000);
+        let raw = format!("{HEADER}@@ -1 +1,200000 @@\n{filler}");
+        let guard = parse_diff_with(&raw, DiffOptions::default())
+            .size_guard
+            .expect("guard trips on the byte total");
+        assert_eq!(guard.reason, DiffSizeReason::TotalBytes);
+        assert!(guard.bytes > MAX_REASONABLE_DIFF_BYTES);
+    }
+
+    /// An ordinary diff is never withheld.
+    #[test]
+    fn size_guard_leaves_an_ordinary_diff_alone() {
+        let raw = format!("{HEADER}@@ -1 +1 @@\n-a\n+b\n");
+        assert!(
+            parse_diff_with(&raw, DiffOptions::default())
+                .size_guard
+                .is_none()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Clipboard text (H-16)
+    // -----------------------------------------------------------------------
+
+    /// Copy is rebuilt from the model, so it carries the file's own lines —
+    /// no `+`/`-` prefixes, no gutters, and real tabs rather than a viewer's
+    /// expansion of them.
+    #[test]
+    fn copy_text_rebuilds_source_lines_without_prefixes() {
+        let raw = format!("{HEADER}@@ -1,3 +1,3 @@\n ctx\n-\told\n+\tnew\n");
+        let parsed = parse_diff_with(&raw, DiffOptions::default());
+        let flat = parsed.file_diff.hunks[0].lines.len();
+
+        // 0 is the `@@` header; 1..4 are ctx, -old, +new.
+        assert_eq!(
+            copy_text(&parsed.file_diff, 1, 4),
+            "ctx\n\told\n\tnew",
+            "prefixes gone, tabs intact"
+        );
+        // A hunk header is its text — that is what the viewer shows.
+        assert!(copy_text(&parsed.file_diff, 0, 1).starts_with("@@"));
+        // Out-of-range indices clamp instead of panicking: the viewer's
+        // selection and the model can disagree while a new diff loads.
+        assert_eq!(
+            copy_text(&parsed.file_diff, 1, flat + 50),
+            copy_text(&parsed.file_diff, 1, flat)
+        );
+        assert!(copy_text(&parsed.file_diff, flat + 1, flat + 2).is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Fused read + parse (H-8), and the whitespace-only answer it enables
+    // -----------------------------------------------------------------------
+
+    /// A re-indented file with hide-whitespace on renders an empty pane. The
+    /// caption has to say *why*, and only the fused call can find out: the
+    /// unfiltered diff is what separates "unchanged" from "whitespace only".
+    #[test]
+    fn hide_whitespace_reports_a_whitespace_only_change_as_such() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        for args in [
+            ["init", "-q", "."].as_slice(),
+            &["config", "user.email", "test@example.com"],
+            &["config", "user.name", "Test User"],
+            &["config", "commit.gpgsign", "false"],
+        ] {
+            let ok = Command::new("git")
+                .current_dir(repo)
+                .args(args)
+                .status()
+                .expect("spawn git")
+                .success();
+            assert!(ok, "git {args:?} failed");
+        }
+        std::fs::write(repo.join("a.txt"), "fn main() {}\n").expect("write");
+        for args in [["add", "-A"].as_slice(), &["commit", "-q", "-m", "base"]] {
+            Command::new("git")
+                .current_dir(repo)
+                .args(args)
+                .status()
+                .expect("spawn git");
+        }
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+        let status = super::super::git::get_status(repo_path.clone()).expect("status");
+        assert!(status.files.is_empty(), "clean after the commit");
+
+        // Re-indent only.
+        std::fs::write(repo.join("a.txt"), "    fn main() {}\n").expect("rewrite");
+        let file = super::super::git::get_status(repo_path.clone())
+            .expect("status")
+            .files
+            .pop()
+            .expect("the edited file is listed");
+
+        let shown = get_parsed_diff(
+            repo_path.clone(),
+            file.clone(),
+            false,
+            DiffOptions::default(),
+        )
+        .expect("diff with whitespace shown");
+        assert_eq!(shown.empty_reason, None, "the change is visible normally");
+
+        let hidden = get_parsed_diff(
+            repo_path.clone(),
+            file.clone(),
+            true,
+            DiffOptions::default(),
+        )
+        .expect("diff with whitespace hidden");
+        assert_eq!(
+            hidden.empty_reason,
+            Some(EmptyDiffReason::WhitespaceOnly),
+            "an empty pane that names the setting hiding the change"
+        );
+
+        // A genuinely unchanged file must not borrow that caption.
+        std::fs::write(repo.join("a.txt"), "fn main() {}\n").expect("restore");
+        let restored =
+            get_parsed_diff(repo_path, file, true, DiffOptions::default()).expect("diff");
+        assert_eq!(restored.empty_reason, Some(EmptyDiffReason::NoChanges));
     }
 }

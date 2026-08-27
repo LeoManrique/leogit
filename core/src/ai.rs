@@ -9,18 +9,56 @@ pub struct CommitMessage {
     pub description: String,
 }
 
+/// Everything a generate request needs, resolved for one provider.
+///
+/// Built by [`provider_config`] from the user's settings — one implementation,
+/// in core, rather than the two that had drifted (a Rust copy in the native
+/// bridge and a TypeScript copy in the composer) over which config read the
+/// provider came from and whether a base URL was set at all.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiProviderConfig {
     pub provider: String,
     pub model: Option<String>,
-    pub api_key: Option<String>,
     pub base_url: Option<String>,
+    /// How long the request may run before it is abandoned. Carried here
+    /// rather than hardcoded, because a settings control that persists a
+    /// timeout nothing reads is worse than no control at all.
+    pub timeout_secs: u32,
+}
+
+/// Resolve the settings into the knobs the selected provider actually uses.
+#[must_use]
+pub fn provider_config(cfg: &super::config::Config) -> AiProviderConfig {
+    // `normalized` already folded any unrecognized name onto claude and turned
+    // emptied fields into absent ones, so this is a straight read.
+    if cfg.ai_provider == "ollama" {
+        AiProviderConfig {
+            provider: "ollama".to_string(),
+            model: cfg.ollama.model.clone(),
+            base_url: Some(cfg.ollama.server_url.clone()),
+            timeout_secs: cfg.ollama.timeout_secs,
+        }
+    } else {
+        AiProviderConfig {
+            provider: "claude".to_string(),
+            model: cfg.claude.model.clone(),
+            base_url: None,
+            timeout_secs: cfg.claude.timeout_secs,
+        }
+    }
+}
+
+/// Read the settings and resolve them for the selected provider.
+///
+/// # Errors
+/// When the config file can't be read or parsed.
+pub fn load_ai_config() -> Result<AiProviderConfig, String> {
+    Ok(provider_config(&super::config::load_config()?))
 }
 
 // Limits per Go reference
 const CLAUDE_MAX_DIFF: usize = 20_971_520; // 20MB
 const OLLAMA_MAX_DIFF: usize = 52_428_800; // 50MB
-const DEFAULT_TIMEOUT_SECS: u64 = 120;
 // Cap the claude CLI's internal request retries. By default a transient
 // overload (HTTP 529) makes it retry with backoff for *minutes* — far past our
 // timeout, so the user only ever sees "timed out". A small cap fails fast with
@@ -86,7 +124,7 @@ pub async fn check_provider_available(
         "ollama" => {
             let base_url = config
                 .base_url
-                .unwrap_or_else(|| "http://localhost:11434".to_string());
+                .unwrap_or_else(super::config::default_ollama_url);
             let Ok(client) = reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
                 .build()
@@ -148,16 +186,12 @@ async fn generate_claude(diff: &str, config: &AiProviderConfig) -> Result<Commit
         }
     });
 
-    let timed = tokio::time::timeout(
-        Duration::from_secs(DEFAULT_TIMEOUT_SECS),
-        child.wait_with_output(),
-    )
-    .await;
+    let timeout_secs = u64::from(config.timeout_secs);
+    let timed =
+        tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await;
     let Ok(result) = timed else {
         writer.abort();
-        return Err(format!(
-            "Claude CLI timed out after {DEFAULT_TIMEOUT_SECS}s"
-        ));
+        return Err(format!("Claude CLI timed out after {timeout_secs}s"));
     };
     let out = result.map_err(|e| format!("Claude CLI error: {e}"))?;
     let _ = writer.await;
@@ -265,10 +299,11 @@ async fn generate_ollama(diff: &str, config: &AiProviderConfig) -> Result<Commit
         ));
     }
 
+    let fallback_url = super::config::default_ollama_url();
     let base_url = config
         .base_url
         .as_deref()
-        .unwrap_or("http://localhost:11434")
+        .unwrap_or(&fallback_url)
         .trim_end_matches('/');
     let model = config
         .model
@@ -284,7 +319,7 @@ async fn generate_ollama(diff: &str, config: &AiProviderConfig) -> Result<Commit
     });
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(u64::from(config.timeout_secs)))
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 

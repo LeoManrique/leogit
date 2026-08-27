@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { listen } from '@tauri-apps/api/event'
-  import { ghApi, gitApi, type GhRepo, type GitProgressEvent } from '$lib/api/commands'
+  import { ghApi, gitApi, reposApi, type GhRepo, type GitProgressEvent } from '$lib/api/commands'
   import { cloneSortMode, setCloneSortMode } from '$lib/stores/reposState'
   import { autofocus } from '$lib/actions/autofocus'
   import { nextActiveIndex, scrollIntoViewWhenActive } from '$lib/actions/listNavigation'
@@ -34,9 +34,10 @@
     return isCloning
   }
 
-  // Live `git clone --progress` output, streamed from the backend. Only the
-  // URL tab produces it (the GitHub tab clones through `gh`, which reports
-  // nothing) — the bar simply stays hidden until the first event arrives.
+  // Live `git clone --progress` output, streamed from the backend. Both tabs
+  // produce it: `gh repo clone` forwards `--progress` to `git clone`, so the
+  // GitHub tab reports real numbers rather than a spinner over an empty bar.
+  // The bar stays hidden until the first event arrives.
   let cloneProgress = $state<GitProgressEvent | null>(null)
   onMount(() => {
     let unlisten: (() => void) | null = null
@@ -136,36 +137,53 @@
     }
   }
 
-  /** Strip a trailing `.git`/slash and return the final path segment as a folder name. */
-  function repoNameFromUrl(raw: string): string {
-    const trimmed = raw.trim().replace(/\/+$/, '').replace(/\.git$/i, '')
-    if (!trimmed) return ''
-    // owner/repo shorthand → repo
-    if (/^[\w.-]+\/[\w.-]+$/.test(trimmed)) return trimmed.split('/')[1]
-    const m = trimmed.match(/[/:]([\w.-]+?)$/)
-    return m ? m[1] : ''
-  }
+  /*
+    What the dialog is about to clone, as core reads it: the URL to hand git
+    (shorthand expanded), the folder name, and the path it lands at. `null`
+    means there is nothing cloneable — which is also what disables the button,
+    so the preview and the button can't disagree about whether this will work.
 
-  /** Expand `owner/repo` shorthand to a full github.com URL; pass anything else through. */
-  function normalizeUrl(raw: string): string {
-    const trimmed = raw.trim()
-    if (/^[\w.-]+\/[\w.-]+$/.test(trimmed.replace(/\.git$/i, ''))) {
-      return `https://github.com/${trimmed.replace(/\.git$/i, '')}`
+    The rule lives in core because it was written twice and the two copies had
+    already drifted on `.git` shorthand, on whitespace (an untrimmed path
+    created a literal " repo" directory and persisted the poisoned
+    destination), and on a trailing slash — while sharing two shapes both of
+    them enabled Clone for and then failed on.
+  */
+  let target = $state<{ url: string; name: string; path: string } | null>(null)
+
+  $effect(() => {
+    const parent = destDir
+    const activeTab = tab
+    const raw = url
+    const picked = selectedRepo
+    let cancelled = false
+    const resolve = async () => {
+      if (activeTab === 'github') {
+        if (!picked) return null
+        const path = await reposApi.cloneTargetPath(parent, picked.name)
+        return path ? { url: '', name: picked.name, path } : null
+      }
+      const derived = await reposApi.deriveCloneTarget(raw, parent)
+      return derived
+        ? { url: derived.normalized_url, name: derived.repo_name, path: derived.target_path }
+        : null
     }
-    return trimmed
-  }
+    resolve()
+      .then((r) => {
+        if (!cancelled) target = r
+      })
+      .catch(() => {
+        if (!cancelled) target = null
+      })
+    return () => {
+      cancelled = true
+    }
+  })
 
-  // The folder name the clone will create, and the full path it lands at.
-  const repoName = $derived(
-    tab === 'github' ? (selectedRepo?.name ?? '') : repoNameFromUrl(url),
-  )
-  const targetPath = $derived(
-    repoName ? `${destDir.replace(/\/+$/, '')}/${repoName}` : '',
-  )
+  const repoName = $derived(target?.name ?? '')
+  const targetPath = $derived(target?.path ?? '')
 
-  const canClone = $derived(
-    !isCloning && destDir.trim().length > 0 && repoName.length > 0,
-  )
+  const canClone = $derived(!isCloning && target !== null)
 
   // Native folder picker for the destination. Seeds the dialog at the current
   // path (expanding a leading ~, which the OS picker won't understand).
@@ -187,16 +205,20 @@
   }
 
   async function handleClone() {
-    if (!canClone) return
+    if (!canClone || !target) return
     isCloning = true
     cloneError = ''
     cloneProgress = null
-    const parentDir = destDir.replace(/\/+$/, '')
+    // The parent of what the clone actually creates, taken from the derived
+    // path so the remembered destination can't disagree with it. A clone into
+    // the root leaves nothing before the name — the parent is `/`, not `''`,
+    // which would come back as an empty destination next time.
+    const parentDir = target.path.slice(0, -(target.name.length + 1)) || '/'
     try {
       const repoPath =
         tab === 'github' && selectedRepo
-          ? await ghApi.clone(selectedRepo.name_with_owner, targetPath)
-          : await gitApi.cloneRepo(normalizeUrl(url), targetPath)
+          ? await ghApi.clone(selectedRepo.name_with_owner, target.path)
+          : await gitApi.cloneRepo(target.url, target.path)
       onCloned(repoPath, parentDir)
     } catch (e) {
       cloneError = String(e)

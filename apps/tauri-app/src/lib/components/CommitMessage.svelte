@@ -2,7 +2,7 @@
   import { get } from 'svelte/store'
   import { repoState, canCommit } from '$lib/stores/repo'
   import { appState } from '$lib/stores/app'
-  import { gitApi, aiApi, configApi, type AiProviderConfig, type FileEntry } from '$lib/api/commands'
+  import { gitApi, aiApi, configApi, type Config, type FileEntry } from '$lib/api/commands'
   import { config } from '$lib/stores/config'
   import { basename } from '$lib/utils/path'
   import EmbeddedRepoConfirm from './EmbeddedRepoConfirm.svelte'
@@ -143,18 +143,15 @@
 
       const diffStr = await gitApi.getSelectedDiff(repoPath, files)
 
-      let cfg: AiProviderConfig = { provider }
-      try {
-        const fullConfig = await configApi.loadConfig()
-        cfg = {
-          provider,
-          model: fullConfig.ai_model,
-          api_key: fullConfig.ai_api_key,
-          base_url: fullConfig.ollama_server_url,
-        }
-      } catch {}
-
-      const message = await aiApi.generateCommitMessage(diffStr, provider, cfg)
+      // Read fresh per generate, and resolved for the selected provider by
+      // core — so the model and server URL always belong to the provider
+      // about to run. Splicing a picker value over a separately-loaded config
+      // is how the two clients drifted, and how a Claude model reached Ollama.
+      // `setProvider` persists the picker's choice; waiting for that write is
+      // what makes this read reflect it, rather than the value it is replacing.
+      await providerWrite
+      const cfg = await aiApi.loadAiConfig()
+      const message = await aiApi.generateCommitMessage(diffStr, cfg.provider, cfg)
       summary = message.title
       description = message.description
     } catch (err) {
@@ -164,17 +161,30 @@
     }
   }
 
-  // Persist a provider change to the config store (optimistic local update,
-  // then write to disk). Used by the composer's provider dropdown.
+  // Persist a provider change (optimistic local update, then write). A patch
+  // naming only `ai_provider`: the whole-object write this replaces posted the
+  // config as the store had cached it — possibly hours old — and reverted
+  // every field the other client had changed since.
+  /**
+   * The in-flight provider write. Generate awaits it: the picker's `onchange`
+   * doesn't, so clicking Generate immediately after switching would otherwise
+   * read the *previous* provider back off disk while the picker already shows
+   * the new one.
+   */
+  let providerWrite: Promise<unknown> = Promise.resolve()
+
   async function setProvider(next: 'claude' | 'ollama') {
     const cfg = $config
     if (!cfg || cfg.ai_provider === next) return
-    const updated = { ...cfg, ai_provider: next }
-    config.set(updated)
+    config.set({ ...cfg, ai_provider: next })
+    providerWrite = configApi.patchConfig({ ai_provider: next })
     try {
-      await configApi.saveConfig(updated)
+      config.set((await providerWrite) as Config)
     } catch (err) {
       error = `Failed to save provider: ${String(err)}`
+      // Put the picker back where the file still has it, rather than leaving
+      // an optimistic value lying until the next restart.
+      config.set(cfg)
     }
   }
 

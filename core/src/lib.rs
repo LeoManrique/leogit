@@ -25,6 +25,7 @@ pub mod paths;
 pub mod process;
 pub mod progress;
 pub mod render;
+pub mod repos;
 pub mod shell;
 pub mod terminal;
 pub mod update;

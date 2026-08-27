@@ -18,8 +18,12 @@
     gitApi,
     diffApi,
     configApi,
+    WEBVIEW_DIFF_OPTIONS,
     type FileEntry,
     type CommitInfo,
+    type DiffSizeGuard,
+    type DiscardPlan,
+    type EmptyDiffReason,
     type LaunchTarget,
     type ParsedDiff,
   } from '$lib/api/commands'
@@ -223,21 +227,49 @@
   }
 
   /*
-    Whether a parsed diff actually has something to put on screen.
-
-    "Did it parse?" is not the same question. `parse_diff` returns null only for
-    genuinely empty input — which is the *whitespace-only edit under
-    hide-whitespace* case. A mode change or a pure rename produce a real
-    `diff --git` header with **zero hunks**, so they parse fine and would render
-    the file header over an empty body: a blank pane with no explanation, which
-    is the same defect one layer along. Both go to the "No Textual Changes"
-    state instead. Binary diffs are renderable — the viewer has its own state
-    for them.
+    Whether a parsed diff has something to put on screen. Core answers the
+    "why not" question itself now — `empty_reason` and `size_guard` — so this
+    is only the boolean the template branches on. Binary diffs are renderable:
+    the viewer has its own state for them.
   */
   function hasRenderableDiff(diff: ParsedDiff | null): boolean {
     if (!diff) return false
+    if (diff.empty_reason || diff.size_guard) return false
     const fileDiff = diff.file_diff
     return fileDiff.is_binary || fileDiff.hunks.some((h) => h.lines.length > 0)
+  }
+
+  /*
+    The empty pane's heading and explanation, from core's reason rather than
+    one caption covering three unrelated situations at once — which told the
+    user the file was unchanged when the whitespace setting was simply hiding
+    the change.
+  */
+  const EMPTY_DIFF_COPY: Record<EmptyDiffReason, { title: string; detail: string }> = {
+    NoChanges: {
+      title: 'No changes',
+      detail: 'This file matches its committed state.',
+    },
+    WhitespaceOnly: {
+      title: 'Whitespace only',
+      detail: 'Every change here is whitespace, and Settings is set to hide those.',
+    },
+    NoTextualChanges: {
+      title: 'No textual changes',
+      detail:
+        'The file changed without changing any lines — a mode change or rename, for example.',
+    },
+  }
+
+  function emptyDiffCopy(diff: ParsedDiff | null): { title: string; detail: string } {
+    return EMPTY_DIFF_COPY[diff?.empty_reason ?? 'NoTextualChanges']
+  }
+
+  /* What the size guard withheld, in the units the user thinks in. */
+  function sizeGuardCopy(guard: DiffSizeGuard): string {
+    return guard.reason === 'TotalBytes'
+      ? `This diff is ${(guard.bytes / 1_048_576).toFixed(1)} MB — large enough to be slow to render.`
+      : `This diff has a line of ${guard.longest_line} characters — long enough to be slow to render.`
   }
 
   // A submodule that is dirty inside but whose recorded commit hasn't moved
@@ -266,7 +298,6 @@
     if (!repoPath) return
     try {
       const status = await gitApi.getStatus(repoPath)
-      const isMerging = await gitApi.isMerging(repoPath).catch(() => false)
       repoState.update((s) => {
         const presentPaths = new Set(status.files.map((f) => f.path))
         const nextSelected = new Set<string>()
@@ -293,7 +324,7 @@
             ahead: status.ahead,
             behind: status.behind,
             files: status.files,
-            isMerging,
+            isMerging: status.merging,
             hasRemote: status.has_remote,
             unpushedShas: new Set(status.unpushed_shas ?? []),
             detached: status.detached,
@@ -509,7 +540,7 @@
 
   async function loadDiffForFile(
     file: FileEntry | null,
-    opts: { force?: boolean } = {},
+    opts: { force?: boolean; showAnyway?: boolean } = {},
   ): Promise<void> {
     // Re-activating the same file that's already on screen (or already
     // being fetched) is a no-op — skip the refetch so arrow scrolls past
@@ -559,10 +590,13 @@
 
     try {
       const cfg = $config
-      const raw = cfg?.hide_whitespace
-        ? await gitApi.getDiffWhitespaceIgnored(repoPath, file)
-        : await gitApi.getDiff(repoPath, file)
-      const parsed = await diffApi.parseDiff(raw)
+      // One call: core reads and parses, and — when hide-whitespace left
+      // nothing to show — checks the unfiltered diff so the pane can say the
+      // change is there and the setting is hiding it.
+      const parsed = await diffApi.getParsedDiff(repoPath, file, cfg?.hide_whitespace ?? false, {
+        ...WEBVIEW_DIFF_OPTIONS,
+        show_anyway: opts.showAnyway ?? false,
+      })
       // Drop the result if the user moved on to a different file mid-fetch.
       if (get(repoState).activeFile?.path !== file.path) return
       if (diffLoadingTimer) {
@@ -598,6 +632,20 @@
     if (active) loadDiffForFile(active, { force: true })
   }
 
+  // The size guard's escape: re-ask for the same diff with the guard lifted.
+  // Deliberately not sticky — it applies to this one request, so moving to
+  // another file gets the guard back rather than inheriting a decision made
+  // about a different file.
+  function showActiveDiffAnyway(): void {
+    const active = get(repoState).activeFile
+    if (active) loadDiffForFile(active, { force: true, showAnyway: true })
+  }
+
+  function showActiveCommitDiffAnyway(): void {
+    const active = get(repoState).activeCommitFile
+    if (active) loadCommitFileDiff(active, { force: true, showAnyway: true })
+  }
+
   async function loadCommitFiles(commit: CommitInfo | null): Promise<void> {
     repoState.update((s) => ({
       ...s,
@@ -611,28 +659,30 @@
     const repoPath = $appState.repoPath
     if (!repoPath) return
     try {
-      const files = await gitApi.getCommitFiles(repoPath, commit.sha)
-      repoState.update((s) => ({ ...s, activeCommitFiles: files }))
-      if (files.length > 0) {
-        loadCommitFileDiff(files[0])
+      // One call for both: the file list and the line totals come out of the
+      // same `git log`, so they can't describe different commits and a stats
+      // failure can't leave the header disagreeing with the list.
+      const detail = await gitApi.getCommitDetail(repoPath, commit.sha)
+      // Guard against a stale response if the user clicked another commit.
+      if (get(repoState).activeCommit?.sha !== commit.sha) return
+      repoState.update((s) => ({
+        ...s,
+        activeCommitFiles: detail.files,
+        activeCommitStats: detail.stats,
+      }))
+      if (detail.files.length > 0) {
+        loadCommitFileDiff(detail.files[0])
       }
     } catch {}
-    // Line totals are non-critical chrome — fetch them separately so a stats
-    // failure never blocks the file list or diff from rendering.
-    gitApi
-      .getCommitStats(repoPath, commit.sha)
-      .then((stats) => {
-        // Guard against a stale response if the user clicked another commit.
-        if (get(repoState).activeCommit?.sha === commit.sha) {
-          repoState.update((s) => ({ ...s, activeCommitStats: stats }))
-        }
-      })
-      .catch(() => {})
   }
 
-  async function loadCommitFileDiff(file: FileEntry | null): Promise<void> {
+  async function loadCommitFileDiff(
+    file: FileEntry | null,
+    opts: { force?: boolean; showAnyway?: boolean } = {},
+  ): Promise<void> {
     const current = get(repoState)
     if (
+      !opts.force &&
       file &&
       current.activeCommitFile?.path === file.path &&
       (current.activeCommitFileDiff !== null || current.isCommitDiffLoading)
@@ -674,8 +724,10 @@
     }, SLOW_DIFF_THRESHOLD_MS)
 
     try {
-      const raw = await gitApi.getCommitDiff(repoPath, commit.sha, file.path)
-      const parsed = await diffApi.parseDiff(raw)
+      const parsed = await diffApi.getParsedCommitDiff(repoPath, commit.sha, file.path, {
+        ...WEBVIEW_DIFF_OPTIONS,
+        show_anyway: opts.showAnyway ?? false,
+      })
       if (get(repoState).activeCommitFile?.path !== file.path) return
       if (commitDiffLoadingTimer) {
         clearTimeout(commitDiffLoadingTimer)
@@ -711,12 +763,12 @@
     const repoPath = $appState.repoPath
     if (!repoPath) return
     if (!shouldAttemptBackground()) return
-    // A repo with no remote has nothing to fetch, and `get_remote` answers
-    // `"origin"` for one anyway — so without this gate every tick ran a doomed
-    // `git fetch origin`, two of them opened the breaker, and the open breaker
-    // then suppressed *all* background fetches app-wide (tier badges, refocus
-    // sweeps, the update check) for as long as that repo stayed open. The tier
-    // path already gates on the same flag (`repoSync.syncRepo`).
+    // A repo with no remote has nothing to fetch: without this gate every
+    // tick ran a doomed `git fetch`, two of them opened the breaker, and the
+    // open breaker then suppressed *all* background fetches app-wide (tier
+    // badges, refocus sweeps, the update check) for as long as that repo
+    // stayed open. The tier path already gates on the same flag
+    // (`repoSync.syncRepo`).
     //
     // Only skip when we *know* there is no remote. `hasRemote` defaults to
     // false, and a repo switch resets it, so between the switch and the first
@@ -724,15 +776,20 @@
     // nobody has looked at — silently dropping a legitimate refocus fetch.
     const current = get(repoState)
     if (current.statusLoaded && !current.status.hasRemote) return
-    let remote: string
+    let remote: string | null
     try {
       remote = await gitApi.getRemote(repoPath)
     } catch {
       return // local remote lookup failed — not a connectivity signal
     }
+    // Now a real answer rather than an invented "origin", so this is the
+    // authoritative version of the gate above rather than dead code under it.
     if (!remote) return
     try {
-      await gitApi.fetch(repoPath, remote)
+      // Automatic, so it runs on the background budget: an unreachable remote
+      // gives up in 12 s instead of holding the single network slot for ten
+      // minutes with every other repo's refresh queued behind it.
+      await gitApi.fetch(repoPath, remote, true)
       recordResult(true)
     } catch {
       recordResult(false)
@@ -974,6 +1031,10 @@
   // ---- Changes-tab context menu --------------------------------------------
   // Files pending a discard confirmation; null when the dialog is closed.
   let discardTarget = $state<FileEntry[] | null>(null)
+  // What discarding them would actually do, as core decides it — the same
+  // decision the discard itself runs on, so the dialog can't promise something
+  // the action then doesn't do. Null until the answer arrives.
+  let discardPlan = $state<DiscardPlan | null>(null)
   let isDiscarding = $state(false)
 
   // Run a side-effect-only file action (copy / reveal / open), surfacing any
@@ -999,7 +1060,18 @@
   }
 
   function requestDiscard(files: FileEntry[]): void {
-    if (files.length > 0) discardTarget = files
+    if (files.length === 0) return
+    discardTarget = files
+    discardPlan = null
+    const repoPath = $appState.repoPath
+    if (!repoPath) return
+    gitApi
+      .classifyDiscard(repoPath, files)
+      .then((plan) => {
+        // Ignore an answer about a dialog the user already dismissed.
+        if (discardTarget === files) discardPlan = plan
+      })
+      .catch(() => {})
   }
 
   async function confirmDiscard(): Promise<void> {
@@ -1010,6 +1082,7 @@
     try {
       await gitApi.discardFiles(repoPath, files)
       discardTarget = null
+      discardPlan = null
       // refreshStatus prunes the discarded files from the list / active diff.
       await refreshStatus({ silent: true })
     } catch (error) {
@@ -1020,7 +1093,9 @@
   }
 
   function cancelDiscard(): void {
-    if (!isDiscarding) discardTarget = null
+    if (isDiscarding) return
+    discardTarget = null
+    discardPlan = null
   }
 
   // Intents raised by FileList's right-click menu. Repo path + refresh + the
@@ -1481,22 +1556,29 @@
             sideBySide={$config?.side_by_side_diff ?? false}
             tabSize={$config?.tab_size ?? 4}
           />
+        {:else if $repoState.activeFileDiff?.size_guard}
+          <!-- Withheld rather than empty: rendering it would be slow, so the
+               pane explains and offers it instead of hanging on it. -->
+          <div class="diff-empty">
+            <p>Large diff</p>
+            <p class="muted">{sizeGuardCopy($repoState.activeFileDiff.size_guard!)}</p>
+            <button class="show-anyway" onclick={() => showActiveDiffAnyway()}>
+              Show diff anyway
+            </button>
+          </div>
         {:else if $repoState.activeFile}
           <!--
-            A file IS selected but there is nothing to render: a mode change, a
-            rename with no edits, or a whitespace-only edit under
-            hide-whitespace (see `hasRenderableDiff`). Falling through to the
+            A file IS selected but there is nothing to render. Core says which
+            of the three unrelated reasons it is; falling through to the
             no-selection copy below told the user to select the file they had
             already selected. Stays blank while the fetch is in flight so a
             sub-threshold load doesn't flash this state on its way to the diff.
           -->
           <div class="diff-empty">
             {#if !$repoState.isDiffLoading}
-              <p>No Textual Changes</p>
-              <p class="muted">
-                The file changed without changing any lines — a mode change or rename, for
-                example.
-              </p>
+              {@const copy = emptyDiffCopy($repoState.activeFileDiff)}
+              <p>{copy.title}</p>
+              <p class="muted">{copy.detail}</p>
             {/if}
           </div>
         {:else}
@@ -1555,16 +1637,22 @@
                 sideBySide={$config?.side_by_side_diff ?? false}
                 tabSize={$config?.tab_size ?? 4}
               />
+            {:else if $repoState.activeCommitFileDiff?.size_guard}
+              <div class="diff-empty">
+                <p>Large diff</p>
+                <p class="muted">{sizeGuardCopy($repoState.activeCommitFileDiff.size_guard!)}</p>
+                <button class="show-anyway" onclick={() => showActiveCommitDiffAnyway()}>
+                  Show diff anyway
+                </button>
+              </div>
             {:else if $repoState.activeCommitFile}
               <!-- Same split as the changes pane above: selected, but nothing
-                   textual to render. -->
+                   to render, and core names which reason. -->
               <div class="diff-empty">
                 {#if !$repoState.isCommitDiffLoading}
-                  <p>No Textual Changes</p>
-                  <p class="muted">
-                    The file changed without changing any lines — a mode change or rename,
-                    for example.
-                  </p>
+                  {@const copy = emptyDiffCopy($repoState.activeCommitFileDiff)}
+                  <p>{copy.title}</p>
+                  <p class="muted">{copy.detail}</p>
                 {/if}
               </div>
             {:else}
@@ -1720,6 +1808,7 @@
   {#if discardTarget}
     <DiscardConfirm
       files={discardTarget}
+      plan={discardPlan}
       {isDiscarding}
       onConfirm={confirmDiscard}
       onCancel={cancelDiscard}

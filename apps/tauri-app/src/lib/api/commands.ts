@@ -46,6 +46,37 @@ export interface RepoStatus {
   detached: boolean
   /** Full SHA of HEAD; empty only on an unborn branch. Labels the detached-HEAD state. */
   head_sha: string
+  /**
+   * Whether a merge is in progress (`MERGE_HEAD` exists). Carried here rather
+   * than fetched separately: every refresh path needs it, one of them used to
+   * forget, and core answers it from a file check that costs the poll nothing.
+   */
+  merging: boolean
+}
+
+/** One status's presentation strings — see `fileStatusStyles`. */
+export interface FileStatusStyle {
+  status: FileEntry['status']
+  letter: string
+  label: string
+}
+
+/** The files a commit changed, plus its line totals — one `git log`. */
+export interface CommitDetail {
+  files: FileEntry[]
+  stats: CommitStats
+}
+
+/**
+ * What discarding a set of files would do, path by path. A row's status letter
+ * can't answer this — a staged re-add of a path that exists in HEAD is
+ * restorable, and under an unborn HEAD nothing is — so the dialog is told.
+ */
+export interface DiscardPlan {
+  /** Paths restored to their committed state (index and working tree). */
+  restore: string[]
+  /** Paths with no committed version: moved to the Trash, unstaged. */
+  trash: string[]
 }
 
 export interface CommitInfo {
@@ -118,7 +149,13 @@ export interface IntraLineRange {
 }
 
 export interface DiffLine {
-  text: string
+  /**
+   * The raw patch line, prefix included — present only where something reads
+   * it: a `Hunk` header and a `NoNewline` marker, whose whole meaning is
+   * their text. Everywhere else it duplicated `content` byte for byte, once
+   * per line of every diff.
+   */
+  text?: string
   content: string
   line_type: 'Context' | 'Add' | 'Delete' | 'Hunk' | 'NoNewline'
   old_line_no?: number
@@ -158,22 +195,56 @@ export interface SbsPair {
   is_hunk_header: boolean
 }
 
+/** Why a diff has no lines to show. */
+export type EmptyDiffReason = 'NoChanges' | 'WhitespaceOnly' | 'NoTextualChanges'
+
+/** Which size limit withheld a diff. */
+export type DiffSizeReason = 'TotalBytes' | 'LineLength'
+
+/** A diff too large to render eagerly, and the measurements that say so. */
+export interface DiffSizeGuard {
+  reason: DiffSizeReason
+  /** Size of the raw patch in bytes — what the message quotes. */
+  bytes: number
+  /** Longest single line, in bytes. */
+  longest_line: number
+}
+
 /**
- * Everything the viewer needs from one `parse_diff` round trip. `file_diff`
- * stays lean because it round-trips back into `highlight_diff` /
- * `generate_patch`; the derived render artifacts ride alongside.
+ * What the caller wants built alongside the parse. This client paints from
+ * `html` on the first frame and pairs rows from `sbs_pairs` in the split
+ * layout, so it asks for both; the native client renders from the line model
+ * and asks for neither.
+ */
+export interface DiffOptions {
+  html: boolean
+  side_by_side: boolean
+  /** Parse past the size guard — the viewer's "Show diff anyway". */
+  show_anyway: boolean
+}
+
+/**
+ * Everything the viewer needs from one round trip. `file_diff` stays lean
+ * because it round-trips back into `highlight_diff` / `generate_patch`; the
+ * derived render artifacts ride alongside.
  */
 export interface ParsedDiff {
   file_diff: FileDiff
   /** Phase-1 HTML per flattened line (plain escaped text + intra-line
-   * backplate), ready for `{@html}` the same frame the diff mounts. */
+   * backplate), ready for `{@html}` the same frame the diff mounts. Empty
+   * unless `DiffOptions.html` asked for it. */
   html: string[]
-  /** Precomputed rows for the side-by-side layout. */
+  /** Precomputed rows for the side-by-side layout. Empty unless
+   * `DiffOptions.side_by_side` asked for it. */
   sbs_pairs: SbsPair[]
   /** Added-line total for the header badge (0 for binary diffs). */
   additions: number
   /** Deleted-line total for the header badge (0 for binary diffs). */
   deletions: number
+  /** Set when there are nothing to show, and why. */
+  empty_reason?: EmptyDiffReason | null
+  /** Set when the diff was withheld for its size. */
+  size_guard?: DiffSizeGuard | null
 }
 
 export interface DiffSelection {
@@ -186,12 +257,23 @@ export interface CommitMessage {
   description: string
 }
 
+/** Claude-specific AI settings. Each provider keeps its own model. */
+export interface ClaudeConfig {
+  model?: string
+  timeout_secs: number
+}
+
+/** Ollama-specific AI settings. */
+export interface OllamaConfig {
+  model?: string
+  server_url: string
+  timeout_secs: number
+}
+
 export interface Config {
   theme: string
   fetch_interval_ms: number
   ai_provider: string
-  ai_model?: string
-  ai_api_key?: string
   auto_fetch: boolean
   syntax_highlighting: boolean
   scan_paths: string[]
@@ -199,10 +281,69 @@ export interface Config {
   side_by_side_diff: boolean
   hide_whitespace: boolean
   tab_size: number
-  claude_timeout_secs: number
-  ollama_server_url: string
   /** Shell id the embedded terminal launches; absent = best available. */
   terminal_shell?: string
+  claude: ClaudeConfig
+  ollama: OllamaConfig
+}
+
+/**
+ * Field-wise patch for `Config`: an absent field is left as it is on disk.
+ *
+ * The only writer. Two clients share this file, and the whole-object write
+ * this replaces posted the config as it looked when a dialog *opened*,
+ * silently reverting whatever the other client had written since. Clearing an
+ * optional field is patching it to `''` — the config's standing
+ * blank-means-absent rule.
+ */
+export interface ConfigPatch {
+  theme?: string
+  fetch_interval_ms?: number
+  ai_provider?: string
+  auto_fetch?: boolean
+  syntax_highlighting?: boolean
+  scan_paths?: string[]
+  scan_depth?: number
+  side_by_side_diff?: boolean
+  hide_whitespace?: boolean
+  tab_size?: number
+  terminal_shell?: string
+  claude_model?: string
+  claude_timeout_secs?: number
+  ollama_model?: string
+  ollama_server_url?: string
+  ollama_timeout_secs?: number
+}
+
+/** The accepted range for a numeric setting, and its no-value fallback. */
+export interface Bounds {
+  min: number
+  max: number
+  fallback: number
+}
+
+/**
+ * Every numeric setting's accepted range, read from the same declaration that
+ * enforces it — so a control can't offer a value the writer then clamps away.
+ */
+export interface ConfigBounds {
+  fetch_interval_ms: Bounds
+  scan_depth: Bounds
+  tab_size: Bounds
+  ai_timeout_secs: Bounds
+}
+
+/** One repo row as the picker knows it: its path plus every label to match. */
+export interface RepoRow {
+  path: string
+  names: string[]
+}
+
+/** Where a clone will land, and what it will be called. */
+export interface CloneTarget {
+  normalized_url: string
+  repo_name: string
+  target_path: string
 }
 
 export interface ReposState {
@@ -243,7 +384,16 @@ export interface GhRepo {
 
 export const configApi = {
   loadConfig: () => invoke<Config>('load_config'),
-  saveConfig: (cfg: Config) => invoke<void>('save_config', { cfg }),
+  /**
+   * Apply a field-wise patch and get the normalized result back. The only
+   * writer: a surface patches what it owns, so it can no longer revert what
+   * the other client changed while the window was open. Feed the returned
+   * config straight back to the form and an out-of-range entry corrects
+   * itself.
+   */
+  patchConfig: (patch: ConfigPatch) => invoke<Config>('patch_config', { patch }),
+  /** The range every numeric setting is clamped to — a control's min/max. */
+  configBounds: () => invoke<ConfigBounds>('config_bounds'),
   loadState: () => invoke<ReposState>('load_state'),
   /** Atomically merge the given fields into repos-state.json; returns the new state. */
   patchState: (patch: ReposStatePatch) => invoke<ReposState>('patch_state', { patch }),
@@ -287,20 +437,16 @@ export const appApi = {
 
 export const gitApi = {
   getStatus: (repoPath: string) => invoke<RepoStatus>('get_status', { repoPath }),
+  /** Letter + label for every status, fetched once — not per row per repaint. */
+  fileStatusStyles: () => invoke<FileStatusStyle[]>('file_status_styles'),
   getHeadSha: (repoPath: string) => invoke<string>('get_head_sha', { repoPath }),
-  getDiff: (repoPath: string, file: FileEntry) => invoke<string>('get_diff', { repoPath, file }),
-  getDiffWhitespaceIgnored: (repoPath: string, file: FileEntry) =>
-    invoke<string>('get_diff_whitespace_ignored', { repoPath, file }),
-  getCommitDiff: (repoPath: string, sha: string, filePath: string) =>
-    invoke<string>('get_commit_diff', { repoPath, sha, filePath }),
   getSelectedDiff: (repoPath: string, files: FileEntry[]) =>
     invoke<string>('get_selected_diff', { repoPath, files }),
   getLog: (repoPath: string, maxCount: number, skip: number) =>
     invoke<CommitInfo[]>('get_log', { repoPath, opts: { max_count: maxCount, skip } }),
-  getCommitFiles: (repoPath: string, sha: string) =>
-    invoke<FileEntry[]>('get_commit_files', { repoPath, sha }),
-  getCommitStats: (repoPath: string, sha: string) =>
-    invoke<CommitStats>('get_commit_stats', { repoPath, sha }),
+  /** A commit's files and its line totals, from one `git log`. */
+  getCommitDetail: (repoPath: string, sha: string) =>
+    invoke<CommitDetail>('get_commit_detail', { repoPath, sha }),
   listBranches: (repoPath: string) => invoke<BranchInfo[]>('list_branches', { repoPath }),
   createBranch: (repoPath: string, name: string, startPoint: string) =>
     invoke<void>('create_branch', { repoPath, name, startPoint }),
@@ -319,6 +465,10 @@ export const gitApi = {
     invoke<void>('commit', { repoPath, message, files, amend }),
   undoLastCommit: (repoPath: string) => invoke<void>('undo_last_commit', { repoPath }),
   hasStagedChanges: (repoPath: string) => invoke<boolean>('has_staged_changes', { repoPath }),
+  /** What a discard would do per path — the confirmation dialog's copy,
+   *  decided by the same code that performs it. */
+  classifyDiscard: (repoPath: string, files: FileEntry[]) =>
+    invoke<DiscardPlan>('classify_discard', { repoPath, files }),
   /** Discard working-tree changes for the given files (revert tracked, trash untracked). */
   discardFiles: (repoPath: string, files: FileEntry[]) =>
     invoke<void>('discard_files', { repoPath, files }),
@@ -332,7 +482,11 @@ export const gitApi = {
     invoke<string>('format_commit_message', { summary, description, coAuthors }),
   repoSyncStatus: (repoPath: string, doFetch: boolean) =>
     invoke<RepoSync>('repo_sync_status', { repoPath, doFetch }),
-  fetch: (repoPath: string, remote: string) => invoke<void>('fetch', { repoPath, remote }),
+  /** `background` picks the budget: an automatic fetch nobody waits on fails
+   *  fast (12 s) so an unreachable remote can't hold the single network slot;
+   *  a user-initiated one keeps the generous budget a real transfer needs. */
+  fetch: (repoPath: string, remote: string, background: boolean) =>
+    invoke<void>('fetch', { repoPath, remote, background }),
   pull: (repoPath: string, remote: string) => invoke<void>('pull', { repoPath, remote }),
   push: (
     repoPath: string,
@@ -343,7 +497,9 @@ export const gitApi = {
   ) => invoke<void>('push', { repoPath, remote, branch, setUpstream, forceWithLease }),
   getAheadBehind: (repoPath: string, upstream: string) =>
     invoke<AheadBehind>('get_ahead_behind', { repoPath, upstream }),
-  getRemote: (repoPath: string) => invoke<string>('get_remote', { repoPath }),
+  /** The first remote's name, or `null` when the repo has none — never an
+   *  invented "origin", which made every no-remote guard unfireable. */
+  getRemote: (repoPath: string) => invoke<string | null>('get_remote', { repoPath }),
   getRepoIdentifier: (repoPath: string) =>
     invoke<RepoIdentifier | null>('get_repo_identifier', { repoPath }),
   mergeBranch: (repoPath: string, branch: string) =>
@@ -352,13 +508,10 @@ export const gitApi = {
     invoke<MergeResult>('merge_squash', { repoPath, branch }),
   commitSquashMerge: (repoPath: string) => invoke<void>('commit_squash_merge', { repoPath }),
   mergeAbort: (repoPath: string) => invoke<void>('merge_abort', { repoPath }),
-  isMerging: (repoPath: string) => invoke<boolean>('is_merging', { repoPath }),
   countCommitsToMerge: (repoPath: string, targetBranch: string) =>
     invoke<number>('count_commits_to_merge', { repoPath, targetBranch }),
-  discoverRepos: (scanPaths: string[], maxDepth: number) =>
-    invoke<string[]>('discover_repos', { scanPaths, maxDepth }),
   /**
-   * The folders `discoverRepos` would actually walk for this config — the
+   * The folders discovery would actually walk for this config — the
    * configured list, or the stock defaults when it's empty. Lets the picker's
    * empty state name where it searched instead of just saying "none found".
    */
@@ -435,8 +588,36 @@ export const terminalApi = {
   close: (pid: number) => invoke<void>('close_terminal', { pid }),
 }
 
+/** What this client asks core to build: everything a WebView renders from. */
+export const WEBVIEW_DIFF_OPTIONS: DiffOptions = {
+  html: true,
+  side_by_side: true,
+  show_anyway: false,
+}
+
 export const diffApi = {
-  parseDiff: (raw: string) => invoke<ParsedDiff | null>('parse_diff', { raw }),
+  /**
+   * Read and parse one working-tree file's diff in a single call. Rejects
+   * rather than returning empty when the read fails, so the pane can tell a
+   * failure from a file with nothing to show.
+   */
+  getParsedDiff: (
+    repoPath: string,
+    file: FileEntry,
+    hideWhitespace: boolean,
+    options: DiffOptions = WEBVIEW_DIFF_OPTIONS
+  ) => invoke<ParsedDiff>('get_parsed_diff', { repoPath, file, hideWhitespace, options }),
+  /** The same, for one file within a commit. Empty `filePath` = whole commit. */
+  getParsedCommitDiff: (
+    repoPath: string,
+    sha: string,
+    filePath: string,
+    options: DiffOptions = WEBVIEW_DIFF_OPTIONS
+  ) => invoke<ParsedDiff>('get_parsed_commit_diff', { repoPath, sha, filePath, options }),
+  /** Plain text of a flat line range, rebuilt from the model — immune to
+   *  gutters, `+`/`−` prefixes and side-by-side filler cells. */
+  copyDiffText: (fileDiff: FileDiff, start: number, end: number) =>
+    invoke<string>('copy_diff_text', { fileDiff, start, end }),
   generatePatch: (repoPath: string, fileDiff: FileDiff, selection: DiffSelection) =>
     invoke<void>('generate_patch', { repoPath, fileDiff, selection }),
   generateInversePatch: (repoPath: string, fileDiff: FileDiff, selection: DiffSelection) =>
@@ -468,6 +649,8 @@ export const highlightApi = {
 export const ghApi = {
   checkAuth: () => invoke<boolean>('check_auth'),
   repoList: (limit: number) => invoke<GhRepo[]>('gh_repo_list', { limit }),
+  /** Streams `git-progress` events like a URL clone: `gh repo clone` forwards
+   *  `--progress` to `git clone`, so both routes report real numbers. */
   clone: (nameWithOwner: string, targetPath: string) =>
     invoke<string>('gh_clone', { nameWithOwner, targetPath }),
   publishRepo: (repoPath: string, name: string, description: string, isPrivate: boolean) =>
@@ -477,15 +660,47 @@ export const ghApi = {
 export interface AiProviderConfig {
   provider: string
   model?: string
-  api_key?: string
   base_url?: string
+  timeout_secs: number
 }
 
 export const aiApi = {
+  /**
+   * The AI settings resolved for the selected provider. The config→provider
+   * mapping lives in core, so the model and server URL always belong to the
+   * provider actually about to run — splicing a picker value over a
+   * separately-loaded config is how the two clients drifted.
+   */
+  loadAiConfig: () => invoke<AiProviderConfig>('load_ai_config'),
   generateCommitMessage: (diff: string, provider: string, config: AiProviderConfig) =>
     invoke<CommitMessage>('generate_commit_message', { diff, provider, config }),
   checkProviderAvailable: (provider: string, config: AiProviderConfig) =>
     invoke<boolean>('check_provider_available', { provider, config }),
+}
+
+export const reposApi = {
+  /**
+   * Every repo the picker should list: discovery over the scan folders unioned
+   * with the persisted MRU, minus entries that no longer exist. Discovery
+   * alone forgot clones, CLI opens and Open-Other rows on every restart, even
+   * though the MRU that remembers them was already on disk.
+   */
+  knownRepos: (scanPaths: string[], maxDepth: number) =>
+    invoke<string[]>('known_repos', { scanPaths, maxDepth }),
+  /**
+   * Narrow and rank rows against a typed query, strongest match first; ties
+   * keep the input order, so a picker's own arrangement survives filtering.
+   * One crossing per keystroke rather than one per row.
+   */
+  filterRepos: (query: string, rows: RepoRow[], scanFolders: string[]) =>
+    invoke<string[]>('filter_repos', { query, rows, scanFolders }),
+  /** What cloning `rawUrl` under `parent` would produce; `null` when there is
+   *  nothing cloneable — which is also the Clone button's enable condition. */
+  deriveCloneTarget: (rawUrl: string, parent: string) =>
+    invoke<CloneTarget | null>('derive_clone_target', { rawUrl, parent }),
+  /** Where a clone of `repoName` lands under `parent` — the GitHub tab's half. */
+  cloneTargetPath: (parent: string, repoName: string) =>
+    invoke<string | null>('clone_target_path', { parent, repoName }),
 }
 
 /** A newer leogit release on GitHub, as reported by `check_for_update`. */

@@ -160,6 +160,7 @@
     beginNetworkOp('pull')
     try {
       const remote = await gitApi.getRemote(repoPath)
+      if (!remote) throw new Error('This repository has no remote to pull from.')
       await gitApi.pull(repoPath, remote)
       await handleRefresh()
     } catch (error) {
@@ -177,6 +178,9 @@
     beginNetworkOp('push')
     try {
       const remote = await gitApi.getRemote(repoPath)
+      // Unreachable through the UI — a repo with no remote is offered Publish,
+      // not Push — but saying so beats git failing on a name we invented.
+      if (!remote) throw new Error('This repository has no remote to push to.')
       cachedRemote = remote
       const setUpstream = !$repoState.status.hasUpstream
       await gitApi.push(repoPath, remote, branch, setUpstream, false)
@@ -196,6 +200,7 @@
     beginNetworkOp('push')
     try {
       const remote = await gitApi.getRemote(repoPath)
+      if (!remote) throw new Error('This repository has no remote to push to.')
       cachedRemote = remote
       const setUpstream = !$repoState.status.hasUpstream
       // 5th arg = forceWithLease. We never use bare --force.
@@ -297,10 +302,17 @@
   })
 
   // Cache the remote name passively so the confirm dialog has it ready.
+  // Skipped for a remote-less repo, where the lookup can only answer null and
+  // the dialog is unreachable anyway.
   $effect(() => {
     const repoPath = $appState.repoPath
     if (!repoPath) return
-    gitApi.getRemote(repoPath).then((r) => (cachedRemote = r)).catch(() => {})
+    gitApi
+      .getRemote(repoPath)
+      .then((r) => {
+        if (r) cachedRemote = r
+      })
+      .catch(() => {})
   })
 
   // A repo switch mid-transfer must not carry the old repo's progress into the

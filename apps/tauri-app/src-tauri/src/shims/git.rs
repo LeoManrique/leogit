@@ -9,14 +9,21 @@
 )]
 
 use leogit_core::git::{
-    self, AheadBehind, BranchInfo, CommitInfo, CommitStats, FileEntry, LogOptions, MergeResult,
-    RepoIdentifier, RepoStatus, RepoSync,
+    self, AheadBehind, BranchInfo, CommitDetail, CommitInfo, DiscardPlan, FileEntry,
+    FileStatusStyle, LogOptions, MergeResult, RepoIdentifier, RepoStatus, RepoSync,
 };
 use tauri::AppHandle;
 
 use crate::event_sink::TauriEventSink;
 
 // ── Status / inspection ────────────────────────────────────────────────────
+
+/// The letter and name for every `FileStatus` — fetched once at startup, not
+/// per row: both clients draw these on every repaint.
+#[tauri::command(async)]
+pub fn file_status_styles() -> Vec<FileStatusStyle> {
+    git::file_status_styles()
+}
 
 #[tauri::command(async)]
 pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
@@ -26,25 +33,6 @@ pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
 #[tauri::command(async)]
 pub fn get_head_sha(repo_path: String) -> Result<String, String> {
     git::get_head_sha(repo_path)
-}
-
-#[tauri::command(async)]
-pub fn get_diff(repo_path: String, file: FileEntry) -> Result<String, String> {
-    git::get_diff(repo_path, file)
-}
-
-#[tauri::command(async)]
-pub fn get_diff_whitespace_ignored(repo_path: String, file: FileEntry) -> Result<String, String> {
-    git::get_diff_whitespace_ignored(repo_path, file)
-}
-
-#[tauri::command(async)]
-pub fn get_commit_diff(
-    repo_path: String,
-    sha: String,
-    file_path: String,
-) -> Result<String, String> {
-    git::get_commit_diff(repo_path, sha, file_path)
 }
 
 #[tauri::command(async)]
@@ -58,13 +46,8 @@ pub fn get_log(repo_path: String, opts: LogOptions) -> Result<Vec<CommitInfo>, S
 }
 
 #[tauri::command(async)]
-pub fn get_commit_files(repo_path: String, sha: String) -> Result<Vec<FileEntry>, String> {
-    git::get_commit_files(repo_path, sha)
-}
-
-#[tauri::command(async)]
-pub fn get_commit_stats(repo_path: String, sha: String) -> Result<CommitStats, String> {
-    git::get_commit_stats(repo_path, sha)
+pub fn get_commit_detail(repo_path: String, sha: String) -> Result<CommitDetail, String> {
+    git::get_commit_detail(repo_path, sha)
 }
 
 // ── Branches ───────────────────────────────────────────────────────────────
@@ -131,6 +114,11 @@ pub fn has_staged_changes(repo_path: String) -> Result<bool, String> {
 }
 
 #[tauri::command(async)]
+pub fn classify_discard(repo_path: &str, files: Vec<FileEntry>) -> DiscardPlan {
+    git::classify_discard(repo_path, &files)
+}
+
+#[tauri::command(async)]
 pub fn discard_files(repo_path: &str, files: Vec<FileEntry>) -> Result<(), String> {
     git::discard_files(repo_path, files)
 }
@@ -162,8 +150,8 @@ pub fn repo_sync_status(repo_path: String, do_fetch: bool) -> Result<RepoSync, S
 }
 
 #[tauri::command]
-pub async fn fetch(repo_path: String, remote: String) -> Result<(), String> {
-    git::fetch(repo_path, remote).await
+pub async fn fetch(repo_path: String, remote: String, background: bool) -> Result<(), String> {
+    git::fetch(repo_path, remote, background).await
 }
 
 #[tauri::command]
@@ -197,7 +185,7 @@ pub fn get_ahead_behind(repo_path: String, upstream: String) -> Result<AheadBehi
 }
 
 #[tauri::command(async)]
-pub fn get_remote(repo_path: String) -> Result<String, String> {
+pub fn get_remote(repo_path: String) -> Result<Option<String>, String> {
     git::get_remote(repo_path)
 }
 
@@ -229,11 +217,6 @@ pub fn merge_abort(repo_path: String) -> Result<(), String> {
 }
 
 #[tauri::command(async)]
-pub fn is_merging(repo_path: String) -> Result<bool, String> {
-    git::is_merging(repo_path)
-}
-
-#[tauri::command(async)]
 pub fn count_commits_to_merge(repo_path: String, target_branch: String) -> Result<i32, String> {
     git::count_commits_to_merge(repo_path, target_branch)
 }
@@ -257,11 +240,6 @@ pub fn get_last_commit_timestamp(repo_path: String) -> i64 {
 #[tauri::command(async)]
 pub fn effective_scan_paths(scan_paths: Vec<String>) -> Vec<String> {
     git::effective_scan_paths(scan_paths)
-}
-
-#[tauri::command(async)]
-pub fn discover_repos(scan_paths: Vec<String>, max_depth: u32) -> Result<Vec<String>, String> {
-    git::discover_repos(scan_paths, max_depth)
 }
 
 #[tauri::command(async)]

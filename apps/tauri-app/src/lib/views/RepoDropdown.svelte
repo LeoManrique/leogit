@@ -7,7 +7,7 @@
   import type { RepoIdentifier } from '$lib/api/commands'
   import RepoTooltip from '$lib/components/RepoTooltip.svelte'
   import { scanFolders } from '$lib/stores/config'
-  import { matchRepo } from '$lib/utils/repoSearch'
+  import { reposApi } from '$lib/api/commands'
   import { autofocus } from '$lib/actions/autofocus'
   import { nextActiveIndex, scrollIntoViewWhenActive } from '$lib/actions/listNavigation'
   import { basename } from '$lib/utils/path'
@@ -84,20 +84,39 @@
 
   // Best match first, and only then the chosen sort order — the keyboard
   // cursor starts on the top row, so a query has to put the repo the user
-  // typed there. `sort` is stable, so equal matches keep `sortedRepos` order.
-  const filteredRepos = $derived.by(() => {
+  // typed there. Core's ranking is stable, so equal matches keep
+  // `sortedRepos` order. Both labels are searchable, including the
+  // owner-qualified one the rows actually display.
+  let filteredRepos = $state<string[]>([])
+
+  $effect(() => {
     const q = filter.trim()
-    if (!q) return sortedRepos
+    const list = sortedRepos
     const ids = $repoIdentifiers
     const folders = $scanFolders
-    return sortedRepos
-      .flatMap((p) => {
-        const id = ids.get(p)
-        const match = matchRepo(q, p, [primaryLabel(p, id), fullLabel(p, id)], folders)
-        return match === null ? [] : [{ path: p, match }]
+    if (!q) {
+      filteredRepos = list
+      return
+    }
+    let cancelled = false
+    reposApi
+      .filterRepos(
+        q,
+        list.map((path) => {
+          const id = ids.get(path)
+          return { path, names: [primaryLabel(path, id), fullLabel(path, id)] }
+        }),
+        folders
+      )
+      .then((matched) => {
+        if (!cancelled) filteredRepos = matched
       })
-      .sort((a, b) => a.match - b.match)
-      .map((r) => r.path)
+      .catch(() => {
+        if (!cancelled) filteredRepos = list
+      })
+    return () => {
+      cancelled = true
+    }
   })
 
   // Map primary label → count, so rows that collide get an `owner/` prefix

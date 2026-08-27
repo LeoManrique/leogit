@@ -14,6 +14,7 @@ pub mod git;
 pub mod highlight;
 pub mod launch;
 pub mod os;
+pub mod repos;
 pub mod shell;
 pub mod terminal;
 pub mod update;

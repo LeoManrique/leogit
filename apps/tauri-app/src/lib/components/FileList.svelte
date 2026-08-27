@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte'
   import type { FileEntry } from '$lib/api/commands'
+  import { fileStatusStyles } from '$lib/stores/config'
   import { revealLabel, fileExtension, type FileContextActions } from '$lib/services/fileActions'
   import PathText from './PathText.svelte'
   import ContextMenu, { type ContextMenuItem } from './ContextMenu.svelte'
@@ -229,7 +230,11 @@
     onToggleAll?.(!allSelected)
   }
 
-  function getStatusColor(status: string): string {
+  // Colour is the one genuinely per-platform choice, so it stays here; the
+  // letter and the name come from core (see `fileStatusStyles`) because the
+  // two clients had already invented different ones for a conflict — the row
+  // a user most needs to recognize.
+  function getStatusColor(status: FileEntry['status']): string {
     switch (status) {
       case 'New':
         return 'var(--status-green)'
@@ -239,27 +244,13 @@
         return 'var(--status-red)'
       case 'Renamed':
         return 'var(--status-blue)'
+      // Deliberately not red: red already means Deleted, and a glance down the
+      // list has to separate "you deleted this" from "git couldn't merge this"
+      // — opposite actions, one of which blocks the commit.
       case 'Conflicted':
-        return 'var(--status-red)'
+        return 'var(--status-purple)'
       default:
         return 'var(--text-secondary)'
-    }
-  }
-
-  function getStatusLabel(status: string): string {
-    switch (status) {
-      case 'New':
-        return 'A'
-      case 'Modified':
-        return 'M'
-      case 'Deleted':
-        return 'D'
-      case 'Renamed':
-        return 'R'
-      case 'Conflicted':
-        return 'U'
-      default:
-        return '?'
     }
   }
 
@@ -477,8 +468,12 @@
             {:else if file.submodule_dirty}
               <div class="status-badge submodule-badge" title={SUBMODULE_DIRTY_HINT}>↪</div>
             {:else}
-              <div class="status-badge" style="color: {getStatusColor(file.status)}">
-                {getStatusLabel(file.status)}
+              <div
+                class="status-badge"
+                style="color: {getStatusColor(file.status)}"
+                title={$fileStatusStyles[file.status]?.label ?? file.status}
+              >
+                {$fileStatusStyles[file.status]?.letter ?? file.status.charAt(0)}
               </div>
             {/if}
 

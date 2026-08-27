@@ -3,8 +3,8 @@
   import { get } from 'svelte/store'
   import { listen } from '@tauri-apps/api/event'
   import { appState } from '$lib/stores/app'
-  import { config, refreshConfig, scanFolders } from '$lib/stores/config'
-  import { ghApi, gitApi, configApi, appApi, type LaunchTarget } from '$lib/api/commands'
+  import { config, loadFileStatusStyles, refreshConfig, scanFolders } from '$lib/stores/config'
+  import { ghApi, gitApi, configApi, appApi, reposApi, type LaunchTarget } from '$lib/api/commands'
   import { patchReposState, recordRecentRepo } from '$lib/stores/reposState'
   import { updateChecker } from '$lib/services/updateChecker'
   import MainLayout from '$lib/views/MainLayout.svelte'
@@ -113,9 +113,14 @@
 
       // Load config + state (shared store so settings updates propagate).
       // Scan-path resolution (~ expansion, stock folders when the list is
-      // empty) lives in discover_repos, next to the walker that uses it.
+      // empty) lives in core, next to the walker that uses it — as does the
+      // union with the persisted MRU, which is what keeps a clone, a CLI open
+      // or an Open-Other repo listed across restarts.
       const cfg = await refreshConfig()
-      const repos = await gitApi.discoverRepos(cfg?.scan_paths ?? [], cfg?.scan_depth ?? 3)
+      // The status glyph table, once. Awaited here so no changed-file row ever
+      // paints before it lands.
+      await loadFileStatusStyles()
+      const repos = await reposApi.knownRepos(cfg?.scan_paths ?? [], cfg?.scan_depth ?? 3)
       const state = await configApi.loadState().catch(() => ({ last_opened_repo: undefined }))
 
       // A repo passed on the cold-start command line (`leogit <dir>`) wins over
@@ -169,7 +174,7 @@
     try {
       // Settings saved before closing, and `refreshConfig` re-resolved the
       // scan folders with it — only the walk itself is left to redo.
-      const repos = await gitApi.discoverRepos(cfg?.scan_paths ?? [], cfg?.scan_depth ?? 3)
+      const repos = await reposApi.knownRepos(cfg?.scan_paths ?? [], cfg?.scan_depth ?? 3)
       appState.update((s) => ({ ...s, repos }))
     } catch (error) {
       console.error('[repos] rediscovery after settings failed', error)

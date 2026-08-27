@@ -1,8 +1,9 @@
 # Plan — Cross-client feature parity (SwiftUI ⇄ Tauri)
 
-> Status: **in progress — WS-A shipped (2026-08-27), WS-B is next.**
+> Status: **in progress — WS-A and WS-B shipped (2026-08-27), WS-C is next.**
 > Accepted 2026-08-27 with every open decision resolved. Per-workstream state
-> is in §6; what WS-A found that WS-B needs is in §6's WS-B entry, not here.
+> is in §6; what a shipped workstream found that the next one needs lives in
+> that workstream's §6 entry, not here.
 > Produced by a three-way
 > audit of the SwiftUI client, the Tauri client, and the GitHub Desktop source
 > at `/Users/leo/Dev/LeoManrique/Desktop/lms-github-desktop` (reference only —
@@ -78,34 +79,36 @@ goals, in the user's priority order:
 These are behaviors that are wrong *today*, ranked by severity. All verified
 in code. "Make the current features work well" starts here (workstream A).
 
-### 3.1 Defects — fixed in WS-A
+### 3.1 Defects — fixed
 
-Twelve of the twenty are closed. Kept as a register (IDs are referenced from
-§4) and trimmed to what each fix *is*, since the code now carries the reasoning.
+Fifteen of the twenty are closed: twelve in WS-A, and D-5 / D-7 / D-17's
+structural half with their hoists in WS-B. Kept as a register (IDs are
+referenced from §4) and trimmed to what each fix *is*, since the code now
+carries the reasoning.
 
 | ID | Client | Fixed | Left over |
 |---|---|---|---|
 | D-1 | Tauri | **Destructive.** Amend/Undo/Checkout gated on the row's index into the *loaded window*, so past a slide Undo reset the real HEAD and seeded the composer from another commit. Now gated on `status.head_sha`, per FRONTEND §6.10. | — |
-| D-2 | Tauri | A remote-less repo's doomed `git fetch origin` opened the breaker against every other repo. `fetchActiveRemote` now gates on `status.hasRemote`, like the tier path already did — and on the new `statusLoaded`, since `hasRemote` defaults to false and an unqualified read would decide "no remote" about a repo nobody has looked at yet. Natively, `silentFetch` returns `Bool?` so a slot conflict or a local `git remote` failure stops being reported as a network failure. | The dead `if (!remote)` guard it was supposed to have — H-2 makes `get_remote` honest. |
+| D-2 | Tauri | A remote-less repo's doomed `git fetch origin` opened the breaker against every other repo. `fetchActiveRemote` now gates on `status.hasRemote`, like the tier path already did — and on the new `statusLoaded`, since `hasRemote` defaults to false and an unqualified read would decide "no remote" about a repo nobody has looked at yet. Natively, `silentFetch` returns `Bool?` so a slot conflict or a local `git remote` failure stops being reported as a network failure. | — (WS-B: `get_remote` answers `Option`, so the guard is live rather than dead). |
 | D-3 | Tauri | Silent poll failures vanished forever. Three consecutive **background** failures now raise a non-blocking banner off `repoState.pollError` — native's shape and threshold, and its ownership: `refreshStatus` grew a `background` opt separate from `silent`, because four of the seven silent callers are user actions whose own `index.lock` races would otherwise accuse a healthy repo. Reset per repository in both clients. | BG-4's equality gate (the other half of that item). |
 | D-8 | Native | ⌘W with a text field still focused dropped the typed value. `flushPendingSave` now also writes an edit that never scheduled a save, guarded by a diff against `lastPersisted` — which holds the *normalized* form of the fields, not the raw file, or a config written by the other client would be rewritten on an open-and-close that changed nothing. A completed debounce also clears `pendingSave` now (generation-guarded), which it never did. | — |
 | D-10 | Tauri | A commit could land mid-Generate and have the late result overwrite the cleared composer. `canSubmit` gained `!isGenerating`, and the lockout runs off `isCommitInProgress` — `isCommitting` is still false while the embedded-repo confirmation waits, and its Confirm calls `performCommit` past `canSubmit` entirely, so the composer stayed live behind the dialog. | — |
 | D-11 | Tauri | The HEAD-move reset was read as a backward slide and scrolled to the bottom of the fresh page, paging again. `log.resetSeq` now distinguishes a *replacement* from a *slide*; a replacement scrolls to the new HEAD, and the counter is monotonic across a repo switch too. | `refreshLog`'s `headChanged` still needs `skip > 0`, so a *same-offset* replacement (a new commit while parked at offset 0, or a checkout's different history) bumps nothing. HI-2's append model removes the case rather than patching it. |
-| D-12 | Tauri | An empty parse fell through to "Select a file to view its diff" with a file selected. Both diff panes now have an explicit "No Textual Changes" state, blank while the fetch is in flight. The test is `hasRenderableDiff`, not `!== null`: `parse_diff` returns null only for empty input, while a mode change or pure rename parse into a header with zero hunks — a blank pane, the same dead end one layer along. | The *reason* (H-9 / DF-7); today the copy names the common causes. And a failed load currently reaches the same branch — DF-10 is what separates them. |
+| D-12 | Tauri | An empty parse fell through to "Select a file to view its diff" with a file selected. Both diff panes now have an explicit "No Textual Changes" state, blank while the fetch is in flight. The test is `hasRenderableDiff`, not `!== null`: `parse_diff` returns null only for empty input, while a mode change or pure rename parse into a header with zero hunks — a blank pane, the same dead end one layer along. | — (WS-B: H-9 supplies the reason, and a failed load is now an `Err` rather than an empty parse; DF-10's remaining work is presentation). |
 | D-13 | Tauri | The header hand-rolled a status write that skipped `is_merging`, the `userDeselected` reconciliation, and the badge feed. It now takes `refreshStatus` as a prop: **one status writer in the client**. Checkout and undo also reload branches. | SY-8's "post-op = status + log". |
 | D-16 | Tauri | `Ctrl+P` reached the shell *and* pushed; ⌃` could not leave a focused terminal; Escape closed overlays instead of reaching `vim`. One rule now (FRONTEND §6.11): `attachCustomKeyEventHandler` releases only the toggle, and the window handlers test the event's origin. | TE-1's modifier narrowing (Tauri still accepts ⌘` too). |
-| D-17 | Tauri | `tab_size: 999` and emptied fields persisted (and the emptied ones failed the save with a raw serde error). All four numeric fields clamp on save, and the clamped value is written back into the form. | H-10's `Config::normalized()` — the structural version, which also covers writers that never see this form. |
+| D-17 | Tauri | `tab_size: 999` and emptied fields persisted (and the emptied ones failed the save with a raw serde error). WS-B replaced the form's own clamp with `Config::normalized()`, which every writer passes through — including ones that never see this form — and whose bounds the controls now read (`config_bounds`) instead of restating. | — |
 | D-18 | Native | The warm-up fetch ran offline, and against remote-less repos, discarding its outcome. Now gated on the breaker *and* `status.hasRemote`, and reports to the breaker (RM-10). Waits on the new `RepoStore.awaitLoadSettled()` so the gate reads a real status. | — |
 | D-19 | Tauri | The `\ No newline at end of file` marker rendered its backslash twice. `linePrefix` no longer adds one — core keeps it in `content`. | DF-8's other three alignments. |
+| D-5 | Tauri | **Config lost-update on a shared file.** A save posted the whole config as it looked when the dialog *opened*, so a native-side `tab_size` change was silently reverted. `patch_config` (H-10) is now the only writer: a surface names the fields it owns and cannot touch the rest, and core reads-edits-writes under a lock the file never had. | — |
+| D-7 | Both / core | **Empty-string AI config poisoned Generate in both clients.** `Some("")` is not `None`, so `--model ""` and a hostless Ollama URL sailed past every `unwrap_or`. `Config::normalized()` (H-10) treats blank-after-trim as absent on every read and every write, so an already-poisoned file heals on first load whichever client opens it. | — |
 
 ### 3.2 Defects still open
 
 | ID | Client | Defect | Severity |
 |---|---|---|---|
 | D-4 | Tauri | **Terminal listener-registration race.** Output and exit listeners are registered two async IPC round trips *after* `start_terminal` returns, while the reader thread is already emitting; Tauri drops events with no listener (`Terminal.svelte:145,154,164`; `event_sink.rs:35-42`). A fast-printing shell loses its first prompt; an instantly-dying shell (the broken-`.zshrc` case the docs claim is handled) can lose `terminal-closed` entirely. Native passes the listener as an argument to the spawn — structurally immune. | High |
-| D-5 | Tauri | **Config lost-update on a shared file.** `handleSave` posts the entire config captured when the overlay opened; `setProvider` spreads a possibly-hours-stale `$config` (`SettingsOverlay.svelte:47-56`; `CommitMessage.svelte:154-164`). A native-side `tab_size` change is silently reverted by the next Tauri save. Compounded by D-6. `config.toml` has **no write lock** in core (unlike `repos-state.json`). | High |
 | D-6 | Tauri | **Config never re-read while running.** `resyncOnActive` doesn't call `refreshConfig` (`MainLayout.svelte:715-732`) — a native-side save never reaches a running Tauri app: theme, diff settings, auto-fetch, provider all stale with an unbounded window. Native reloads `AppConfigStore` on every activation. | High |
-| D-7 | Both / core | **Empty-string AI config poisons Generate in both clients.** Tauri persists `""` for `ai_model` / `ollama_server_url`; `Some("")` is not `None`, so core's `unwrap_or` never fires — Ollama POSTs to `"/api/generate"`, Claude runs `--model ""` (`core/src/ai.rs:268-272,118-126`). One client's emptied field breaks Generate in the *other* client until a native save heals the file. | High |
 | D-9 | Native | **Collapsing the terminal reflows the emulator to one row.** The zero-height frame is full-width, so SwiftTerm's degenerate-size bail (width *and* height zero) doesn't fire; the buffer reflows to `MINIMUM_ROWS = 1` and each collapse/expand cycle sends a spurious `SIGWINCH` (TerminalDock's `.frame(height: 0)` + SwiftTerm `AppleTerminalView.swift:353-356`). | Medium |
 | D-14 | Native | **Stale-diff scroll: no reset on file switch.** No `ScrollViewReader` exists; `DiffRow.id` is a flat index, so switching files lands at the previous file's scroll offset (verified — no `scrollPosition`/`scrollTo` anywhere in `Sources/LeoGit`). Both Tauri and GitHub Desktop reset on file change. | Medium |
 | D-15 | Native | **Copying from a diff yields garbage.** `.textSelection(.enabled)` spans the gutters, so a copy includes line numbers and `+`/`−` glyphs; tab expansion means tabs come out as spaces (`DiffView.swift:145`; `DiffLineText.swift:86-88`). GitHub Desktop rebuilds clipboard text from the model. | Medium |
@@ -118,17 +121,17 @@ behavior change the user would notice — except battery.
 
 | ID | Where | Waste | Scale |
 |---|---|---|---|
-| E-1 | Both | `is_merging` is a separate `git rev-parse --git-dir` subprocess on every 2 s poll tick, for a boolean `get_status` could carry free (it already resolves the git dir and parses porcelain v2). | ~1 800 avoidable spawns/hour **per client** |
+| E-1 | ✅ *WS-B.* `merging` rides on `RepoStatus`, answered by a filesystem read of `<repo>/.git` rather than a subprocess (H-1). The waste it named was real; its explanation was not — `get_status` never resolved the git dir. | was ~1 800 spawns/hour **per client** |
 | E-2 | Tauri | `pollHeadSha` spawns `git rev-parse HEAD` every tick although `status.head_sha` from the same tick already holds it. | ~30 spawns/min |
 | E-3 | Tauri | No visibility gating anywhere: hidden window keeps the 2 s poll (≈120 subprocesses/min if the engine doesn't throttle) and the tier scheduler fetching up to 19 remotes on a 2/5/10-min rotation, forever. Native: 30 s ladder + paused sweeps. | ~60× hidden-state cost |
 | E-4 | Tauri | Three independent tier `setInterval`s collide every 10 min — up to 3 concurrent background `git fetch` + auto-fetch + a visible sweep. The "sequential" comment is only true within a tier. | 4 concurrent fetches worst case |
 | E-5 | Tauri | Dropdown open fires `get_repo_identifier` + `get_last_commit_timestamp` per repo, **unbounded in parallel** — the only unbounded fan-out in either client. | 2N processes at once (N = repos) |
 | E-6 | Tauri | Poll publishes a fresh `repoState` (plus two new `Set`s) every tick even when nothing changed → every subscriber re-renders every 2 s on an idle repo. Native equality-skips. | continuous idle re-render |
 | E-7 | Native | Every discard/ignore triggers a **full** reload — status + up to 500-commit log + `is_merging` + a progress-bar flash — though neither can change history. Tauri does a silent status refresh. | one `git log`@500 per row action |
-| E-8 | Native | Core builds phase-1 HTML (a `Vec<char>` per line) + side-by-side pairs on every native parse and the bridge discards both (`core/src/diff.rs:125-126` → `ffi/src/lib.rs:303-311`). | ~40 k allocations per 20 k-line diff load |
+| E-8 | ✅ *WS-B.* `DiffOptions` makes the render artifacts opt-in, so the native path no longer builds HTML and pairings for the bridge to drop (H-8). `DiffLine.text` became `Option` in the same pass, dropping a duplicate of every line's content from both wires. | was ~40 k allocations per 20 k-line diff load |
 | E-9 | Native | Whole-status epoch re-tokenizes the open diff when *any* file changes (~19–140 ms + 2 `git show` per unrelated edit); a per-file `stat_stamp` compare would gate it. No phase-2 debounce either (Tauri: 80 ms). | up to ~140 ms background CPU per unrelated edit |
 | E-10 | Native | `PathText.fittedParts` is recomputed on every body evaluation (~50 rows × log₂-probes per interaction) — TECHNICAL.md claims it's width-keyed; it isn't. | ~350 text measurements per interaction |
-| E-11 | Tauri | Diff viewer mounts every row (no virtualization) and phase 2 re-parses N `innerHTML`s in one tick; no size guard in either client (GH Desktop has three). Terminal output crosses IPC as one JSON event per 4 KiB read. | unbounded in diff size; ~2 560 IPC crossings per 10 MB of terminal output |
+| E-11 | Tauri | Diff viewer mounts every row (no virtualization) and phase 2 re-parses N `innerHTML`s in one tick. **Half closed in WS-B**: the size guard landed in core (H-15), and terminal output now coalesces under back-pressure instead of crossing once per 4 KiB read (H-14). Virtualization is the ROADMAP item DF-4 defers. | terminal half closed; diff size still unbounded without the guard's escape |
 | E-12 | Tauri | Terminal shims are sync `#[tauri::command]`s on the main thread — one hop per keystroke, and `close_terminal` blocks ~250 ms on every teardown. | visible teardown hitch |
 
 ## 4. The parity inventory
@@ -163,10 +166,12 @@ and matched, not that it was skipped.
   Tauri's list is discovery-only — clones, CLI opens, and Open-Other rows all
   vanish on restart, and `last_opened_repo` restore is conditioned on
   discovery re-finding it. **Native right**; Tauri is throwing away state it
-  already persists. Hoist the union rule to core (`known_repos`) and use it
-  for the tier membership too — native currently tiers raw MRU entries that
-  may no longer exist, burning a time-boxed fetch per dead entry per tier
-  interval (the reverse defect). → WS-C, WS-B
+  already persists. ✅ *WS-B*: the union rule is core's (`known_repos`) and both
+  clients call it, so a clone, a CLI open or an Open-Other repo keeps its row
+  across restarts and a path that no longer exists loses one — which also stops
+  native tiering dead MRU entries and burning a time-boxed fetch on each per
+  tier interval (the reverse defect). Still open: Tauri's `last_opened_repo`
+  restore is conditioned on discovery re-finding the repo. → WS-C
 - **RM-4 · Switcher sort order.** Native: MRU + active-first (zero
   subprocesses). Tauri: last-commit-time via one `git log -1` per repo
   (E-5), list reordering under the user as timestamps stream in, plus a
@@ -185,9 +190,13 @@ and matched, not that it was skipped.
   and searches only them — so the "tier-for-tier identical" search contract
   (FRONTEND §6.9) has silently drifted on its *input set*, and Tauri's own startup
   picker disagrees with its own dropdown. **Tauri's labels right; the search
-  rule belongs in core** (`match_repo`) so drift becomes impossible — which
-  also gives Tauri the `$HOME` path-root for free. Port identifiers to native
-  lazily (visible rows only) and bound Tauri's fan-out (E-5). → WS-B, WS-E
+  rule belongs in core**. ✅ *WS-B*: `match_repo` and the batch `filter_repos`
+  both hosts call replaced the two drifted files, which are deleted. Tauri
+  gained the `$HOME` path-root and native gained case- and
+  separator-normalized prefix matching (its raw `hasPrefix` silently made the
+  whole absolute path searchable whenever a scan folder's case differed).
+  Native still searches one label — porting identifiers to it lazily (visible
+  rows only) and bounding Tauri's fan-out (E-5) is what's left. → WS-E
 - **RM-6 · Switcher keyboard cursor.** Native: Return opens the first match,
   nothing else (confirmed; ROADMAP tracks it). Tauri: full ↑/↓ cursor with
   scroll-into-view across all three of its pickers. **Tauri right**; native
@@ -247,7 +256,10 @@ and matched, not that it was skipped.
   machine is available), then macOS and Windows; the Tauri client adopts it in
   WS-D, and the native client retires `NetworkPathObserver` once the macOS
   backend proves equivalent. Until it lands, `navigator.onLine` stays
-  authoritative-negative only. → WS-B, WS-D
+  authoritative-negative only. **Decided by the user: built in WS-D, beside its
+  adopter** — a workstream earlier would have meant an unverifiable, uncalled
+  backend, which is the dead-wiring shape this plan otherwise deletes (see §6's
+  WS-D entry). → WS-D
 - **BG-4 · Poll equality + failure surfacing.** The failure half landed in WS-A
   (D-3: the 3-tick streak on the poll-owned `pollError` flag, reset on repo
   switch in both clients). What remains is E-6: port the native equality skip
@@ -274,10 +286,11 @@ and matched, not that it was skipped.
   from the policy's occlusion edge. → WS-G
 - **BG-8 · Auto-fetch budget (shared).** Both clients run auto-fetch under the
   *user* network budget (15/30/600 s), not the 12 s background budget the tier
-  fetches use — arguably wrong for an automatic fetch. Core-level, both
-  clients inherit the fix. **Decided: scheduled here rather than filed** — it
-  is a constant and a call site (H-19), cheap to take while the core is open.
-  → WS-B
+  fetches use. ✅ *WS-B.* `fetch` takes a `background` flag and both clients'
+  automatic paths pass it, so an unreachable remote gives up in 12 s instead of
+  holding the single network slot for ten minutes with every other repo's
+  refresh queued behind it. A fetch the user asked for keeps the generous
+  budget a large transfer needs.
 
 ### 4.3 Sync & publish (SY)
 
@@ -384,11 +397,12 @@ and matched, not that it was skipped.
   **document as a FRONTEND §8 row** — but native's `· merging` suffix is easy to miss
   and truncates first; give it the same color treatment as the conflicted
   badge. → §9, WS-F
-- **BR-9 · `is_merging` fold-in.** E-1: add `merging: bool` to `RepoStatus`
-  in core (populated from the git dir `get_status` already resolves), keep the
-  standalone command for compatibility. Removes a subprocess per tick per
-  client *and* the whole class of "refresh path forgot isMerging" bugs (D-13).
-  Highest-leverage single change in the area. → WS-B
+- **BR-9 · `is_merging` fold-in** — ✅ *WS-B.* `RepoStatus.merging` is filled
+  from a filesystem read of the git dir, so it costs the poll nothing and no
+  refresh path can forget to ask (D-13's bug class). The standalone command
+  was deleted rather than kept for compatibility: with both clients reading
+  the status field it had no callers, and an unused second route back to the
+  same answer is how they diverge again.
 - **BR-10 · Rename / remote-delete plumbing.** Tauri carries registered,
   wrapped, never-called commands; the FFI's dead-surface rule (don't export
   what nothing calls) is the better policy — the dead wiring is exactly how
@@ -430,16 +444,18 @@ and matched, not that it was skipped.
   clients (`U` in Tauri, `!` natively): **verdict `U`** — git's own porcelain
   letter, which is the vocabulary native's own comment claims to follow. Hoist
   `letter()`/`label()` onto core's `FileStatus` so the glyphs can't drift
-  again. **Decided: conflicted gets its own purple status token** — a new
-  light + dark pair in STYLE.md's status palette rather than reusing red,
-  because red is already Deleted and a glance down the list has to separate
-  "you deleted this" from "git couldn't merge this": opposite actions, and one
-  of them blocks the commit. The token gets a second consumer immediately in
-  BR-8's easily-missed `· merging` suffix. **Decided: the native 18×18 tinted
-  plate behind the letter stays** and becomes the shared look — STYLE.md's old
-  no-plate rule was a leftover of the earlier TUI-flavored direction, macOS
-  style is the design authority today, and the rule is rewritten to describe
-  the plate; the Tauri client adopts the plate here. → WS-F, WS-C
+  again. ✅ *WS-B* for the glyph and the token: `file_status_styles()` is the
+  one table both clients read (once, at startup — colour stays per-platform),
+  the conflicted letter settled on `U`, and conflicted gained its own purple
+  status token in both palettes rather than reusing red, because red is
+  already Deleted and a glance down the list has to separate "you deleted
+  this" from "git couldn't merge this": opposite actions, and one of them
+  blocks the commit. The token's second consumer is BR-8's easily-missed
+  `· merging` suffix. **Decided: the native 18×18 tinted plate behind the
+  letter stays** and becomes the shared look — STYLE.md's old no-plate rule was
+  a leftover of the earlier TUI-flavored direction, macOS style is the design
+  authority today, and the rule is rewritten to describe the plate; the Tauri
+  client adopts the plate here. → WS-C
 - **CH-5 · Rename display.** Tauri and GH Desktop render `old → new`
   (STYLE.md mandates it); native shows only the destination —
   indistinguishable from an add. Also missing in the native diff header
@@ -458,14 +474,20 @@ and matched, not that it was skipped.
   a premature prune costs a commit you didn't mean to make and never saw
   happen — and the grace window bounds the set without reopening the flicker
   hole. Hoist the reconciliation to core (H-20; written twice today, already
-  drifted). → WS-B
+  drifted). **Decided by the user: land it in WS-D with BG-4's equality gate** —
+  the grace counter has to advance every tick, so it cannot be gated on "the
+  file list changed" and would cost the Tauri poll a second crossing every 2 s;
+  BG-4 is restructuring that poll anyway. → WS-D
 - **CH-8 · Discard confirmation copy.** Native names the actual per-file
   outcome (restored from HEAD vs moved to Trash) — what FRONTEND §6.10 asks for; Tauri
   states both rules generically and dismisses on backdrop click (STYLE.md
   violation). But native *guesses* the outcome from status while core decides
-  it authoritatively via `ls-tree` — they can disagree on odd renames. Hoist
-  `classify_discard` from core's own logic; both clients then state the real
-  outcome. Native also lacks Tauri's in-flight busy state. → WS-B, WS-C, WS-F
+  it authoritatively via `ls-tree`. ✅ *WS-B*: `classify_discard` returns the
+  same plan the discard itself runs on, and both dialogs render it — so the
+  three cases the guess got wrong (a staged re-add of a path that exists in
+  HEAD, a rename whose original is *not* in HEAD, and every file under an
+  unborn HEAD) now read truthfully instead of promising something the action
+  then doesn't do. Native still lacks Tauri's in-flight busy state. → WS-F
 - **CH-9 · Embedded-repo confirm.** Tauri's copy is better (names the outer
   repo, states the clone consequence, "Commit as link" verb); native's system
   `confirmationDialog` is the right container. Merge: native container +
@@ -515,25 +537,30 @@ and matched, not that it was skipped.
   collapse lives) should close **toward the structured token wire for both**
   — that is GitHub Desktop's own shape (worker tokens, view-side collapse),
   it halves Tauri's per-diff IPC, and it unblocks Tauri virtualization.
-  Related core fixes regardless of timing: stop building HTML+pairs on the
-  native path (E-8); make `DiffLine.text` an `Option` (it duplicates every
-  line's content and is read only for Hunk/NoNewline rows — halves parsed-diff
-  memory in both clients); fuse the raw-read+parse round trip into
-  `get_parsed_diff` / `get_parsed_commit_diff`. → WS-B
+  ✅ *WS-B* for the core half: `DiffOptions` makes HTML and side-by-side pairs
+  opt-in (E-8), `DiffLine.text` is an `Option` filled only for the Hunk and
+  NoNewline rows that read it, and `get_parsed_diff` /
+  `get_parsed_commit_diff` fuse the read and the parse. FRONTEND §7's open
+  decision — whether the *phase-2* wire becomes structured tokens for both —
+  is untouched and still open.
 - **DF-4 · Virtualization + size guards.** Tauri mounts every row.
   GitHub Desktop solves the exact variable-height
   problem Tauri gave up on (measured-height cache). Neither client has any
   large-diff guard; GH Desktop has three (70 MB buffer / ~4.4 MB "reasonable"
   / 5 000 chars-per-line → a "Show Diff anyway" state). **Decided: guard only
   in this plan** — the two fixes sit at very different sizes, and only the
-  guard is cheap: it makes the pathological diff survivable and explained
-  instead of a hang, with thresholds in core (H-15) so both clients inherit
-  one policy. Virtualization only smooths the merely-large diff, so it becomes
-  a ROADMAP item recording GitHub Desktop's measured-height approach, why it
-  is a web-only concern (SwiftUI's `List`/`LazyVStack` already virtualize — no
-  native work exists there), and that it is re-judged after DF-3's structured
-  wire changes how rows are built, then taken only if large diffs still feel
-  heavy. → WS-B
+  guard is cheap. ✅ *WS-B*: `DiffSizeGuard` withholds a patch over 4 MiB, or
+  one with a line over 5 000 bytes, and both viewers render the measurements
+  with a "Show diff anyway" button that re-asks with the guard lifted (per
+  request, not sticky — moving to another file gets the guard back), so a
+  pathological diff is survivable and explained instead of a hang. The
+  long-line limit earns its place separately: a minified bundle is slow at a
+  total size the byte bar waves through. Virtualization only smooths the
+  merely-large diff, so it stays a ROADMAP item recording GitHub Desktop's
+  measured-height approach, why it is a web-only concern (SwiftUI's
+  `List`/`LazyVStack` already virtualize — no native work exists there), and
+  that it is re-judged after DF-3's structured wire changes how rows are
+  built, then taken only if large diffs still feel heavy.
 - **DF-5 · Dead per-line-selection scaffolding (Tauri).** Confirmed
   unreachable end to end (props hard-coded false, store field never written,
   patch commands uncalled) — and it costs today: hunk headers are focusable
@@ -549,16 +576,17 @@ and matched, not that it was skipped.
   prefixes, wrapping, side-by-side interleaving, and native's tab expansion,
   since `line.content` keeps real tabs). Interim: Tauri `user-select: none`
   on the `+/-` prefix; native scope `.textSelection` to the content text.
-  A core helper ("plain text of a flat line range") keeps the two clients
-  byte-identical. → WS-F, WS-C, WS-B
-- **DF-7 · Empty-parse reason** (D-12). WS-A gave the Tauri client the *state*
-  (both diff panes now render "No Textual Changes" rather than the
-  no-selection copy), which is where the reason plugs in. Core still returns a
-  bare `None` for both "empty input" and "no hunks"; return a reason
-  (`NoTextualChanges | WhitespaceOnly | Empty`) so both clients render an
-  honest message — the whitespace case matters because hide-whitespace makes
-  it common — and add a *load failed* variant, or the Tauri branch keeps
-  claiming "No Textual Changes" behind DF-10's error. → WS-B, WS-C
+  The core helper that keeps the two byte-identical landed in WS-B
+  (`copy_text`, exported as `copy_diff_text`) and is deliberately unconsumed
+  until one of these lands — the workstream's one exception to the
+  no-dead-surface rule. → WS-F, WS-C
+- **DF-7 · Empty-parse reason** (D-12) — ✅ *WS-B.* `EmptyDiffReason` names the
+  three situations one caption used to cover, and both clients render each
+  honestly. The whitespace case needed the fused call to exist at all: when the
+  filtered diff has nothing to render, core re-reads the unfiltered one to tell
+  "unchanged" from "re-indented, and the setting is hiding it". A *load
+  failed* variant turned out to be unnecessary — the fusion makes a failure an
+  `Err` rather than an empty parse (see DF-10).
 - **DF-8 · Header details.** Tauri shows `old → new` for renames (native:
   nothing — source it from the parsed diff, which describes what's rendered);
   Tauri suppresses `+0 −0` (native shows it on binary diffs, misleading);
@@ -572,7 +600,9 @@ and matched, not that it was skipped.
   (D-14 is the native half). → WS-F, WS-C
 - **DF-10 · Failure surface.** Native clears the stale payload and shows an
   inline pane error (right on safety); Tauri leaves the stale diff rendered
-  behind a blocking modal (wrong on both). Inline + clear, both. → WS-C
+  behind a blocking modal (wrong on both). Inline + clear, both. WS-B removed
+  the ambiguity underneath it — a failed load is an `Err`, an empty parse is an
+  `Ok` with a reason — so what remains is presentation only. → WS-C
 - **DF-11 · Dirty-submodule pane.** Tauri explains ("Submodule changes …");
   native renders git's raw `Subproject commit …-dirty` — the one place the
   guard chain breaks (STYLE.md mandates the pane). Branch before the
@@ -632,15 +662,15 @@ and matched, not that it was skipped.
 - **HI-6 · Commit-list keyboard.** The one list in the Tauri app with no
   arrow navigation (every row a tab stop — also an a11y problem); native gets
   it free from `List`. Port `FileList`'s pattern. → WS-C
-- **HI-7 · Detail loads.** Fuse `get_commit_files` + `get_commit_stats` into
-  one `get_commit_detail` (two near-identical `git log -1` invocations —
-  halves subprocesses per selection in both clients and removes the
-  error-policy split: native shows a failure state, Tauri silently renders
-  "No changes"). Port the error state to Tauri. Guard Tauri's re-select
-  (currently blanks and refetches on clicking the selected row). Key native's
-  detail task on `(repoPath, sha)` not sha alone (latent cross-repo defect;
-  the `LoadKey` pattern exists one file over). Clear native's `commits` on
-  repo switch (it briefly shows the previous repo's history). → WS-B, WS-C, WS-F
+- **HI-7 · Detail loads.** ✅ *WS-B* for the fusion: `get_commit_detail` is one
+  `git log -1 -z --raw --numstat`, halving subprocesses per selection in both
+  clients and removing the error-policy split — the files and the totals now
+  come from one read, so neither can describe a different commit than the
+  other. Still open: guard Tauri's re-select (currently blanks and refetches on
+  clicking the selected row); key native's detail task on `(repoPath, sha)` not
+  sha alone (latent cross-repo defect; the `LoadKey` pattern exists one file
+  over); clear native's `commits` on repo switch (it briefly shows the previous
+  repo's history). → WS-C, WS-F
 - **HI-8 · Paging.** A failed page opens a blocking modal mid-scroll in Tauri
   (demote to non-blocking); Tauri's paging sets repo-wide `isLoading`, which
   disables the Commit button on the other tab (give it its own flag); native
@@ -685,22 +715,23 @@ and matched, not that it was skipped.
   (an untrimmed Tauri path creates literal `" …"` directories and persists the
   poisoned `last_clone_dir`), empty-destination preview shows `/repo` in
   Tauri. Both share two latent bugs (`owner/repo/` and scheme-less
-  `github.com/…` enable Clone then fail). **Hoist:
-  `derive_clone_target(raw_url, parent) -> {normalized_url, repo_name,
-  target_path}`** in core beside `prepare_clone_target` (not inside it —
-  separate responsibilities), unit-tested against the full matrix; gate the
-  Clone button on a real parse. Single highest-value structural fix in the
-  area. → WS-B
+  `github.com/…` enable Clone then fail). ✅ *WS-B*:
+  `derive_clone_target(raw_url, parent)` and `clone_target_path(parent, name)`
+  live in `core::repos`, matrix-tested, and both dialogs gate Clone on a real
+  parse — so the preview and the button can no longer disagree about whether
+  the app is about to succeed. Both latent bugs are covered, and the
+  destination join keeps a bare root (`/`) that the old trailing-slash strip
+  turned into a relative path.
 - **CL-5 · Mid-clone state.** Native freezes every input (correct); Tauri
   leaves tabs/filter/rows/URL/destination editable — clicking another repo
   mid-clone rewrites the "Clones into…" preview to a lie. One `<fieldset
   disabled>`. → WS-C
 - **CL-6 · Progress.** Native always shows motion (indeterminate for gh
   clones); Tauri shows nothing for a gh clone but the button label.
-  Port the indeterminate bar as the interim. **Decided: scheduled here rather
-  than filed** — `gh repo clone` accepts pass-through git args, so `gh_clone`
-  reuses the streaming seam `git clone` already has (H-18) and both clients
-  get real progress instead of an indeterminate bar. → WS-C, WS-B
+  ✅ *WS-B*: `gh repo clone … -- --progress` forwards to `git clone`, so
+  `gh_clone` reuses the streaming seam a URL clone already had and both routes
+  report real numbers. Nothing was wrong with the plumbing — nobody had passed
+  the flag through.
 - **CL-7 · Small deltas.** Empty-state discrimination (no repos vs no
   matches — native right); description tooltip (native surfaces what both
   fetch); per-tab error state (GH Desktop's shape; native currently shows a
@@ -723,20 +754,17 @@ and matched, not that it was skipped.
   the research notes). Live-apply: native applies auto-fetch/interval within
   one tick and diff settings immediately; Tauri needs a restart or repo
   switch for auto-fetch (BG-2) and never sees cross-client edits (D-6).
-  Dead fields: `claude_timeout_secs` is read by **nothing** (core hardcodes
-  120 s) yet Tauri ships a live-looking control for it; `ai_api_key` is
-  mapped but no provider reads it. A control that persists a value nobody
-  reads is worse than no control — the user believes the timeout is set — so
-  ST-8's restructure wires `claude_timeout_secs` through `AiProviderConfig`
-  into both providers and drops `ai_api_key`. → WS-B
-- **ST-2 · Save semantics.** Native: load-fresh-overlay-write everywhere.
-  Tauri: whole-object write-back (D-5). **Hoist `patch_config` into core
-  with a lock** (the file two clients share currently has none) — that makes
-  the pattern structural rather than a per-frontend discipline. Plus
-  `Config::normalized()` (clamp numerics, empty-strings → absent) inside
-  core's save so D-7/D-17-class poison can't land regardless of writer, and
-  the AI entry points treating empty-after-trim as absent so already-poisoned
-  files heal. → WS-B
+  ✅ *WS-B* for the dead fields: the AI timeout now travels on
+  `AiProviderConfig` and bounds both providers' requests — a control that
+  persisted a value nobody read was worse than no control, because the user
+  believed the timeout was set — and `ai_api_key`, mapped but read by neither
+  provider, is gone. → WS-C, WS-D
+- **ST-2 · Save semantics** — ✅ *WS-B.* `patch_config` is the only writer, and
+  it reads-edits-normalizes-writes under a lock the shared file never had, so
+  a surface can only change the fields it names. `Config::normalized()` runs on
+  both the read and the write, which is what heals an already-poisoned file on
+  first load. Both clients' whole-object writes are deleted; so is
+  `save_config`'s export.
 - **ST-3 · Surface model.** **Decided: the Tauri client moves to
   instant-apply, matching native** — the simplest and least-code option: each
   control patches its own field through H-10's `patch_config` as it changes,
@@ -750,13 +778,12 @@ and matched, not that it was skipped.
   D-8's lost text edit is already fixed. Port native's per-section footers ("Applies to the open diff
   immediately") to Tauri — honest only once BG-2 lands, which is a feature of
   the suggestion. → WS-C, WS-F
-- **ST-4 · Units and bounds.** Native shows fetch interval in seconds (better;
-  keep ms on the wire); Tauri still shows raw ms. Both clamp on save now
-  (D-17), but in **three** disagreeing places — `SettingsStore`'s three ranges
-  in seconds, `SettingsOverlay`'s `BOUNDS` in milliseconds, and core's
-  `default_*` — which is exactly what H-10's `Config::normalized()` collapses.
-  Native's load-clamp also floors to 1 s while its own control starts at 5 —
-  clamp to the range. → WS-C, WS-F
+- **ST-4 · Units and bounds.** ✅ *WS-B* for the bounds: `config_bounds()` is
+  the one declaration, read by both forms and enforced by the one writer, so a
+  control can no longer offer a value the writer then clamps away (native's
+  load-clamp floored to 1 s while its own control started at 5). Units are
+  unchanged and deliberate — native shows seconds, the wire stays
+  milliseconds. Still open: Tauri shows raw ms. → WS-C
 - **ST-5 · `ai_provider` ownership.** Native has **two independent owners**
   (composer's CommitStore and SettingsStore) that never observe each other —
   with both windows open the pickers can disagree, and a Settings save of any
@@ -765,12 +792,13 @@ and matched, not that it was skipped.
   Route both native surfaces through `AppConfigStore` (which exists precisely
   to be the single owner — and grow it the `scanPaths` accessor three other
   call sites currently bypass it for). → WS-F
-- **ST-6 · AI mapping duplication.** The Config→`AiProviderConfig` mapping
-  exists in the bridge (Rust) *and* still inline in `CommitMessage.svelte` —
-  "moved" was actually "duplicated", and the pinning test asserts Rust
-  against a described TS behavior it can't watch. Move the mapping into
-  `core/src/ai.rs`, expose `load_ai_config` through a Tauri shim, delete the
-  TS copy. → WS-B
+- **ST-6 · AI mapping duplication** — ✅ *WS-B.* `ai::provider_config` and
+  `ai::load_ai_config` live in core; the bridge is the delegation it always
+  claimed to be, the TS copy is deleted, and both clients call
+  `load_ai_config` per generate. The three behavioural differences between the
+  old copies go with it — including the one that mattered: the model and the
+  server URL now always belong to the provider actually about to run, rather
+  than being spliced from a picker value over a separately-loaded config.
 - **ST-7 · Provider save failure.** Native reverts the picker; Tauri leaves
   the optimistic value lying until restart. Port the revert (4 lines). → WS-C
 - **ST-8 · One model field, two providers.** Set `sonnet`, switch to Ollama,
@@ -780,9 +808,12 @@ and matched, not that it was skipped.
   can be regenerated), so the config gains a real per-provider shape (a
   Claude section with model + timeout, an Ollama section with model + server
   URL) instead of a migration shim; `ai_api_key` goes away in the same pass;
-  unknown old keys keep parsing (`config_ignores_retired_keys`). The UI
-  follows: each provider remembers its own model, so switching provider in
-  the composer never requires a Settings trip. → WS-B, WS-C, WS-F
+  unknown old keys keep parsing (`config_ignores_retired_keys`). ✅ *WS-B*, UI
+  included: both Settings surfaces show the selected provider's own fields, so
+  switching provider in the composer never requires a Settings trip. Field
+  order in `Config` is now load-bearing — a TOML table swallows every key after
+  it, so nothing scalar may be declared below those two (pinned by a
+  round-trip test).
 - **ST-9 · `check_provider_available`.** Dead wrapper in Tauri, deliberately
   unexported natively. **Decided: use it rather than delete it** — a dead
   command path is exactly how BR-1 rotted, and the probe earns its keep: gate
@@ -820,19 +851,19 @@ and matched, not that it was skipped.
   frontend-created `Channel` passed into `start_terminal` (mirrors the
   native seam, kills the race and the per-chunk JSON), mark
   `start`/`close`/`resize` `(async)` (leave `write` sync — IPC arrival order
-  is the keystroke-ordering guarantee). **Core hoist**: an optional
-  coalescing flush (8 KiB / 8 ms) in the shared reader thread serves both
-  hosts and simplifies the native relay; add a byte ceiling with *flow
-  control* (pause PTY reads, never discard — native's relay is currently
-  unbounded, xterm discards at 50 MB). → WS-C, WS-B
+  is the keystroke-ordering guarantee). ✅ *WS-B* for the core half: the reader
+  thread now feeds a bounded channel and a second thread coalesces, so output
+  is slowed rather than dropped when a host falls behind, and a flood arrives
+  in a few dozen deliveries instead of one per 4 KiB read. The batching is
+  back-pressure-driven, not a fixed window — see §6's WS-B entry for why, and
+  for what that means for the `Channel` rewrite. → WS-C
 - **TE-3 · Collapse/resize** — D-9 (native emulator reflow; fix by pinning
   the inner frame) and the missing native 80 ms resize debounce (a divider
   drag is one SIGWINCH per column crossed today — put the coalescing in
   `TerminalController.resize`, not the delegate, to keep the one-shot
-  initial-size push). Core: `resize_terminal` should reject `cols/rows < 2`
-  itself — unbypassable for every host, instead of one explicit guard
-  (native) and one accidental one (Tauri relying on FitAddon internals).
-  → WS-F, WS-B
+  initial-size push). ✅ *WS-B* for the core half: `resize_terminal` ignores a
+  `< 2×2` grid itself, so no host can announce a collapsed panel to the PTY —
+  which leaves D-9 as purely the native inner-frame pin. → WS-F
 - **TE-4 · Scrollback.** 500 (native) vs 1000 (Tauri) — both library
   defaults, neither chosen. Set 1000 explicitly on both (`git log --stat`
   exceeds 500; VS Code ships 1000). → WS-F
@@ -921,33 +952,37 @@ applied: hoist when the logic is pure, duplicated (or about to be), and
 IPC-cost-free; keep per-platform when it's presentation or host-lifecycle.
 None of these sacrifice measurable performance; several *save* subprocesses.
 
+Eighteen shipped in WS-B; the two that didn't are the two the rule above
+disqualifies for opposite reasons, and both moved to WS-D (see §6).
+
 | # | Hoist | Replaces | Feeds |
 |---|---|---|---|
-| H-1 | `RepoStatus.merging: bool` filled by `get_status` (keep `is_merging` for compat) | one subprocess per tick per client (E-1) + the forgot-isMerging bug class | WS-B |
-| H-2 | `get_remote` returns no-remote honestly (stop inventing `"origin"`; move the assumption to the publish path) | D-2's dead guard, D-18's doomed fetches | WS-B |
+| H-1 | ✅ `RepoStatus.merging: bool` filled by `get_status` | one subprocess per tick per client (E-1) + the forgot-isMerging bug class | shipped |
+| H-2 | ✅ `get_remote` returns no-remote honestly (`Option`); `DEFAULT_PUBLISH_REMOTE` carries the assumption at the one call site that creates a remote | D-2's dead guard, D-18's doomed fetches | shipped |
 | H-3 | `sync_proposal(&RepoStatus) -> SyncProposal` (the ladder as a total function; titles/icons stay per-platform) | native `SyncControls` derivation + Tauri's three loose booleans; makes ROADMAP's force-push-recommended a one-place change | WS-C |
-| H-4 | `derive_clone_target(url, parent)` beside `prepare_clone_target`, matrix-tested | the drifted TS/Swift pair + two shared latent bugs (CL-4) | WS-B |
-| H-5 | `match_repo(query, path, names, scan_folders)` (the FRONTEND §6.9 rule) | two implementations already drifted on input set (RM-5); gives Tauri the home-dir root free | WS-B |
-| H-6 | `known_repos(scan_paths, depth, recents)` (discovery ∪ existence-checked MRU) | Tauri's forgotten rows + native's dead-MRU tiering (RM-3) | WS-B |
-| H-7 | `get_commit_detail(repo, sha)` (one `git log -1 --name-status --numstat`) | two subprocesses per commit selection per client + the error-policy split (HI-7) | WS-B |
-| H-8 | `get_parsed_diff` / `get_parsed_commit_diff` (fuse read+parse); split parse from render (stop building HTML/sbs on demandless paths); `DiffLine.text: Option` | E-8, half of Tauri's per-diff IPC, the double traversal in both (DF-3) | WS-B |
-| H-9 | Empty-parse reason enum | D-12 + native's generic copy (DF-7) | WS-B |
-| H-10 | `patch_config` + a config write lock + `Config::normalized()`; AI entry points treat `""` as absent | D-5, D-7, D-17 structurally | WS-B |
-| H-11 | Config→`AiProviderConfig` mapping into `core/src/ai.rs`; per-provider config sections (clean restructure, no migration shim, `ai_api_key` dropped — ST-8); `claude_timeout_secs` wired into both providers | the duplicated mapping + the untestable pin (ST-6) + the shared-model footgun (ST-8) | WS-B |
-| H-12 | `classify_discard(repo, files) -> {restore, trash}` from core's own `ls-tree` logic | native's guessed dialog copy; upgrades Tauri's generic copy free (CH-8) | WS-B |
-| H-13 | `FileStatus::letter()` / `label()` | three-way glyph drift (CH-4) | WS-B |
-| H-14 | Terminal reader-thread coalescing (8 KiB/8 ms) + bounded buffer with flow control; `resize_terminal` rejects `< 2×2` | E-11/E-12 transport waste, native's unbounded relay, the FitAddon-internals dependency (TE-2/TE-3) | WS-B |
-| H-15 | Large-diff thresholds (bytes / per-line chars) with a "show anyway" escape | the missing size guard in both (DF-4) | WS-B |
-| H-16 | Copy-text helper (flat line range → plain content) | byte-identical clipboard in both (DF-6) | WS-B |
-| H-17 | `core::net` connectivity observer emitting online/offline over the event seam — Linux netlink backend first, then macOS/Windows | Tauri's hard-wired `navigator.onLine` on WebKitGTK; eventually native's separate `NetworkPathObserver` (BG-3) | WS-B, WS-D |
-| H-18 | `gh_clone` through the `git clone` streaming seam (pass-through progress args) | the progress-less gh clone in both clients (CL-6) | WS-B |
-| H-19 | auto-fetch moved under the 12 s background network budget | an automatic fetch holding the single slot on the 15/30/600 s user budget (BG-8) | WS-B |
-| H-20 | exclusion-set reconciliation (keep an opt-out through a grace window, drop it after N absent ticks) | the two hand-written, already-drifted exclusion rules (CH-7) | WS-B |
+| H-4 | ✅ `derive_clone_target(url, parent)` + `clone_target_path`, matrix-tested | the drifted TS/Swift pair + two shared latent bugs (CL-4) | shipped |
+| H-5 | ✅ `match_repo` + the batch `filter_repos` both hosts call | two implementations already drifted on input set (RM-5); gives Tauri the home-dir root free | shipped |
+| H-6 | ✅ `known_repos(scan_paths, depth)` (discovery ∪ existence-checked MRU) | Tauri's forgotten rows + native's dead-MRU tiering (RM-3) | shipped |
+| H-7 | ✅ `get_commit_detail(repo, sha)` (one `git log -1 -z --raw --numstat`) | two subprocesses per commit selection per client + the error-policy split (HI-7) | shipped |
+| H-8 | ✅ `get_parsed_diff` / `get_parsed_commit_diff` (fuse read+parse); `DiffOptions` splits parse from render; `DiffLine.text: Option` | E-8, half of Tauri's per-diff IPC, the double traversal in both (DF-3) | shipped |
+| H-9 | ✅ `EmptyDiffReason` (`NoChanges` / `WhitespaceOnly` / `NoTextualChanges`) | D-12 + native's generic copy (DF-7) | shipped |
+| H-10 | ✅ `patch_config` + a config write lock + `Config::normalized()` + `config_bounds()`; blank-means-absent everywhere | D-5, D-7, D-17 structurally | shipped |
+| H-11 | ✅ `ai::provider_config` / `load_ai_config` in core; per-provider config sections; `timeout_secs` wired into both providers; `ai_api_key` dropped | the duplicated mapping + the untestable pin (ST-6) + the shared-model footgun (ST-8) | shipped |
+| H-12 | ✅ `classify_discard(repo, files) -> DiscardPlan` from core's own `ls-tree` logic | native's guessed dialog copy; upgrades Tauri's generic copy free (CH-8) | shipped |
+| H-13 | ✅ `FileStatus::letter()` / `label()` + the `file_status_styles()` table both hosts read once | three-way glyph drift (CH-4) | shipped |
+| H-14 | ✅ Terminal reader→emitter split with a bounded channel (flow control) and back-pressure-driven coalescing; `resize_terminal` ignores `< 2×2` | E-11/E-12 transport waste, native's unbounded relay, the FitAddon-internals dependency (TE-2/TE-3) | shipped |
+| H-15 | ✅ `DiffSizeGuard` (4 MiB total / 5 000 bytes per line) with a `show_anyway` escape | the missing size guard in both (DF-4) | shipped |
+| H-16 | ✅ `copy_text(file_diff, start, end)` | byte-identical clipboard in both (DF-6) | shipped |
+| H-17 | `core::net` connectivity observer emitting online/offline over the event seam — Linux netlink backend first, then macOS/Windows | Tauri's hard-wired `navigator.onLine` on WebKitGTK; eventually native's separate `NetworkPathObserver` (BG-3) | WS-D |
+| H-18 | ✅ `gh_clone` through the `git clone` streaming seam (`gh repo clone … -- --progress`) | the progress-less gh clone in both clients (CL-6) | shipped |
+| H-19 | ✅ `fetch(.., background)` picks the 8/8/12 s budget for automatic fetches | an automatic fetch holding the single slot on the 15/30/600 s user budget (BG-8) | shipped |
+| H-20 | exclusion-set reconciliation (keep an opt-out through a grace window, drop it after N absent ticks) | the two hand-written, already-drifted exclusion rules (CH-7) | WS-D |
 
 Deliberately **not** hoisted: sort collation (locale into a chrono-free core —
 no), relative-date formatting (platform), scheduling policy (host lifecycle),
 tab-expansion (single consumer), disambiguation labels (small, but H-6-adjacent
-if it ever grows).
+if it ever grows), and the per-status *colour* (H-13 hoists the glyph and the
+name; the tint resolves against each host's own palette).
 
 ## 6. Workstreams
 
@@ -971,38 +1006,93 @@ relative (S/M/L).
    and feeding it a *local* failure is the same poisoning D-2 is about). One new
    shared file, `apps/tauri-app/src/lib/utils/keyboard.ts`, holds D-16's rule.
    Gates: `pnpm check` 0/0, prettier clean, zero-warning `xcodebuild`, 120 core
-   + 24 bridge tests, clippy-pedantic at the 184 baseline. (D-4/D-5/D-6/D-7/D-9/
-   D-14/D-15/D-20 always needed their area's structure and remain in B/C/F.)
-2. **WS-B — Core convergence layer (L). ← next.** H-1 … H-20 (in the table's
-   order; H-2/H-10/H-11 carry D-2/D-5/D-7 to ground; H-17's Linux backend gets
-   verified on the user's Linux machine). Mostly pure-Rust + bridge work, all
-   test-covered; regenerated bindings; both hosts adopt as the later
-   workstreams touch each surface. Tests pin every new function; clippy
-   baseline unchanged. What WS-A changed under it:
-   - **H-1** has exactly one Tauri adopter now: `MainLayout.refreshStatus` is
-     the client's only status writer (D-13), so folding `merging` into
-     `RepoStatus` deletes one `gitApi.isMerging` call there and two natively
-     (`RepoStore.loadRepoData` and `refreshQuietly`).
-   - **H-2** must update three call sites, not one: `MainLayout`'s
-     `fetchActiveRemote` and `SyncStore.silentFetch` both call `get_remote`
-     unconditionally *after* a `has_remote` gate WS-A added — keep the gates
-     (they skip a subprocess), and drop the now-dead `if (!remote) return`.
-     `Header`'s pull/push path is the third, and is the one place the
-     `"origin"` assumption legitimately belongs (per the hoist's own note).
-   - **H-9** lands in three render sites, all now shaped the same way: the
-     Tauri changes pane, the Tauri commit pane, and native `DiffView`. Give the
-     enum a variant for *load failed* as well, or DF-10 has to arrive with it —
-     the Tauri branch currently cannot tell an empty parse from a failed load
-     and will claim "No Textual Changes" behind the error modal.
-   - **H-10**'s `Config::normalized()` replaces **three** bound tables that must
-     already agree: `SettingsStore.fetchIntervalRange/scanDepthRange/
-     tabSizeRange` (native, seconds), `SettingsOverlay`'s `BOUNDS` (Tauri,
-     milliseconds), and core's own `default_*` functions. Collapsing them to one
-     is most of this hoist's value; note the unit difference at the boundary.
-   - **H-14**'s `resize_terminal` guard is unaffected by WS-A, but the terminal
-     touched in D-16 is the same file — `Terminal.svelte` now owns an
-     `attachCustomKeyEventHandler`, which TE-2's `Channel` rewrite must keep.
-3. **WS-C — Tauri catches up (L).** The Tauri client adopts what the native
+   + 24 bridge tests, clippy-pedantic at the 184 baseline. (D-4/D-6/D-9/D-14/
+   D-15/D-20 always needed their area's structure and remain in C/D/F; D-5 and
+   D-7 went to ground with their hoists in WS-B.)
+2. ~~**WS-B — Core convergence layer (L).**~~ **Shipped 2026-08-27.** Eighteen
+   of the twenty hoists landed with tests, regenerated bindings, and adoption
+   in **both** clients — a hoist nothing calls is the dead wiring BR-1, CL-8
+   and BR-10 are cautionary tales about, so each one replaced its duplicates
+   rather than sitting beside them. Per-hoist state is in §5; what that cost
+   and closed elsewhere:
+   - Three defects went to ground with their hoist, as planned: **D-2**'s dead
+     guard (H-2 makes `get_remote` answer `None`, so "skip when there's no
+     remote" can finally fire), **D-5** (H-10's `patch_config` — a surface now
+     names the fields it owns, so it cannot revert the other client's), and
+     **D-7** (H-10's blank-means-absent rule, applied on every read and every
+     write rather than per settings form). **D-17**'s clamp became structural
+     with them, and **D-12** gained its reason (H-9).
+   - Four surfaces were deleted rather than left standing: `is_merging`,
+     `get_diff`/`get_diff_whitespace_ignored`/`get_commit_diff`/`parse_diff`,
+     `get_commit_files`/`get_commit_stats`, and `discover_repos` — each
+     replaced by the hoist that subsumed it. Two hand-written files went with
+     them: `apps/tauri-app/src/lib/utils/repoSearch.ts` and
+     `apps/swift-ui-app/Sources/LeoGit/Services/RepoSearch.swift`, the drifted
+     pair H-5 exists to retire.
+   - Gates: 159 core + 24 bridge tests (from 120 + 24), `pnpm check` 0/0,
+     prettier clean, zero-warning `xcodebuild`, clippy-pedantic **170** (from
+     the 184 baseline).
+
+   Findings the later workstreams need:
+   - **§3.3's E-1 is right about the cost and wrong about the mechanism.**
+     `get_status` does *not* resolve the git dir — it runs one
+     `git status --porcelain=2` and nothing else. `merging` is free anyway
+     because the git dir is a *filesystem* question: `<repo>/.git` is either
+     the directory or a one-line `gitdir:` pointer (worktree, submodule), so
+     `git::git_dir` reads it and keeps `rev-parse --git-dir` only as the
+     fallback for shapes that file can't describe. Any future "fold it into
+     the status tick" item should check the same way before assuming a value
+     is free.
+   - **`--name-status` and `--numstat` do not combine** — git honours only the
+     former. H-7 uses `-z --raw --numstat`, which does, and whose records are
+     told apart by shape (`:` opens a raw record) rather than by section order.
+     A rename's numstat record puts its paths in *following* NUL segments, so
+     the parse advances by a variable number of segments; the two tests pin it.
+   - **H-8 changed the shape of "empty", which DF-10 now depends on.** A failed
+     load is an `Err` from `get_parsed_diff`; an empty parse is an `Ok` with
+     `empty_reason` set. The Tauri branch can therefore already tell them
+     apart — DF-10's remaining work is presentation only (inline pane error
+     instead of the blocking modal), not a new core variant. The `LoadFailed`
+     enum variant the previous entry asked for is unnecessary and was not
+     added.
+   - **A blank pane is not one situation.** `parse_diff` returns nothing for a
+     pure rename *and* for an empty patch *and* for a whitespace-only edit
+     under hide-whitespace, and only the fused call can distinguish the last:
+     when the filtered diff has nothing to render, core re-reads the unfiltered
+     one and compares. That second `git diff` runs only on the path where the
+     pane would otherwise be blank.
+   - **H-13 hoists the glyph, not the colour.** Both hosts now read
+     `file_status_styles()` once at startup — per row per repaint would be
+     absurd for ten short strings. Conflicted settled on `U` and gained its own
+     purple token in both palettes (`--status-purple` in Tauri), which is the
+     token BR-8's `· merging` suffix should reuse.
+   - **`ConfigPatch` fields default to "leave it alone"** (`#[uniffi(default =
+     None)]` on the bridge side), so a one-field write is one line. Clearing an
+     optional field is patching it to `""` — the config's standing
+     blank-means-absent rule doing double duty instead of a second `Option`
+     layer every host would have to model. ST-3's instant-apply rewrite in
+     WS-C is now a small change per control rather than a redesign.
+   - **`config.toml` gained `[claude]` and `[ollama]` tables.** Field order in
+     `Config` is load-bearing: `toml` serializes in declaration order and a
+     table swallows every key after it, so nothing scalar may be declared below
+     those two. A round-trip test pins it.
+   - **H-14's coalescing is back-pressure-driven, not a fixed 8 KiB/8 ms
+     window.** A fixed threshold with 4 KiB reads only ever halves the delivery
+     count; gathering whatever is *already queued* is self-tuning — nothing is
+     held when the host keeps up, and a `cat` flood arrives in a few dozen
+     deliveries instead of thousands. A lone chunk with nothing behind it goes
+     out immediately, so echo latency is unchanged. TE-2's `Channel` rewrite
+     inherits this and should not add a second layer of batching; the native
+     relay's own coalescing is now redundant but harmless (TE-2/WS-F may
+     simplify it to the main-actor hop it still needs).
+   - **`resize_terminal` now ignores a `< 2×2` grid itself**, so D-9's fix is
+     purely the native inner-frame pin — the PTY can no longer be told about a
+     collapsed panel from either client.
+   - **H-16 has no consumer yet.** `copy_text` and `copy_diff_text` are the one
+     deliberate exception to the no-dead-surface rule in this workstream,
+     because DF-6 lands their UI in WS-C/WS-F and splitting the helper from its
+     tests would have been worse. Wire it there or delete it.
+3. **WS-C — Tauri catches up (L). ← next.** The Tauri client adopts what the native
    client (and GH Desktop) got right: SY-1…SY-9 (adaptive ladder on H-3,
    fetch, publish dialog), BR-1…BR-7 + BR-11 (merge/abort/freshness/busy),
    DF-1 (stat-stamp reload), CH-3/CH-9/CH-11/CH-13, HI-3/HI-4/HI-6/HI-8's
@@ -1010,13 +1100,29 @@ relative (S/M/L).
    TE-1/TE-2/TE-6/TE-7's Tauri halves, SH-3…SH-7's Tauri halves, RM-2/RM-4/
    RM-7/RM-8/RM-9, CH-4's Tauri half (plate + `U`), ST-9's Generate gate,
    DF-5's interim neutralize.
-4. **WS-D — Tauri background parity (M).** BG-1 (cadence ladder + sweep
-   pause + skew), BG-2 (self-scheduling re-arm), BG-4's remaining half (the
-   equality gate — the failure streak landed in A), BG-6, D-6 (activation config reload),
-   E-2 (drop `pollHeadSha`), E-4 (single tier loop), E-5 (bounded fan-out —
-   already halved by RM-4's `repoActivity` deletion), and H-17 adoption
-   (`navigator.onLine` demoted to a negative-only hint). Mostly deletion and
-   one structural shape (the timeout chain).
+4. **WS-D — Tauri background parity + the two deferred hoists (M/L).** BG-1
+   (cadence ladder + sweep pause + skew), BG-2 (self-scheduling re-arm),
+   BG-4's remaining half (the equality gate — the failure streak landed in A),
+   BG-6, D-6 (activation config reload), E-2 (drop `pollHeadSha`), E-4 (single
+   tier loop), E-5 (bounded fan-out — already halved by RM-4's `repoActivity`
+   deletion). Mostly deletion and one structural shape (the timeout chain).
+   Plus the two hoists WS-B deferred here, both **decided by the user**:
+   - **H-17 — build and verify it here, not a workstream early.** Three OS
+     backends, a new `CoreEvent` variant and a new dependency, none of it
+     verifiable from macOS; the Linux backend needs the user's Linux machine,
+     which is also where the only consumer (`navigator.onLine` demoted to a
+     negative-only hint) is being written. Landing it in WS-B would have meant
+     an unverifiable, uncalled backend — the exact dead-wiring shape this plan
+     otherwise deletes. Build it beside its adopter and prove the macOS
+     backend equivalent before retiring `NetworkPathObserver`.
+   - **H-20 — land it with BG-4's equality gate.** The reconciliation is pure
+     and duplicated, but *not* IPC-cost-free, which §5's own rule requires: the
+     grace counter has to advance on every tick, so it cannot be gated on "the
+     file list changed" and would cost the Tauri poll a second crossing every
+     2 s. BG-4 is restructuring that poll anyway, so the decision about where
+     the call sits belongs there. Until it lands the two clients keep their
+     disagreeing rules — Tauri prunes an opt-out the tick a path vanishes,
+     native never prunes (CH-7 has the failure modes and the verdict).
 5. **WS-E — Native launch & shell (L).** SH-1 (CLI/init/open-repo — the
    contract debt), RM-1 (Welcome discovery + sole-repo rule + picker states),
    RM-5/RM-6 (labels + cursor), BG-5 (update checker), SH-2 (menu bar: File
@@ -1099,10 +1205,10 @@ other decision lives inline with the item it governs, marked **Decided** in §4.
 Per workstream, matching the previous plan's bar:
 
 - Zero-warning `xcodebuild` via `just mac-build`; `pnpm check` (svelte-check)
-  0/0; `cargo test --workspace` green (baseline 120 core + 24 bridge — WS-B
-  grows it; every hoist lands with tests); `cargo clippy --workspace
-  --all-targets -- -W clippy::pedantic` at the 184 baseline or better, never
-  worse.
+  0/0; `cargo test --workspace` green (**159 core + 24 bridge** after WS-B,
+  from the 120 + 24 this plan started at — every hoist landed with tests);
+  `cargo clippy --workspace --all-targets -- -W clippy::pedantic` at
+  **170** or better, never worse (the plan opened at 184).
 - Visual checks per workstream (ask for confirmation, no screenshots), on
   **both** clients whenever a change touches shared core or a ported
   behavior — the checklist comes from the workstream's inventory items.
@@ -1127,13 +1233,14 @@ written as each chunk lands, no duplication between documents:
   the claims WS-H lists as their areas land.
 - **DESIGN.md** — flow 1 stops being Tauri-scoped once WS-E lands; the per-flow
   client hedges retire as parity closes them.
-- **STYLE.md** — the status-letter row settles on `U` + the purple token when
-  CH-4 lands (the tinted-plate rule is already rewritten); the header-strip
-  bullet collapses to one description when SY-1 converges the two headers.
+- **STYLE.md** — the status-letter row settled on `U` + the purple token with
+  H-13 (done); the header-strip bullet collapses to one description when SY-1
+  converges the two headers.
 - **ROADMAP.md** — items close as their workstreams land; the deferrals this
   plan makes (per-line staging, diff virtualization, branch rename +
-  delete-on-remote) are already filed there, so the plan itself adds nothing
-  new.
+  delete-on-remote) are already filed there. WS-B added one: GitHub identifiers
+  in the native repo switcher's rows, the half of RM-5 the shared search rule
+  doesn't supply.
 - **README.md** — the merge scoping goes away once WS-C gives the Tauri client
   a reachable merge flow.
 

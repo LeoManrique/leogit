@@ -1,16 +1,50 @@
 <script lang="ts">
-  import type { FileEntry } from '$lib/api/commands'
+  import type { DiscardPlan, FileEntry } from '$lib/api/commands'
 
   interface Props {
     files: FileEntry[]
+    /**
+     * What the discard would actually do, per path, as core decides it — the
+     * same decision the action runs on. Null until the answer arrives, which
+     * is one round trip after the dialog opens.
+     */
+    plan: DiscardPlan | null
     isDiscarding: boolean
     onConfirm: () => void
     onCancel: () => void
   }
 
-  let { files, isDiscarding, onConfirm, onCancel }: Props = $props()
+  let { files, plan, isDiscarding, onConfirm, onCancel }: Props = $props()
 
   const single = $derived(files.length === 1 ? files[0] : null)
+
+  /*
+    The two outcomes are not interchangeable — one is undone by committing
+    again, the other sends a file to the Trash — and which one a row gets is
+    not visible from its status letter: a staged re-add of a path that exists
+    in HEAD is restorable, a rename whose original is not in HEAD is not, and
+    under an unborn HEAD nothing is. So the dialog names the real outcome
+    instead of reciting both rules and leaving the user to guess which applies.
+  */
+  const outcome = $derived.by(() => {
+    if (!plan) return null
+    const restored = plan.restore.length
+    const trashed = plan.trash.length
+    if (restored > 0 && trashed > 0) {
+      return `${restored} ${restored === 1 ? 'file goes' : 'files go'} back to the last commit; ${trashed} ${trashed === 1 ? 'moves' : 'move'} to the Trash.`
+    }
+    if (restored > 0) {
+      return restored === 1
+        ? 'It goes back to its committed state.'
+        : `All ${restored} go back to their committed state.`
+    }
+    if (trashed > 0) {
+      return trashed === 1
+        ? 'It was never committed, so there is nothing to restore it to — it moves to the Trash instead.'
+        : `None of the ${trashed} were ever committed, so they move to the Trash rather than being restored.`
+    }
+    return 'There is nothing to discard.'
+  })
 
   function handleKeyDown(e: KeyboardEvent) {
     if (e.key === 'Escape' && !isDiscarding) onCancel()
@@ -41,8 +75,7 @@
         </p>
       {/if}
       <p class="muted">
-        Tracked files are reverted to the last commit. New (untracked) files are moved to the
-        Trash, so they can be recovered.
+        {outcome ?? 'Working out what this will do…'}
       </p>
     </div>
     <div class="modal-footer">

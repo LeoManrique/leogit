@@ -38,20 +38,27 @@ use std::path::Path;
 use std::sync::Arc;
 
 use leogit_core::events::{CoreEvent, EventSink};
-use leogit_core::{ai, config, diff, gh, git, highlight, os, process, shell, terminal};
+use leogit_core::{ai, config, diff, gh, git, highlight, os, process, repos, shell, terminal};
 
 // Re-exported so Swift sees the real core types. Names are used by the
 // `#[uniffi::remote]` declarations below.
 pub use leogit_core::ai::{AiProviderConfig, CommitMessage};
-pub use leogit_core::config::{Config, ReposState, ReposStatePatch};
-pub use leogit_core::diff::{DiffLine, FileDiff, Hunk, HunkHeader, IntraLineRange, LineType};
+pub use leogit_core::config::{
+    Bounds, ClaudeConfig, Config, ConfigBounds, ConfigPatch, OllamaConfig, ReposState,
+    ReposStatePatch,
+};
+pub use leogit_core::diff::{
+    DiffLine, DiffOptions, DiffSizeGuard, DiffSizeReason, EmptyDiffReason, FileDiff, Hunk,
+    HunkHeader, IntraLineRange, LineType,
+};
 pub use leogit_core::events::TerminalExit;
 pub use leogit_core::gh::GhRepo;
 pub use leogit_core::git::{
-    BranchInfo, CommitInfo, CommitStats, FileEntry, FileStatus, LogOptions, MergeResult,
-    RepoStatus, RepoSync,
+    BranchInfo, CommitDetail, CommitInfo, CommitStats, DiscardPlan, FileEntry, FileStatus,
+    FileStatusStyle, LogOptions, MergeResult, RepoStatus, RepoSync,
 };
 pub use leogit_core::highlight::{BlobSource, Token, TokenClass};
+pub use leogit_core::repos::{CloneTarget, RepoRow};
 pub use leogit_core::shell::ShellOption;
 pub use leogit_core::terminal::StartedTerminal;
 
@@ -136,6 +143,7 @@ pub struct RepoStatus {
     pub unpushed_shas: Vec<String>,
     pub detached: bool,
     pub head_sha: String,
+    pub merging: bool,
 }
 
 /// Mirrors [`leogit_core::git::CommitInfo`].
@@ -208,7 +216,7 @@ pub struct IntraLineRange {
 /// Mirrors [`leogit_core::diff::DiffLine`].
 #[uniffi::remote(Record)]
 pub struct DiffLine {
-    pub text: String,
+    pub text: Option<String>,
     pub content: String,
     pub line_type: LineType,
     pub old_line_no: Option<i32>,
@@ -240,6 +248,79 @@ pub struct FileDiff {
     pub file_header: String,
     pub hunks: Vec<Hunk>,
     pub is_binary: bool,
+}
+
+/// Mirrors [`leogit_core::git::FileStatusStyle`].
+#[uniffi::remote(Record)]
+pub struct FileStatusStyle {
+    pub status: FileStatus,
+    pub letter: String,
+    pub label: String,
+}
+
+/// Mirrors [`leogit_core::git::CommitDetail`].
+#[uniffi::remote(Record)]
+pub struct CommitDetail {
+    pub files: Vec<FileEntry>,
+    pub stats: CommitStats,
+}
+
+/// Mirrors [`leogit_core::git::DiscardPlan`].
+#[uniffi::remote(Record)]
+pub struct DiscardPlan {
+    pub restore: Vec<String>,
+    pub trash: Vec<String>,
+}
+
+/// Mirrors [`leogit_core::diff::EmptyDiffReason`].
+#[uniffi::remote(Enum)]
+pub enum EmptyDiffReason {
+    NoChanges,
+    WhitespaceOnly,
+    NoTextualChanges,
+}
+
+/// Mirrors [`leogit_core::diff::DiffSizeReason`].
+#[uniffi::remote(Enum)]
+pub enum DiffSizeReason {
+    TotalBytes,
+    LineLength,
+}
+
+/// Mirrors [`leogit_core::diff::DiffSizeGuard`].
+#[uniffi::remote(Record)]
+pub struct DiffSizeGuard {
+    pub reason: DiffSizeReason,
+    pub bytes: u64,
+    pub longest_line: u64,
+}
+
+/// Mirrors [`leogit_core::diff::DiffOptions`].
+///
+/// The native client renders from the line model, so it asks for neither
+/// `html` nor `side_by_side` — the fields exist because core serves a
+/// `WebView` host too, and declaring them keeps this record honest about the
+/// shared type rather than hiding the choice.
+#[uniffi::remote(Record)]
+pub struct DiffOptions {
+    pub html: bool,
+    pub side_by_side: bool,
+    pub show_anyway: bool,
+}
+
+/// Mirrors [`leogit_core::repos::RepoRow`].
+#[uniffi::remote(Record)]
+pub struct RepoRow {
+    pub path: String,
+    pub names: Vec<String>,
+}
+
+/// Mirrors [`leogit_core::repos::CloneTarget`].
+#[uniffi::remote(Record)]
+pub struct CloneTarget {
+    pub normalized_url: String,
+    pub repo_name: String,
+    pub target_path: String,
 }
 
 /// Mirrors [`leogit_core::highlight::TokenClass`].
@@ -298,6 +379,12 @@ pub struct DiffPayload {
     pub additions: u32,
     /// Deleted-line total for the header badge (0 for binary diffs).
     pub deletions: u32,
+    /// Set when there are no lines to show, and why — what the pane's empty
+    /// state says instead of guessing at three unrelated causes at once.
+    pub empty_reason: Option<EmptyDiffReason>,
+    /// Set when the diff was withheld for its size. Ask again with
+    /// `DiffOptions::show_anyway` to render it regardless.
+    pub size_guard: Option<DiffSizeGuard>,
 }
 
 impl From<diff::ParsedDiff> for DiffPayload {
@@ -306,6 +393,8 @@ impl From<diff::ParsedDiff> for DiffPayload {
             file_diff: parsed.file_diff,
             additions: parsed.additions,
             deletions: parsed.deletions,
+            empty_reason: parsed.empty_reason,
+            size_guard: parsed.size_guard,
         }
     }
 }
@@ -351,7 +440,17 @@ pub fn repo_display_name(path: String) -> String {
     git::get_repo_name(&path)
 }
 
-/// Working-tree status: branch metadata plus the list of changed files.
+/// The letter and name for every [`FileStatus`] — a table, fetched once, so
+/// neither client writes its own set and they can't disagree again. Colour
+/// stays per-platform.
+#[must_use]
+#[uniffi::export]
+pub fn file_status_styles() -> Vec<FileStatusStyle> {
+    git::file_status_styles()
+}
+
+/// Working-tree status: branch metadata, the list of changed files, and
+/// whether a merge is in progress.
 ///
 /// # Errors
 ///
@@ -385,46 +484,63 @@ pub fn core_version() -> String {
 // Exported functions — diff pipeline
 // ---------------------------------------------------------------------------
 //
-// Three steps, same as the Tauri client: raw text → structure → tokens. Kept
-// separate (rather than fused into one call) so the UI can render the plain
-// structured diff immediately and apply syntax colour when tokenization —
-// which may read and parse whole blobs — catches up.
+// Two steps: read-and-parse, then tokens. The read and the parse are one call
+// because nothing ever wanted one without the other, and splitting them cost a
+// round trip per file selection — and left the "empty because whitespace is
+// hidden" answer with nowhere to be computed. Tokenization stays separate so
+// the UI can render the structured diff immediately and apply syntax colour
+// when the tokenizer — which may read and parse whole blobs — catches up.
 
-/// The raw unified diff for one working-tree file, `HEAD` against the working
-/// tree (staged and unstaged combined). Untracked files diff against
-/// `/dev/null`, so a brand-new file still yields hunks.
+/// Read and parse one working-tree file's diff: `HEAD` against the working
+/// tree (staged and unstaged combined), untracked files against `/dev/null`
+/// so a brand-new file still yields hunks.
+///
+/// `hide_whitespace` runs `git diff -w`; if that leaves nothing to show, core
+/// checks the unfiltered diff so the pane can say the change *is* there and
+/// the setting is hiding it.
 ///
 /// # Errors
 ///
-/// Returns [`GitError`] when `git diff` fails.
+/// Returns [`GitError`] when `git diff` fails — which the caller must keep
+/// distinct from an empty result, since a stale diff behind an error is the
+/// one thing the pane must never show.
 #[uniffi::export]
-pub fn get_diff(repo_path: String, file: FileEntry) -> Result<String, GitError> {
-    git::get_diff(repo_path, file).map_err(GitError::from)
-}
-
-/// [`get_diff`] with whitespace-only changes suppressed (`git diff -w`) —
-/// the read behind the `hide_whitespace` setting, working-tree only: commit
-/// diffs have no whitespace-ignored variant in either client.
-///
-/// # Errors
-///
-/// Returns [`GitError`] when `git diff` fails.
-#[uniffi::export]
-pub fn get_diff_whitespace_ignored(
+pub fn get_parsed_diff(
     repo_path: String,
     file: FileEntry,
-) -> Result<String, GitError> {
-    git::get_diff_whitespace_ignored(repo_path, file).map_err(GitError::from)
+    hide_whitespace: bool,
+    options: DiffOptions,
+) -> Result<DiffPayload, GitError> {
+    diff::get_parsed_diff(repo_path, file, hide_whitespace, options)
+        .map(DiffPayload::from)
+        .map_err(GitError::from)
 }
 
-/// Parse a raw unified diff into hunks of typed lines.
+/// Read and parse one file's diff within a commit (that commit against its
+/// first parent). An empty `file_path` yields the whole-commit diff.
 ///
-/// Returns `None` for input that contains no parseable diff — an empty string,
-/// or output for a file with no textual changes (e.g. a pure mode change).
+/// # Errors
+///
+/// Returns [`GitError`] when `git log` fails.
+#[uniffi::export]
+pub fn get_parsed_commit_diff(
+    repo_path: String,
+    sha: String,
+    file_path: String,
+    options: DiffOptions,
+) -> Result<DiffPayload, GitError> {
+    diff::get_parsed_commit_diff(repo_path, sha, file_path, options)
+        .map(DiffPayload::from)
+        .map_err(GitError::from)
+}
+
+/// Plain text of a flat line range, for the clipboard — rebuilt from the line
+/// model so a copy carries the file's own lines rather than whatever the view
+/// drew around them (gutters, `+`/`−` prefixes, expanded tabs).
 #[must_use]
 #[uniffi::export]
-pub fn parse_diff(raw: String) -> Option<DiffPayload> {
-    diff::parse_diff(raw).map(DiffPayload::from)
+pub fn copy_diff_text(file_diff: FileDiff, start: u32, end: u32) -> String {
+    diff::copy_text(&file_diff, start as usize, end as usize)
 }
 
 /// Syntax tokens for a parsed diff: one entry per flattened line of
@@ -445,51 +561,25 @@ pub fn tokenize_diff(file_diff: FileDiff, source: Option<BlobSource>) -> Vec<Vec
 // Exported functions — commit history detail
 // ---------------------------------------------------------------------------
 //
-// The History detail pane's three reads, same split as the Tauri client:
-// commit metadata rides in the `CommitInfo` the list already holds, so
-// selecting a commit only fetches its changed files, its +/− totals, and —
-// per selected file — a raw diff that feeds the same `parse_diff` /
-// `tokenize_diff` pipeline as the working tree (with `BlobSource::Commit` so
-// blobs are read at the commit, not from disk). All three use `--first-parent`
+// The History detail pane's two reads: commit metadata rides in the
+// `CommitInfo` the list already holds, so selecting a commit fetches its
+// changed files and +/− totals together, then — per selected file — a parsed
+// diff from the same pipeline as the working tree (with `BlobSource::Commit`
+// so blobs are read at the commit, not from disk). Both use `--first-parent`
 // in core, so a merge commit shows its first-parent changes rather than
 // `diff-tree`'s empty output.
 
-/// The files a commit changed, in the same shape as `get_status`'s list.
+/// The files a commit changed and its line totals, from one `git log`.
 /// Renames carry `orig_path`; `embedded`/`submodule_dirty` are always false
-/// here (they are working-tree concepts).
+/// here (they are working-tree concepts), and binary files contribute to the
+/// file list but not to the totals.
 ///
 /// # Errors
 ///
 /// Returns [`GitError`] when `git log` fails — an unknown sha, most likely.
 #[uniffi::export]
-pub fn get_commit_files(repo_path: String, sha: String) -> Result<Vec<FileEntry>, GitError> {
-    git::get_commit_files(repo_path, sha).map_err(GitError::from)
-}
-
-/// A commit's total added/deleted line counts, summed across its files.
-/// Binary files count zero — a binary-only commit reports `0/0`.
-///
-/// # Errors
-///
-/// Returns [`GitError`] when `git log` fails.
-#[uniffi::export]
-pub fn get_commit_stats(repo_path: String, sha: String) -> Result<CommitStats, GitError> {
-    git::get_commit_stats(repo_path, sha).map_err(GitError::from)
-}
-
-/// The raw unified diff of one file within a commit (that commit against its
-/// first parent). An empty `file_path` yields the whole-commit diff.
-///
-/// # Errors
-///
-/// Returns [`GitError`] when `git log` fails.
-#[uniffi::export]
-pub fn get_commit_diff(
-    repo_path: String,
-    sha: String,
-    file_path: String,
-) -> Result<String, GitError> {
-    git::get_commit_diff(repo_path, sha, file_path).map_err(GitError::from)
+pub fn get_commit_detail(repo_path: String, sha: String) -> Result<CommitDetail, GitError> {
+    git::get_commit_detail(repo_path, sha).map_err(GitError::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -547,6 +637,16 @@ pub fn commit(
 //
 // `os::open_url` is deliberately NOT exported: SwiftUI opens URLs itself
 // (`Link` / `openURL`), so the native client has no caller for it.
+
+/// What [`discard_files`] would do to each of `files`, path by path — the
+/// confirmation dialog's copy, decided by the same code that performs the
+/// action rather than inferred from a status letter (which gets a staged
+/// re-add, an odd rename and an unborn HEAD wrong).
+#[must_use]
+#[uniffi::export]
+pub fn classify_discard(repo_path: String, files: Vec<FileEntry>) -> DiscardPlan {
+    git::classify_discard(&repo_path, &files)
+}
 
 /// Throw away the working-tree changes to `files`, restoring each to its
 /// committed state.
@@ -751,16 +851,9 @@ pub fn merge_abort(repo_path: String) -> Result<(), GitError> {
     git::merge_abort(repo_path).map_err(GitError::from)
 }
 
-/// Whether a merge is in progress (`MERGE_HEAD` exists) — drives the
-/// "merging" badge and the Abort Merge affordance. Worktree-safe.
-///
-/// # Errors
-///
-/// Never fails in practice; an unreadable repository reports `false`.
-#[uniffi::export]
-pub fn is_merging(repo_path: String) -> Result<bool, GitError> {
-    git::is_merging(repo_path).map_err(GitError::from)
-}
+// `is_merging` stays unexported (the dead-surface rule): `RepoStatus.merging`
+// carries the same answer on every refresh, which is where the UI reads it —
+// and a separate call is what let one refresh path forget to ask.
 
 /// How many commits merging `target_branch` would bring into the current
 /// branch — the merge dialog's preview number.
@@ -818,7 +911,7 @@ pub trait SyncProgressListener: Send + Sync {
 
 /// Adapts core's [`EventSink`] to a [`SyncProgressListener`]. Non-git-progress
 /// events (the terminal variants) are ignored: this sink is only ever handed
-/// to `pull`/`push`/`clone_repo`, which emit nothing else.
+/// to `pull`/`push`/`clone_repo`/`gh_clone`, which emit nothing else.
 struct ProgressSink {
     listener: Arc<dyn SyncProgressListener>,
 }
@@ -842,7 +935,7 @@ impl EventSink for ProgressSink {
 ///
 /// Returns [`GitError`] when `git remote` itself fails.
 #[uniffi::export]
-pub fn get_remote(repo_path: String) -> Result<String, GitError> {
+pub fn get_remote(repo_path: String) -> Result<Option<String>, GitError> {
     git::get_remote(repo_path).map_err(GitError::from)
 }
 
@@ -854,8 +947,10 @@ pub fn get_remote(repo_path: String) -> Result<String, GitError> {
 ///
 /// Returns [`GitError`] when the fetch fails — unreachable remote, timeout.
 #[uniffi::export(async_runtime = "tokio")]
-pub async fn fetch(repo_path: String, remote: String) -> Result<(), GitError> {
-    git::fetch(repo_path, remote).await.map_err(GitError::from)
+pub async fn fetch(repo_path: String, remote: String, background: bool) -> Result<(), GitError> {
+    git::fetch(repo_path, remote, background)
+        .await
+        .map_err(GitError::from)
 }
 
 /// `git pull --ff --progress <remote>`. Fast-forward only: a diverged branch
@@ -987,10 +1082,18 @@ pub async fn gh_repo_list(limit: u32) -> Result<Vec<GhRepo>, GitError> {
 /// Returns [`GitError`] when `gh` is missing, the clone fails or times out
 /// (600 s cap), or the destination already exists.
 #[uniffi::export(async_runtime = "tokio")]
-pub async fn gh_clone(name_with_owner: String, target_path: String) -> Result<String, GitError> {
-    gh::gh_clone(name_with_owner, target_path)
-        .await
-        .map_err(GitError::from)
+pub async fn gh_clone(
+    listener: Arc<dyn SyncProgressListener>,
+    name_with_owner: String,
+    target_path: String,
+) -> Result<String, GitError> {
+    gh::gh_clone(
+        Arc::new(ProgressSink { listener }),
+        name_with_owner,
+        target_path,
+    )
+    .await
+    .map_err(GitError::from)
 }
 
 /// `gh repo create <name> --source <repo_path> --remote origin --push` — the
@@ -1045,34 +1148,15 @@ pub struct CommitMessage {
 ///
 /// `provider` is `"claude"` or `"ollama"`; core dispatches on the standalone
 /// `provider` argument of [`generate_commit_message`] and treats this record
-/// as provider knobs only (`model`, `base_url`; `api_key` is accepted for
-/// wire-compatibility but read by neither provider). `None` fields fall back
-/// inside core: model `"sonnet"` (claude) / `"tavernari/git-commit-message:
-/// latest"` (ollama), base URL `http://localhost:11434`.
+/// as provider knobs only. `None` fields fall back inside core: model
+/// `"sonnet"` (claude) / `"tavernari/git-commit-message:latest"` (ollama),
+/// base URL `http://localhost:11434`.
 #[uniffi::remote(Record)]
 pub struct AiProviderConfig {
     pub provider: String,
     pub model: Option<String>,
-    pub api_key: Option<String>,
     pub base_url: Option<String>,
-}
-
-/// The config→provider mapping the Tauri client performs in TypeScript
-/// (`CommitMessage.svelte`) before every generate call, ported verbatim so
-/// the two clients can never drift on which config field feeds which knob.
-fn ai_provider_config(cfg: config::Config) -> AiProviderConfig {
-    AiProviderConfig {
-        // Anything unrecognized falls back to claude, matching the
-        // frontend's `=== 'ollama' ? 'ollama' : 'claude'` guard.
-        provider: if cfg.ai_provider == "ollama" {
-            "ollama".to_string()
-        } else {
-            "claude".to_string()
-        },
-        model: cfg.ai_model,
-        api_key: cfg.ai_api_key,
-        base_url: Some(cfg.ollama_server_url),
-    }
+    pub timeout_secs: u32,
 }
 
 /// The AI settings from the shared config file, ready to pass to
@@ -1080,36 +1164,17 @@ fn ai_provider_config(cfg: config::Config) -> AiProviderConfig {
 /// cached — so an edit to `config.toml` (or a save from the Tauri client)
 /// takes effect on the next click.
 ///
+/// The config→provider mapping itself lives in core, so the two clients
+/// cannot drift on which setting feeds which knob; this is a delegation like
+/// every other export here.
+///
 /// # Errors
 ///
 /// Returns [`GitError`] when the config file exists but cannot be read or
 /// parsed. A missing file is not an error — defaults are written and used.
 #[uniffi::export]
 pub fn load_ai_config() -> Result<AiProviderConfig, GitError> {
-    config::load_config()
-        .map(ai_provider_config)
-        .map_err(GitError::from)
-}
-
-/// Persist the composer's provider choice (`"claude"` | `"ollama"`) into the
-/// shared config file — a read-modify-write of the whole `Config`, so every
-/// other setting survives untouched. Validated before touching disk: an
-/// unknown value can never be persisted.
-///
-/// # Errors
-///
-/// Returns [`GitError`] for an unknown provider name, or when the config
-/// file cannot be read or written.
-#[uniffi::export]
-pub fn save_ai_provider(provider: String) -> Result<(), GitError> {
-    if !matches!(provider.as_str(), "claude" | "ollama") {
-        return Err(GitError::Failed {
-            message: format!("Unknown AI provider: {provider}"),
-        });
-    }
-    let mut cfg = config::load_config().map_err(GitError::from)?;
-    cfg.ai_provider = provider;
-    config::save_config(cfg).map_err(GitError::from)
+    ai::load_ai_config().map_err(GitError::from)
 }
 
 /// The combined unified diff of exactly `files` — each file diffed
@@ -1175,8 +1240,6 @@ pub struct Config {
     pub theme: String,
     pub fetch_interval_ms: u32,
     pub ai_provider: String,
-    pub ai_model: Option<String>,
-    pub ai_api_key: Option<String>,
     pub auto_fetch: bool,
     pub syntax_highlighting: bool,
     pub scan_paths: Vec<String>,
@@ -1184,9 +1247,87 @@ pub struct Config {
     pub side_by_side_diff: bool,
     pub hide_whitespace: bool,
     pub tab_size: u32,
-    pub claude_timeout_secs: u32,
-    pub ollama_server_url: String,
     pub terminal_shell: Option<String>,
+    pub claude: ClaudeConfig,
+    pub ollama: OllamaConfig,
+}
+
+/// Mirrors [`leogit_core::config::Bounds`].
+#[uniffi::remote(Record)]
+pub struct Bounds {
+    pub min: u32,
+    pub max: u32,
+    pub fallback: u32,
+}
+
+/// Mirrors [`leogit_core::config::ConfigBounds`].
+#[uniffi::remote(Record)]
+pub struct ConfigBounds {
+    pub fetch_interval_ms: Bounds,
+    pub scan_depth: Bounds,
+    pub tab_size: Bounds,
+    pub ai_timeout_secs: Bounds,
+}
+
+/// Mirrors [`leogit_core::config::ClaudeConfig`].
+#[uniffi::remote(Record)]
+pub struct ClaudeConfig {
+    pub model: Option<String>,
+    pub timeout_secs: u32,
+}
+
+/// Mirrors [`leogit_core::config::OllamaConfig`].
+#[uniffi::remote(Record)]
+pub struct OllamaConfig {
+    pub model: Option<String>,
+    pub server_url: String,
+    pub timeout_secs: u32,
+}
+
+/// Mirrors [`leogit_core::config::ConfigPatch`] — the only writer.
+///
+/// `None` leaves a field as it is on disk, so a surface patches what it owns
+/// and nothing else: two clients share this file, and a whole-object write
+/// reverted whatever the other had changed since the window opened. Clearing
+/// an optional field is patching it to `""` (the config's standing
+/// blank-means-absent rule), which is why these stay a single `Option` layer.
+/// Every field defaults to "leave it alone", so a caller writes only what it
+/// means to change — the whole point of a patch, and what makes the
+/// one-field writes (a provider picker, a sort toggle) read as one line.
+#[uniffi::remote(Record)]
+pub struct ConfigPatch {
+    #[uniffi(default = None)]
+    pub theme: Option<String>,
+    #[uniffi(default = None)]
+    pub fetch_interval_ms: Option<u32>,
+    #[uniffi(default = None)]
+    pub ai_provider: Option<String>,
+    #[uniffi(default = None)]
+    pub auto_fetch: Option<bool>,
+    #[uniffi(default = None)]
+    pub syntax_highlighting: Option<bool>,
+    #[uniffi(default = None)]
+    pub scan_paths: Option<Vec<String>>,
+    #[uniffi(default = None)]
+    pub scan_depth: Option<u32>,
+    #[uniffi(default = None)]
+    pub side_by_side_diff: Option<bool>,
+    #[uniffi(default = None)]
+    pub hide_whitespace: Option<bool>,
+    #[uniffi(default = None)]
+    pub tab_size: Option<u32>,
+    #[uniffi(default = None)]
+    pub terminal_shell: Option<String>,
+    #[uniffi(default = None)]
+    pub claude_model: Option<String>,
+    #[uniffi(default = None)]
+    pub claude_timeout_secs: Option<u32>,
+    #[uniffi(default = None)]
+    pub ollama_model: Option<String>,
+    #[uniffi(default = None)]
+    pub ollama_server_url: Option<String>,
+    #[uniffi(default = None)]
+    pub ollama_timeout_secs: Option<u32>,
 }
 
 /// Mirrors [`leogit_core::config::ReposState`] — the shared
@@ -1240,18 +1381,29 @@ pub fn load_config() -> Result<Config, GitError> {
     config::load_config().map_err(GitError::from)
 }
 
-/// Persist the whole configuration — the native Settings window's writer.
-/// Core rewrites the entire file, so callers must follow the
-/// [`save_ai_provider`] pattern writ large: load fresh, apply their edits,
-/// save — never persist a `Config` loaded before the user started editing,
-/// which would clobber changes made by the other client in between.
+/// The range every numeric setting is clamped to — what a control's minimum,
+/// maximum and step should be built from, so a form can't offer a value the
+/// writer will silently correct.
+#[must_use]
+#[uniffi::export]
+pub fn config_bounds() -> ConfigBounds {
+    config::config_bounds()
+}
+
+/// Apply a field-wise patch to the configuration and return the result.
+///
+/// The only writer, and the reason a settings surface no longer has to
+/// hand-roll load-fresh-then-edit: core reads, edits, normalizes and writes
+/// under one lock, so a patch cannot revert a field it doesn't name. The
+/// returned config is the normalized one — hand it straight back to the form
+/// and an out-of-range entry corrects itself in place.
 ///
 /// # Errors
 ///
-/// Returns [`GitError`] when the file cannot be serialized or written.
+/// Returns [`GitError`] when the file cannot be read, serialized or written.
 #[uniffi::export]
-pub fn save_config(config: Config) -> Result<(), GitError> {
-    config::save_config(config).map_err(GitError::from)
+pub fn patch_config(patch: ConfigPatch) -> Result<Config, GitError> {
+    config::patch_config(patch).map_err(GitError::from)
 }
 
 /// The shared repos-state file. Corrupt state self-heals to defaults inside
@@ -1288,9 +1440,10 @@ pub fn record_recent_repo(path: String) -> Result<ReposState, GitError> {
     config::record_recent_repo(path).map_err(GitError::from)
 }
 
-/// Walk the scan folders for git repositories — a pure filesystem walk, no
-/// git subprocesses. An empty `scan_paths` falls back to core's defaults;
-/// results are canonicalized and sorted.
+/// Every repo the picker should list: a filesystem walk of the scan folders
+/// (no git subprocesses) unioned with the recently-opened list, minus any
+/// entry that no longer exists. An empty `scan_paths` falls back to core's
+/// defaults; results are canonicalized and sorted.
 ///
 /// Async over `spawn_blocking` for the same reason as [`repo_sync_status`]:
 /// core's walk is synchronous and, over several roots at the configured
@@ -1302,18 +1455,49 @@ pub fn record_recent_repo(path: String) -> Result<ReposState, GitError> {
 /// # Errors
 ///
 /// Returns [`GitError`] only on walk-level failures; unreadable folders are
-/// skipped, not fatal.
+/// skipped, not fatal, and an unreadable state file costs the MRU half rather
+/// than the whole answer.
 #[uniffi::export(async_runtime = "tokio")]
-pub async fn discover_repos(
-    scan_paths: Vec<String>,
-    max_depth: u32,
-) -> Result<Vec<String>, GitError> {
-    tokio::task::spawn_blocking(move || git::discover_repos(scan_paths, max_depth))
+pub async fn known_repos(scan_paths: Vec<String>, max_depth: u32) -> Result<Vec<String>, GitError> {
+    tokio::task::spawn_blocking(move || repos::known_repos(scan_paths, max_depth))
         .await
         .map_err(|join_error| GitError::Failed {
-            message: format!("discover_repos did not complete: {join_error}"),
+            message: format!("known_repos did not complete: {join_error}"),
         })?
         .map_err(GitError::from)
+}
+
+/// Narrow and rank the picker's rows against a typed query, strongest match
+/// first. Ties keep the caller's own ordering, so an MRU or active-first
+/// arrangement survives filtering rather than being scrambled by it.
+///
+/// A batch call rather than one per row: the rule is shared, and crossing the
+/// bridge once per keystroke is what makes sharing it affordable.
+#[must_use]
+#[uniffi::export]
+pub fn filter_repos(query: String, rows: Vec<RepoRow>, scan_folders: Vec<String>) -> Vec<String> {
+    repos::filter_repos(&query, &rows, &scan_folders)
+}
+
+/// What cloning `raw_url` under `parent` would produce — the URL to hand git
+/// (shorthand expanded), the folder name, and the path it lands at.
+///
+/// `None` means there is nothing cloneable in the input, which is also the
+/// Clone button's enable condition: the preview and the button can't disagree
+/// about whether the app is about to succeed.
+#[must_use]
+#[uniffi::export]
+pub fn derive_clone_target(raw_url: String, parent: String) -> Option<CloneTarget> {
+    repos::derive_clone_target(&raw_url, &parent)
+}
+
+/// Where a clone of `repo_name` lands under `parent` — the GitHub tab's half
+/// of the same rule, where the name comes from the selected repo rather than
+/// from a URL.
+#[must_use]
+#[uniffi::export]
+pub fn clone_target_path(parent: String, repo_name: String) -> Option<String> {
+    repos::clone_target_path(&parent, &repo_name)
 }
 
 /// The folders discovery would actually walk for this configuration,
@@ -1585,8 +1769,8 @@ mod tests {
         assert_eq!(status.files.len(), 2, "one modified + one untracked");
 
         for file in status.files {
-            let raw = get_diff(repo.clone(), file.clone()).expect("diff");
-            let payload = parse_diff(raw).expect("parses");
+            let payload =
+                get_parsed_diff(repo.clone(), file.clone(), false, lean_diff()).expect("diff");
             assert!(payload.additions > 0, "{} adds lines", file.path);
 
             let flat: usize = payload.file_diff.hunks.iter().map(|h| h.lines.len()).sum();
@@ -1828,7 +2012,8 @@ mod tests {
         run_git(&dir, &["commit", "-m", "second"]);
         let sha = run_git_stdout(&dir, &["rev-parse", "HEAD"]);
 
-        let files = get_commit_files(repo.clone(), sha.clone()).expect("commit files");
+        let detail = get_commit_detail(repo.clone(), sha.clone()).expect("commit detail");
+        let files = detail.files;
         assert_eq!(files.len(), 3, "rename + source file + binary: {files:?}");
         let renamed = files
             .iter()
@@ -1844,11 +2029,11 @@ mod tests {
 
         // The pure rename moves no lines and numstat reports the binary file
         // as `-`, so the two source lines are the whole count.
-        let stats = get_commit_stats(repo.clone(), sha.clone()).expect("stats");
-        assert_eq!((stats.additions, stats.deletions), (2, 0));
+        assert_eq!((detail.stats.additions, detail.stats.deletions), (2, 0));
 
-        let raw = get_commit_diff(repo.clone(), sha.clone(), added.path.clone()).expect("diff");
-        let payload = parse_diff(raw).expect("parses");
+        let payload =
+            get_parsed_commit_diff(repo.clone(), sha.clone(), added.path.clone(), lean_diff())
+                .expect("diff");
         assert_eq!(payload.additions, 2);
         let flat: usize = payload.file_diff.hunks.iter().map(|h| h.lines.len()).sum();
         let tokens = tokenize_diff(
@@ -1864,8 +2049,16 @@ mod tests {
             "rust source read at the commit produces tokens"
         );
 
-        let whole = get_commit_diff(repo, sha, String::new()).expect("whole-commit diff");
-        assert!(whole.contains("renamed.txt") && whole.contains("src/new.rs"));
+        let whole = get_parsed_commit_diff(repo, sha, String::new(), lean_diff())
+            .expect("whole-commit diff");
+        let paths: Vec<&str> = whole
+            .file_diff
+            .hunks
+            .iter()
+            .flat_map(|h| &h.lines)
+            .filter_map(|l| l.text.as_deref())
+            .collect();
+        assert!(!paths.is_empty(), "the whole-commit diff parses into hunks");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1905,8 +2098,8 @@ mod tests {
 
     /// The three merge outcomes end-to-end: a fast-forward `merge_branch`, the
     /// two-call squash flow, and a conflict — which must come back as data
-    /// (`success == false` + conflicted paths), flip `is_merging`, and clean
-    /// up via `merge_abort`.
+    /// (`success == false` + conflicted paths), flip the status's `merging`
+    /// flag, and clean up via `merge_abort`.
     #[test]
     fn merge_flow_fast_forwards_squashes_and_surfaces_conflicts() {
         let (dir, repo, default) = seeded_repo("merge");
@@ -1953,13 +2146,13 @@ mod tests {
         assert_eq!(conflict.conflicts, ["base.txt"]);
         assert!(conflict.error_message.is_some());
         assert!(
-            is_merging(repo.clone()).expect("is_merging"),
-            "MERGE_HEAD exists"
+            get_status(repo.clone()).expect("status").merging,
+            "MERGE_HEAD exists, and the status the UI reads says so"
         );
 
         merge_abort(repo.clone()).expect("abort");
         assert!(
-            !is_merging(repo).expect("is_merging"),
+            !get_status(repo).expect("status").merging,
             "abort clears the merge"
         );
         let restored = std::fs::read_to_string(dir.join("base.txt")).expect("read");
@@ -2030,8 +2223,8 @@ mod tests {
         let (dir, repo, default) = seeded_repo("sync");
         assert_eq!(
             get_remote(repo.clone()).expect("remote"),
-            "origin",
-            "no remote configured falls back to the literal origin"
+            None,
+            "a repo with no remote says so rather than inventing one"
         );
         let bare = bare_origin("sync", &dir);
 
@@ -2069,7 +2262,7 @@ mod tests {
         run_git(&clone_b, &["push"]);
 
         // …fetch sees it as behind without touching the working tree…
-        fetch(repo.clone(), "origin".to_string())
+        fetch(repo.clone(), "origin".to_string(), false)
             .await
             .expect("fetch");
         let behind = get_status(repo.clone()).expect("status");
@@ -2148,7 +2341,7 @@ mod tests {
         assert!(matches!(stale, GitError::Failed { .. }));
 
         // After a fetch the lease matches, and the forced push wins.
-        fetch(repo.clone(), "origin".to_string())
+        fetch(repo.clone(), "origin".to_string(), false)
             .await
             .expect("fetch");
         push(
@@ -2171,35 +2364,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&clone_b);
     }
 
-    /// The bridge's config→provider mapping — the port of what the Tauri
-    /// client does in TypeScript before every generate call. Pinned so the
-    /// two clients can't drift on which config field feeds which knob.
+    /// The mapping now lives in core, and the bridge is the delegation it
+    /// always claimed to be. What this pins is that the shared record still
+    /// carries what each provider needs across the boundary — the only part
+    /// this crate owns.
     #[test]
-    fn ai_config_mapping_matches_the_tauri_client() {
-        let defaults = ai_provider_config(config::Config::default());
-        assert_eq!(defaults.provider, "claude");
-        assert_eq!(defaults.model, None);
-        assert_eq!(
-            defaults.base_url.as_deref(),
-            Some("http://localhost:11434"),
-            "the ollama URL always travels as base_url, like the frontend"
-        );
+    fn ai_config_crosses_with_the_knobs_each_provider_reads() {
+        let mut cfg = config::Config::default();
+        cfg.claude.model = Some("sonnet".to_string());
+        cfg.ollama.model = Some("llama3".to_string());
 
-        let ollama = ai_provider_config(config::Config {
-            ai_provider: "ollama".to_string(),
-            ai_model: Some("llama3".to_string()),
-            ..config::Config::default()
-        });
+        let claude: AiProviderConfig = ai::provider_config(&cfg);
+        assert_eq!(claude.provider, "claude");
+        assert_eq!(claude.model.as_deref(), Some("sonnet"));
+        assert_eq!(claude.timeout_secs, config::AI_TIMEOUT_SECS.fallback);
+
+        cfg.ai_provider = "ollama".to_string();
+        let ollama: AiProviderConfig = ai::provider_config(&cfg);
         assert_eq!(ollama.provider, "ollama");
         assert_eq!(ollama.model.as_deref(), Some("llama3"));
-
-        let unknown = ai_provider_config(config::Config {
-            ai_provider: "copilot".to_string(),
-            ..config::Config::default()
-        });
         assert_eq!(
-            unknown.provider, "claude",
-            "unrecognized providers fall back to claude"
+            ollama.base_url.as_deref(),
+            Some("http://localhost:11434"),
+            "the ollama URL travels as base_url"
         );
     }
 
@@ -2241,8 +2428,17 @@ mod tests {
         AiProviderConfig {
             provider: provider.to_string(),
             model: None,
-            api_key: None,
             base_url: None,
+            timeout_secs: 120,
+        }
+    }
+
+    /// What the native client asks for: the line model, nothing rendered.
+    fn lean_diff() -> DiffOptions {
+        DiffOptions {
+            html: false,
+            side_by_side: false,
+            show_anyway: false,
         }
     }
 
@@ -2275,23 +2471,31 @@ mod tests {
         );
     }
 
-    /// `save_ai_provider` validates before touching the config file, so a bad
-    /// value can never be persisted — which is also what keeps this test away
-    /// from the user's real `config.toml`.
+    /// An unknown provider can't be persisted, because normalization folds it
+    /// onto claude before the write — a rule that now protects every writer
+    /// rather than the one export that happened to validate. Asserted against
+    /// the pure normalizer so the test stays away from the real
+    /// `config.toml`, like the other config paths here.
     #[test]
-    fn save_ai_provider_rejects_unknown_providers() {
-        let err = save_ai_provider("copilot".to_string()).unwrap_err();
-        assert!(
-            matches!(err, GitError::Failed { ref message } if message.contains("Unknown AI provider"))
-        );
+    fn an_unknown_provider_cannot_reach_the_config_file() {
+        let normalized = config::Config {
+            ai_provider: "copilot".to_string(),
+            ..config::Config::default()
+        }
+        .normalized();
+        assert_eq!(normalized.ai_provider, "claude");
     }
 
-    /// Discovery exactly as the picker drives it: repos at the scan root's
-    /// first level and nested deeper are both found, plain folders and
+    /// The picker's row list exactly as it is driven: repos at the scan
+    /// root's first level and nested deeper are both found, plain folders and
     /// missing scan roots contribute nothing, and `effective_scan_paths`
-    /// reports tilde-expanded folders. The config/state read-write functions
-    /// are deliberately untested here — they operate on the user's real
-    /// shared files, like the AI config load/save paths.
+    /// reports tilde-expanded folders.
+    ///
+    /// Asserted by membership rather than by count: `known_repos` also unions
+    /// in the shared MRU, which is the machine's real `repos-state.json` —
+    /// exactly the file this crate's tests otherwise stay away from. Core's
+    /// own `union_known_repos` tests pin the merge rule against fixtures; what
+    /// this covers is the discovery half reaching the bridge intact.
     #[tokio::test]
     async fn discovery_finds_repos_and_reports_scan_folders() {
         let root = std::env::temp_dir().join(format!("leogit-ffi-discover-{}", std::process::id()));
@@ -2305,7 +2509,7 @@ mod tests {
         run_git(&nested, &["init"]);
 
         let missing = root.join("not-there");
-        let repos = discover_repos(
+        let repos = known_repos(
             vec![
                 root.to_string_lossy().into_owned(),
                 missing.to_string_lossy().into_owned(),
@@ -2316,9 +2520,16 @@ mod tests {
         .expect("discover");
         // Compare by suffix: results are canonicalized, and /tmp resolves
         // through /private on macOS.
-        assert_eq!(repos.len(), 2, "two repos, the plain folder ignored");
         assert!(repos.iter().any(|r| r.ends_with("/direct")));
         assert!(repos.iter().any(|r| r.ends_with("/nested")));
+        assert!(
+            !repos.iter().any(|r| r.ends_with("/plain")),
+            "a folder that is not a repo contributes nothing"
+        );
+        assert!(
+            !repos.iter().any(|r| r.ends_with("/not-there")),
+            "a missing scan root contributes nothing"
+        );
 
         let folders = effective_scan_paths(vec!["~/Dev".to_string()]);
         assert_eq!(folders.len(), 1);
@@ -2595,6 +2806,7 @@ mod tests {
         std::fs::create_dir_all(&target).expect("target dir");
 
         let err = gh_clone(
+            CollectingListener::arc(),
             "owner/repo".to_string(),
             target.to_string_lossy().to_string(),
         )

@@ -57,29 +57,28 @@ enum GitBridge {
         coreVersion()
     }
 
-    /// Raw unified diff for one working-tree file: `HEAD` against the working
+    /// What this client asks core to build alongside a parse: the line model
+    /// and nothing else. The HTML and side-by-side artifacts exist for a
+    /// `WebView` host; asking for them here would only pay to marshal strings
+    /// this renderer never looks at.
+    static let lineModelOnly = DiffOptions(html: false, sideBySide: false, showAnyway: false)
+
+    /// Read and parse one working-tree file's diff: `HEAD` against the working
     /// tree, staged and unstaged combined. Untracked files diff against
     /// `/dev/null`, so a brand-new file still yields hunks.
+    ///
+    /// `hideWhitespace` runs `git diff -w`; when that leaves nothing to show,
+    /// core checks the unfiltered diff so the pane can say the change is there
+    /// and the setting is hiding it, rather than implying nothing changed.
     @concurrent
-    static func rawDiff(of repoPath: String, for file: FileEntry) async throws -> String {
-        try getDiff(repoPath: repoPath, file: file)
-    }
-
-    /// `rawDiff` with whitespace-only changes suppressed (`git diff -w`) —
-    /// the `hide_whitespace` setting's read. Working-tree only, same as the
-    /// Tauri client: commit diffs have no whitespace-ignored variant.
-    @concurrent
-    static func rawDiffIgnoringWhitespace(of repoPath: String, for file: FileEntry) async throws
-        -> String
-    {
-        try getDiffWhitespaceIgnored(repoPath: repoPath, file: file)
-    }
-
-    /// Structure a raw diff into hunks of typed lines, or `nil` when there is
-    /// nothing textual to show.
-    @concurrent
-    static func parsedDiff(from raw: String) async -> DiffPayload? {
-        parseDiff(raw: raw)
+    static func parsedDiff(
+        of repoPath: String,
+        for file: FileEntry,
+        hideWhitespace: Bool,
+        options: DiffOptions = lineModelOnly
+    ) async throws -> DiffPayload {
+        try getParsedDiff(
+            repoPath: repoPath, file: file, hideWhitespace: hideWhitespace, options: options)
     }
 
     /// Syntax tokens for a parsed diff — one entry per flattened line, empty
@@ -92,28 +91,28 @@ enum GitBridge {
 
     // MARK: - Commit history detail
 
-    /// The files a commit changed — the same row shape as the status list.
+    /// The files a commit changed and its line totals, from one `git log`.
     /// Renames carry `origPath`; the working-tree-only flags (`embedded`,
-    /// `submoduleDirty`) are always false here. First-parent for merges.
+    /// `submoduleDirty`) are always false here, and binary files appear in the
+    /// list without contributing to the totals. First-parent for merges.
     @concurrent
-    static func commitFiles(in repoPath: String, sha: String) async throws -> [FileEntry] {
-        try getCommitFiles(repoPath: repoPath, sha: sha)
+    static func commitDetail(in repoPath: String, sha: String) async throws -> CommitDetail {
+        try getCommitDetail(repoPath: repoPath, sha: sha)
     }
 
-    /// A commit's total added/deleted line counts, summed across its files;
-    /// binary files count zero.
-    @concurrent
-    static func commitStats(in repoPath: String, sha: String) async throws -> CommitStats {
-        try getCommitStats(repoPath: repoPath, sha: sha)
-    }
-
-    /// Raw unified diff of one file within a commit — the commit against its
+    /// Read and parse one file's diff within a commit — the commit against its
     /// first parent, so a merge commit shows coherent per-file changes. Feeds
-    /// the same `parsedDiff`/`diffTokens` pipeline as the working tree, with
+    /// the same `diffTokens` pipeline as the working tree, with
     /// `BlobSource.commit` so blobs are read at the commit, not from disk.
     @concurrent
-    static func commitDiff(in repoPath: String, sha: String, filePath: String) async throws -> String {
-        try getCommitDiff(repoPath: repoPath, sha: sha, filePath: filePath)
+    static func parsedCommitDiff(
+        in repoPath: String,
+        sha: String,
+        filePath: String,
+        options: DiffOptions = lineModelOnly
+    ) async throws -> DiffPayload {
+        try getParsedCommitDiff(
+            repoPath: repoPath, sha: sha, filePath: filePath, options: options)
     }
 
     /// The full commit message: summary, optional description, and
@@ -146,6 +145,15 @@ enum GitBridge {
     @concurrent
     static func discardChanges(in repoPath: String, files: [FileEntry]) async throws {
         try discardFiles(repoPath: repoPath, files: files)
+    }
+
+    /// What discarding `files` would do to each path — the confirmation
+    /// dialog's copy, decided by the same code that performs the action.
+    /// A row's status letter cannot answer this: a staged re-add of a path
+    /// that exists in HEAD is restorable, and under an unborn HEAD nothing is.
+    @concurrent
+    static func discardPlan(in repoPath: String, files: [FileEntry]) async -> DiscardPlan {
+        classifyDiscard(repoPath: repoPath, files: files)
     }
 
     /// Add literal file paths to the repository's root `.gitignore`. Core
@@ -253,13 +261,6 @@ enum GitBridge {
         try mergeAbort(repoPath: repoPath)
     }
 
-    /// Whether a merge is in progress (`MERGE_HEAD` exists) — drives the
-    /// merging indicator and the Abort Merge affordance.
-    @concurrent
-    static func mergeInProgress(in repoPath: String) async throws -> Bool {
-        try isMerging(repoPath: repoPath)
-    }
-
     /// How many commits merging `branch` would bring in — the merge sheet's
     /// preview number.
     @concurrent
@@ -269,20 +270,28 @@ enum GitBridge {
 
     // MARK: - Sync
 
-    /// The repository's first remote name, or the literal "origin" when none
-    /// is configured. Resolved immediately before each network operation,
-    /// never cached — matching the Tauri handlers.
+    /// The repository's first remote name, or `nil` when it has none.
+    /// Resolved immediately before each network operation, never cached —
+    /// matching the Tauri handlers. Deliberately does not invent "origin": a
+    /// caller that skips on `nil` is skipping a fetch that could only fail,
+    /// and whose failure the connectivity breaker would have read as the
+    /// network being down.
     @concurrent
-    static func remoteName(in repoPath: String) async throws -> String {
+    static func remoteName(in repoPath: String) async throws -> String? {
         try getRemote(repoPath: repoPath)
     }
 
     /// `git fetch --prune`: refresh remote-tracking refs — and the
     /// ahead/behind counts derived from them — without touching the working
     /// tree. Fetch streams no progress; core's fetch path has no sink.
+    ///
+    /// `background` picks the budget: an automatic fetch nobody is waiting on
+    /// fails fast (8/8/12 s) so an unreachable remote can't hold the single
+    /// network slot for ten minutes, while a fetch the user asked for keeps
+    /// the generous one a large transfer needs.
     @concurrent
-    static func fetchRemote(in repoPath: String, remote: String) async throws {
-        try await fetch(repoPath: repoPath, remote: remote)
+    static func fetchRemote(in repoPath: String, remote: String, background: Bool) async throws {
+        try await fetch(repoPath: repoPath, remote: remote, background: background)
     }
 
     /// `git pull --ff --progress`. Fast-forward only: a diverged branch fails
@@ -348,12 +357,20 @@ enum GitBridge {
     }
 
     /// Clone `owner/name` through the GitHub CLI, whose stored auth covers
-    /// private repositories without a prompt. No progress stream: `gh repo
-    /// clone` reports nothing parseable, so callers show an indeterminate
-    /// bar — the Tauri dialog does the same.
+    /// private repositories without a prompt. Progress ticks arrive on the
+    /// same seam a URL clone uses — `gh repo clone` forwards `--progress` to
+    /// `git clone`, so this reports real numbers rather than an
+    /// indeterminate bar.
     @concurrent
-    static func githubClone(nameWithOwner: String, into targetPath: String) async throws -> String {
-        try await ghClone(nameWithOwner: nameWithOwner, targetPath: targetPath)
+    static func githubClone(
+        nameWithOwner: String,
+        into targetPath: String,
+        onProgress: @escaping @Sendable (SyncProgress) -> Void
+    ) async throws -> String {
+        try await ghClone(
+            listener: ProgressRelay(onProgress),
+            nameWithOwner: nameWithOwner,
+            targetPath: targetPath)
     }
 
     /// Publish a remote-less repository to GitHub in one shot (`gh repo
@@ -405,13 +422,18 @@ enum GitBridge {
 
     // MARK: - Settings
 
-    /// Persist the whole configuration file. Callers must load fresh, apply
-    /// their edits, and save — core rewrites the entire file, so saving a
-    /// `Config` loaded before the user started editing would clobber
-    /// changes the other client made in between.
+    /// Apply a field-wise patch to the configuration and return the result.
+    ///
+    /// The only writer. A surface patches the fields it owns and nothing else,
+    /// so it can no longer revert what the other client changed while its
+    /// window was open — the load-fresh-then-edit discipline this used to
+    /// require of every caller now lives inside core, under a lock. The
+    /// returned config is normalized: hand it back to the form and an
+    /// out-of-range entry corrects itself.
+    @discardableResult
     @concurrent
-    static func saveAppConfig(_ config: Config) async throws {
-        try saveConfig(config: config)
+    static func patchAppConfig(_ patch: ConfigPatch) async throws -> Config {
+        try patchConfig(patch: patch)
     }
 
     /// The launchable shells on this machine, best first — the Settings
@@ -443,10 +465,12 @@ enum GitBridge {
     }
 
     /// Persist the provider picker's choice (`"claude"` | `"ollama"`) into
-    /// the shared config file, leaving every other setting untouched.
+    /// the shared config file, leaving every other setting untouched. An
+    /// unrecognized name normalizes to claude inside core rather than being
+    /// rejected here, so no writer can persist one.
     @concurrent
     static func setAIProvider(_ provider: String) async throws {
-        try saveAiProvider(provider: provider)
+        try await patchAppConfig(ConfigPatch(aiProvider: provider))
     }
 
     /// Generate a commit message from `diff` via `config.provider` — the
@@ -498,13 +522,43 @@ enum GitBridge {
         try recordRecentRepo(path: repoPath)
     }
 
-    /// Walk the configured scan folders for git repositories — a pure
-    /// filesystem walk, no git subprocesses. An empty list falls back to
-    /// core's default folders. The walk itself runs on a Rust blocking
-    /// thread, so a deep scan tree can't park a cooperative one.
+    /// Every repository the picker should list: a filesystem walk of the scan
+    /// folders (no git subprocesses) unioned with the shared
+    /// recently-opened list, minus any entry that no longer exists. An empty
+    /// list falls back to core's default folders. The walk runs on a Rust
+    /// blocking thread, so a deep scan tree can't park a cooperative one.
     @concurrent
-    static func discoverRepositories(scanPaths: [String], depth: UInt32) async throws -> [String] {
-        try await discoverRepos(scanPaths: scanPaths, maxDepth: depth)
+    static func knownRepositories(scanPaths: [String], depth: UInt32) async throws -> [String] {
+        try await knownRepos(scanPaths: scanPaths, maxDepth: depth)
+    }
+
+    // MARK: - Pure rules
+    //
+    // Deliberately synchronous, unlike every wrapper above: these touch no
+    // filesystem and spawn nothing, so there is no blocking work to move off
+    // the caller's executor — and both are read from a view's computed
+    // property, where an `await` would force the answer into state that lags
+    // a keystroke behind the field it describes.
+
+    /// Narrow and rank picker rows against a typed query, strongest match
+    /// first; ties keep the caller's ordering, so an MRU arrangement survives
+    /// filtering. One crossing per keystroke rather than one per row.
+    static func matchingRepos(query: String, rows: [RepoRow], scanFolders: [String]) -> [String] {
+        filterRepos(query: query, rows: rows, scanFolders: scanFolders)
+    }
+
+    /// What cloning `rawURL` under `parent` would produce — the URL to hand
+    /// git (shorthand expanded), the folder name, and where it lands. `nil`
+    /// means there is nothing cloneable, which is also the Clone button's
+    /// enable condition, so the preview and the button can't disagree.
+    static func cloneTarget(rawURL: String, parent: String) -> CloneTarget? {
+        deriveCloneTarget(rawUrl: rawURL, parent: parent)
+    }
+
+    /// Where a clone of `repoName` lands under `parent` — the GitHub tab's
+    /// half of the same rule.
+    static func clonePath(parent: String, repoName: String) -> String? {
+        cloneTargetPath(parent: parent, repoName: repoName)
     }
 
     /// The folders discovery would actually walk, tilde-expanded — for the

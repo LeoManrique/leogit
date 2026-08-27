@@ -4,11 +4,9 @@ import Foundation
 /// and which file's diff is showing.
 ///
 /// Metadata needs no loading — it rides in the `CommitInfo` the history list
-/// already holds — so selecting a commit fetches only the file list and, as
-/// non-critical chrome, the line totals. The Tauri client makes the same
-/// split: files awaited, stats fired-and-forgotten with failures swallowed.
-/// One deliberate improvement over it: a failed file-list read shows an error
-/// state here instead of silently rendering as "no files".
+/// already holds — so selecting a commit is one read: core returns the file
+/// list and the line totals from a single `git log`, which is also what keeps
+/// the two from ever describing different commits.
 @MainActor
 @Observable
 final class CommitDetailStore {
@@ -36,25 +34,17 @@ final class CommitDetailStore {
         selectedPath = nil
         errorMessage = nil
 
-        async let statsResult = GitBridge.commitStats(in: repoPath, sha: sha)
-
         do {
-            let loaded = try await GitBridge.commitFiles(in: repoPath, sha: sha)
+            let detail = try await GitBridge.commitDetail(in: repoPath, sha: sha)
             guard current == generation else { return }
-            files = loaded
-            selectedPath = loaded.first?.path
+            files = detail.files
+            stats = detail.stats
+            selectedPath = detail.files.first?.path
             isLoading = false
         } catch {
             guard current == generation else { return }
             errorMessage = error.displayMessage
             isLoading = false
-        }
-
-        // Totals arrive whenever they arrive; a failure just leaves the
-        // header without a +/− badge, never an error.
-        if let stats = try? await statsResult {
-            guard current == generation else { return }
-            self.stats = stats
         }
     }
 }

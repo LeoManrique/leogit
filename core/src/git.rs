@@ -17,6 +17,71 @@ pub enum FileStatus {
     Conflicted,
 }
 
+impl FileStatus {
+    /// Single-letter badge for the changed-file row.
+    ///
+    /// Git's own porcelain vocabulary, including `U` for a conflict —
+    /// "unmerged" is the word git uses, and a client that invented its own
+    /// glyph was teaching a vocabulary git never confirms elsewhere.
+    #[must_use]
+    pub fn letter(self) -> &'static str {
+        match self {
+            Self::New => "A",
+            Self::Modified => "M",
+            Self::Deleted => "D",
+            Self::Renamed => "R",
+            Self::Conflicted => "U",
+        }
+    }
+
+    /// Human-readable status name — the badge's accessible name, and the word
+    /// any prose about a row should use.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::New => "Added",
+            Self::Modified => "Modified",
+            Self::Deleted => "Deleted",
+            Self::Renamed => "Renamed",
+            Self::Conflicted => "Conflicted",
+        }
+    }
+}
+
+/// One status's presentation strings, for a host that renders a file list.
+///
+/// Handed over as a table rather than asked for per row: both clients draw
+/// these on every row of every repaint, and a crossing per row would be a
+/// silly price for ten short strings. Colour is deliberately absent — that is
+/// the one genuinely per-platform choice, resolved against each host's palette.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileStatusStyle {
+    pub status: FileStatus,
+    pub letter: String,
+    pub label: String,
+}
+
+/// The letter and name for every [`FileStatus`], so no client has to write its
+/// own set — which is how the two ended up disagreeing about the conflicted
+/// row, the one a user most needs to recognize.
+#[must_use]
+pub fn file_status_styles() -> Vec<FileStatusStyle> {
+    [
+        FileStatus::New,
+        FileStatus::Modified,
+        FileStatus::Deleted,
+        FileStatus::Renamed,
+        FileStatus::Conflicted,
+    ]
+    .into_iter()
+    .map(|status| FileStatusStyle {
+        status,
+        letter: status.letter().to_string(),
+        label: status.label().to_string(),
+    })
+    .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileEntry {
     pub path: String,
@@ -50,7 +115,7 @@ pub struct FileEntry {
     /// hash, which left content edits invisible to a status comparison and
     /// the open diff stale until reselect. Filled only by `get_status`
     /// (`None` for deletions, where nothing exists on disk, and always `None`
-    /// from `get_commit_files`, whose entries are immutable history). A
+    /// from `get_commit_detail`, whose entries are immutable history). A
     /// string, not integers: the Tauri wire is JSON, where nanosecond mtimes
     /// exceed 2^53 and a number would silently lose precision. Compare it,
     /// never parse it.
@@ -169,6 +234,13 @@ pub struct RepoStatus {
     /// `# branch.oid`. Empty only for an unborn branch (a freshly initialised
     /// repo with no commits). Powers the detached-HEAD label ("On <short>").
     pub head_sha: String,
+    /// Whether a merge is in progress (`MERGE_HEAD` exists in the git dir).
+    ///
+    /// Carried here rather than left to a separate [`is_merging`] call: every
+    /// refresh path needs it, and one that forgot to ask produced a header
+    /// claiming a clean branch mid-merge. Filled from a filesystem probe (see
+    /// [`git_dir`]), so it costs no subprocess on the status poll.
+    pub merging: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -350,7 +422,7 @@ pub const GIT_PROGRESS_EVENT: &str = "git-progress";
 /// Emission is throttled — a whole-percent move or ~150 ms elapsed — so the
 /// throughput text stays live without flooding the IPC bridge; git repaints the
 /// meter far faster than a human can read it.
-fn progress_forwarder(
+pub(crate) fn progress_forwarder(
     sink: Arc<dyn crate::events::EventSink>,
     op: &'static str,
     path: String,
@@ -394,6 +466,43 @@ fn has_commits(repo_path: &str) -> bool {
     git_cmd(repo_path, &["rev-parse", "--verify", "--quiet", "HEAD"])
         .output()
         .is_ok_and(|o| o.status.success())
+}
+
+/// Locate a repo's git directory — where `MERGE_HEAD`, `HEAD` and friends live.
+///
+/// Resolved from the filesystem first, because the answer is a file read rather
+/// than a fact only git knows: `<repo>/.git` is either the directory itself or,
+/// for a linked worktree or a submodule, a one-line `gitdir: <path>` pointer.
+/// That path costs no subprocess, which is what lets [`get_status`] carry
+/// `merging` for free on a 2 s poll. `git rev-parse --git-dir` is kept as the
+/// fallback for the shapes the shortcut can't see — a bare repo, or a path
+/// somewhere *inside* the work tree rather than at its root.
+fn git_dir(repo_path: &str) -> Option<PathBuf> {
+    let dot_git = Path::new(repo_path).join(".git");
+    if let Ok(meta) = std::fs::metadata(&dot_git) {
+        if meta.is_dir() {
+            return Some(dot_git);
+        }
+        if meta.is_file()
+            && let Ok(text) = std::fs::read_to_string(&dot_git)
+            && let Some(target) = text.trim().strip_prefix("gitdir:")
+        {
+            let target = Path::new(target.trim());
+            return Some(if target.is_absolute() {
+                target.to_path_buf()
+            } else {
+                Path::new(repo_path).join(target)
+            });
+        }
+    }
+
+    let reported = run_git(repo_path, &["rev-parse", "--git-dir"]).ok()?;
+    let reported = Path::new(reported.trim());
+    Some(if reported.is_absolute() {
+        reported.to_path_buf()
+    } else {
+        Path::new(repo_path).join(reported)
+    })
 }
 
 /// First configured remote name (e.g. "origin"), or `None` when the repo has
@@ -636,6 +745,7 @@ pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
         unpushed_shas: Vec::new(),
         detached: false,
         head_sha: String::new(),
+        merging: is_merging_in(git_dir(&repo_path).as_deref()),
     };
 
     // Configured remote, queried once and reused below (the no-upstream
@@ -958,9 +1068,9 @@ pub fn get_commit_diff(
     sha: String,
     file_path: String,
 ) -> Result<String, String> {
-    // `--root` matches `get_commit_files`/`get_commit_stats`: without it, a
-    // user with `log.showRoot=false` gets an empty patch for the repository's
-    // first commit while the file list and stats stay populated.
+    // `--root` matches `get_commit_detail`: without it, a user with
+    // `log.showRoot=false` gets an empty patch for the repository's first
+    // commit while the file list and stats stay populated.
     if file_path.is_empty() {
         // Full commit diff
         run_git(
@@ -1280,91 +1390,50 @@ fn civil_from_unix(unix: i64) -> (i64, u32, u32, u32, u32, u32) {
 // Commit files
 // ---------------------------------------------------------------------------
 
-pub fn get_commit_files(repo_path: String, sha: String) -> Result<Vec<FileEntry>, String> {
-    // `git log --first-parent` (not `diff-tree`) so merge commits diff against
-    // their first parent and show their files — `diff-tree` emits nothing for a
-    // merge unless given a combined-diff flag. This mirrors `get_commit_diff`,
-    // keeping the file list, the per-file diff, and the stats badge in agreement.
-    let output = run_git(
-        &repo_path,
-        &[
-            "log",
-            &sha,
-            "-1",
-            "--first-parent",
-            "--format=",
-            "--name-status",
-            "--root",
-            "--no-color",
-        ],
-    )?;
-
-    let mut files = Vec::new();
-    for line in output.lines() {
-        if line.is_empty() {
-            continue;
-        }
-        let parts: Vec<&str> = line.splitn(3, '\t').collect();
-        if parts.len() < 2 {
-            continue;
-        }
-
-        let code = parts[0];
-        let (status, path, orig) = if code.starts_with('R') {
-            // R100\told\tnew
-            if parts.len() < 3 {
-                continue;
-            }
-            (
-                FileStatus::Renamed,
-                parts[2].to_string(),
-                Some(parts[1].to_string()),
-            )
-        } else if code.starts_with('C') {
-            // Copy: C<score>\told\tnew — treat as modified.
-            if parts.len() < 3 {
-                continue;
-            }
-            (FileStatus::Modified, parts[2].to_string(), None)
-        } else {
-            let status = match code {
-                "A" => FileStatus::New,
-                "D" => FileStatus::Deleted,
-                "M" | "T" => FileStatus::Modified,
-                _ => FileStatus::Modified,
-            };
-            (status, parts[1].to_string(), None)
-        };
-
-        let (display_name, display_dir) = extract_display_name_and_dir(&path);
-        files.push(FileEntry {
-            path,
-            orig_path: orig,
-            status,
-            xy: code.to_string(),
-            display_name,
-            display_dir,
-            embedded: false,
-            submodule_dirty: false,
-            // Immutable history — a commit's files can't be edited, so the
-            // working-tree stamp stays absent by design.
-            stat_stamp: None,
-        });
+/// Map a `--raw` status code to a [`FileStatus`]. `C` (copy) reads as a
+/// modification: the copy's *source* is untouched, so the only change the row
+/// can describe is the new file's content.
+fn status_from_raw_code(code: &str) -> FileStatus {
+    match code.as_bytes().first() {
+        Some(b'A') => FileStatus::New,
+        Some(b'D') => FileStatus::Deleted,
+        Some(b'R') => FileStatus::Renamed,
+        Some(b'U') => FileStatus::Conflicted,
+        // `M`, `T` (type change), `C` (copy) and anything git adds later.
+        _ => FileStatus::Modified,
     }
-
-    sort_file_entries(&mut files);
-
-    Ok(files)
 }
 
-/// Sums the added/removed line counts across every file in a commit so the
-/// commit detail header can show a single `+N / -M` badge. Uses `--numstat`,
-/// whose `<added>\t<deleted>\t<path>` lines parse cleanly; binary files report
-/// `-` in both columns and are skipped. Like `get_commit_files`, it goes through
-/// `git log --first-parent` so merge commits report their first-parent totals
-/// rather than the empty output `diff-tree` gives for merges.
-pub fn get_commit_stats(repo_path: String, sha: String) -> Result<CommitStats, String> {
-    let output = run_git(
+/// Everything the commit-detail pane needs about one commit's contents.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitDetail {
+    /// Files the commit touched, in [`sort_file_entries`] order.
+    pub files: Vec<FileEntry>,
+    /// Line totals across those files, for the `+N −M` header badge.
+    pub stats: CommitStats,
+}
+
+/// One commit's file list *and* line totals, from a single `git log`.
+///
+/// The two used to be separate commands issuing near-identical `git log -1`
+/// invocations, which cost two subprocesses per commit selection in each
+/// client and let their error handling drift — one surfaced a failure, the
+/// other silently rendered "No changes". `--raw` and `--numstat` combine in one
+/// invocation (unlike `--name-status`, which suppresses `--numstat`), so the
+/// fusion is free: `--raw` carries the status letter and paths, `--numstat` the
+/// counts.
+///
+/// `--first-parent` (not `diff-tree`) so a merge commit diffs against its first
+/// parent and reports its files at all — `diff-tree` emits nothing for a merge
+/// without a combined-diff flag. This mirrors [`get_commit_diff`], keeping the
+/// file list, the per-file diff and the stats badge in agreement.
+///
+/// # Errors
+/// When `git log` can't run or the revision doesn't resolve.
+pub fn get_commit_detail(repo_path: String, sha: String) -> Result<CommitDetail, String> {
+    // `-z` for both sections: paths with spaces, tabs or newlines survive, and
+    // renames arrive as their own records rather than needing a tab count.
+    let bytes = run_git_raw(
         &repo_path,
         &[
             "log",
@@ -1372,30 +1441,100 @@ pub fn get_commit_stats(repo_path: String, sha: String) -> Result<CommitStats, S
             "-1",
             "--first-parent",
             "--format=",
+            "--raw",
             "--numstat",
             "--root",
             "--no-color",
+            "-z",
         ],
     )?;
 
+    let segments: Vec<&[u8]> = bytes.split(|&b| b == 0).collect();
+    let text = |seg: &[u8]| String::from_utf8_lossy(seg).into_owned();
+
+    let mut files = Vec::new();
     let mut additions: u32 = 0;
     let mut deletions: u32 = 0;
-    for line in output.lines() {
-        let mut cols = line.split('\t');
+
+    // Records are told apart by shape, not by position: a `--raw` record opens
+    // with `:`, a `--numstat` record with its two counts. That keeps the parse
+    // correct whichever order git emits the two sections in.
+    let mut i = 0;
+    while i < segments.len() {
+        let seg = segments[i];
+        if seg.is_empty() {
+            i += 1;
+            continue;
+        }
+
+        if seg[0] == b':' {
+            // `:<srcmode> <dstmode> <srcsha> <dstsha> <status>` then the path
+            // (two paths, source first, when the status is a rename or copy).
+            let record = text(seg);
+            let Some(code) = record.split_whitespace().nth(4).map(str::to_string) else {
+                i += 1;
+                continue;
+            };
+            let renamed = matches!(code.as_bytes().first(), Some(b'R' | b'C'));
+            let (orig_path, path) = if renamed {
+                if i + 2 >= segments.len() {
+                    break;
+                }
+                (Some(text(segments[i + 1])), text(segments[i + 2]))
+            } else {
+                if i + 1 >= segments.len() {
+                    break;
+                }
+                (None, text(segments[i + 1]))
+            };
+            i += if renamed { 3 } else { 2 };
+
+            let (display_name, display_dir) = extract_display_name_and_dir(&path);
+            files.push(FileEntry {
+                path,
+                // A copy has a source too, but nothing was taken from it, so
+                // the row must not claim the rename's "old → new" shape.
+                orig_path: orig_path.filter(|_| code.starts_with('R')),
+                status: status_from_raw_code(&code),
+                xy: code,
+                display_name,
+                display_dir,
+                embedded: false,
+                submodule_dirty: false,
+                // Immutable history — a commit's files can't be edited, so the
+                // working-tree stamp stays absent by design.
+                stat_stamp: None,
+            });
+            continue;
+        }
+
+        // `<added>\t<deleted>\t<path>`, or `<added>\t<deleted>\t` followed by
+        // the two path segments of a rename.
+        let record = text(seg);
+        let mut cols = record.split('\t');
         let added = cols.next();
         let deleted = cols.next();
+        let trailing_path = cols.next().unwrap_or("");
         if let (Some(a), Some(d)) = (added, deleted) {
-            // Binary files show `-`; `parse` fails and we skip them.
+            // Binary files show `-` in both columns; `parse` fails and we skip
+            // them rather than counting them as zero-line text changes.
             if let (Ok(a), Ok(d)) = (a.parse::<u32>(), d.parse::<u32>()) {
                 additions = additions.saturating_add(a);
                 deletions = deletions.saturating_add(d);
             }
         }
+        // An empty third column means the paths follow as their own segments.
+        i += if trailing_path.is_empty() { 3 } else { 1 };
     }
 
-    Ok(CommitStats {
-        additions,
-        deletions,
+    sort_file_entries(&mut files);
+
+    Ok(CommitDetail {
+        files,
+        stats: CommitStats {
+            additions,
+            deletions,
+        },
     })
 }
 
@@ -1911,15 +2050,36 @@ fn head_paths(repo_path: &str, paths: &[String]) -> HashSet<String> {
 /// Returns `Err` if the underlying `git reset` / `git checkout` fails. A file
 /// that can't be moved to the trash (already gone, permissions) is logged and
 /// skipped rather than aborting the whole operation.
-pub fn discard_files(repo_path: &str, files: Vec<FileEntry>) -> Result<(), String> {
-    if files.is_empty() {
-        return Ok(());
-    }
+/// What discarding a set of files would actually do, path by path.
+///
+/// The two outcomes are not interchangeable — one is reversible by committing
+/// again, the other sends a file to the Trash — and which one a row gets is not
+/// visible from its status letter, so the confirmation dialog has to be told
+/// rather than left to guess.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscardPlan {
+    /// Paths restored to their committed state (index and working tree).
+    pub restore: Vec<String>,
+    /// Paths with no committed version to fall back to: the working-tree copy
+    /// moves to the OS trash and any staged entry is dropped from the index.
+    pub trash: Vec<String>,
+}
 
+/// Decide, per path, whether a discard restores it from `HEAD` or trashes it.
+///
+/// Membership in `HEAD` is the only thing that decides this, and only git can
+/// answer it: a status letter can't, which is why a client that inferred the
+/// outcome from `status == New` or `orig_path != nil` told the user the wrong
+/// story for a staged addition of a path that also exists in HEAD, for a rename
+/// whose original is *not* in HEAD, and for every file in a repo with an unborn
+/// HEAD. [`discard_files`] runs on this same plan, so the dialog and the action
+/// cannot disagree.
+#[must_use]
+pub fn classify_discard(repo_path: &str, files: &[FileEntry]) -> DiscardPlan {
     // Every path whose HEAD membership decides how we discard it: the path
     // itself plus the pre-rename original.
     let mut candidates: Vec<String> = Vec::new();
-    for f in &files {
+    for f in files {
         candidates.push(f.path.clone());
         if let Some(orig) = &f.orig_path {
             candidates.push(orig.clone());
@@ -1927,21 +2087,35 @@ pub fn discard_files(repo_path: &str, files: Vec<FileEntry>) -> Result<(), Strin
     }
     let in_head = head_paths(repo_path, &candidates);
 
-    // `restore` → tracked paths to `git checkout HEAD --`.
-    // `trash_and_unstage` → never-committed paths to trash + `git reset --`.
-    let mut restore: Vec<String> = Vec::new();
-    let mut trash_and_unstage: Vec<String> = Vec::new();
+    let mut plan = DiscardPlan {
+        restore: Vec::new(),
+        trash: Vec::new(),
+    };
     for f in files {
-        match f.orig_path {
+        match &f.orig_path {
             // Rename: bring back the committed original, drop the new path.
-            Some(orig) if in_head.contains(&orig) => {
-                restore.push(orig);
-                trash_and_unstage.push(f.path);
+            Some(orig) if in_head.contains(orig) => {
+                plan.restore.push(orig.clone());
+                plan.trash.push(f.path.clone());
             }
-            _ if in_head.contains(&f.path) => restore.push(f.path),
-            _ => trash_and_unstage.push(f.path),
+            _ if in_head.contains(&f.path) => plan.restore.push(f.path.clone()),
+            _ => plan.trash.push(f.path.clone()),
         }
     }
+    plan
+}
+
+pub fn discard_files(repo_path: &str, files: Vec<FileEntry>) -> Result<(), String> {
+    if files.is_empty() {
+        return Ok(());
+    }
+
+    // `restore` → tracked paths to `git checkout HEAD --`.
+    // `trash_and_unstage` → never-committed paths to trash + `git reset --`.
+    let DiscardPlan {
+        restore,
+        trash: trash_and_unstage,
+    } = classify_discard(repo_path, &files);
 
     // 1) Move never-committed working-tree files to the trash so an accidental
     //    discard is recoverable. Best-effort per file.
@@ -2198,7 +2372,15 @@ pub fn repo_sync_status(repo_path: String, do_fetch: bool) -> Result<RepoSync, S
     Ok(sync)
 }
 
-/// Fetch `remote` (`--prune`, on-demand submodules) — the auto-fetch path.
+/// Fetch `remote` (`--prune`, on-demand submodules).
+///
+/// `background` picks the budget. An automatic fetch — the timer, the
+/// on-activation resync — is `true`: nobody is waiting on it, so it fails fast
+/// under the same 8/8/12 s budget the badge sweep uses, and an unreachable
+/// remote can't hold the single network slot for ten minutes while every other
+/// repo's polling waits behind it. A fetch the user asked for is `false` and
+/// keeps the generous 15/30/600 s budget, because a legitimate large transfer
+/// takes a while and abandoning it would be the wrong answer.
 ///
 /// Like every command below that can legitimately run for minutes, this is an
 /// `async fn` delegating to [`process::run_blocking`] so the transfer sits on
@@ -2206,8 +2388,13 @@ pub fn repo_sync_status(repo_path: String, do_fetch: bool) -> Result<RepoSync, S
 ///
 /// # Errors
 /// When the process can't start or `git fetch` exits non-zero.
-pub async fn fetch(repo_path: String, remote: String) -> Result<(), String> {
+pub async fn fetch(repo_path: String, remote: String, background: bool) -> Result<(), String> {
     super::process::run_blocking(move || {
+        let (connect, stall, timeout) = if background {
+            (NET_BG_CONNECT_SECS, NET_BG_STALL_SECS, NET_BG_TIMEOUT)
+        } else {
+            (NET_UI_CONNECT_SECS, NET_UI_STALL_SECS, NET_UI_TIMEOUT)
+        };
         let (ok, combined) = run_git_net(
             Some(&repo_path),
             &[
@@ -2216,9 +2403,9 @@ pub async fn fetch(repo_path: String, remote: String) -> Result<(), String> {
                 "--recurse-submodules=on-demand",
                 &remote,
             ],
-            NET_UI_CONNECT_SECS,
-            NET_UI_STALL_SECS,
-            NET_UI_TIMEOUT,
+            connect,
+            stall,
+            timeout,
         )?;
         if !ok {
             return Err(format!("git fetch failed: {}", combined.trim()));
@@ -2344,19 +2531,35 @@ pub fn get_ahead_behind(repo_path: String, upstream: String) -> Result<AheadBehi
     }
 }
 
-pub fn get_remote(repo_path: String) -> Result<String, String> {
+/// Name of the repo's first configured remote (e.g. `"origin"`), or `None`
+/// when it has none.
+///
+/// Deliberately does **not** invent `"origin"` for a remote-less repo. It used
+/// to, and every caller inherited a name that resolves to nothing: a guard
+/// written as "skip when there's no remote" could never fire, so fetches ran
+/// against a remote that does not exist and their failures were read as the
+/// network being down. The one place the assumption is legitimate — naming the
+/// remote a *publish* is about to create — makes it explicitly, at that call
+/// site. Elsewhere, `RepoStatus::has_remote` is the question worth asking.
+///
+/// # Errors
+/// When `git remote` itself can't run (not a repository, git missing).
+pub fn get_remote(repo_path: String) -> Result<Option<String>, String> {
     // Return the NAME of the first remote, not the URL.
     let out = run_git(&repo_path, &["remote"])?;
-    if let Some(first) = out.lines().next() {
-        let first = first.trim();
-        if !first.is_empty() {
-            return Ok(first.to_string());
-        }
-    }
-    // If no remotes are configured but there's exactly one "origin"-shaped default,
-    // fall back to "origin".
-    Ok("origin".to_string())
+    Ok(out
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(str::to_string))
 }
+
+/// The remote name a publish should create and push to when the repo has none.
+///
+/// `git` itself defaults to this name on `clone`, and `gh repo create` wires it
+/// up under this name too, so a publish that has to name a remote before one
+/// exists is the single place the assumption is true rather than convenient.
+pub const DEFAULT_PUBLISH_REMOTE: &str = "origin";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RepoIdentifier {
@@ -2518,22 +2721,25 @@ pub fn merge_abort(repo_path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `git_dir` holds a `MERGE_HEAD` — git's own record of an
+/// in-progress merge. `None` (no git dir could be resolved) reads as "not
+/// merging" so a non-repo path degrades to a calm answer rather than an error.
+fn is_merging_in(git_dir: Option<&Path>) -> bool {
+    git_dir.is_some_and(|dir| dir.join("MERGE_HEAD").exists())
+}
+
+/// Standalone merge probe.
+///
+/// [`RepoStatus::merging`] carries the same answer on every status refresh and
+/// is what the UI should read; this stays for callers that hold no status —
+/// and never gained one, since removing it would only push the same filesystem
+/// probe out to each host.
+///
+/// # Errors
+/// Never fails today; the `Result` is kept so hosts' generated bindings don't
+/// churn when a future probe can.
 pub fn is_merging(repo_path: String) -> Result<bool, String> {
-    // Use rev-parse --git-dir to handle both regular .git directories AND
-    // .git files used by worktrees (where .git is a text file pointing to
-    // the real git dir).
-    let git_dir = match run_git(&repo_path, &["rev-parse", "--git-dir"]) {
-        Ok(d) => d,
-        Err(_) => return Ok(false),
-    };
-
-    let git_dir_path = if Path::new(&git_dir).is_absolute() {
-        PathBuf::from(&git_dir)
-    } else {
-        Path::new(&repo_path).join(&git_dir)
-    };
-
-    Ok(git_dir_path.join("MERGE_HEAD").exists())
+    Ok(is_merging_in(git_dir(&repo_path).as_deref()))
 }
 
 pub fn count_commits_to_merge(repo_path: String, target_branch: String) -> Result<i32, String> {
@@ -3224,9 +3430,9 @@ mod tests {
 
     /// Regression: the repository's first commit must diff like any other,
     /// even for a user with `log.showRoot=false` — `git log -p` honours that
-    /// setting unless `--root` is passed, and `get_commit_files`/
-    /// `get_commit_stats` already pass it. Without the flag, the History
-    /// detail showed a populated file list whose every diff was empty.
+    /// setting unless `--root` is passed, and `get_commit_detail` already
+    /// passes it. Without the flag, the History detail showed a populated file
+    /// list whose every diff was empty.
     #[test]
     fn commit_diff_covers_the_root_commit_regardless_of_show_root() {
         let tmp = tempdir().expect("tempdir");
@@ -3636,7 +3842,13 @@ mod tests {
         assert_ne!(after, before, "…and therefore the whole status value");
 
         // Commit, then delete: the row exists but nothing is on disk.
-        commit(repo_path.clone(), "c1".into(), vec![new_file("a.txt")], None).expect("commit");
+        commit(
+            repo_path.clone(),
+            "c1".into(),
+            vec![new_file("a.txt")],
+            None,
+        )
+        .expect("commit");
         fs::remove_file(repo.join("a.txt")).expect("delete file");
         let deleted = get_status(repo_path).expect("get_status");
         assert_eq!(deleted.files.len(), 1, "the deletion is listed");
@@ -4221,5 +4433,362 @@ mod tests {
             read_blob(&repo_path, "HEAD", "a.txt").expect("read head blob"),
             "v2\n"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Status carries `merging` (H-1)
+    // -----------------------------------------------------------------------
+
+    /// `get_status` answers the merge question itself, so no refresh path can
+    /// forget to ask it — and it agrees with the standalone probe in every
+    /// state, since both read the same `MERGE_HEAD`.
+    #[test]
+    fn status_reports_a_merge_in_progress_and_its_end() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_test_repo(repo);
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+
+        fs::write(repo.join("shared.txt"), "base\n").expect("write base");
+        commit(
+            repo_path.clone(),
+            "base".into(),
+            vec![new_file("shared.txt")],
+            None,
+        )
+        .expect("commit base");
+        let main = get_status(repo_path.clone()).expect("status").branch;
+
+        create_branch(repo_path.clone(), "feature".into(), "HEAD".into()).expect("branch");
+        switch_branch(repo_path.clone(), "feature".into()).expect("switch");
+        fs::write(repo.join("shared.txt"), "feature\n").expect("write feature");
+        commit(
+            repo_path.clone(),
+            "feature".into(),
+            vec![new_file("shared.txt")],
+            None,
+        )
+        .expect("commit feature");
+
+        switch_branch(repo_path.clone(), main).expect("switch back");
+        fs::write(repo.join("shared.txt"), "main\n").expect("write main");
+        commit(
+            repo_path.clone(),
+            "main".into(),
+            vec![new_file("shared.txt")],
+            None,
+        )
+        .expect("commit main");
+
+        assert!(
+            !get_status(repo_path.clone()).expect("status").merging,
+            "a clean branch is not merging"
+        );
+
+        let merge = merge_branch(repo_path.clone(), "feature".into()).expect("merge runs");
+        assert!(!merge.success, "the conflicting merge stops mid-way");
+
+        let during = get_status(repo_path.clone()).expect("status mid-merge");
+        assert!(during.merging, "status sees the in-progress merge");
+        assert_eq!(
+            during.merging,
+            is_merging(repo_path.clone()).expect("probe"),
+            "the folded-in flag and the standalone probe agree"
+        );
+
+        merge_abort(repo_path.clone()).expect("abort");
+        assert!(
+            !get_status(repo_path.clone())
+                .expect("status after abort")
+                .merging,
+            "aborting ends the merge state"
+        );
+    }
+
+    /// The merge flag is resolved from the filesystem, so it must survive the
+    /// shape where `.git` is a *file* pointing elsewhere — a linked worktree.
+    /// That is the case the old `rev-parse --git-dir` call existed to handle,
+    /// and losing it would silently report every worktree as never merging.
+    #[test]
+    fn merge_state_resolves_through_a_worktree_git_file() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_test_repo(repo);
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+        fs::write(repo.join("a.txt"), "1\n").expect("write a");
+        commit(
+            repo_path.clone(),
+            "first".into(),
+            vec![new_file("a.txt")],
+            None,
+        )
+        .expect("commit");
+
+        let linked = tmp.path().join("linked");
+        run_git(
+            &repo_path,
+            &[
+                "worktree",
+                "add",
+                linked.to_str().expect("utf-8 path"),
+                "-b",
+                "side",
+            ],
+        )
+        .expect("add worktree");
+        let linked_path = linked.to_str().expect("utf-8 path").to_string();
+
+        assert!(
+            linked.join(".git").is_file(),
+            "a linked worktree's .git is a pointer file, not a directory"
+        );
+        // The per-worktree git dir is where a merge there would record itself,
+        // so resolving to the *main* one would answer about the wrong tree.
+        let resolved = git_dir(&linked_path).expect("worktree git dir");
+        assert!(
+            resolved.ends_with("worktrees/linked"),
+            "resolved the per-worktree git dir, got {}",
+            resolved.display()
+        );
+        assert!(
+            !get_status(linked_path).expect("status in worktree").merging,
+            "a fresh worktree is not merging"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // get_remote (H-2)
+    // -----------------------------------------------------------------------
+
+    /// A repo with no remote must say so. Inventing `"origin"` is what made
+    /// every "skip when there's no remote" guard unfireable, so fetches ran
+    /// against a name that resolves to nothing and their failures were read as
+    /// the network being down.
+    #[test]
+    fn get_remote_is_none_without_a_remote_and_names_the_real_one_with() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_test_repo(repo);
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+
+        assert_eq!(
+            get_remote(repo_path.clone()).expect("remote lookup"),
+            None,
+            "a remote-less repo reports no remote"
+        );
+        assert!(
+            !get_status(repo_path.clone()).expect("status").has_remote,
+            "and the status flag agrees"
+        );
+
+        run_git(
+            &repo_path,
+            &["remote", "add", "upstream", "https://example.invalid/x.git"],
+        )
+        .expect("add remote");
+        assert_eq!(
+            get_remote(repo_path.clone()).expect("remote lookup"),
+            Some("upstream".to_string()),
+            "the real remote's name is returned, not a guess"
+        );
+        assert!(
+            get_status(repo_path).expect("status").has_remote,
+            "and the status flag agrees"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // get_commit_detail (H-7)
+    // -----------------------------------------------------------------------
+
+    /// One invocation must return the same file list and the same totals the
+    /// two separate commands did, including the rename shape — `--raw` carries
+    /// the status and both paths, `--numstat` the counts, and a rename's
+    /// numstat record puts its paths in following segments rather than inline.
+    #[test]
+    fn commit_detail_reports_files_and_totals_in_one_pass() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_test_repo(repo);
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+
+        fs::write(repo.join("keep.txt"), "a\nb\nc\n").expect("write keep");
+        fs::write(repo.join("gone.txt"), "x\n").expect("write gone");
+        fs::write(repo.join("old name.txt"), "1\n2\n3\n4\n5\n").expect("write old");
+        commit(
+            repo_path.clone(),
+            "base".into(),
+            vec![
+                new_file("keep.txt"),
+                new_file("gone.txt"),
+                new_file("old name.txt"),
+            ],
+            None,
+        )
+        .expect("commit base");
+
+        fs::write(repo.join("keep.txt"), "a\nb\nc\nd\n").expect("edit keep");
+        fs::remove_file(repo.join("gone.txt")).expect("remove gone");
+        fs::rename(repo.join("old name.txt"), repo.join("new name.txt")).expect("rename");
+        fs::write(repo.join("new name.txt"), "1\n2\n3\n4\n5\n6\n").expect("edit renamed");
+        fs::write(repo.join("added.txt"), "new\n").expect("write added");
+        run_git(&repo_path, &["add", "-A"]).expect("stage everything");
+        run_git(&repo_path, &["commit", "-m", "second"]).expect("commit second");
+
+        let detail = get_commit_detail(repo_path, "HEAD".into()).expect("detail");
+        let by_path = |p: &str| {
+            detail
+                .files
+                .iter()
+                .find(|f| f.path == p)
+                .unwrap_or_else(|| panic!("{p} is in the commit: {:?}", detail.files))
+                .clone()
+        };
+
+        assert_eq!(detail.files.len(), 4, "four files: {:?}", detail.files);
+        assert_eq!(by_path("added.txt").status, FileStatus::New);
+        assert_eq!(by_path("keep.txt").status, FileStatus::Modified);
+        assert_eq!(by_path("gone.txt").status, FileStatus::Deleted);
+
+        let renamed = by_path("new name.txt");
+        assert_eq!(renamed.status, FileStatus::Renamed);
+        assert_eq!(
+            renamed.orig_path.as_deref(),
+            Some("old name.txt"),
+            "the rename keeps its source, spaces and all"
+        );
+
+        // keep.txt +1, old→new +1, added.txt +1, gone.txt −1.
+        assert_eq!(detail.stats.additions, 3, "additions across every file");
+        assert_eq!(detail.stats.deletions, 1, "deletions across every file");
+    }
+
+    /// A binary file has no line counts (`--numstat` prints `-`), and counting
+    /// it as zero would be a lie the badge repeats. It still has to appear in
+    /// the file list.
+    #[test]
+    fn commit_detail_lists_binary_files_without_counting_their_lines() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_test_repo(repo);
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+
+        fs::write(repo.join("blob.bin"), [0u8, 159, 146, 150, 0]).expect("write binary");
+        fs::write(repo.join("text.txt"), "one\ntwo\n").expect("write text");
+        commit(
+            repo_path.clone(),
+            "mixed".into(),
+            vec![new_file("blob.bin"), new_file("text.txt")],
+            None,
+        )
+        .expect("commit");
+
+        let detail = get_commit_detail(repo_path, "HEAD".into()).expect("detail");
+        assert_eq!(
+            detail.files.len(),
+            2,
+            "both files listed: {:?}",
+            detail.files
+        );
+        assert_eq!(
+            detail.stats.additions, 2,
+            "only the text file's lines are counted"
+        );
+        assert_eq!(detail.stats.deletions, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // classify_discard (H-12)
+    // -----------------------------------------------------------------------
+
+    /// The dialog's promise and the action must come from the same decision.
+    /// Each case here is one a status letter alone gets wrong: a *staged*
+    /// addition of a path that exists in HEAD is restorable, not trash; a
+    /// rename restores its original and trashes its new path; an untracked
+    /// file has nothing to restore to.
+    #[test]
+    fn classify_discard_names_the_outcome_a_status_letter_cannot() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_test_repo(repo);
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+
+        fs::write(repo.join("tracked.txt"), "committed\n").expect("write tracked");
+        fs::write(repo.join("renamed.txt"), "content\n").expect("write renamed");
+        commit(
+            repo_path.clone(),
+            "base".into(),
+            vec![new_file("tracked.txt"), new_file("renamed.txt")],
+            None,
+        )
+        .expect("commit base");
+
+        // A path that IS in HEAD but whose entry git reports as an addition
+        // (deleted, then re-added and staged) — the case the guess got wrong.
+        fs::remove_file(repo.join("tracked.txt")).expect("remove tracked");
+        fs::write(repo.join("tracked.txt"), "re-added\n").expect("re-add tracked");
+        run_git(&repo_path, &["add", "tracked.txt"]).expect("stage re-add");
+        fs::rename(repo.join("renamed.txt"), repo.join("moved.txt")).expect("rename");
+        run_git(&repo_path, &["add", "-A"]).expect("stage rename");
+        fs::write(repo.join("untracked.txt"), "never committed\n").expect("write untracked");
+
+        let status = get_status(repo_path.clone()).expect("status");
+        let plan = classify_discard(&repo_path, &status.files);
+
+        assert!(
+            plan.restore.contains(&"tracked.txt".to_string()),
+            "a path in HEAD is restored however git labels its entry: {plan:?}"
+        );
+        assert!(
+            plan.restore.contains(&"renamed.txt".to_string()),
+            "a rename restores its committed original: {plan:?}"
+        );
+        assert!(
+            plan.trash.contains(&"moved.txt".to_string()),
+            "and trashes the path it moved to: {plan:?}"
+        );
+        assert!(
+            plan.trash.contains(&"untracked.txt".to_string()),
+            "a never-committed file has nothing to restore to: {plan:?}"
+        );
+    }
+
+    /// With an unborn HEAD there is nothing to restore *anything* to, so every
+    /// path is trash — regardless of whether it has been staged. A client that
+    /// inferred the outcome from the status letter promised a restore that
+    /// could not happen.
+    #[test]
+    fn classify_discard_trashes_everything_under_an_unborn_head() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_test_repo(repo);
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+
+        fs::write(repo.join("staged.txt"), "a\n").expect("write staged");
+        fs::write(repo.join("loose.txt"), "b\n").expect("write loose");
+        run_git(&repo_path, &["add", "staged.txt"]).expect("stage");
+
+        let status = get_status(repo_path.clone()).expect("status");
+        let plan = classify_discard(&repo_path, &status.files);
+
+        assert!(plan.restore.is_empty(), "nothing to restore to: {plan:?}");
+        assert_eq!(plan.trash.len(), 2, "both files are trash: {plan:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // FileStatus presentation (H-13)
+    // -----------------------------------------------------------------------
+
+    /// The glyphs are git's own porcelain vocabulary, `U` for a conflict
+    /// included — the clients each invented a set and disagreed on that one.
+    #[test]
+    fn file_status_letters_follow_git_porcelain() {
+        assert_eq!(FileStatus::New.letter(), "A");
+        assert_eq!(FileStatus::Modified.letter(), "M");
+        assert_eq!(FileStatus::Deleted.letter(), "D");
+        assert_eq!(FileStatus::Renamed.letter(), "R");
+        assert_eq!(FileStatus::Conflicted.letter(), "U");
+        assert_eq!(FileStatus::Conflicted.label(), "Conflicted");
+        assert_eq!(FileStatus::New.label(), "Added");
     }
 }

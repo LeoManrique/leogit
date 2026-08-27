@@ -115,7 +115,7 @@ final class RepoDirectoryStore {
         let config = try? await GitBridge.appConfig()
         let scanPaths = config?.scanPaths ?? []
         scanFolders = await GitBridge.scanFolders(for: scanPaths)
-        if let found = try? await GitBridge.discoverRepositories(
+        if let found = try? await GitBridge.knownRepositories(
             scanPaths: scanPaths,
             depth: config?.scanDepth ?? 3
         ) {
@@ -124,11 +124,13 @@ final class RepoDirectoryStore {
         }
     }
 
-    /// Rebuild the row list from the two sources: discovery order first (core
-    /// returns it sorted), then MRU entries discovery didn't cover — a repo
-    /// opened via "Open Other…" keeps its row even from outside the scan
-    /// folders, provided it still exists (an MRU entry can name a folder that
-    /// has since been moved or deleted).
+    /// Rebuild the row list.
+    ///
+    /// `discovered` already holds core's answer — discovery unioned with the
+    /// existence-checked MRU — so this only re-adds the locally-known entries
+    /// that haven't reached disk yet: `noteOpened` fronts the list before its
+    /// write lands, and a refresh racing that write must not make the repo the
+    /// user just opened disappear from the switcher.
     private func publishRepos() {
         var merged = discovered
         var seen = Set(discovered)

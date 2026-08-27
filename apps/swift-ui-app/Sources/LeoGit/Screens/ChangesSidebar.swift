@@ -42,6 +42,10 @@ struct ChangesSidebar: View {
 
     /// The file the discard confirmation is about; `nil` when it's closed.
     @State private var fileToDiscard: FileEntry?
+    /// What discarding `fileToDiscard` would actually do, as core decides it.
+    /// `nil` until the answer arrives — the dialog opens on the row click and
+    /// fills its message a moment later rather than guessing in the meantime.
+    @State private var discardPlan: DiscardPlan?
 
     /// The composer's height — the one piece of sidebar geometry the user
     /// sets by hand, persisted like the Tauri client's `leogit:commitHeight`
@@ -117,6 +121,13 @@ struct ChangesSidebar: View {
         } message: { file in
             Text(discardWarning(for: file))
         }
+        .task(id: fileToDiscard?.path) {
+            guard let file = fileToDiscard else {
+                discardPlan = nil
+                return
+            }
+            discardPlan = await GitBridge.discardPlan(in: repoPath, files: [file])
+        }
     }
 
     // MARK: Composer height
@@ -189,7 +200,10 @@ struct ChangesSidebar: View {
     /// first, then the copies, then the hand-offs to the system.
     @ViewBuilder
     private func rowMenu(for file: FileEntry) -> some View {
-        Button("Discard Changes…", role: .destructive) { fileToDiscard = file }
+        Button("Discard Changes…", role: .destructive) {
+            discardPlan = nil
+            fileToDiscard = file
+        }
 
         Divider()
 
@@ -257,16 +271,30 @@ struct ChangesSidebar: View {
     /// Discard does one of two things per path, and which one is not obvious
     /// from the row — so the dialog says it outright rather than asking the
     /// user to guess whether their file is recoverable.
+    ///
+    /// The answer comes from core, which decides it from actual `HEAD`
+    /// membership, and is the same decision the discard itself runs on. The
+    /// status letter cannot answer it: a staged re-add of a path that exists
+    /// in HEAD is restorable, a rename whose original is *not* in HEAD is not,
+    /// and under an unborn HEAD nothing is — three cases the old guess got
+    /// wrong, each of them a promise the action then broke.
     private func discardWarning(for file: FileEntry) -> String {
-        if let original = file.origPath {
-            return "\(original) comes back and \(file.path) moves to the Trash. "
-                + "This can't be undone."
+        guard let plan = discardPlan else {
+            return "Working out what this will do…"
         }
-        if file.status == .new {
-            return "\(file.path) was never committed, so there is nothing to restore it to — "
+        let restored = plan.restore.joined(separator: ", ")
+        let trashed = plan.trash.joined(separator: ", ")
+        return switch (restored.isEmpty, trashed.isEmpty) {
+        case (false, false):
+            "\(restored) comes back and \(trashed) moves to the Trash. This can't be undone."
+        case (false, true):
+            "\(restored) goes back to its committed state. This can't be undone."
+        case (true, false):
+            "\(trashed) was never committed, so there is nothing to restore it to — "
                 + "it moves to the Trash instead."
+        case (true, true):
+            "There is nothing to discard in \(file.path)."
         }
-        return "\(file.path) goes back to its committed state. This can't be undone."
     }
 
     private func absolutePath(of file: FileEntry) -> String {

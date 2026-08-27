@@ -6,13 +6,13 @@ import Foundation
 ///
 /// Only fields with a native consumer get a control — auto-fetch cadence,
 /// the diff rendering settings, repo discovery, the terminal shell, and the
-/// AI knobs. The remaining fields cross the bridge untouched: `save()` loads
-/// a fresh `Config`, overlays just the managed fields, and writes the whole
-/// file back, so the other client's settings survive every save. Two are
-/// exempt deliberately (FRONTEND.md §8): `theme` permanently, because the
-/// native app follows the system appearance and a stored theme is a web-only
-/// concept; `side_by_side_diff` until the split layout gets its own design
-/// pass (tracked in ROADMAP).
+/// AI knobs. `save()` sends a *patch* naming exactly those, so every field
+/// this window doesn't manage survives untouched by construction rather than
+/// by remembering to reload first. Two are exempt deliberately
+/// (FRONTEND.md §8): `theme` permanently, because the native app follows the
+/// system appearance and a stored theme is a web-only concept;
+/// `side_by_side_diff` until the split layout gets its own design pass
+/// (tracked in ROADMAP).
 ///
 /// Saves are debounced a moment and fired by the controls themselves (via
 /// `scheduleSave()`), never by `load()` — so opening the window writes
@@ -22,13 +22,19 @@ import Foundation
 @MainActor
 @Observable
 final class SettingsStore {
-    /// Bounds shown by the controls and enforced on save, matching the Tauri
-    /// form's HTML constraints — which that client never actually enforced.
-    static let fetchIntervalRange = 5...3600
-    static let scanDepthRange = 1...10
-    static let tabSizeRange = 1...16
+    /// The ranges every writer enforces, read from core rather than restated
+    /// here — a control that offered a value the writer then clamped away was
+    /// the exact symptom of three copies of these numbers in two units.
+    private static let bounds = configBounds()
 
-    private static let defaultOllamaURL = "http://localhost:11434"
+    /// Seconds, because that is what the control shows; milliseconds stay on
+    /// the wire. Rounded outward so the displayed range never excludes a value
+    /// core would accept.
+    static let fetchIntervalRange =
+        Int(bounds.fetchIntervalMs.min / 1000)...Int(bounds.fetchIntervalMs.max / 1000)
+    static let scanDepthRange = Int(bounds.scanDepth.min)...Int(bounds.scanDepth.max)
+    static let tabSizeRange = Int(bounds.tabSize.min)...Int(bounds.tabSize.max)
+
     private static let saveDebounce = Duration.milliseconds(300)
 
     // Git
@@ -48,10 +54,14 @@ final class SettingsStore {
     var shellSelection = ""
     private(set) var shells: [ShellOption] = []
 
-    // AI
+    // AI. Each provider keeps its own model: one shared field meant setting
+    // `sonnet` and switching to Ollama produced a request against a model
+    // that doesn't exist there.
     var aiProvider = "claude"
-    var aiModel = ""
-    var ollamaURL = SettingsStore.defaultOllamaURL
+    var claudeModel = ""
+    var ollamaModel = ""
+    var ollamaURL = ""
+
 
     private(set) var isLoaded = false
 
@@ -66,15 +76,12 @@ final class SettingsStore {
 
     private var pendingSave: Task<Void, Never>?
 
-    /// What this window's fields amounted to at the last load or save — the
-    /// *normalized* form, not the raw file. `flushPendingSave()` overlays the
-    /// current fields onto it to answer "has a field changed since then?",
-    /// which is how closing the window can commit a text field that never
-    /// scheduled a save without rewriting the file on every visit. Storing the
-    /// raw file instead would answer a different question — "is the file
-    /// already normalized?" — and a config written by the other client rarely
-    /// is, so an open-and-close with no edit would rewrite it.
-    private var lastPersisted: Config?
+    /// What this window's fields amounted to at the last load or save.
+    /// `flushPendingSave()` compares the current fields against it to answer
+    /// "has anything changed since then?", which is how closing the window can
+    /// commit a text field that never scheduled a save without rewriting the
+    /// file on every visit.
+    private var lastPersisted: ConfigPatch?
 
     /// Ordinal of the most recently scheduled debounce, so a completed one can
     /// clear `pendingSave` without clearing a newer one that replaced it. Left
@@ -110,12 +117,13 @@ final class SettingsStore {
         } else {
             shellSelection = ""
         }
-        aiProvider = config.aiProvider == "ollama" ? "ollama" : "claude"
-        aiModel = config.aiModel ?? ""
-        ollamaURL = config.ollamaServerUrl
+        aiProvider = config.aiProvider
+        claudeModel = config.claude.model ?? ""
+        ollamaModel = config.ollama.model ?? ""
+        ollamaURL = config.ollama.serverUrl
         isLoaded = true
-        // After `isLoaded`, so `applying(to:)` describes fields that are live.
-        lastPersisted = applying(to: config)
+        // After `isLoaded`, so `currentPatch` describes fields that are live.
+        lastPersisted = currentPatch
     }
 
     /// Coalesce rapid control changes (stepper clicks, toggles) into one
@@ -147,10 +155,8 @@ final class SettingsStore {
     /// user typed into and never left. Text fields commit on focus change or
     /// Return, and ⌘W is neither, so the typed model, Ollama URL, or scan
     /// paths were dropped with no feedback in the one surface whose whole
-    /// premise is "you never press Save". Overlaying the fields onto
-    /// `lastPersisted` — the normalized form of what they held at the last
-    /// load or save — keeps that from turning into a write on every
-    /// open-and-close: unchanged fields reproduce it exactly.
+    /// premise is "you never press Save". Comparing against `lastPersisted`
+    /// keeps that from turning into a write on every open-and-close.
     func flushPendingSave() {
         if let pendingSave {
             pendingSave.cancel()
@@ -158,23 +164,24 @@ final class SettingsStore {
             Task { await save() }
             return
         }
-        guard isLoaded, let baseline = lastPersisted, applying(to: baseline) != baseline else {
-            return
-        }
+        guard isLoaded, currentPatch != lastPersisted else { return }
         Task { await save() }
     }
 
-    /// Load the file fresh, overlay the managed fields, and write it back —
-    /// then reload the shared `AppConfigStore`, which is how the main window
-    /// observes the change: the open diff re-keys and the auto-fetch loop
-    /// re-arms within one interval, no restart.
+    /// Patch the fields this window manages — then reload the shared
+    /// `AppConfigStore`, which is how the main window observes the change: the
+    /// open diff re-keys and the auto-fetch loop re-arms within one interval,
+    /// no restart.
+    ///
+    /// A patch, not a whole-file write: the load-fresh-then-edit discipline
+    /// that used to protect the other client's settings is now structural, so
+    /// there is nothing left here to get wrong.
     private func save() async {
         guard isLoaded else { return }
+        let patch = currentPatch
         do {
-            let fresh = try await GitBridge.appConfig()
-            let written = applying(to: fresh)
-            try await GitBridge.saveAppConfig(written)
-            lastPersisted = written
+            try await GitBridge.patchAppConfig(patch)
+            lastPersisted = patch
             errorMessage = nil
             await configStore?.reload()
         } catch {
@@ -182,30 +189,28 @@ final class SettingsStore {
         }
     }
 
-    /// This window's fields over `fresh`, normalized: numbers clamped to
-    /// their control bounds, an emptied model back to `nil` (Tauri persists
-    /// `""` there — a bug not worth replicating), an emptied Ollama URL back
-    /// to core's default so Generate can never be pointed at "".
-    private func applying(to fresh: Config) -> Config {
-        let interval = fetchIntervalSeconds.clamped(to: Self.fetchIntervalRange)
-        let trimmedModel = aiModel.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedURL = ollamaURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        return Config(
-            theme: fresh.theme,
-            fetchIntervalMs: UInt32(interval * 1000),
-            aiProvider: aiProvider == "ollama" ? "ollama" : "claude",
-            aiModel: trimmedModel.isEmpty ? nil : trimmedModel,
-            aiApiKey: fresh.aiApiKey,
+    /// This window's fields as a patch. Numbers are clamped to the control
+    /// bounds here so the form matches what lands; blanks travel as `""`,
+    /// which core reads as "no value" — the rule that keeps an emptied model
+    /// box from becoming `--model ""`.
+    private var currentPatch: ConfigPatch {
+        // `theme`, `sideBySideDiff` and the two timeouts are absent on
+        // purpose: this window has no control for them, and a patch that
+        // named them would be claiming an opinion it doesn't have.
+        ConfigPatch(
+            fetchIntervalMs: UInt32(
+                fetchIntervalSeconds.clamped(to: Self.fetchIntervalRange) * 1000),
+            aiProvider: aiProvider,
             autoFetch: autoFetch,
             syntaxHighlighting: syntaxHighlighting,
             scanPaths: parsedScanPaths,
             scanDepth: UInt32(scanDepth.clamped(to: Self.scanDepthRange)),
-            sideBySideDiff: fresh.sideBySideDiff,
             hideWhitespace: hideWhitespace,
             tabSize: UInt32(tabSize.clamped(to: Self.tabSizeRange)),
-            claudeTimeoutSecs: fresh.claudeTimeoutSecs,
-            ollamaServerUrl: trimmedURL.isEmpty ? Self.defaultOllamaURL : trimmedURL,
-            terminalShell: shellSelection.isEmpty ? nil : shellSelection
+            terminalShell: shellSelection,
+            claudeModel: claudeModel.trimmingCharacters(in: .whitespacesAndNewlines),
+            ollamaModel: ollamaModel.trimmingCharacters(in: .whitespacesAndNewlines),
+            ollamaServerUrl: ollamaURL.trimmingCharacters(in: .whitespacesAndNewlines)
         )
     }
 

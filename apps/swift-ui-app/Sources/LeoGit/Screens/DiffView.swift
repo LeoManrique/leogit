@@ -114,11 +114,31 @@ struct DiffView: View {
                 systemImage: "doc.zipper",
                 description: Text("This change has no line-by-line diff.")
             )
-        } else if store.isEmpty || (store.payload != nil && store.rows.isEmpty) {
+        } else if let guardInfo = store.sizeGuard {
+            // Withheld, never refused — without the button this state would
+            // make a file with one long line permanently unreadable.
+            ContentUnavailableView {
+                Label("Large Diff", systemImage: "doc.text.magnifyingglass")
+            } description: {
+                Text(Self.sizeGuardExplanation(guardInfo))
+            } actions: {
+                Button("Show Diff Anyway") {
+                    Task {
+                        await store.loadIgnoringSizeGuard(
+                            repoPath: repoPath,
+                            file: file,
+                            target: target,
+                            hideWhitespace: hideWhitespace,
+                            highlight: appConfig.syntaxHighlighting
+                        )
+                    }
+                }
+            }
+        } else if let reason = store.emptyReason {
             ContentUnavailableView(
-                "No Textual Changes",
+                Self.emptyTitle(reason),
                 systemImage: "doc",
-                description: Text("The file changed without changing any lines — a mode change or rename, for example.")
+                description: Text(Self.emptyExplanation(reason))
             )
         } else if store.payload == nil {
             Color.clear
@@ -150,6 +170,38 @@ struct DiffView: View {
         DiffPalette(colorScheme)
     }
 
+    /// Each empty state names what actually happened. They are three different
+    /// situations, and one caption covering all of them told the user the file
+    /// was unchanged when the whitespace setting was simply hiding the change.
+    private static func emptyTitle(_ reason: EmptyDiffReason) -> String {
+        switch reason {
+        case .noChanges: "No Changes"
+        case .whitespaceOnly: "Whitespace Only"
+        case .noTextualChanges: "No Textual Changes"
+        }
+    }
+
+    private static func emptyExplanation(_ reason: EmptyDiffReason) -> String {
+        switch reason {
+        case .noChanges:
+            "This file matches its committed state."
+        case .whitespaceOnly:
+            "Every change here is whitespace, and Settings is set to hide those."
+        case .noTextualChanges:
+            "The file changed without changing any lines — a mode change or rename, for example."
+        }
+    }
+
+    private static func sizeGuardExplanation(_ info: DiffSizeGuard) -> String {
+        let megabytes = Double(info.bytes) / 1_048_576
+        return switch info.reason {
+        case .totalBytes:
+            String(format: "This diff is %.1f MB — large enough to be slow to render.", megabytes)
+        case .lineLength:
+            "This diff has a line of \(info.longestLine) characters — long enough to be slow to render."
+        }
+    }
+
     /// The row's token line once phase two has landed; empty means "render
     /// plain", which is also the correct state while tokens are in flight.
     private func tokens(for row: DiffRow) -> [Token] {
@@ -171,7 +223,7 @@ private struct DiffRowView: View {
         switch row.line.lineType {
         case .hunk:
             // The `@@ -a,b +c,d @@ context` separator row.
-            Text(row.line.text)
+            Text(row.line.text ?? row.line.content)
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(.tertiary)
                 .padding(.horizontal, 12)
@@ -179,7 +231,7 @@ private struct DiffRowView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(.quaternary.opacity(0.5))
         case .noNewline:
-            Text(row.line.text)
+            Text(row.line.text ?? row.line.content)
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(.tertiary)
                 .padding(.horizontal, 12)

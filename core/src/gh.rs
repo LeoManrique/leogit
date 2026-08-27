@@ -139,8 +139,17 @@ pub async fn gh_publish_repo(
         }
         let visibility = if is_private { "--private" } else { "--public" };
         let description = description.trim();
+        // The one place naming a remote before one exists is legitimate:
+        // this call is what creates it.
         let mut args: Vec<&str> = vec![
-            "repo", "create", name, "--source", &repo_path, "--remote", "origin", "--push",
+            "repo",
+            "create",
+            name,
+            "--source",
+            &repo_path,
+            "--remote",
+            super::git::DEFAULT_PUBLISH_REMOTE,
+            "--push",
             visibility,
         ];
         if !description.is_empty() {
@@ -169,16 +178,40 @@ pub async fn gh_publish_repo(
 /// Returns the absolute path of the cloned repo. Runs on the blocking pool —
 /// see [`process::run_blocking`].
 ///
+/// Progress streams over the same seam a URL clone uses. `gh repo clone` hands
+/// everything after `--` to `git clone`, so asking it for `--progress` gets the
+/// real meter instead of a spinner over an empty bar — the only reason the two
+/// clone routes ever showed different amounts of information was that nobody
+/// had passed the flag through.
+///
 /// # Errors
 /// When `gh` is missing, the destination can't be prepared, or the clone fails.
-pub async fn gh_clone(name_with_owner: String, target_path: String) -> Result<String, String> {
+pub async fn gh_clone(
+    sink: std::sync::Arc<dyn crate::events::EventSink>,
+    name_with_owner: String,
+    target_path: String,
+) -> Result<String, String> {
     super::process::run_blocking(move || {
         let target = super::git::prepare_clone_target(&target_path)?;
+        let forward = super::git::progress_forwarder(
+            sink,
+            "clone",
+            target.clone(),
+            super::progress::GitOp::Clone,
+        );
         let mut cmd = Command::new("gh");
-        cmd.args(["repo", "clone", &name_with_owner, &target]);
+        cmd.args([
+            "repo",
+            "clone",
+            &name_with_owner,
+            &target,
+            "--",
+            "--progress",
+        ]);
         super::process::hide_console(&mut cmd);
-        let output = super::process::run_timed(cmd, "gh repo clone", GH_TRANSFER_TIMEOUT)
-            .map_err(|e| gh_unavailable(&e))?;
+        let output =
+            super::process::run_timed_streaming(cmd, "gh repo clone", GH_TRANSFER_TIMEOUT, forward)
+                .map_err(|e| gh_unavailable(&e))?;
         if !output.status.success() {
             return Err(stderr_or(&output, "gh repo clone failed."));
         }

@@ -222,7 +222,7 @@
           {@const right = row.pair.right !== null ? flatLines[row.pair.right] : null}
           {#if row.pair.is_hunk_header && left}
             <div class="hunk-header sbs-hunk-header">
-              <span class="hunk-text">{left.text}</span>
+              <span class="hunk-text">{left.text ?? left.content}</span>
             </div>
           {:else}
             <div class="sbs-row">
@@ -263,7 +263,7 @@
               role="button"
               tabindex="0"
             >
-              <span class="hunk-text">{row.line.text}</span>
+              <span class="hunk-text">{row.line.text ?? row.line.content}</span>
               {#if showSelection}<span class="hunk-hint">Shift+click for hunk</span>{/if}
             </div>
           {:else}

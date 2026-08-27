@@ -47,6 +47,7 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 | `--status-red` | `#DC2626` | Deleted lines (fg), conflict, error |
 | `--status-yellow` | `#D97706` | Modified marker, behind-by-N indicator, warning |
 | `--status-blue` | `#2563EB` | Info, untracked file marker |
+| `--status-purple` | `#9333EA` | Conflicted file marker |
 | `--diff-add-bg` | `rgba(22,163,74,0.10)` | Added-line row background in diff |
 | `--diff-remove-bg` | `rgba(220,38,38,0.10)` | Deleted-line row background in diff |
 | `--cursor-bg` | `rgba(0,122,255,0.18)` | Focus ring tint, selected diff line |
@@ -72,6 +73,7 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 | `--status-red` | `#EF4444` | Deleted lines, conflict, error |
 | `--status-yellow` | `#F59E0B` | Modified marker, behind-by-N, warning |
 | `--status-blue` | `#3B82F6` | Info, untracked file marker |
+| `--status-purple` | `#A855F7` | Conflicted file marker |
 | `--diff-add-bg` | `rgba(34,197,94,0.12)` | Added-line row background |
 | `--diff-remove-bg` | `rgba(239,68,68,0.12)` | Deleted-line row background |
 | `--cursor-bg` | `rgba(10,132,255,0.22)` | Focus ring tint, selected diff line |
@@ -114,7 +116,8 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 
 - One row per changed file. 22–24px row height, 4px vertical padding, 12px horizontal padding.
 - Layout: `[checkbox] [status marker] [path]` — checkbox for staging, single-character status marker in the appropriate status color, then the repo-relative path with the filename in `--text-primary` medium-weight and the directory muted. The row carries **no per-file line counts**: `FileEntry` has no additions/deletions to render, and `+N -N` totals belong to the commit detail card, where they are per commit.
-- **Status letters** are git's own porcelain vocabulary: `A` added, `M` modified, `D` deleted, `R` renamed. A conflicted entry is `U` in the Tauri list and `!` in the native one — the two clients have not settled on one glyph.
+- **Status letters** are git's own porcelain vocabulary: `A` added, `M` modified, `D` deleted, `R` renamed, `U` conflicted ("unmerged" is git's word for it). Neither client writes its own set — both read `file_status_styles` from core, so they cannot drift apart again, which is exactly what happened to the conflicted glyph.
+- **Conflicted gets its own hue**, `--status-purple`, not the red that already means Deleted. A glance down the list has to separate "you deleted this" from "git couldn't merge this": opposite actions, and only one of them blocks the commit. Colour is the one part of a status's presentation each platform resolves itself, against its own palette.
 - **Status as a single colored letter on a soft tint plate.** An 18×18 rounded-rect plate tinted at 15% of the status color, the letter centered in it — the native `FileStatusBadge` look, and the shared target. No full-word chips (`[Modified]`), no rounded-full outlines: the letter carries the meaning; the plate only gives it a consistent footprint in dense rows.
 - Hover row: `--surface-hover` tint, nothing more. No left-edge accent bar, no scale transform.
 - Selected (active diff) row: `--bg-tertiary` background, 6px radius, no border. The selection state, not the staging state, gets visual emphasis.

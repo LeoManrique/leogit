@@ -34,10 +34,10 @@ static-linking or a local daemon (that decision is open; see the plan).
 - The backend **categorizes and computes**; frontends **render and orchestrate**.
   Frontends never re-derive git state the core already returns (e.g. file status
   categories, ahead/behind, merge conflicts).
-- Today's surface: **4 events, ~30 DTOs**, and a command catalogue (§3) each host exposes
-  **to the extent it consumes it**. The Tauri host registers **69** `#[tauri::command]`s,
+- Today's surface: **4 events, ~35 DTOs**, and a command catalogue (§3) each host exposes
+  **to the extent it consumes it**. The Tauri host registers **73** `#[tauri::command]`s,
   each with a wrapper in `apps/tauri-app/src/lib/api/commands.ts`; the UniFFI bridge
-  exports **57** functions. The two sets are deliberately not identical, and a command
+  exports **59** functions. The two sets are deliberately not identical, and a command
   reaching one host does not oblige the other — what is required is that the difference be
   recorded, here or in §8, never left silent.
   - No native export: `check_auth`, `check_for_update`, `check_provider_available`,
@@ -51,11 +51,14 @@ static-linking or a local daemon (that decision is open; see the plan).
     (§6.1); `take_pending_launch_target` and `init_repo` serve the launch path, which is
     Tauri-only (§8); and the rest the bridge omits because it carries no surface a client
     does not call.
-  - No Tauri command: `core_version`, `fix_path_env`, `load_ai_config`,
-    `repo_display_name`, `resolve_repo_root`, `save_ai_provider`, `tokenize_diff`.
+  - No Tauri command: `core_version`, `fix_path_env`, `repo_display_name`,
+    `resolve_repo_root`, `tokenize_diff`.
   - Registered Tauri-side but called by nothing in the Svelte client:
-    `check_provider_available`, `generate_patch`, `generate_inverse_patch`,
-    `get_ahead_behind`, `has_staged_changes`, `rename_branch`, `delete_remote_branch`.
+    `check_provider_available`, `copy_diff_text`, `generate_patch`,
+    `generate_inverse_patch`, `get_ahead_behind`, `has_staged_changes`,
+    `rename_branch`, `delete_remote_branch`. Each is a live item in the parity
+    plan — either being wired (ST-9, DF-5, DF-6) or being deleted (WS-H) — and a
+    command that is neither should not stay on this list.
 
 ## 2. System context & architecture
 
@@ -74,41 +77,52 @@ static-linking or a local daemon (that decision is open; see the plan).
 - **State ownership** — durable state (config, repos MRU, terminal PTY sessions)
   lives in the core. Frontends hold only re-derivable view state.
 
-## 3. Command surface (69)
+## 3. Command surface (67)
 
 Grouped by namespace. `args` are the logical inputs (camelCase on the wire);
 `→` is the return DTO (§5). "async/net" marks network operations that may stream
 progress (§4.1) and can be slow. This is the catalogue of operations core offers a
-frontend — the Tauri host registers all 69; the native bridge exposes the subset it
+frontend — the Tauri host registers all 67; the native bridge exposes the subset it
 consumes, plus seven of its own (§1).
 
-### 3.1 Config & state — 5
+### 3.1 Config & state — 6
 | Command | Args | Returns |
 |---|---|---|
-| `load_config` | – | `Config` |
-| `save_config` | `cfg: Config` | `void` |
+| `load_config` | – | `Config` (normalized) |
+| `patch_config` | `patch: ConfigPatch` | `Config` (merged + normalized) |
+| `config_bounds` | – | `ConfigBounds` |
 | `load_state` | – | `ReposState` |
 | `patch_state` | `patch: ReposStatePatch` | `ReposState` (merged) |
 | `record_recent_repo` | `path` | `ReposState` (authoritative MRU) |
+
+`patch_config` is the **only** writer. A surface names the fields it owns and
+nothing else, so it cannot revert what the other client changed while its
+window was open; core reads, edits, normalizes and writes under one lock.
+Clearing an optional field is patching it to `""` — the config's standing
+"blank means absent" rule (§5.2). `config_bounds` is where a numeric control's
+`min`/`max` come from, so a form can never offer a value the writer clamps away.
 
 ### 3.2 Launch — 1
 | Command | Args | Returns |
 |---|---|---|
 | `take_pending_launch_target` | – | `LaunchTarget \| null` (cold-start `leogit <dir>` claim) |
 
-### 3.3 Git — status / diff / log — 10
+### 3.3 Git — status / diff / log — 6
 | Command | Args | Returns |
 |---|---|---|
 | `get_status` | `repoPath` | `RepoStatus` |
+| `file_status_styles` | – | `FileStatusStyle[]` |
 | `get_head_sha` | `repoPath` | `string` |
-| `get_diff` | `repoPath, file` | `string` (raw unified diff) |
-| `get_diff_whitespace_ignored` | `repoPath, file` | `string` |
-| `get_commit_diff` | `repoPath, sha, filePath` | `string` |
-| `get_selected_diff` | `repoPath, files` | `string` |
+| `get_selected_diff` | `repoPath, files` | `string` (the AI input; never parsed) |
 | `get_log` | `repoPath, opts:{max_count, skip}` | `CommitInfo[]` |
-| `get_commit_files` | `repoPath, sha` | `FileEntry[]` |
-| `get_commit_stats` | `repoPath, sha` | `CommitStats` |
+| `get_commit_detail` | `repoPath, sha` | `CommitDetail` (files + totals, one `git log`) |
 | `get_last_commit_timestamp` | `repoPath` | `number` |
+
+The raw-diff getters are gone: reading and parsing were always done together,
+and fusing them (§3.10) removed a round trip per file selection and gave the
+"empty because whitespace is hidden" answer somewhere to be computed.
+`file_status_styles` is fetched once, not per row — it is a table of ten short
+strings that a changed-file list draws on every repaint.
 
 ### 3.4 Git — branches — 7
 | Command | Args | Returns |
@@ -121,12 +135,13 @@ consumes, plus seven of its own (§1).
 | `delete_remote_branch` (net) | `repoPath, remote, branch` | `void` |
 | `rename_branch` | `repoPath, oldName, newName` | `void` |
 
-### 3.5 Git — commit & staging — 8
+### 3.5 Git — commit & staging — 9
 | Command | Args | Returns |
 |---|---|---|
 | `commit` | `repoPath, message, files, amend` | `void` |
 | `undo_last_commit` | `repoPath` | `void` |
 | `has_staged_changes` | `repoPath` | `boolean` |
+| `classify_discard` | `repoPath, files` | `DiscardPlan` |
 | `discard_files` | `repoPath, files` | `void` |
 | `append_to_gitignore` | `repoPath, patterns` | `void` |
 | `ignore_paths` | `repoPath, paths` | `void` |
@@ -137,31 +152,42 @@ consumes, plus seven of its own (§1).
 | Command | Args | Returns |
 |---|---|---|
 | `repo_sync_status` (net) | `repoPath, doFetch` | `RepoSync` |
-| `fetch` (net) | `repoPath, remote` | `void` |
+| `fetch` (net) | `repoPath, remote, background` | `void` |
 | `pull` (net) | `repoPath, remote` | `void` |
 | `push` (net) | `repoPath, remote, branch, setUpstream, forceWithLease` | `void` |
 | `get_ahead_behind` | `repoPath, upstream` | `AheadBehind` |
-| `get_remote` | `repoPath` | `string` |
+| `get_remote` | `repoPath` | `string \| null` |
 | `get_repo_identifier` | `repoPath` | `RepoIdentifier \| null` |
 | `get_repo_name` | `path` | `string` |
 
-### 3.7 Git — merge — 6
+### 3.7 Git — merge — 5
 | Command | Args | Returns |
 |---|---|---|
 | `merge_branch` | `repoPath, branch` | `MergeResult` |
 | `merge_squash` | `repoPath, branch` | `MergeResult` |
 | `commit_squash_merge` | `repoPath` | `void` |
 | `merge_abort` | `repoPath` | `void` |
-| `is_merging` | `repoPath` | `boolean` |
 | `count_commits_to_merge` | `repoPath, targetBranch` | `number` |
 
-### 3.8 Git — discovery / init / clone — 4
+`RepoStatus.merging` answers "is a merge in progress" on every refresh, so
+there is no separate command for it — a second route to the same answer is how
+one refresh path came to forget to ask.
+
+### 3.8 Git — discovery / init / clone — 7
 | Command | Args | Returns |
 |---|---|---|
-| `discover_repos` | `scanPaths, maxDepth` | `string[]` |
+| `known_repos` | `scanPaths, maxDepth` | `string[]` (discovery ∪ live MRU) |
+| `filter_repos` | `query, rows: RepoRow[], scanFolders` | `string[]` (ranked) |
+| `derive_clone_target` | `rawUrl, parent` | `CloneTarget \| null` |
+| `clone_target_path` | `parent, repoName` | `string \| null` |
 | `is_git_repo` | `path` | `boolean` |
 | `init_repo` | `path` | `string` |
 | `clone_repo` (net) | `url, targetPath` | `string` |
+
+`filter_repos` is a batch call by design: one crossing per keystroke rather
+than one per row is what makes a shared search rule affordable for a list that
+re-filters as the user types. A `null` `derive_clone_target` is the Clone
+button's disable condition, so the preview and the button always agree.
 
 ### 3.9 OS shell — 3
 | Command | Args | Returns |
@@ -170,12 +196,21 @@ consumes, plus seven of its own (§1).
 | `open_path` | `repoPath, relPath` | `void` (open with default app) |
 | `open_url` | `url` | `void` (open in browser) |
 
-### 3.10 Diff parsing / patch — 3
+### 3.10 Diff read + parse / patch — 5
 | Command | Args | Returns |
 |---|---|---|
-| `parse_diff` | `raw` | `ParsedDiff \| null` |
+| `get_parsed_diff` | `repoPath, file, hideWhitespace, options: DiffOptions` | `ParsedDiff` |
+| `get_parsed_commit_diff` | `repoPath, sha, filePath, options` | `ParsedDiff` |
+| `copy_diff_text` | `fileDiff, start, end` | `string` |
 | `generate_patch` | `repoPath, fileDiff, selection` | `void` (stage hunks) |
 | `generate_inverse_patch` | `repoPath, fileDiff, selection` | `void` (discard hunks) |
+
+A **failure** is a rejected promise; **nothing to show** is a resolved one with
+`empty_reason` set. Those are different events and a viewer must not merge
+them: a stale diff behind an error is the one thing the pane must never show.
+`DiffOptions` says what to build alongside the parse — a `WebView` host asks
+for `html` and, in the split layout, `sbs_pairs`; the native host asks for
+neither and pays for neither.
 
 ### 3.11 Highlight — 1
 | Command | Args | Returns |
@@ -190,11 +225,18 @@ consumes, plus seven of its own (§1).
 | `gh_clone` (net) | `nameWithOwner, targetPath` | `string` |
 | `gh_publish_repo` (net) | `repoPath, name, description, isPrivate` | `void` |
 
-### 3.13 AI — 2
+### 3.13 AI — 3
 | Command | Args | Returns |
 |---|---|---|
+| `load_ai_config` | – | `AiProviderConfig` (resolved for the selected provider) |
 | `generate_commit_message` (net) | `diff, provider, config: AiProviderConfig` | `CommitMessage` |
 | `check_provider_available` | `provider, config` | `boolean` |
+
+`load_ai_config` is read fresh before every generate, never cached, so an edit
+in either client applies on the next click. The config→provider mapping lives
+in core: the model, server URL and timeout always belong to the provider
+actually about to run, which splicing a picker value over a separately-loaded
+config could not guarantee.
 
 ### 3.14 Terminal (PTY) — 5 + shells — 1
 | Command | Args | Returns |
@@ -242,30 +284,43 @@ codegen decision is open (plan §10.7).
 
 ### 5.1 Enums with non-default serialization
 - `FileEntry.status` — `#[serde(rename_all="PascalCase")]`:
-  `'New' | 'Modified' | 'Deleted' | 'Renamed' | 'Conflicted'`.
+  `'New' | 'Modified' | 'Deleted' | 'Renamed' | 'Conflicted'`. The letter and
+  the human label for each come from `file_status_styles`, never from a
+  frontend's own table.
 - `DiffLine.line_type` — PascalCase: `'Context' | 'Add' | 'Delete' | 'Hunk' | 'NoNewline'`.
 - `BlobSource` — tagged union: `{kind:'workingTree', repoPath}` | `{kind:'commit', repoPath, sha}`.
 
 ### 5.2 Structures by domain
 | Domain | Types (key fields) |
 |---|---|
-| Working tree / status | `FileEntry` (path, status, xy, display_name, display_dir, embedded, submodule_dirty, stat_stamp — an opaque mtime+size string so a status comparison sees content edits; compare, never parse); `RepoStatus` (branch, upstream, ahead, behind, files[], has_remote, unpushed_shas[], detached, head_sha) |
-| History | `CommitInfo` (sha, short_sha, summary, body, author, committer, parents[], trailers[], co_authors[], body_without_coauthors, tags[]); `CommitStats` (additions, deletions) |
+| Working tree / status | `FileEntry` (path, status, xy, display_name, display_dir, embedded, submodule_dirty, stat_stamp — an opaque mtime+size string so a status comparison sees content edits; compare, never parse); `RepoStatus` (branch, upstream, ahead, behind, files[], has_remote, unpushed_shas[], detached, head_sha, merging); `FileStatusStyle` (status, letter, label — the glyph table, fetched once; colour is per-platform); `DiscardPlan` (restore[], trash[]) |
+| History | `CommitInfo` (sha, short_sha, summary, body, author, committer, parents[], trailers[], co_authors[], body_without_coauthors, tags[]); `CommitStats` (additions, deletions); `CommitDetail` (files[], stats) |
 | Branches / remote | `BranchInfo` (name, is_remote, is_current); `AheadBehind`; `RepoSync` (ahead, behind, has_remote, fetched, dirty); `RepoIdentifier` (owner, name); `MergeResult` (success, fast_forward, conflicts[], error_message?) |
-| Diff | `DiffLine` (incl. `intra_line_diff: IntraLineRange`), `IntraLineRange`, `HunkHeader`, `Hunk`, `FileDiff` (old_path, new_path, file_header, hunks[], is_binary); `SbsPair`; `ParsedDiff` (file_diff, html[], sbs_pairs[], additions, deletions); `Token` (start, end, class: `TokenClass`) / `TokenLine` — the structured highlight layer under the HTML (§7); `DiffSelection` |
+| Diff | `DiffLine` (content, line_type, line numbers, `intra_line_diff: IntraLineRange`, and `text?` — the raw patch line, present only on `Hunk` and `NoNewline` rows, which are the only ones that read it); `IntraLineRange`, `HunkHeader`, `Hunk`, `FileDiff` (old_path, new_path, file_header, hunks[], is_binary); `SbsPair`; `DiffOptions` (html, side_by_side, show_anyway); `ParsedDiff` (file_diff, html[], sbs_pairs[], additions, deletions, empty_reason?, size_guard?); `EmptyDiffReason` (`NoChanges`/`WhitespaceOnly`/`NoTextualChanges`); `DiffSizeGuard` (reason, bytes, longest_line); `Token` (start, end, class: `TokenClass`) / `TokenLine` — the structured highlight layer under the HTML (§7); `DiffSelection` |
 | Commit composer | `CommitMessage` (title, description) |
-| Config / persistence | `Config` (theme, fetch_interval_ms, ai_provider, ai_model, ai_api_key, auto_fetch, syntax_highlighting, scan_paths[], scan_depth, side_by_side_diff, hide_whitespace, tab_size, claude_timeout_secs, ollama_server_url, terminal_shell?); `ReposState`; `ReposStatePatch` |
+| Config / persistence | `Config` (theme, fetch_interval_ms, ai_provider, auto_fetch, syntax_highlighting, scan_paths[], scan_depth, side_by_side_diff, hide_whitespace, tab_size, terminal_shell?, then the `claude` and `ollama` tables — **nothing scalar may follow them**, since a TOML table swallows every key after it); `ClaudeConfig` (model?, timeout_secs); `OllamaConfig` (model?, server_url, timeout_secs); `ConfigPatch` (every field optional — absent means "leave it alone", `""` means "clear it"); `Bounds`/`ConfigBounds`; `ReposState`; `ReposStatePatch` |
+| Repo list | `RepoRow` (path, names[] — every label the user might type for that row); `CloneTarget` (normalized_url, repo_name, target_path) |
 | GitHub | `GhRepo` (name_with_owner, name, description, is_private, pushed_at) |
-| AI | `AiProviderConfig` (provider, model?, api_key?, base_url?) |
+| AI | `AiProviderConfig` (provider, model?, base_url?, timeout_secs) |
 | Terminal | `ShellOption`; `PtyInfo` (backend, build_number); `StartedTerminal` (pid, shell_id, shell_label) |
 | Events / launch / update | `GitProgressEvent`; `LaunchTarget` (path, is_repo); `UpdateInfo` (version, url, install_command?) |
 
-> `ParsedDiff.html`/`highlight_diff` return **pre-rendered HTML** today — a web-shaped
-> payload SwiftUI cannot use. But the structured layer under it already exists
-> (`Token`/`TokenClass`, today `pub(crate)`; plus each line's `intra_line_diff`), and
-> `render.rs` is a pure structured→HTML collapse. Per plan §7.1 the core exposes that
-> layer as the wire and each frontend renders it; where the HTML collapse lives for
-> Tauri is the open decision. When resolved, update this section.
+> **Blank means absent.** An emptied text setting persists as `""`, which is
+> not `None`, so every `unwrap_or` downstream sails past it — `--model ""`, a
+> hostless server URL. `Config::normalized()` turns blank-after-trim into
+> absent on every read *and* every write, which is also what heals a file
+> another client already poisoned. Optional numeric settings clamp to
+> `config_bounds()` the same way, landing on the nearest bound rather than
+> reverting to the default.
+>
+> `ParsedDiff.html`/`highlight_diff` return **pre-rendered HTML** — a web-shaped
+> payload SwiftUI cannot use, which is why `DiffOptions.html` exists: the
+> native host asks for neither the HTML nor the side-by-side pairs and core
+> builds neither. The structured layer under it already exists
+> (`Token`/`TokenClass`, plus each line's `intra_line_diff`), and `render.rs`
+> is a pure structured→HTML collapse. Whether the *phase-2* wire becomes that
+> structured layer for Tauri too is still open (§7); when resolved, update this
+> section.
 
 ## 6. Behavioral contract (must be identical across frontends)
 
@@ -304,14 +359,18 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    a result equal to what's shown, so scroll and tokens survive; a permitted refinement,
    not a divergence (the observable rule — no flash under the threshold — is shared).
    A diff with **nothing to render** is a state of its own, and the pane must say so rather
-   than fall through to the nothing-is-selected copy — the user did select a file. "Did it
-   parse?" is the wrong test: `parse_diff` returns an absence only for empty input (the
-   whitespace-only edit under `hide_whitespace`), while a mode change or a pure rename
-   parse fine into a header with **zero hunks**, which renders as a blank pane. Both belong
-   in the same explicit state. (The reason enum that would let the pane name *which* is
-   tracked in the parity plan as DF-7.)
-4. **File selection semantics** — maintain selection as `selectedFiles` **plus**
-   `userDeselected` so the 2s poll does not re-check files the user just unchecked. The
+   than fall through to the nothing-is-selected copy — the user did select a file. It must
+   also say *which* nothing it is: `empty_reason` distinguishes "this file matches its
+   committed state" from "every change here is whitespace, and the setting is hiding
+   them" from "the file changed without changing any lines" (a mode change or a pure
+   rename). One caption covering all three told the user a file was unchanged when a
+   setting was simply hiding the change. A **failed** load is not any of these — it
+   rejects, and the pane must clear rather than leave a stale diff standing behind an
+   error.
+4. **File selection semantics** — inclusion is *derived*: every committable file is
+   included unless the user opted it out, so the 2s poll cannot re-check a file they
+   just unchecked. How long an opt-out survives its path leaving the list is where the
+   two clients still differ (§8). The
    list is keyboard-navigable: arrows move the active row and load its diff. Staging is
    **whole-file** today (partial-hunk staging is scaffolded but inactive). How far the
    keyboard and the pointer go beyond that — range selection, a Space toggle, Home/End —
@@ -331,13 +390,15 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    platform policy (§8) — one client slides a fixed window, the other appends.
 9. **Repo search** — the filter over a repository list is **loose on names, strict on
    paths**: the query may appear as a scattered subsequence in a repo's name(s), but a
-   path must contain it contiguously and only below the scan folder that found the repo
-   (every row shares the folders above, so matching them matches everything). Results
-   are ranked — exact name, prefix, substring, initials, subsequence, path — and each
-   list's own sort order only breaks ties, because the first row is what Return or the
-   keyboard cursor acts on. One implementation per frontend
-   (`lib/utils/repoSearch.ts`, `Services/RepoSearch.swift`), kept tier-for-tier
-   identical; the only sanctioned difference is in §8.
+   path must contain it contiguously and only below the deepest root it sits under —
+   a scan folder, or the home directory (every row shares the folders above, so
+   matching them matches everything). Results are ranked — exact name, prefix,
+   substring, initials, subsequence, path — and each list's own sort order only breaks
+   ties, because the first row is what Return or the keyboard cursor acts on. **One
+   implementation, in core** (`filter_repos`), because two hand-written ones had
+   already drifted on the very set of labels they searched. A frontend supplies the
+   rows and every label it displays for each — a basename, and where it is known the
+   GitHub `owner/name` — and gets them back narrowed.
 10. **Row context actions** — right-clicking a changed file offers discard (always
    confirmed), ignore-this-file / ignore-this-extension, copy absolute + relative
    path, and reveal / open-with-default (both disabled when the file is deleted, since
@@ -347,7 +408,10 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    Undo is further gated on the commit being provably unpushed, *or* on no upstream
    resolving at all, in which case nothing can prove it was pushed either. Discarding a
    never-committed file moves it to the OS trash rather than deleting it, and the
-   confirmation must say so.
+   confirmation must say so — reading the outcome from `classify_discard`, which
+   returns the same plan the discard runs on. A status letter cannot answer it: a
+   staged re-add of a path that exists in `HEAD` is restorable, a rename whose original
+   is *not* in `HEAD` is not, and under an unborn `HEAD` nothing is.
 11. **Embedded-terminal key ownership** — while the terminal holds keyboard focus the shell
    owns every key, with exactly one exception: the chord that toggles the panel, which stays
    reachable from *inside* the panel. Nothing else the app binds may fire from there —
@@ -383,8 +447,20 @@ as `ParsedDiff.html`/`highlight_diff` spans for the Svelte `{@html}` renderer.
   (the exact HTML it gets today, unchanged) or built in Svelte from the structured layer.
 - **SwiftUI**: maps `TokenClass` → colour/traits (the mirror of `css_class`) into an
   `AttributedString`.
-- **Open decision** (parity plan, DF-3): where the HTML collapse lives for Tauri — the wire
-  is structured either way.
+- **Who pays for what**: `DiffOptions` decides. The HTML array and the
+  side-by-side pairs are built only for a host that asked; the native host asks
+  for neither, so the phase-1 collapse no longer runs on a path that discards it.
+- **Nothing to render is not one situation.** A viewer must distinguish four
+  outcomes and say which: a rejected call (the load failed — never leave a stale
+  diff on screen behind it), `empty_reason` (`NoChanges` /
+  `WhitespaceOnly` / `NoTextualChanges`), `size_guard` (withheld for its size,
+  with a "show anyway" that re-asks with `DiffOptions.show_anyway`), and
+  `is_binary` (a stand-in, not a diff).
+- **Copying comes from the model**, never from the rendered view:
+  `copy_diff_text` over a flat line range, so a copy can't pick up gutters,
+  `+`/`−` prefixes, side-by-side filler cells or a viewer's tab expansion.
+- **Open decision** (parity plan, DF-3): whether the *phase-2* wire becomes the
+  structured layer for Tauri too, or the HTML collapse stays on the Tauri host.
 
 ## 8. Platform presentation mapping (intentional divergences)
 
@@ -403,9 +479,10 @@ every deliberate difference here.
 | Terminal widget | `xterm.js` | SwiftTerm (PTY backend reused) |
 | Virtualized lists | hand-rolled windowing | native `List`/`LazyVStack`/`Table` |
 | Pane geometry persistence | `localStorage` (sidebar width, composer height, commit-files width) | `UserDefaults` (composer height, `commitComposerHeight`); sidebar and commit-files widths are per-session |
-| Repo-search path root (§6.9) | scan folders only — the frontend can't resolve `~`, so a repo outside them is searched by its whole path | scan folders, then `NSHomeDirectory()` |
+| Repo-search labels (§6.9) | rows carry the GitHub `owner/name` when it is known, and both it and the basename are searchable | basename only — GitHub identifiers are not fetched natively yet (ROADMAP) |
 | Context-menu scope (§6.10) | multi-row selection, so discard also acts on a whole selection | single-selection lists, so every item acts on the right-clicked row |
 | Open-diff freshness | stale until reselect — the poll never reloads the open diff (adopting `stat_stamp` the same way would fix it; ROADMAP) | reloads within a poll tick: `stat_stamp` makes the status comparison see content edits, `workingTreeEpoch` re-keys the load, the equality skip absorbs no-ops |
+| Exclusion set (which changed files are left out of a commit) | an opt-out is pruned the tick its path leaves the file list, so a file that vanishes for one refresh — a formatter rewriting it — is silently re-included | an opt-out persists for the session, so nothing can re-include a file the user unchecked. Converging on the native rule plus a grace window is filed (parity plan CH-7/H-20); until then this is a real behavioural difference, not a presentation one |
 | Background cadence while unfocused/hidden (§6.1) | no explicit pause and no visibility term: the status poll is a flat 2 s `setInterval` and auto-fetch a flat `fetch_interval_ms` one, so the hidden-window cadence is whatever the host WebView's timer throttling makes it. `document.hidden` is read only to *trigger* the on-activation resync | the active repo never stops, and the cadence is explicit: status poll 2 s frontmost / 10 s visible-unfocused / 30 s hidden, auto-fetch interval ×3 while hidden, only the multi-repo sweeps pausing when inactive (`BackgroundSchedulingPolicy`), with an App Nap assertion held while a repo is open so the timers are not coalesced away |
 | File-list selection & keyboard (§6.4) | shift-click extends a multi-row selection (a separate anchor for the checkbox column, Finder/Gmail semantics), Space toggles the focused row's checkbox and bulk-toggles a multi-selection, Home/End jump to first/last | single-selection `List`: arrow keys move the active row, and there is no range selection, Space toggle, or Home/End |
 | History paging (§6.8) | 50-commit pages into a bidirectional **sliding window** capped at 500: scrolling past either end drops from the far end and `windowStartOffset` tracks the absolute index of row 0, with `scrollTop` compensated so the visible row stays pinned. A HEAD move *replaces* the window with a fresh page 1 instead of sliding it, which is a distinct signal (`log.resetSeq`) precisely so it is not compensated — the list scrolls to the new HEAD | 100-commit pages **appended** without dropping, de-duplicated by sha against what is already loaded; only a *refresh* is capped, at the same 500 |

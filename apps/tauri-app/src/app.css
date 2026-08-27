@@ -39,6 +39,10 @@
   --status-red: #ef4444;
   --status-yellow: #f59e0b;
   --status-blue: #3b82f6;
+  /* Conflicted. Its own hue rather than red, which already means Deleted: a
+     glance down the list has to separate "you deleted this" from "git
+     couldn't merge this" — opposite actions, one of which blocks the commit. */
+  --status-purple: #a855f7;
 
   --diff-add-fg: #22c55e;
   --diff-remove-fg: #ef4444;
@@ -97,6 +101,7 @@
   --status-red: #dc2626;
   --status-yellow: #d97706;
   --status-blue: #2563eb;
+  --status-purple: #9333ea;
 
   --diff-add-fg: #16a34a;
   --diff-remove-fg: #dc2626;

@@ -25,8 +25,9 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, mpsc};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use super::paths;
 use super::shell::{self, ShellOption};
@@ -251,17 +252,22 @@ pub fn start_terminal(
         .map_err(|_| "sessions lock poisoned")?
         .insert(pid, session);
 
-    // Reader thread: pump PTY output through the event sink, scoped by pid.
+    // Reader thread: pump PTY output into the coalescing channel, scoped by
+    // pid. Sending blocks once the queue is full, which stops us reading the
+    // PTY, which fills its buffer, which makes the shell itself wait — output
+    // is never dropped to keep up, it is only ever slowed down.
+    let (tx, rx) = mpsc::sync_channel::<String>(MAX_PENDING_CHUNKS);
     thread::spawn(move || {
-        let mut buf = [0u8; 4096];
+        let mut buf = [0u8; READ_BUF_BYTES];
         let mut decoder = Utf8Decoder::default();
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break, // EOF
                 Ok(n) => {
                     let data = decoder.push(&buf[..n]);
-                    if !data.is_empty() {
-                        sink.emit(CoreEvent::TerminalOutput { pid, data });
+                    if !data.is_empty() && tx.send(data).is_err() {
+                        // The emitter is gone; nothing left to read for.
+                        break;
                     }
                 }
                 Err(e) => {
@@ -272,10 +278,20 @@ pub fn start_terminal(
                 }
             }
         }
+        // Dropping `tx` here is what tells the emitter the session is over,
+        // and it happens only after EOF — preserving the deliberate
+        // EOF-then-`wait()` ordering `reap_child` documents.
+        drop(tx);
+    });
+
+    // Emitter thread: coalesce and hand the host whole bursts.
+    thread::spawn(move || {
+        emit_coalesced(pid, &rx, sink.as_ref());
         // Clean up session on EOF/error, reap the child for its exit status,
-        // and notify the frontend. A poisoned lock means another session's
-        // teardown panicked; the frontend still needs its close event, so
-        // don't unwind this thread over it.
+        // and notify the frontend — after the last output has been flushed, so
+        // "session over" never arrives before the text that preceded it. A
+        // poisoned lock means another session's teardown panicked; the
+        // frontend still needs its close event, so don't unwind over it.
         let session = SESSIONS
             .lock()
             .ok()
@@ -289,6 +305,91 @@ pub fn start_terminal(
         shell_id: chosen.id,
         shell_label: chosen.label,
     })
+}
+
+/// Smallest grid a resize may announce. Below this the emulator's own
+/// degenerate-size handling is what breaks, so nothing gets to send it.
+const MIN_GRID: u16 = 2;
+
+/// Bytes per PTY read. A page-sized buffer keeps a busy shell moving without
+/// making any single read wait for more than it has.
+const READ_BUF_BYTES: usize = 4096;
+
+/// Most output one delivery may carry — the queue's own ceiling, so a burst
+/// can be gathered whole without the buffer outgrowing what was already in
+/// flight.
+const MAX_DELIVERY_BYTES: usize = MAX_PENDING_CHUNKS * READ_BUF_BYTES;
+
+/// How long a delivery already known to be part of a burst will keep gathering.
+/// Long enough to catch the next read of a fast producer, short enough to be
+/// well under a frame.
+const BURST_WINDOW: Duration = Duration::from_millis(8);
+
+/// Queue depth for the reader→emitter handoff, in chunks of at most
+/// [`READ_BUF_BYTES`] — a ceiling of ~256 KiB in flight.
+///
+/// Bounded on purpose: this is the flow control. A host that can't keep up
+/// makes the queue fill, which blocks the reader, which fills the PTY buffer,
+/// which makes the *shell* wait. Slowing a runaway `cat` down is the correct
+/// answer; the alternatives are an unbounded buffer that grows until something
+/// dies, or discarding output the user asked for.
+const MAX_PENDING_CHUNKS: usize = 64;
+
+/// Drain `rx`, emitting coalesced [`CoreEvent::TerminalOutput`] until the
+/// reader hangs up. Returns once the last byte has been emitted.
+///
+/// The rule is *deliver at once unless output is outrunning the host*. A lone
+/// chunk with nothing behind it goes straight out, so an echoed keystroke or a
+/// prompt costs no added latency. The moment a second chunk is already waiting
+/// the session is in a burst, and the delivery keeps gathering — up to
+/// [`MAX_DELIVERY_BYTES`], or [`BURST_WINDOW`] with nothing more queued.
+///
+/// That makes the batching self-tuning against the thing it exists to fix: when
+/// the host drains faster than the PTY fills, nothing queues and nothing is
+/// held; when it doesn't, the backlog *is* the signal, and `cat` on a large
+/// file arrives in a few dozen deliveries instead of one per 4 KiB read — which
+/// was one JSON IPC message each on one host and one main-actor hop each on the
+/// other.
+fn emit_coalesced(pid: u32, rx: &mpsc::Receiver<String>, sink: &dyn EventSink) {
+    let emit = |data: String| sink.emit(CoreEvent::TerminalOutput { pid, data });
+
+    loop {
+        let Ok(first) = rx.recv() else { return };
+        let mut pending = first;
+        let started = Instant::now();
+        let mut bursting = false;
+
+        while pending.len() < MAX_DELIVERY_BYTES {
+            match rx.try_recv() {
+                Ok(more) => {
+                    // Something was already waiting: the host is behind.
+                    pending.push_str(&more);
+                    bursting = true;
+                    continue;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    emit(pending);
+                    return;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            if !bursting {
+                break;
+            }
+            let Some(left) = BURST_WINDOW.checked_sub(started.elapsed()) else {
+                break;
+            };
+            match rx.recv_timeout(left) {
+                Ok(more) => pending.push_str(&more),
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    emit(pending);
+                    return;
+                }
+            }
+        }
+        emit(pending);
+    }
 }
 
 /// Reap the exited child and translate its status for the close event.
@@ -351,9 +452,20 @@ pub fn write_terminal(pid: u32, data: &str) -> Result<(), String> {
 
 /// Resize the PTY window.
 ///
+/// A grid smaller than 2×2 is ignored rather than pushed through. A collapsed
+/// or not-yet-laid-out panel legitimately measures 0 or 1 cells, and passing
+/// that on costs real damage: the emulator reflows its whole scrollback to one
+/// row and the shell gets a `SIGWINCH` announcing a window nobody has. That is
+/// not a failure to report — there is simply no new size — so it returns `Ok`.
+/// Enforced here so it holds for every host, rather than in one client
+/// explicitly and another by accident of its layout library's internals.
+///
 /// # Errors
 /// Returns `Err` if the session is gone or the resize fails.
 pub fn resize_terminal(pid: u32, cols: u16, rows: u16) -> Result<(), String> {
+    if cols < MIN_GRID || rows < MIN_GRID {
+        return Ok(());
+    }
     let session = session_for(pid)?;
     let s = session.lock().map_err(|_| "session lock poisoned")?;
     s.master
@@ -511,5 +623,89 @@ mod tests {
                 "{id} must inherit PATH, not set it"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Output coalescing (H-14)
+    // -----------------------------------------------------------------------
+
+    /// Collects what a host would have been handed.
+    #[derive(Default)]
+    struct RecordingSink {
+        emitted: Mutex<Vec<String>>,
+    }
+
+    impl RecordingSink {
+        fn chunks(&self) -> Vec<String> {
+            self.emitted.lock().expect("sink lock").clone()
+        }
+    }
+
+    impl EventSink for RecordingSink {
+        fn emit(&self, event: CoreEvent) {
+            if let CoreEvent::TerminalOutput { data, .. } = event {
+                self.emitted.lock().expect("sink lock").push(data);
+            }
+        }
+    }
+
+    /// Run the emitter over a fixed script of chunks and report what it emitted.
+    fn coalesce(chunks: Vec<String>) -> Vec<String> {
+        let (tx, rx) = mpsc::sync_channel::<String>(MAX_PENDING_CHUNKS);
+        let feeder = thread::spawn(move || {
+            for chunk in chunks {
+                if tx.send(chunk).is_err() {
+                    return;
+                }
+            }
+        });
+        let sink = RecordingSink::default();
+        emit_coalesced(7, &rx, &sink);
+        feeder.join().expect("feeder");
+        sink.chunks()
+    }
+
+    /// A flood arrives as a handful of large deliveries instead of one per PTY
+    /// read — the whole point, since each delivery is an IPC message on one
+    /// host and a main-actor hop on the other. Nothing may be lost or
+    /// reordered in the process.
+    #[test]
+    fn a_flood_coalesces_into_far_fewer_deliveries() {
+        let reads = 400;
+        let chunk = "x".repeat(READ_BUF_BYTES);
+        let emitted = coalesce(vec![chunk.clone(); reads]);
+
+        assert!(
+            emitted.len() * 8 < reads,
+            "expected an order-of-magnitude reduction from {reads} reads, got {}",
+            emitted.len()
+        );
+        assert_eq!(
+            emitted.concat().len(),
+            reads * READ_BUF_BYTES,
+            "every byte still arrives"
+        );
+        assert!(
+            emitted.concat().chars().all(|c| c == 'x'),
+            "and arrives in order"
+        );
+    }
+
+    /// The reason coalescing needs a deadline as well as a byte count: an
+    /// interactive reply is tiny, and a prompt that waits for 8 KiB of company
+    /// would never appear at all.
+    #[test]
+    fn a_small_reply_is_not_held_waiting_for_more() {
+        let emitted = coalesce(vec!["$ ".to_string()]);
+        assert_eq!(emitted, vec!["$ ".to_string()]);
+    }
+
+    /// Whatever is still buffered when the shell exits must be handed over
+    /// before teardown — a dying shell's last words are exactly the ones worth
+    /// keeping.
+    #[test]
+    fn the_tail_is_flushed_when_the_reader_hangs_up() {
+        let emitted = coalesce(vec!["goodbye".to_string(), ": broken .zshrc".to_string()]);
+        assert_eq!(emitted.concat(), "goodbye: broken .zshrc");
     }
 }

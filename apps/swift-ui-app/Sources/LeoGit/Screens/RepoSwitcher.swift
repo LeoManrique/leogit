@@ -97,7 +97,7 @@ private struct RepoSwitcherList: View {
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(filteredRepos, id: \.self) { path in
-                            RepoRow(
+                            RepoListRow(
                                 path: path,
                                 isActive: path == activePath,
                                 sync: directory.syncByPath[path],
@@ -161,25 +161,24 @@ private struct RepoSwitcherList: View {
     /// order, then the rest by name — so the repos the user actually cycles
     /// between stay at the top. (The Tauri picker sorts by last-commit time
     /// instead; recency-of-use serves quick switching better and costs no
-    /// extra git calls.) Filtered: `RepoSearch`'s match quality leads and that
-    /// order only breaks ties, because Return opens the first row — pinning
-    /// the open repository there would hide the repo the user just typed.
+    /// extra git calls.) Filtered: core ranks by match quality and keeps the
+    /// input order within a tier, so this hands it the already-ranked list and
+    /// gets it back narrowed — Return opens the first row, and pinning the
+    /// open repository there would hide the repo the user just typed.
+    ///
+    /// The rule itself lives in core so the two clients can't drift on it
+    /// again; they already had, on the very input set they searched.
     private var filteredRepos: [String] {
+        let ranked = directory.repos.sorted { rank(of: $0) < rank(of: $1) }
         let query = filter.trimmingCharacters(in: .whitespaces)
-        guard !query.isEmpty else {
-            return directory.repos.sorted { rank(of: $0) < rank(of: $1) }
-        }
-        return directory.repos
-            .compactMap { path in
-                RepoSearch.match(query: query, for: path, scanFolders: directory.scanFolders)
-                    .map { (path: path, match: $0) }
-            }
-            .sorted { lhs, rhs in
-                lhs.match == rhs.match
-                    ? rank(of: lhs.path) < rank(of: rhs.path)
-                    : lhs.match < rhs.match
-            }
-            .map(\.path)
+        guard !query.isEmpty else { return ranked }
+        return GitBridge.matchingRepos(
+            query: query,
+            rows: ranked.map {
+                RepoRow(path: $0, names: [RepoDirectoryStore.displayName(of: $0)])
+            },
+            scanFolders: directory.scanFolders
+        )
     }
 
     /// Sort key: 0 for the active repo, 1+index for MRU entries, then a
@@ -196,7 +195,7 @@ private struct RepoSwitcherList: View {
 }
 
 /// One repository row: checkmark slot, name, and the three indicators.
-private struct RepoRow: View {
+private struct RepoListRow: View {
     let path: String
     let isActive: Bool
     let sync: RepoSync?

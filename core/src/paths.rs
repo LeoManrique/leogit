@@ -82,7 +82,12 @@ pub fn expand_tilde(path: &str) -> PathBuf {
     expand_tilde_from(path, home_dir().as_deref())
 }
 
-fn home_dir() -> Option<PathBuf> {
+/// The user's home directory, resolved the same way [`expand_tilde`] resolves
+/// `~`. Also a search root in its own right (see [`super::repos`]), so a repo
+/// outside every scan folder is still shown and matched by the part of its
+/// path that distinguishes it.
+#[must_use]
+pub fn home_dir() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf())
 }
 

@@ -3,7 +3,7 @@
 use leogit_core::launch as core_launch;
 use leogit_lib::launch_glue;
 use leogit_lib::shims::{
-    ai, config, diff, gh, git, highlight, launch, os, shell, terminal, update,
+    ai, config, diff, gh, git, highlight, launch, os, repos, shell, terminal, update,
 };
 
 fn main() {
@@ -29,19 +29,17 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             config::load_config,
-            config::save_config,
+            config::patch_config,
+            config::config_bounds,
             config::load_state,
             config::patch_state,
             config::record_recent_repo,
+            git::file_status_styles,
             git::get_status,
             git::get_head_sha,
-            git::get_diff,
-            git::get_diff_whitespace_ignored,
-            git::get_commit_diff,
             git::get_selected_diff,
             git::get_log,
-            git::get_commit_files,
-            git::get_commit_stats,
+            git::get_commit_detail,
             git::list_branches,
             git::create_branch,
             git::switch_branch,
@@ -52,6 +50,7 @@ fn main() {
             git::commit,
             git::undo_last_commit,
             git::has_staged_changes,
+            git::classify_discard,
             git::discard_files,
             git::append_to_gitignore,
             git::ignore_paths,
@@ -71,15 +70,15 @@ fn main() {
             git::merge_squash,
             git::commit_squash_merge,
             git::merge_abort,
-            git::is_merging,
             git::count_commits_to_merge,
-            git::discover_repos,
             git::is_git_repo,
             git::init_repo,
             git::get_repo_name,
             git::clone_repo,
             git::get_last_commit_timestamp,
-            diff::parse_diff,
+            diff::get_parsed_diff,
+            diff::get_parsed_commit_diff,
+            diff::copy_diff_text,
             diff::generate_patch,
             diff::generate_inverse_patch,
             highlight::highlight_diff,
@@ -87,6 +86,7 @@ fn main() {
             gh::gh_repo_list,
             gh::gh_clone,
             gh::gh_publish_repo,
+            ai::load_ai_config,
             ai::generate_commit_message,
             ai::check_provider_available,
             terminal::terminal_pty_info,
@@ -96,6 +96,10 @@ fn main() {
             terminal::close_terminal,
             shell::list_shells,
             git::effective_scan_paths,
+            repos::known_repos,
+            repos::filter_repos,
+            repos::derive_clone_target,
+            repos::clone_target_path,
             launch::take_pending_launch_target,
         ])
         .run(tauri::generate_context!())

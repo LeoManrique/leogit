@@ -52,8 +52,28 @@ final class DiffStore {
     private(set) var rows: [DiffRow] = []
     /// One entry per row once tokenization lands; `nil` while in flight.
     private(set) var tokens: [[Token]]?
-    /// Set when the diff parsed to nothing textual (e.g. a pure mode change).
-    private(set) var isEmpty = false
+    /// Set when there are no lines to show, and which of the three unrelated
+    /// reasons it is — the pane names the actual cause instead of covering
+    /// all of them with one caption.
+    private(set) var emptyReason: EmptyDiffReason?
+
+    /// Set when core withheld the diff for its size. The pane explains it and
+    /// offers to render it anyway, rather than hanging on it.
+    private(set) var sizeGuard: DiffSizeGuard?
+
+    /// Whether the user asked for the withheld diff anyway.
+    ///
+    /// Deliberately not sticky: `load` clears it, so the decision applies to
+    /// the file it was made about and moving to another one gets the guard
+    /// back. Without this the guard *refuses* rather than withholds — a file
+    /// with one long line (a minified bundle, a lock file, a long Markdown
+    /// paragraph) would simply have no way to be read.
+    private(set) var showAnyway = false
+
+    /// What the in-flight `read` should ask for. Separate from `showAnyway`,
+    /// which describes what is *on screen*: the flag has to be set before the
+    /// load and published only once its result lands.
+    private var pendingShowAnyway = false
 
     /// Where the current load stands. The view's rule: show content whenever
     /// `payload != nil`, fall back to the spinner only on `loading(slow: true)`
@@ -94,11 +114,14 @@ final class DiffStore {
         file: FileEntry,
         target: DiffTarget,
         hideWhitespace: Bool,
-        highlight: Bool
+        highlight: Bool,
+        ignoringSizeGuard: Bool = false
     ) async {
         generation += 1
         let current = generation
         phase = .loading(slow: false)
+        showAnyway = false
+        pendingShowAnyway = ignoringSizeGuard
 
         // The slow-load fallback: just another racer against `generation`.
         // Unstructured on purpose — `.task(id:)` cancelling the load must not
@@ -111,29 +134,36 @@ final class DiffStore {
         }
 
         do {
-            let raw: String
-            switch target {
-            case .workingTree:
-                raw =
-                    hideWhitespace
-                    ? try await GitBridge.rawDiffIgnoringWhitespace(of: repoPath, for: file)
-                    : try await GitBridge.rawDiff(of: repoPath, for: file)
-            case .commit(let sha):
-                raw = try await GitBridge.commitDiff(in: repoPath, sha: sha, filePath: file.path)
-            }
+            let parsed = try await read(
+                repoPath: repoPath, file: file, target: target, hideWhitespace: hideWhitespace)
             guard current == generation else { return }
 
-            guard let parsed = await GitBridge.parsedDiff(from: raw) else {
-                guard current == generation else { return }
+            // Nothing to render, and core says which of the three unrelated
+            // reasons it is — including the whitespace-only case, which the
+            // pane would otherwise report as "no changes" while the setting
+            // was what hid them.
+            if let reason = parsed.emptyReason {
                 payload = nil
                 rows = []
                 tokens = nil
-                isEmpty = true
+                emptyReason = reason
+                sizeGuard = nil
                 phase = .idle
                 return
             }
-            guard current == generation else { return }
-            isEmpty = false
+            // Withheld for its size rather than empty: the pane offers to
+            // render it anyway instead of hanging on it.
+            if let guardInfo = parsed.sizeGuard {
+                payload = nil
+                rows = []
+                tokens = nil
+                emptyReason = nil
+                sizeGuard = guardInfo
+                phase = .idle
+                return
+            }
+            emptyReason = nil
+            sizeGuard = nil
             if parsed != payload {
                 // Rows are `Identifiable` by flat index, so SwiftUI diffs the
                 // list in place instead of rebuilding it; tokens reset to nil
@@ -172,8 +202,51 @@ final class DiffStore {
             payload = nil
             rows = []
             tokens = nil
-            isEmpty = false
+            emptyReason = nil
+            sizeGuard = nil
             phase = .failed(error.displayMessage)
+        }
+    }
+
+    /// Re-request the diff the size guard withheld, this time rendering it.
+    ///
+    /// A second load rather than a flag on the first: the guard's whole point
+    /// is that core did not parse the patch, so there is nothing held back to
+    /// reveal.
+    func loadIgnoringSizeGuard(
+        repoPath: String,
+        file: FileEntry,
+        target: DiffTarget,
+        hideWhitespace: Bool,
+        highlight: Bool
+    ) async {
+        await load(
+            repoPath: repoPath,
+            file: file,
+            target: target,
+            hideWhitespace: hideWhitespace,
+            highlight: highlight,
+            ignoringSizeGuard: true
+        )
+        showAnyway = true
+    }
+
+    /// The one read, with the options this client asks for.
+    private func read(
+        repoPath: String,
+        file: FileEntry,
+        target: DiffTarget,
+        hideWhitespace: Bool
+    ) async throws -> DiffPayload {
+        let options = DiffOptions(
+            html: false, sideBySide: false, showAnyway: pendingShowAnyway)
+        switch target {
+        case .workingTree:
+            return try await GitBridge.parsedDiff(
+                of: repoPath, for: file, hideWhitespace: hideWhitespace, options: options)
+        case .commit(let sha):
+            return try await GitBridge.parsedCommitDiff(
+                in: repoPath, sha: sha, filePath: file.path, options: options)
         }
     }
 

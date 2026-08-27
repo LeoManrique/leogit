@@ -4,6 +4,11 @@
 use leogit_core::ai::{self, AiProviderConfig, CommitMessage};
 
 #[tauri::command]
+pub fn load_ai_config() -> Result<AiProviderConfig, String> {
+    ai::load_ai_config()
+}
+
+#[tauri::command]
 pub async fn generate_commit_message(
     diff: String,
     provider: String,

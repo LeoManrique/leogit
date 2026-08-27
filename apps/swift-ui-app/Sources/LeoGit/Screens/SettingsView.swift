@@ -135,24 +135,33 @@ struct SettingsView: View {
                 Text("Claude").tag("claude")
                 Text("Ollama").tag("ollama")
             }
-            TextField(
-                "Model",
-                text: $store.aiModel,
-                prompt: Text(store.aiProvider == "ollama" ? "tavernari/git-commit-message:latest" : "sonnet")
-            )
-            .focused($focusedField, equals: .aiModel)
-            .onSubmit { store.scheduleSave() }
-            TextField(
-                "Ollama server URL",
-                text: $store.ollamaURL,
-                prompt: Text("http://localhost:11434")
-            )
-            .focused($focusedField, equals: .ollamaURL)
-            .onSubmit { store.scheduleSave() }
+            // One model field per provider: a single shared one meant a model
+            // set for Claude was handed to Ollama, which has never heard of
+            // it, so Generate failed with nothing on screen explaining why.
+            if store.aiProvider == "ollama" {
+                TextField(
+                    "Model",
+                    text: $store.ollamaModel,
+                    prompt: Text("tavernari/git-commit-message:latest")
+                )
+                .focused($focusedField, equals: .aiModel)
+                .onSubmit { store.scheduleSave() }
+                TextField(
+                    "Ollama server URL",
+                    text: $store.ollamaURL,
+                    prompt: Text("http://localhost:11434")
+                )
+                .focused($focusedField, equals: .ollamaURL)
+                .onSubmit { store.scheduleSave() }
+            } else {
+                TextField("Model", text: $store.claudeModel, prompt: Text("sonnet"))
+                    .focused($focusedField, equals: .aiModel)
+                    .onSubmit { store.scheduleSave() }
+            }
         } header: {
             Text("AI Commit Messages")
         } footer: {
-            Text("Used by Generate in the commit composer. Leave the model empty for the provider's default.")
+            Text("Used by Generate in the commit composer. Each provider keeps its own model; leave it empty for that provider's default.")
                 .settingsFooter()
         }
     }

@@ -63,13 +63,23 @@ final class CloneStore {
 
     private var hasPrepared = false
 
+    /// What the URL tab is about to clone, as core reads it — `nil` when the
+    /// field holds nothing cloneable, which is also what disables the button.
+    /// The rule lives in core because this pair was written twice and the two
+    /// copies had already drifted on `.git` shorthand, on whitespace, and on
+    /// a trailing slash, while sharing two shapes both of them enabled Clone
+    /// for and then failed on.
+    private var urlTarget: CloneTarget? {
+        GitBridge.cloneTarget(rawURL: url, parent: destinationDir)
+    }
+
     /// The folder name the clone will create — the whole validation rule,
     /// with a non-empty destination: no scheme checks, no reachability
     /// probes. Anything deeper is git's call, surfaced after the fact.
     var repoName: String {
         switch source {
         case .github: selectedRepo?.name ?? ""
-        case .url: Self.repoName(fromURL: url)
+        case .url: urlTarget?.repoName ?? ""
         }
     }
 
@@ -79,13 +89,17 @@ final class CloneStore {
 
     /// Live preview of the full clone target: `<destination>/<name>`.
     var targetPath: String {
-        let parent = normalizedDestination
-        guard !parent.isEmpty, !repoName.isEmpty else { return "" }
-        return "\(parent)/\(repoName)"
+        switch source {
+        case .github:
+            guard let name = selectedRepo?.name else { return "" }
+            return GitBridge.clonePath(parent: destinationDir, repoName: name) ?? ""
+        case .url:
+            return urlTarget?.targetPath ?? ""
+        }
     }
 
     var canClone: Bool {
-        !isCloning && !normalizedDestination.isEmpty && !repoName.isEmpty
+        !isCloning && !targetPath.isEmpty
     }
 
     /// The GitHub rows after the sort toggle and the filter — filtering on
@@ -158,18 +172,25 @@ final class CloneStore {
             progressText = nil
         }
 
-        let parent = normalizedDestination
+        // The PARENT of the target, taken from the derived path so it can't
+        // disagree with what the clone actually creates. A clone into the root
+        // leaves nothing before the name — the parent is "/", not "", which
+        // would come back as an empty destination next time.
         let target = targetPath
+        let dropped = String(target.dropLast(repoName.count + 1))
+        let parent = dropped.isEmpty ? "/" : dropped
         do {
             let repoPath: String
             if source == .github, let repo = selectedRepo {
                 repoPath = try await GitBridge.githubClone(
                     nameWithOwner: repo.nameWithOwner,
-                    into: target
+                    into: target,
+                    onProgress: progressHandler()
                 )
             } else {
+                guard let derived = urlTarget else { return nil }
                 repoPath = try await GitBridge.cloneRepository(
-                    url: Self.normalizedURL(url),
+                    url: derived.normalizedUrl,
                     into: target,
                     onProgress: progressHandler()
                 )
@@ -184,16 +205,6 @@ final class CloneStore {
         }
     }
 
-    /// Destination with trailing slashes stripped, so the target preview
-    /// never reads `dir//name`.
-    private var normalizedDestination: String {
-        var dir = destinationDir.trimmingCharacters(in: .whitespaces)
-        while dir.count > 1, dir.hasSuffix("/") {
-            dir.removeLast()
-        }
-        return dir
-    }
-
     /// Ticks arrive on a Rust background thread; hop to the main actor and
     /// drop stragglers once the clone ended.
     private func progressHandler() -> @Sendable (SyncProgress) -> Void {
@@ -206,36 +217,4 @@ final class CloneStore {
         }
     }
 
-    // MARK: Name derivation (the Tauri dialog's rules, ported verbatim)
-
-    /// The repo folder name implied by a URL or `owner/name` shorthand:
-    /// strip trailing slashes and a `.git` suffix, then take the last
-    /// path (or scp-style `:`) segment. Empty when nothing derivable —
-    /// which disables the Clone button.
-    nonisolated static func repoName(fromURL raw: String) -> String {
-        var trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        while trimmed.hasSuffix("/") {
-            trimmed.removeLast()
-        }
-        if trimmed.lowercased().hasSuffix(".git") {
-            trimmed.removeLast(4)
-        }
-        if trimmed.wholeMatch(of: /[\w.-]+\/[\w.-]+/) != nil {
-            return trimmed.split(separator: "/").last.map(String.init) ?? ""
-        }
-        if let match = trimmed.firstMatch(of: /[\/:]([\w.-]+?)$/) {
-            return String(match.1)
-        }
-        return ""
-    }
-
-    /// Expand the `owner/name` GitHub shorthand to a full HTTPS URL; full
-    /// URLs, scp-style remotes, and local paths pass through untouched.
-    nonisolated static func normalizedURL(_ raw: String) -> String {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.wholeMatch(of: /[\w.-]+\/[\w.-]+/) != nil {
-            return "https://github.com/\(trimmed)"
-        }
-        return trimmed
-    }
 }

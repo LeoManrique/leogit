@@ -203,20 +203,29 @@ final class CommitStore {
         }
     }
 
+    /// The in-flight provider write, if any. Generate awaits it: the picker
+    /// fires `setAIProvider` from a detached `Task`, so clicking Generate
+    /// immediately after switching would otherwise read the *previous*
+    /// provider back off disk while the picker already shows the new one.
+    @ObservationIgnored private var providerWrite: Task<Void, Never>?
+
     /// Persist a provider change. On failure the picker reverts and the
-    /// error shows inline — unlike the Tauri client, which leaves the
-    /// optimistic value on screen; reverting keeps the picker truthful
-    /// about what Generate will actually use.
+    /// error shows inline, which keeps it truthful about what Generate will
+    /// actually use.
     func setAIProvider(_ provider: String) async {
         guard provider != aiProvider else { return }
         let previous = aiProvider
         aiProvider = provider
-        do {
-            try await GitBridge.setAIProvider(provider)
-        } catch {
-            aiProvider = previous
-            errorMessage = "Failed to save provider: \(error.displayMessage)"
+        let write = Task { @MainActor [weak self] in
+            do {
+                try await GitBridge.setAIProvider(provider)
+            } catch {
+                self?.aiProvider = previous
+                self?.errorMessage = "Failed to save provider: \(error.displayMessage)"
+            }
         }
+        providerWrite = write
+        await write.value
     }
 
     /// Generate a commit message from the checked files' combined diff and
@@ -235,17 +244,14 @@ final class CommitStore {
 
         do {
             let diff = try await GitBridge.selectedDiff(in: repoPath, files: files)
-            // A fresh config read per generate, degrading to bare defaults
-            // when it fails — the Tauri client wraps its load in the same
-            // swallow-everything catch. The picker's value is the provider
-            // either way, so what the user sees is what runs.
-            let loaded = try? await GitBridge.aiConfig()
-            let config = AiProviderConfig(
-                provider: aiProvider,
-                model: loaded?.model,
-                apiKey: loaded?.apiKey,
-                baseUrl: loaded?.baseUrl
-            )
+            // A fresh config read per generate, resolved for the selected
+            // provider by core — so the model and server URL always belong to
+            // the provider actually about to run, which splicing a picker
+            // value over a separately-loaded config could not guarantee.
+            // `setAIProvider` persists the picker's choice; waiting for that
+            // write is what makes this read reflect it.
+            await providerWrite?.value
+            let config = try await GitBridge.aiConfig()
             let message = try await GitBridge.generateMessage(diff: diff, config: config)
             summary = message.title
             details = message.description
