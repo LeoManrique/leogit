@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte'
   import { get } from 'svelte/store'
   import { repoState, canCommit } from '$lib/stores/repo'
   import { appState } from '$lib/stores/app'
@@ -10,9 +11,15 @@
   interface Props {
     onCommitted?: () => void
     onStopAmending?: () => void
+    /**
+     * Run a shell command in the app's own terminal. Supplied by the view that
+     * owns the terminal panel; the composer knows the command that would fix an
+     * unready AI provider but nothing about where to run it.
+     */
+    onRunInTerminal?: (command: string) => void
   }
 
-  let { onCommitted, onStopAmending }: Props = $props()
+  let { onCommitted, onStopAmending, onRunInTerminal }: Props = $props()
 
   let summary = $state('')
   let description = $state('')
@@ -87,6 +94,115 @@
     effectiveSummary.length > 0 && !isGenerating && (isAmending || $canCommit),
   )
 
+  // ---- Provider readiness ---------------------------------------------------
+  // Why the selected provider can't serve a request, when it can't. Core asks
+  // two questions, not one — installed, *and* able to answer — because the first
+  // on its own let an installed Claude CLI with an expired session light the
+  // button up and fail every generate.
+  //
+  // Only the blocked case is stored, tagged with the provider it describes.
+  // `null` therefore covers both "ready" and "not asked yet", which is the same
+  // thing to the gate: refusing on "not known" is worse than letting a doomed
+  // request report itself. Tagging is what makes a switched provider drop its
+  // predecessor's block on the spot, with no clearing step to forget.
+  interface ProviderBlock {
+    provider: 'claude' | 'ollama'
+    reason: string
+    fixCommand: string
+    /** The failed request this was read out of, when it came from one. */
+    detail: string
+  }
+  let providerBlock = $state<ProviderBlock | null>(null)
+  let probeSeq = 0
+
+  async function probeProvider(target: 'claude' | 'ollama') {
+    const seq = ++probeSeq
+    try {
+      // The same wait Generate does: the picker's own write may still be in
+      // flight, and `load_ai_config` reads the file it is writing.
+      await providerWrite
+      const cfg = await aiApi.loadAiConfig()
+      // A newer probe started, or the file still names the provider we're
+      // replacing — either way this answer describes the wrong one.
+      if (seq !== probeSeq || cfg.provider !== target) return
+      const status = await aiApi.checkProviderStatus(cfg.provider, cfg)
+      // Assigned only once the answer is in hand. Clearing on the way *into*
+      // the probe is what made the remedy blink out and back on every window
+      // focus — the re-probe runs on exactly that event, and asking Claude
+      // costs two process spawns.
+      if (seq !== probeSeq) return
+      providerBlock = status.ready
+        ? null
+        : {
+            provider: target,
+            reason: status.reason,
+            fixCommand: status.fix_command,
+            detail: '',
+          }
+    } catch (err) {
+      // Core raises only for an unknown provider name; a probe that fails for
+      // any other reason is a wiring failure, not an answer — so it is logged
+      // and nothing changes. It must not clear a block a real failed request
+      // proved, which would put Generate back in front of a provider already
+      // known to be dead.
+      //
+      // Logged, not silent: an unanswered probe leaves the gate open, and a
+      // host that predates this command ("no such command") would otherwise
+      // read as a working probe that found nothing wrong.
+      console.error('[ai] provider probe failed; leaving Generate enabled', err)
+    }
+  }
+
+  /** Re-ask, for the triggers below. Reads `provider` untracked on purpose. */
+  function reprobeProvider() {
+    untrack(() => void probeProvider(provider))
+  }
+
+  // Depends on `provider` alone. Reading the whole config here would re-probe
+  // on every unrelated Settings change, and reading anything inside the body
+  // would subscribe to it — hence `untrack`, the same shape the clone dialog's
+  // re-arm effect needs.
+  $effect(() => {
+    const target = provider
+    untrack(() => void probeProvider(target))
+  })
+
+  // The block while it still describes the selected provider — one narrowing
+  // that the three reads below and the gate all share.
+  const blocked = $derived(providerBlock?.provider === provider ? providerBlock : null)
+  const blockedReason = $derived(blocked?.reason ?? '')
+  const fixCommand = $derived(blocked?.fixCommand ?? '')
+  // The raw provider text the remedy was read out of. Kept as the block's
+  // tooltip rather than as a second line: "Claude couldn't authenticate. Sign
+  // in again." and "Failed to authenticate: OAuth session expired" are one
+  // fact, and stacking both is what made this strip unreadable.
+  const blockedDetail = $derived(blocked?.detail ?? '')
+  const generateHint = $derived(blockedReason || 'Generate (Ctrl+G)')
+  const canGenerate = $derived(
+    !isGenerating && !isCommitInProgress && !blocked && $repoState.selectedFiles.size > 0,
+  )
+
+  /*
+    Re-probe when the window comes back, but only while something is blocking —
+    so a ready provider costs nothing on every focus.
+
+    This is the trigger that makes a *disabled* Generate safe to ship: every way
+    of fixing an unready provider leaves this window. Signing in opens a browser
+    and comes back; starting Ollama or installing the CLI happens in a terminal
+    that takes focus of its own. Without it the button stays dead after the user
+    has already fixed the problem, which is worse than never having disabled it.
+  */
+  $effect(() => {
+    if (!blocked) return
+    const onFocus = () => reprobeProvider()
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  })
+
+  function runFixCommand() {
+    if (fixCommand) onRunInTerminal?.(fixCommand)
+  }
+
   // When entering amend mode, pre-fill the composer from the target commit.
   // The backend pre-parses `co_authors` / `body_without_coauthors` off the
   // commit's trailers, so no trailer parsing happens here. When leaving
@@ -156,8 +272,38 @@
       description = message.description
     } catch (err) {
       error = `Generate failed: ${String(err)}`
+      // Read the failure itself, rather than re-running the probe. For an
+      // expired session the probe is *wrong*: the credentials are still on
+      // disk, so it reports a signed-in CLI, and this failure is the only place
+      // that state is ever visible. Core owns the reading.
+      void classifyFailure(String(err))
     } finally {
       isGenerating = false
+    }
+  }
+
+  async function classifyFailure(message: string) {
+    const target = provider
+    const seq = ++probeSeq
+    try {
+      const status = await aiApi.providerStatusFromFailure(target, message)
+      // Only ever to *raise* a remedy. A failure core doesn't recognize says
+      // nothing about the provider, so it must not clear a block the probe
+      // already found.
+      if (seq !== probeSeq || status.ready) return
+      providerBlock = {
+        provider: target,
+        reason: status.reason,
+        fixCommand: status.fix_command,
+        detail: message,
+      }
+      // The remedy replaces the raw failure rather than stacking under it. Both
+      // describe one state, and the remedy is the half the user can act on; the
+      // provider's own wording stays in the block's tooltip and in this log.
+      console.warn('[ai] provider blocked by a failed request', message)
+      error = null
+    } catch (err) {
+      console.error('[ai] could not classify the generate failure', err)
     }
   }
 
@@ -183,8 +329,13 @@
     } catch (err) {
       error = `Failed to save provider: ${String(err)}`
       // Put the picker back where the file still has it, rather than leaving
-      // an optimistic value lying until the next restart.
-      config.set(cfg)
+      // an optimistic value lying until the next restart — and put back only
+      // the picker. Restoring the whole snapshot would revert every other
+      // field the store has learned since, which is the lost update
+      // `patch_config` exists to prevent, re-introduced one layer up.
+      config.update((current) =>
+        current ? { ...current, ai_provider: cfg.ai_provider } : current,
+      )
     }
   }
 
@@ -266,17 +417,22 @@
     e.preventDefault()
   }
 
-  function handleKeyDown(e: KeyboardEvent) {
-    const meta = e.ctrlKey || e.metaKey
-    if (meta && e.key === 'g') {
-      e.preventDefault()
-      // Both directions, like the buttons: a keyboard route past the lockout
-      // is still a way to have a late AI result overwrite a cleared composer.
-      if (!isGenerating && !isCommitInProgress) handleGenerate()
-    } else if (meta && e.key === 'Enter') {
-      e.preventDefault()
-      if (canSubmit && !isCommitInProgress) handleCommit()
-    }
+  // ---- Keyboard entry points ------------------------------------------------
+  // Called by the window-level handler in MainLayout rather than by a listener
+  // on the fields: a chord scoped to the field it belongs to is only reachable
+  // once you have already clicked into the composer, which is the one moment
+  // you don't need a shortcut. Both gate exactly as their buttons do — a
+  // keyboard route past the lockout is still a way to have a late AI result
+  // overwrite a composer the commit just cleared.
+
+  /** ⌘↩ / Ctrl+↩ from anywhere in the repo view. */
+  export function requestCommit() {
+    if (canSubmit && !isCommitInProgress) handleCommit()
+  }
+
+  /** ⌘G / Ctrl+G from anywhere in the repo view. */
+  export function requestGenerate() {
+    if (canGenerate) handleGenerate()
   }
 </script>
 
@@ -307,7 +463,6 @@
       maxlength="200"
       disabled={isGenerating || isCommitInProgress}
       onwheel={handleSummaryWheel}
-      onkeydown={handleKeyDown}
     />
     <span class="char-count" class:warning={charCount > 72}>{charCount}/72</span>
   </div>
@@ -319,12 +474,46 @@
       placeholder="Description"
       bind:value={description}
       disabled={isGenerating || isCommitInProgress}
-      onkeydown={handleKeyDown}
     ></textarea>
   </div>
 
-  {#if error}
-    <div class="error-message">{error}</div>
+  <!--
+    One strip for everything that went wrong, so a failure and the state behind
+    it read as a single message instead of as two unrelated lines at opposite
+    ends of the box.
+
+    Both rows are independent: a commit failure has to stay visible while the AI
+    provider is separately blocked. Only the *generate* failure that produced a
+    remedy is folded away, and that happens in `classifyFailure`, not here.
+  -->
+  {#if error || blockedReason}
+    <div class="composer-status" role="status">
+      {#if error}
+        <p class="status-error">{error}</p>
+      {/if}
+      {#if blockedReason}
+        <!--
+          Why Generate is greyed out, stated rather than left to a hover. The
+          offer sits immediately after the sentence that explains it, and reads
+          as a sentence too — "Run" is prose, and only the command itself is the
+          control. The command is spelled out because the app is about to type
+          exactly that into the user's shell.
+        -->
+        <p class="status-remedy" title={blockedDetail}>
+          <span>{blockedReason}</span>
+          {#if fixCommand && onRunInTerminal}
+            <span class="fix-offer">
+              Run <button
+                type="button"
+                class="fix-command"
+                onclick={runFixCommand}
+                title="Run this in the terminal below"
+              >{fixCommand}</button>
+            </span>
+          {/if}
+        </p>
+      {/if}
+    </div>
   {/if}
 
   <div class="button-bar">
@@ -341,8 +530,8 @@
       <button
         class="action-button"
         onclick={handleGenerate}
-        disabled={isGenerating || isCommitInProgress || $repoState.selectedFiles.size === 0}
-        title="Generate (Ctrl+G)"
+        disabled={!canGenerate}
+        title={generateHint}
       >
         {isGenerating ? 'Generating…' : 'Generate'}
       </button>
@@ -484,9 +673,14 @@
     cursor: not-allowed;
   }
 
+  /* Deliberately no min-height of its own. The composer already has one floor
+     — its 180px minimum, enforced by the resize handle and by MainLayout's
+     clamp — and a second floor here can only disagree with it: the textarea
+     refused to shrink when the status strip appeared, overflowed its flex slot,
+     and painted over the strip below. One floor, in one place. */
   .description-input {
     flex: 1;
-    min-height: 80px;
+    min-height: 0;
     font-size: 13px;
     padding: 8px;
     background: var(--bg-primary);
@@ -498,10 +692,73 @@
     overflow-y: auto;
   }
 
-  .error-message {
+  /* One bordered block, so a failure and the remedy for it read as a single
+     message. A left rule instead of a filled banner, matching the amend
+     notice: the composer is a dense stack of fields and a tinted slab here
+     reads as another one. */
+  .composer-status {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
     padding: 6px 8px;
-    color: var(--status-red);
+    border-left: 2px solid var(--status-red);
     font-size: 11px;
+    line-height: 1.4;
+    flex-shrink: 0;
+  }
+
+  .status-error {
+    margin: 0;
+    color: var(--status-red);
+    /* Provider errors can run long; keep the composer's width rather than
+       letting an un-wrappable token push the whole box wider. */
+    overflow-wrap: anywhere;
+  }
+
+  /* A standing condition, not a failed attempt — so it reads as a caption
+     rather than in the red the error line above uses. Baseline-aligned, so the
+     inline command chip sits on the same line as the words around it. */
+  .status-remedy {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    /* One word space between the reason and the offer, not a gutter: they are
+       one sentence, and a gap wide enough to read as a column break undoes
+       that. The row gap is what a wrapped line falls by. */
+    gap: 2px;
+    margin: 0;
+    color: var(--text-secondary);
+  }
+
+  /* "Run" is prose at the caption's own size and colour — it is grammar, not a
+     control. Only the command is clickable. */
+  .fix-offer {
+    flex-shrink: 0;
+  }
+
+  /* The command is the control: its own tinted chip, in mono, in the accent —
+     a thing you can tell apart from the sentence carrying it without leaving
+     that sentence. Deliberately not a bordered button: the chrome made the
+     whole phrase read as one oversized control and buried which part was
+     actually clickable. */
+  .fix-command {
+    padding: 1px 5px;
+    background: var(--bg-elevated);
+    border: none;
+    border-radius: 4px;
+    color: var(--border-active);
+    font-family: var(--font-mono);
+    /* Mono renders visually larger than the UI face at the same value, so
+       matching the strip's size would not match on screen. */
+    font-size: 0.92em;
+    line-height: inherit;
+    cursor: pointer;
+    transition: background 120ms ease;
+  }
+
+  .fix-command:hover {
+    background: var(--surface-hover);
+    text-decoration: underline;
   }
 
   .button-bar {

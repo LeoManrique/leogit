@@ -20,3 +20,18 @@ export function basename(path: string): string {
   const parts = path.split(/[\\/]/).filter(Boolean)
   return parts[parts.length - 1] || path
 }
+
+/**
+ * A working-tree file's absolute path: a filesystem `repoPath` joined with a
+ * git-reported `relPath`. The one place the two path worlds above meet, so the
+ * conversion between them is written once.
+ *
+ * The separator is read off `repoPath` rather than assumed, and `relPath`'s
+ * forward slashes are rewritten to match — the result is meant for the
+ * clipboard, where a Windows user pastes it into a shell or Explorer.
+ */
+export function absolutePath(repoPath: string, relPath: string): string {
+  const separator = repoPath.includes('\\') && !repoPath.includes('/') ? '\\' : '/'
+  const root = repoPath.replace(/[\\/]+$/, '')
+  return `${root}${separator}${relPath.split('/').join(separator)}`
+}

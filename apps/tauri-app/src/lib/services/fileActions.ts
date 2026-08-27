@@ -1,5 +1,5 @@
-import { join } from '@tauri-apps/api/path'
 import { gitApi, osApi, type FileEntry } from '$lib/api/commands'
+import { absolutePath } from '$lib/utils/path'
 
 // Stateless helpers behind the Changes-tab file context menu. The repo-state
 // mutations (discard, ignore) still go through MainLayout so they can confirm /
@@ -8,9 +8,10 @@ import { gitApi, osApi, type FileEntry } from '$lib/api/commands'
 
 /** Copy the file's absolute path to the clipboard. */
 export async function copyAbsolutePath(repoPath: string, file: FileEntry): Promise<void> {
-  // join() is platform-aware, so this yields native separators on Windows.
-  const abs = await join(repoPath, file.path)
-  await navigator.clipboard.writeText(abs)
+  // Joined here rather than through `@tauri-apps/api/path`'s `join`, which
+  // crossed to the backend and back to concatenate two strings the frontend
+  // already holds — on a menu item that is otherwise instant.
+  await navigator.clipboard.writeText(absolutePath(repoPath, file.path))
 }
 
 /** Copy the file's repo-relative path (as git reports it) to the clipboard. */

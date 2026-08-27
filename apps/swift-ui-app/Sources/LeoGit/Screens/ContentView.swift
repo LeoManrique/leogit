@@ -292,7 +292,8 @@ struct ContentView: View {
                     commitStore: commitStore,
                     selectedPath: $selectedPath,
                     onWorkingTreeChanged: { await store.refresh() },
-                    onError: { store.errorMessage = $0 }
+                    onError: { store.errorMessage = $0 },
+                    onRunInTerminal: terminalStore.run
                 )
             case .history:
                 HistorySidebar(
@@ -494,8 +495,25 @@ struct ContentView: View {
     /// diff to reload (a file can change on disk without its status row
     /// changing), and give the most-recent repos' badges a throttled
     /// catch-up — the Tauri client's `resyncOnActive`.
+    ///
+    /// Re-asking the AI provider rides along, but ahead of the guards below:
+    /// they exist to keep a network operation from being stomped, and a
+    /// provider probe stomps nothing. Behind them, an activation that happened
+    /// to land during a fetch would leave Generate dead until the user thought
+    /// to leave and come back again.
     @MainActor
     private func resyncOnActivate() async {
+        // Only while something is blocking, so a ready provider costs nothing
+        // on every activation. This is what makes a *disabled* Generate safe to
+        // ship: every way of fixing an unready provider leaves this app —
+        // signing in opens a browser, installing the CLI or starting Ollama
+        // happens in a terminal — so coming back is exactly when the answer can
+        // have changed. Without it the button stays dead after the user has
+        // already fixed the problem, which is worse than never disabling it.
+        if commitStore.blockingProvider != nil {
+            await commitStore.refreshProviderStatus()
+        }
+
         guard store.repoPath != nil, !isResyncing, syncStore.activeOperation == nil else {
             return
         }

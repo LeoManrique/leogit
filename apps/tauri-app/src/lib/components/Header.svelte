@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { listen } from '@tauri-apps/api/event'
-  import { repoState } from '$lib/stores/repo'
+  import { repoState, reportActionError, reportNotice } from '$lib/stores/repo'
   import { appState } from '$lib/stores/app'
   import {
     activeNetworkOp,
@@ -164,7 +164,7 @@
       await gitApi.pull(repoPath, remote)
       await handleRefresh()
     } catch (error) {
-      repoState.update((s) => ({ ...s, error: String(error) }))
+      reportActionError(error, handlePull)
     } finally {
       endNetworkOp()
     }
@@ -186,7 +186,7 @@
       await gitApi.push(repoPath, remote, branch, setUpstream, false)
       await handleRefresh()
     } catch (error) {
-      repoState.update((s) => ({ ...s, error: String(error) }))
+      reportActionError(error, handlePush)
     } finally {
       endNetworkOp()
     }
@@ -208,7 +208,7 @@
       await handleRefresh()
       showForcePushConfirm = false
     } catch (error) {
-      repoState.update((s) => ({ ...s, error: String(error) }))
+      reportActionError(error, handleForcePush)
     } finally {
       endNetworkOp()
     }
@@ -236,7 +236,7 @@
       showPublish = false
       await handleRefresh()
     } catch (error) {
-      repoState.update((s) => ({ ...s, error: String(error) }))
+      reportActionError(error)
     } finally {
       endNetworkOp()
     }
@@ -278,11 +278,12 @@
 
   // Opening the browser can fail (no `xdg-open`, a wedged handler). Surface it
   // the way every other OS hand-off in the app does rather than letting the
-  // menu close with nothing happening.
+  // menu close with nothing happening — in the banner, since an update the user
+  // was only glancing at is not worth the window.
   function openReleasePage(url: string) {
     osApi.openUrl(url).catch((error) => {
       console.error('[update] could not open the release page:', error)
-      repoState.update((s) => ({ ...s, error: String(error) }))
+      reportNotice(error)
     })
   }
 

@@ -18,6 +18,16 @@ struct TerminalSessionView: View {
     let onStarted: (StartedTerminal) -> Void
     let onExit: () -> Void
 
+    /// A command the dock wants typed into this shell, or nil. Handed over
+    /// through the store rather than called directly: the session is mounted
+    /// by the dock, and the composer that asks for the command sits on the
+    /// other side of the split.
+    let pendingCommand: String?
+
+    /// Acknowledge `pendingCommand`, so it is typed once and not again on the
+    /// next redraw.
+    let onCommandSent: () -> Void
+
     @State private var controller = TerminalController()
 
     var body: some View {
@@ -25,6 +35,16 @@ struct TerminalSessionView: View {
             .task {
                 if isExpanded { controller.focus() }
                 await controller.start(repoPath: repoPath, onStarted: onStarted, onExit: onExit)
+            }
+            .onChange(of: pendingCommand, initial: true) { _, command in
+                // `initial: true` because the command is usually what caused
+                // this view to exist: the first expand spawns the session, and
+                // the request is already waiting by the time it mounts. The
+                // controller queues it if the PTY isn't up yet, so this can
+                // land before or after `start` either way.
+                guard let command else { return }
+                controller.run(command)
+                onCommandSent()
             }
             .onDisappear { controller.shutdown() }
             .onChange(of: isExpanded) { _, expanded in
@@ -103,10 +123,34 @@ final class TerminalController {
             pid = started.pid
             onStarted(started)
             pushCurrentSize()
+            // After the pid is set, so `run` takes the send path rather than
+            // re-queueing what it is draining.
+            if let queued = queuedCommand {
+                queuedCommand = nil
+                run(queued)
+            }
         } catch {
             feed(Array("\r\n\u{1B}[31mTerminal error: \(error.displayMessage)\u{1B}[0m\r\n".utf8))
         }
     }
+
+    /// Type `command` into the shell and press Return, as if the user had.
+    ///
+    /// Queued when the PTY is still spawning: the composer's fix button is
+    /// what *creates* the first session, so it can arrive before there is a
+    /// shell to type into. `start` flushes the queue once the pid is in hand.
+    func run(_ command: String) {
+        guard pid != nil else {
+            queuedCommand = command
+            return
+        }
+        send(command + "\r")
+    }
+
+    /// A command that arrived before the shell existed. At most one — the
+    /// only source is a single button, and a queue of stale fixes is not
+    /// something anyone would want replayed.
+    private var queuedCommand: String?
 
     /// Keystrokes (and pastes) from the emulator, in order.
     func send(_ data: String) {

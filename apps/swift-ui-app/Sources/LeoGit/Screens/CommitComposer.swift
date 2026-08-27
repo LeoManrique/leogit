@@ -26,6 +26,11 @@ struct CommitComposer: View {
     /// Generate a commit message with AI from the checked files' diff.
     let onGenerate: () -> Void
 
+    /// Run a shell command in the app's own terminal. The composer knows the
+    /// command that would fix an unready AI provider but nothing about where
+    /// to run it — the terminal dock lives on the far side of the split.
+    let onRunFixCommand: (String) -> Void
+
     /// What Commit would use: the typed summary, or the single-file
     /// auto-summary backing the placeholder.
     private var effectiveSummary: String {
@@ -49,6 +54,14 @@ struct CommitComposer: View {
         store.isCommitting || store.isGenerating
     }
 
+    /// Generate is also held back while the provider is known to be unable to
+    /// answer — a signed-out Claude CLI passes every "is it installed" check
+    /// and fails every request. Not knowing is not blocking: an unanswered
+    /// probe leaves the button live and lets the request report itself.
+    private var canGenerate: Bool {
+        !isBusy && includedCount > 0 && store.blockingProvider == nil
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if store.isAmending {
@@ -63,12 +76,8 @@ struct CommitComposer: View {
 
             descriptionEditor
 
-            if let errorMessage = store.errorMessage {
-                Text(errorMessage)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .lineLimit(3)
-                    .textSelection(.enabled)
+            if store.errorMessage != nil || store.blockingProvider != nil {
+                statusStrip
             }
 
             HStack(alignment: .center, spacing: 8) {
@@ -86,8 +95,9 @@ struct CommitComposer: View {
                     onGenerate()
                 }
                 .keyboardShortcut("g", modifiers: .command)
-                .disabled(isBusy || includedCount == 0)
-                .help("Generate a commit message from the checked files (⌘G)")
+                .disabled(!canGenerate)
+                .help(store.blockingProvider?.reason
+                    ?? "Generate a commit message from the checked files (⌘G)")
 
                 Spacer(minLength: 0)
 
@@ -138,6 +148,97 @@ struct CommitComposer: View {
                 .frame(width: 2)
         }
     }
+
+    /// One strip for everything that went wrong, so a failure and the standing
+    /// state behind it read as a single message instead of as two unrelated
+    /// lines. A leading rule rather than a filled banner, like the amend notice
+    /// above: the composer is a dense stack of fields, and a tinted block here
+    /// would read as another one.
+    ///
+    /// Both rows are independent — a commit failure has to stay visible while
+    /// the AI provider is separately blocked. Only the *generate* failure that
+    /// produced a remedy is folded away, and the store does that when it reads
+    /// the remedy out, not here.
+    private var statusStrip: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let errorMessage = store.errorMessage {
+                Text(errorMessage)
+                    .foregroundStyle(.red)
+                    .lineLimit(3)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            if let block = store.blockingProvider {
+                // Why Generate is greyed out, stated rather than left to a
+                // hover — with the action immediately after the sentence that
+                // explains it. The button spells out the command it will run,
+                // because the app is about to type into the user's shell.
+                // One word space between the reason and the offer, not a
+                // gutter: they are one sentence, and a gap wide enough to read
+                // as a column break undoes that.
+                HStack(alignment: .firstTextBaseline, spacing: 2) {
+                    Text(block.reason)
+                        .foregroundStyle(.secondary)
+
+                    if !block.fixCommand.isEmpty {
+                        // "Run" is prose at the strip's own size and colour —
+                        // it is grammar, not a control. Only the command is
+                        // clickable, so only the command is dressed as
+                        // something to click.
+                        HStack(alignment: .firstTextBaseline, spacing: 5) {
+                            Text("Run").foregroundStyle(.secondary)
+                            fixCommandChip(block.fixCommand)
+                        }
+                    }
+
+                    Spacer(minLength: 0)
+                }
+                // The provider's own wording, when the remedy was read out of
+                // a failed request — it replaces that line rather than
+                // stacking under it, so this is where it stays reachable.
+                .help(block.detail.isEmpty ? block.reason : block.detail)
+            }
+        }
+        .font(.caption)
+        .padding(.leading, 8)
+        .padding(.vertical, 4)
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(.red)
+                .frame(width: 2)
+        }
+    }
+
+    /// The command as its own tinted chip, in mono, in the accent — a thing
+    /// you can tell apart from the sentence carrying it without leaving that
+    /// sentence.
+    ///
+    /// Deliberately not a bordered `Button`: its chrome made the whole phrase
+    /// read as one oversized control and buried which part was actually
+    /// clickable. `.plain` hands the appearance back here; the link pointer is
+    /// what still says it can be clicked.
+    private func fixCommandChip(_ command: String) -> some View {
+        Button {
+            onRunFixCommand(command)
+        } label: {
+            Text(command)
+                .font(Self.commandFont)
+                .foregroundStyle(Color.accentColor)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(.quaternary, in: .rect(cornerRadius: 4))
+        }
+        .buttonStyle(.plain)
+        .pointerStyle(.link)
+        .disabled(isBusy)
+        .help("Run this in the terminal below")
+    }
+
+    /// The strip's caption size, stepped down for monospace: mono renders
+    /// visually larger than the UI face at the same point size, so matching
+    /// values would not match on screen. macOS `.caption` is 10 pt.
+    private static let commandFont = Font.system(size: 9.5, design: .monospaced)
 
     /// The native counterpart of the Tauri textarea: fills whatever height
     /// the owner leaves after the fixed rows, scrolling with a scrollbar once

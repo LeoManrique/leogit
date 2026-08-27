@@ -35,13 +35,13 @@ static-linking or a local daemon (that decision is open; see the plan).
   Frontends never re-derive git state the core already returns (e.g. file status
   categories, ahead/behind, merge conflicts).
 - Today's surface: **4 events, ~35 DTOs**, and a command catalogue (§3) each host exposes
-  **to the extent it consumes it**. The Tauri host registers **72** `#[tauri::command]`s,
+  **to the extent it consumes it**. The Tauri host registers **73** `#[tauri::command]`s,
   each with a wrapper in `apps/tauri-app/src/lib/api/commands.ts`; the UniFFI bridge
-  exports **59** functions. The two sets are deliberately not identical, and a command
+  exports **61** functions. The two sets are deliberately not identical, and a command
   reaching one host does not oblige the other — what is required is that the difference be
   recorded, here or in §8, never left silent.
-  - No native export: `check_auth`, `check_for_update`, `check_provider_available`,
-    `delete_remote_branch`, `generate_patch`, `generate_inverse_patch`, `get_ahead_behind`,
+  - No native export: `check_auth`, `check_for_update`, `delete_remote_branch`,
+    `generate_patch`, `generate_inverse_patch`, `get_ahead_behind`,
     `get_head_sha`, `get_repo_identifier`, `get_repo_name`,
     `has_staged_changes`, `highlight_diff`, `init_repo`, `is_git_repo`, `open_url`,
     `rename_branch`, `take_pending_launch_target`, `terminal_pty_info`. Three of those the
@@ -49,16 +49,16 @@ static-linking or a local daemon (that decision is open; see the plan).
     `resolve_repo_root` for `is_git_repo`, the structured `tokenize_diff` for the
     HTML-shaped `highlight_diff`); `get_head_sha` is redundant against `get_status`
     (§6.1); `take_pending_launch_target` and `init_repo` serve the launch path, which is
-    Tauri-only (§8); and the rest the bridge omits because it carries no surface a client
-    does not call.
+    Tauri-only (§8); and the rest the bridge omits because it carries no
+    surface a client does not call.
   - No Tauri command: `core_version`, `fix_path_env`, `repo_display_name`,
     `resolve_repo_root`, `tokenize_diff`.
   - Registered Tauri-side but called by nothing in the Svelte client:
-    `check_provider_available`, `copy_diff_text`, `generate_patch`,
-    `generate_inverse_patch`, `get_ahead_behind`, `has_staged_changes`,
-    `rename_branch`, `delete_remote_branch`. Each is a live item in the parity
-    plan — either being wired (ST-9, DF-5, DF-6) or being deleted (WS-S) — and a
-    command that is neither should not stay on this list.
+    `copy_diff_text`, `generate_patch`, `generate_inverse_patch`,
+    `get_ahead_behind`, `has_staged_changes`, `rename_branch`,
+    `delete_remote_branch`. Each is a live item in the parity plan — either being
+    wired (DF-5, DF-6) or being deleted (WS-S) — and a command that is neither
+    should not stay on this list.
 
 ## 2. System context & architecture
 
@@ -77,12 +77,12 @@ static-linking or a local daemon (that decision is open; see the plan).
 - **State ownership** — durable state (config, repos MRU, terminal PTY sessions)
   lives in the core. Frontends hold only re-derivable view state.
 
-## 3. Command surface (67)
+## 3. Command surface (68)
 
 Grouped by namespace. `args` are the logical inputs (camelCase on the wire);
 `→` is the return DTO (§5). "async/net" marks network operations that may stream
 progress (§4.1) and can be slow. This is the catalogue of operations core offers a
-frontend — the Tauri host registers all 67; the native bridge exposes the subset it
+frontend — the Tauri host registers all 68; the native bridge exposes the subset it
 consumes, plus seven of its own (§1).
 
 ### 3.1 Config & state — 6
@@ -224,12 +224,13 @@ neither and pays for neither.
 | `gh_clone` (net) | `nameWithOwner, targetPath` | `string` |
 | `gh_publish_repo` (net) | `repoPath, name, description, isPrivate` | `void` |
 
-### 3.13 AI — 3
+### 3.13 AI — 4
 | Command | Args | Returns |
 |---|---|---|
 | `load_ai_config` | – | `AiProviderConfig` (resolved for the selected provider) |
 | `generate_commit_message` (net) | `diff, provider, config: AiProviderConfig` | `CommitMessage` |
-| `check_provider_available` | `provider, config` | `boolean` |
+| `check_provider_status` | `provider, config` | `ProviderStatus` |
+| `provider_status_from_failure` | `provider, error` | `ProviderStatus` |
 
 `load_ai_config` is read fresh before every generate, never cached, so an edit
 in either client applies on the next click. The config→provider mapping lives
@@ -300,7 +301,7 @@ codegen decision is open (plan §10.7).
 | Config / persistence | `Config` (theme, fetch_interval_ms, ai_provider, auto_fetch, syntax_highlighting, scan_paths[], scan_depth, side_by_side_diff, hide_whitespace, tab_size, terminal_shell?, then the `claude` and `ollama` tables — **nothing scalar may follow them**, since a TOML table swallows every key after it); `ClaudeConfig` (model?, timeout_secs); `OllamaConfig` (model?, server_url, timeout_secs); `ConfigPatch` (every field optional — absent means "leave it alone", `""` means "clear it"); `Bounds`/`ConfigBounds`; `ReposState`; `ReposStatePatch` |
 | Repo list | `RepoRow` (path, names[] — every label the user might type for that row); `CloneTarget` (normalized_url, repo_name, target_path) |
 | GitHub | `GhRepo` (name_with_owner, name, description, is_private, pushed_at) |
-| AI | `AiProviderConfig` (provider, model?, base_url?, timeout_secs) |
+| AI | `AiProviderConfig` (provider, model?, base_url?, timeout_secs), `ProviderStatus` (ready, reason, fix_command) |
 | Terminal | `ShellOption`; `PtyInfo` (backend, build_number); `StartedTerminal` (pid, shell_id, shell_label) |
 | Events / launch / update | `GitProgressEvent`; `LaunchTarget` (path, is_repo); `UpdateInfo` (version, url, install_command?) |
 
@@ -381,7 +382,42 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    kicks, an on-switch sweep, and an on-visible sweep.
 7. **Commit composer** — AI generation via `generate_commit_message`; auto-summary
    from a single changed file; amend/undo re-seed the message. `format_commit_message`
-   composes summary + description + co-authors.
+   composes summary + description + co-authors. **Generate is gated on the provider
+   being ready to answer, not merely installed** — two different questions, and asking
+   only the first lets an installed Claude CLI with a dead session light the button up
+   and fail every request. **Two sources answer, and neither is sufficient alone.**
+   `check_provider_status` probes ahead of the click and catches what is visible from
+   outside: a missing binary, a signed-out CLI, an Ollama that isn't listening.
+   `provider_status_from_failure` reads a request that already failed, and is the *only*
+   thing that catches an expired session — signing out deletes the credentials, so a
+   probe sees it, while an expiry leaves them on disk, so the probe reports a signed-in
+   CLI and only a real request discovers the refresh failed. Both return the same shape:
+   whether it is ready, the reason, and where core knows one, the shell command that
+   fixes it. The client writes the reason beside the button rather than hiding it in a
+   tooltip, and offers to run the command in its own terminal.
+   Both clients keep **only the blocked case, tagged with the provider it describes**, so
+   absence means "ready" and "not asked yet" alike and a switched provider drops the old
+   block by comparison instead of by a clearing step. The answer is written only once it
+   arrives — never cleared on the way into a probe, which made the remedy blink out and
+   back on every focus.
+   Four rules make a *disabled* Generate safe: an unanswered probe leaves it
+   **enabled** (refusing on "not yet known" is worse than letting a doomed request
+   report itself, and an answer core cannot interpret opens the gate for the same
+   reason); a probe that *throws* changes nothing, because a wiring failure is not
+   evidence and must not clear a block a real failure proved; a failure core does not
+   recognize may never *clear* a block, only raise one; and the question is re-asked on
+   every event that could have fixed it — the provider changing, and the app regaining
+   focus while blocked, since every remedy leaves it for a browser or a terminal.
+   A raised block **replaces** the generate failure that produced it rather than stacking
+   under it: both describe one state, the remedy is the half the user can act on, and the
+   provider's own wording survives as the row's tooltip and in the client's log. A commit
+   failure is untouched by this — it has to stay visible while the provider is separately
+   blocked, so the two rows are independent.
+   **The composer's own chords are window-wide**, not scoped to its fields: a shortcut
+   you must first click into the message to use is one nobody reaches mid-sentence. They
+   are inert under any dialog and on any other tab, and they gate exactly as their
+   buttons do — a keyboard route past the commit/generate lockout is still a way for a
+   late AI result to land on a composer the commit just cleared.
 8. **History** — commit history is a **flat linear list** (no DAG/graph layout), paged
    through `get_log` `{max_count, skip}`. Two invariants are shared: a refresh re-reads at
    most **500** commits however deep the user has scrolled (deeper rows re-grow on demand),
@@ -430,6 +466,20 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    deliberately chrono-free) and each frontend renders them as relative ("5 minutes
    ago"), recomputed on every refresh. Whether an idle list also re-ticks between
    refreshes is platform policy (§8).
+13. **Failure surfacing is classified, not uniform.** Every failure lands in one of two
+   places, and which one is decided by *whether the user is waiting on it*, never by how
+   severe it looks. An operation the user asked for and is waiting on — a transfer, a
+   branch change, a commit, an explicit refresh — did not happen, so it takes the window
+   in a modal, and that modal offers a retry wherever the same attempt can simply be made
+   again. A failure that was never the user's task — an OS hand-off that didn't take, the
+   app's own background refresh — states itself in a non-blocking strip and leaves the
+   last good view of the repository readable behind it (§6.1 covers the refresh streak
+   that raises the app's own). The classification lives in one function per client rather
+   than at each call site, because a `report the failure` shape copied from the site next
+   door is how *every* failure in the Tauri client, down to "couldn't reveal the file in
+   Finder", ended up seizing the window. Native still routes discard, checkout and undo
+   failures to its strip where this rule puts them in the modal — the parity plan's WS-N
+   and WS-Q close that.
 
 ## 7. Diff rendering contract
 
@@ -471,7 +521,7 @@ every deliberate difference here.
 | Window chrome | Tauri window | native `WindowGroup` / AppKit |
 | Theme | CSS tokens in `app.css`, dark/light via `data-theme`, driven by the `theme` config field | `Color` assets, system appearance — the `theme` field is never read (permanent exemption: a stored theme is a web-only concept) |
 | Opening a repository from disk | the one `plugin-dialog.open` call chooses a *clone destination*; repositories otherwise arrive from discovery, a clone, or `leogit <dir>` | a `.fileImporter` on Welcome (⌘O) only — Welcome has no discovery list yet, so this is the sole way in without a `last_opened_repo`; it retires with that list |
-| Home dir / path join | `@tauri-apps/api/path` | `FileManager` |
+| Home dir | `@tauri-apps/api/path`'s `homeDir` | `FileManager` |
 | Reveal / open / open-url | core `os::*` commands (unchanged) | core `os::*` commands (unchanged) |
 | Launch target / second instance | the whole contract: `leogit <dir>` resolves through `core::launch`, a cold start claims it with `take_pending_launch_target`, and a second invocation focuses the window and forwards an `open-repo` event via `plugin-single-instance` | not implemented — no app delegate, no `onOpenURL`, no `CFBundleURLTypes`/`CFBundleDocumentTypes`, and neither launch command is exported to the bridge. The native client restores `last_opened_repo` at launch and otherwise waits on Welcome |
 | Diff rendering | HTML spans (`{@html}`) | structured runs → `AttributedString` |

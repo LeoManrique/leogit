@@ -41,7 +41,7 @@ use leogit_core::{ai, config, diff, gh, git, highlight, os, process, repos, shel
 
 // Re-exported so Swift sees the real core types. Names are used by the
 // `#[uniffi::remote]` declarations below.
-pub use leogit_core::ai::{AiProviderConfig, CommitMessage};
+pub use leogit_core::ai::{AiProviderConfig, CommitMessage, ProviderStatus};
 pub use leogit_core::config::{
     Bounds, ClaudeConfig, Config, ConfigBounds, ConfigPatch, OllamaConfig, ReposState,
     ReposStatePatch,
@@ -1130,8 +1130,9 @@ pub async fn gh_publish_repo(
 // that same mapping owned here in Rust instead, where core drift becomes a
 // compile error rather than a silent field mismatch.
 //
-// `check_provider_available` stays unexported: it has no callers in either
-// client (the Tauri API wrapper for it is dead code).
+// Readiness is two exports, not one, because the two provider states a user can
+// fix are visible in different places: a signed-out CLI to a probe, an expired
+// session only to a request that failed. Both clients ask both questions.
 
 /// Mirrors [`leogit_core::ai::CommitMessage`] — the provider's already-split
 /// suggestion: `title` fills the summary field, `description` the body.
@@ -1154,6 +1155,16 @@ pub struct AiProviderConfig {
     pub model: Option<String>,
     pub base_url: Option<String>,
     pub timeout_secs: u32,
+}
+
+/// Mirrors [`leogit_core::ai::ProviderStatus`] — whether the provider can
+/// serve a request, and when it can't, the sentence to show and the shell
+/// command that would fix it (empty when there is none to offer).
+#[uniffi::remote(Record)]
+pub struct ProviderStatus {
+    pub ready: bool,
+    pub reason: String,
+    pub fix_command: String,
 }
 
 /// The AI settings from the shared config file, ready to pass to
@@ -1211,6 +1222,44 @@ pub async fn generate_commit_message(
     ai::generate_commit_message(diff, provider, config)
         .await
         .map_err(GitError::from)
+}
+
+/// Ask whether `provider` could serve a request right now, so the composer can
+/// say *why* Generate is greyed out instead of letting a doomed request report
+/// it. Two questions for Claude (`--version`, then `auth status`), a request to
+/// its own configured address for Ollama.
+///
+/// Every probe failure is an answer rather than an error, and an answer that
+/// can't be interpreted reports ready: locking the user out of Generate because
+/// a CLI changed its output format is worse than letting the request speak.
+///
+/// # Errors
+///
+/// Returns [`GitError`] only for a provider name core doesn't know.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn check_provider_status(
+    provider: String,
+    config: AiProviderConfig,
+) -> Result<ProviderStatus, GitError> {
+    ai::check_provider_status(provider, config)
+        .await
+        .map_err(GitError::from)
+}
+
+/// Read a *failed* generate for a provider state the user can fix.
+///
+/// Not a fallback for [`check_provider_status`] — for an expired session it is
+/// the only thing that works, because signing out deletes the credentials (a
+/// probe sees that) while an expired session leaves them on disk, so `claude
+/// auth status` still reports a signed-in CLI and only a real request discovers
+/// the refresh failed.
+///
+/// Reports ready for anything it doesn't recognize, so a caller can only ever
+/// *raise* a remedy from it, never clear one.
+#[uniffi::export]
+#[must_use]
+pub fn provider_status_from_failure(provider: String, error: String) -> ProviderStatus {
+    ai::provider_status_from_failure(&provider, &error)
 }
 
 // ---------------------------------------------------------------------------

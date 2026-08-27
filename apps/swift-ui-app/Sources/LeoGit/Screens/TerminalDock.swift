@@ -27,7 +27,9 @@ struct TerminalDock: View {
                     repoPath: repoPath,
                     isExpanded: store.isExpanded,
                     onStarted: { store.activeShellLabel = $0.shellLabel },
-                    onExit: { store.closeSession() }
+                    onExit: { store.closeSession() },
+                    pendingCommand: store.pendingCommand,
+                    onCommandSent: store.commandDidRun
                 )
                 // Structural identity: a bumped generation or a switched
                 // repo unmounts the old session (killing its PTY) and

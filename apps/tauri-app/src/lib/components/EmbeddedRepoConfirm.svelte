@@ -15,8 +15,14 @@
 
   const many = $derived(repos.length > 1)
 
+  // Every dismissal is the same decision, so they answer to one guard: the
+  // commit this dialog is a pause inside cannot be called off once it starts,
+  // and a backdrop click that closed the dialog anyway left the composer live
+  // over a commit still running underneath it.
+  const canCancel = $derived(!isCommitting)
+
   function handleKeyDown(e: KeyboardEvent) {
-    if (e.key === 'Escape' && !isCommitting) onCancel()
+    if (e.key === 'Escape' && canCancel) onCancel()
   }
 </script>
 
@@ -24,7 +30,7 @@
   class="overlay"
   role="presentation"
   onclick={(e) => {
-    if (e.target === e.currentTarget) onCancel()
+    if (e.target === e.currentTarget && canCancel) onCancel()
   }}
   onkeydown={handleKeyDown}
 >
@@ -50,7 +56,7 @@
       </p>
     </div>
     <div class="modal-footer">
-      <button class="btn-secondary" onclick={onCancel} disabled={isCommitting}>Cancel</button>
+      <button class="btn-secondary" onclick={onCancel} disabled={!canCancel}>Cancel</button>
       <button class="btn-primary" onclick={onConfirm} disabled={isCommitting}>
         {isCommitting ? 'Committing…' : 'Commit as link'}
       </button>

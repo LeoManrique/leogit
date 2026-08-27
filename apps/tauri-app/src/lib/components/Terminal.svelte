@@ -36,6 +36,8 @@
   // Set once teardown starts so async setup steps bail instead of resurrecting
   // a PTY for a component that is already gone.
   let disposed = false
+  // A command handed in before the shell was ready (see `runCommand`).
+  let queuedCommand: string | null = null
 
   // A panel drag fires ResizeObserver every frame. Each fit() that changes the
   // grid pushes a ResizePseudoConsole down to the shell, and PSReadLine repaints
@@ -148,6 +150,23 @@
     }
   })
 
+  /**
+   * Type a command into this shell and run it, on behalf of somewhere else in
+   * the app that knows the command but not the terminal (today: the composer's
+   * "fix the AI provider" button).
+   *
+   * Queued when the shell is still starting, so the caller never has to know
+   * whether this panel is warm — it may have been created by the very click
+   * that is calling this.
+   */
+  export function runCommand(command: string) {
+    if (pid === null) {
+      queuedCommand = command
+      return
+    }
+    terminalApi.write(pid, `${command}\r`).catch(console.error)
+  }
+
   async function initBackend() {
     if (!term) return
     try {
@@ -203,6 +222,16 @@
       // before the backend session was ready.
       if (pid !== null) {
         terminalApi.resize(pid, term.cols, term.rows).catch(console.error)
+      }
+
+      // Deliberately after the output listener is registered: a command sent
+      // before it exists would run with its echo and its first lines dropped
+      // (the same window D-4 is about), so the user would see a bare prompt and
+      // assume nothing happened.
+      if (queuedCommand !== null) {
+        const command = queuedCommand
+        queuedCommand = null
+        runCommand(command)
       }
     } catch (e) {
       term?.writeln(`\r\n\x1b[31mTerminal error: ${e}\x1b[0m`)

@@ -1,8 +1,15 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onMount, tick, untrack } from 'svelte'
   import { get } from 'svelte/store'
   import { listen } from '@tauri-apps/api/event'
-  import { repoState, resetRepoState } from '$lib/stores/repo'
+  import {
+    repoState,
+    resetRepoState,
+    reportActionError,
+    reportNotice,
+    dismissActionError,
+    dismissNotice,
+  } from '$lib/stores/repo'
   import { appState } from '$lib/stores/app'
   import { config, refreshConfig } from '$lib/stores/config'
   import { hydrateReposState, patchReposState, recordRecentRepo } from '$lib/stores/reposState'
@@ -70,6 +77,13 @@
   let showMerge = $state(false)
   let mergeTarget = $state<string>('')
 
+  // The mounted composer, so the window-level key handler can reach ⌘↩ / ⌘G
+  // without the fields owning them (CommitMessage explains why).
+  let composer = $state<{ requestCommit: () => void; requestGenerate: () => void } | null>(null)
+  // The mounted terminal, so `runInTerminal` can hand it a command. Null
+  // whenever no session is up, which that function starts.
+  let terminal = $state<{ runCommand: (command: string) => void } | null>(null)
+
   let statusInterval: ReturnType<typeof setInterval> | null = null
   let fetchInterval: ReturnType<typeof setInterval> | null = null
   let userTyping = $state(false)
@@ -96,6 +110,8 @@
   const SIDEBAR_MAX = 640
   const COMMIT_MIN = 180
   const COMMIT_MAX = 600
+  // The least the file list keeps when the composer is at its tallest.
+  const FILE_LIST_MIN = 80
   const COMMIT_FILES_MIN = 180
   const COMMIT_FILES_MAX = 600
 
@@ -111,6 +127,32 @@
   let commitFilesWidth = $state(
     loadStoredNumber('leogit:commitFilesWidth', 280, COMMIT_FILES_MIN, COMMIT_FILES_MAX),
   )
+
+  // Measured height of the space the file list and the composer share, so a
+  // stored height taller than today's window can't push the Commit button out
+  // of the clipped pane. Zero until the first layout.
+  let tabPanesHeight = $state(0)
+
+  /**
+   * How tall the composer may be *right now*: the fixed ceiling, capped by what
+   * fits above the list's floor. Capping the drag as well as the render is what
+   * keeps the stored value within reach — otherwise a drag back down first
+   * spends an invisible surplus while the divider sits still. Unmeasured means
+   * uncapped, so the stored height doesn't flash through the minimum on the
+   * first frame.
+   */
+  const commitMax = $derived(
+    tabPanesHeight > 0
+      ? Math.min(COMMIT_MAX, Math.max(COMMIT_MIN, tabPanesHeight - FILE_LIST_MIN))
+      : COMMIT_MAX,
+  )
+
+  /**
+   * The stored height clamped into today's cap. The stored value itself is left
+   * alone, so a window that grows again gives the user their full height back
+   * without a fresh drag.
+   */
+  const effectiveCommitHeight = $derived(Math.min(commitHeight, commitMax))
 
   function startSidebarResize(e: MouseEvent) {
     e.preventDefault()
@@ -160,10 +202,13 @@
   function startCommitResize(e: MouseEvent) {
     e.preventDefault()
     const startY = e.clientY
-    const startHeight = commitHeight
+    // From what is on screen, not from the stored value: with a clamp in play
+    // the two differ, and starting from the stored one would make the divider
+    // jump on the first pixel of the drag.
+    const startHeight = effectiveCommitHeight
     function onMove(ev: MouseEvent) {
       const delta = startY - ev.clientY
-      commitHeight = Math.max(COMMIT_MIN, Math.min(COMMIT_MAX, startHeight + delta))
+      commitHeight = Math.max(COMMIT_MIN, Math.min(commitMax, startHeight + delta))
     }
     function onUp() {
       window.removeEventListener('mousemove', onMove)
@@ -214,7 +259,7 @@
   }
 
   function handleCommitKey(e: KeyboardEvent) {
-    splitterKey(e, 'horizontal', commitHeight, COMMIT_MIN, COMMIT_MAX, (v) => {
+    splitterKey(e, 'horizontal', effectiveCommitHeight, COMMIT_MIN, commitMax, (v) => {
       commitHeight = v
       window.localStorage.setItem('leogit:commitHeight', String(v))
     })
@@ -356,7 +401,9 @@
       })
     } catch (error) {
       if (!opts.silent) {
-        repoState.update((s) => ({ ...s, error: String(error) }))
+        // An explicit refresh (⌘R, a post-op reload) that failed — retrying it
+        // is exactly what the user would do next.
+        reportActionError(error, () => void refreshStatus(opts))
         return
       }
       if (!opts.background) return // a user action's own follow-up: it reported already
@@ -395,7 +442,7 @@
         },
       }))
     } catch (error) {
-      repoState.update((s) => ({ ...s, error: String(error) }))
+      reportActionError(error)
     }
   }
 
@@ -500,7 +547,8 @@
         }
       })
     } catch (error) {
-      repoState.update((s) => ({ ...s, isLoading: false, error: String(error) }))
+      repoState.update((s) => ({ ...s, isLoading: false }))
+      reportActionError(error)
     }
   }
 
@@ -535,7 +583,8 @@
         }
       })
     } catch (error) {
-      repoState.update((s) => ({ ...s, isLoading: false, error: String(error) }))
+      repoState.update((s) => ({ ...s, isLoading: false }))
+      reportActionError(error)
     }
   }
 
@@ -620,8 +669,8 @@
         ...s,
         isDiffLoading: false,
         isDiffLoadingSlow: false,
-        error: String(error),
       }))
+      reportActionError(error, () => void loadDiffForFile(file, { ...opts, force: true }))
     }
   }
 
@@ -750,8 +799,8 @@
         ...s,
         isCommitDiffLoading: false,
         isCommitDiffLoadingSlow: false,
-        error: String(error),
       }))
+      reportActionError(error, () => void loadCommitFileDiff(file, { ...opts, force: true }))
     }
   }
 
@@ -884,6 +933,32 @@
     loadDiffForFile(file)
   }
 
+  /*
+    Keep a file open in the diff pane: the first one when the changeset arrives,
+    and again when a reload drops the one that was open. Landing on "Select a
+    file to view its diff" with the list of files right there made the most
+    common next action a click nobody should have to make — and this client's
+    own commit-detail pane has always auto-selected its first file.
+
+    Keyed on the *path list* rather than the files, so a tick that only changes
+    a file's content or status can't disturb the selection: a derived string
+    settles before the effect sees it, which is what turns a 2 s poll into a
+    trigger that fires when the changeset actually changes. `refreshStatus` has
+    already cleared `activeFile` when its path left the tree, so "nothing open"
+    is the whole condition — the same two cases the native sidebar re-seats on.
+  */
+  const changedPaths = $derived($repoState.status.files.map((f) => f.path).join('\n'))
+  $effect(() => {
+    const paths = changedPaths
+    untrack(() => {
+      if (!paths) return
+      const current = get(repoState)
+      if (current.activeFile) return
+      const first = current.status.files[0]
+      if (first) void loadDiffForFile(first)
+    })
+  })
+
   async function handleCommitted(): Promise<void> {
     // Defensive: clear amend mode if the composer somehow didn't.
     repoState.update((s) => ({ ...s, commitToAmend: null }))
@@ -932,7 +1007,7 @@
         refreshBranches(),
       ])
     } catch (error) {
-      repoState.update((s) => ({ ...s, error: String(error) }))
+      reportActionError(error)
     } finally {
       // Always close the dialog so any error surfaces in the ErrorModal alone.
       checkoutTarget = null
@@ -968,7 +1043,7 @@
       // metadata in the picker moved with it.
       await refreshBranches()
     } catch (error) {
-      repoState.update((s) => ({ ...s, error: String(error) }))
+      reportActionError(error)
     }
   }
 
@@ -1044,14 +1119,36 @@
   let discardPlan = $state<DiscardPlan | null>(null)
   let isDiscarding = $state(false)
 
-  // Run a side-effect-only file action (copy / reveal / open), surfacing any
-  // failure through the shared error modal. No-op without an open repo.
+  /**
+   * Anything on top of the repo view — the overlays, the confirmations, the
+   * error modal. What the app's own chords check before firing: the question a
+   * dialog is asking is the only one on screen, and answering it with a ⌘↩ that
+   * means "commit" would answer something else entirely. One list, declared
+   * where the last of its inputs is; SH-4 turns it into a real topmost-closing
+   * stack, and until then a new overlay joins here or joins nothing.
+   */
+  const modalOpen = $derived(
+    showRepos ||
+      showClone ||
+      showBranches ||
+      showSettings ||
+      showHelp ||
+      showMerge ||
+      discardTarget !== null ||
+      checkoutTarget !== null ||
+      $repoState.error !== undefined,
+  )
+
+  // Run a side-effect-only file action (copy / reveal / open). These hand the
+  // file to another program and change nothing here, so a failure is reported
+  // and stepped over: taking the window because Finder wouldn't open is a
+  // bigger interruption than the thing that failed, and the repository the user
+  // was actually looking at stays on screen behind the banner. No-op without an
+  // open repo.
   function runFileAction(fn: (repoPath: string) => Promise<void>): void {
     const repoPath = $appState.repoPath
     if (!repoPath) return
-    fn(repoPath).catch((error) => {
-      repoState.update((s) => ({ ...s, error: String(error) }))
-    })
+    fn(repoPath).catch(reportNotice)
   }
 
   async function ignoreFiles(append: (repoPath: string) => Promise<void>): Promise<void> {
@@ -1062,7 +1159,7 @@
       // The newly-ignored untracked file drops out of the changes list.
       await refreshStatus({ silent: true })
     } catch (error) {
-      repoState.update((s) => ({ ...s, error: String(error) }))
+      reportActionError(error)
     }
   }
 
@@ -1093,7 +1190,7 @@
       // refreshStatus prunes the discarded files from the list / active diff.
       await refreshStatus({ silent: true })
     } catch (error) {
-      repoState.update((s) => ({ ...s, error: String(error) }))
+      reportActionError(error)
     } finally {
       isDiscarding = false
     }
@@ -1142,7 +1239,7 @@
       const intervalMs = cfg?.auto_fetch ? cfg.fetch_interval_ms || 30000 : 0
       startAutoFetch(intervalMs)
     } catch (error) {
-      repoState.update((s) => ({ ...s, error: String(error) }))
+      reportActionError(error)
     }
   }
 
@@ -1214,7 +1311,7 @@
       await refreshBranches()
       await handleCommitted()
     } catch (error) {
-      repoState.update((s) => ({ ...s, error: String(error) }))
+      reportActionError(error)
     }
   }
 
@@ -1229,7 +1326,7 @@
       await refreshBranches()
       await handleCommitted()
     } catch (error) {
-      repoState.update((s) => ({ ...s, error: String(error) }))
+      reportActionError(error)
     }
   }
 
@@ -1240,7 +1337,7 @@
       await gitApi.deleteBranch(repoPath, name)
       await refreshBranches()
     } catch (error) {
-      repoState.update((s) => ({ ...s, error: String(error) }))
+      reportActionError(error)
     }
   }
 
@@ -1256,7 +1353,7 @@
       await refreshStatus()
       await handleCommitted()
     } catch (error) {
-      repoState.update((s) => ({ ...s, error: String(error) }))
+      reportActionError(error)
     }
   }
 
@@ -1274,12 +1371,17 @@
       await refreshStatus()
       await handleCommitted()
     } catch (error) {
-      repoState.update((s) => ({ ...s, error: String(error) }))
+      reportActionError(error)
     }
   }
 
-  function dismissError() {
-    repoState.update((s) => ({ ...s, error: undefined }))
+  // Retry closes the modal first: the second attempt reports its own outcome,
+  // and leaving the first failure on screen while it runs would make a success
+  // look like nothing happened.
+  function retryError(): void {
+    const retry = get(repoState).errorRetry
+    dismissActionError()
+    retry?.()
   }
 
   function toggleTerminalMinimize() {
@@ -1287,6 +1389,27 @@
       terminalSessionId = 1
     }
     terminalExpanded = !terminalExpanded
+  }
+
+  /**
+   * Run `command` in the embedded terminal, starting and expanding it first if
+   * it isn't already up.
+   *
+   * This is why the app hands a fix off to its own terminal rather than running
+   * it itself: `claude auth login` opens a browser and then waits on stdin for
+   * a pasted code. Driving that from our own UI would mean rebuilding a
+   * terminal — and asking for an auth code in app chrome, which is a habit
+   * worth not teaching. Here the real CLI runs in a real shell, the browser
+   * does the sign-in, and the user answers the tool's own prompt.
+   */
+  async function runInTerminal(command: string): Promise<void> {
+    if (terminalSessionId === 0) terminalSessionId = 1
+    terminalExpanded = true
+    // The panel may have been created by the click that got us here, so wait
+    // for it to mount before reaching for it; `runCommand` queues from there
+    // until the shell itself is ready.
+    await tick()
+    terminal?.runCommand(command)
   }
 
   function newTerminalSession() {
@@ -1333,6 +1456,19 @@
         if (cloneDismissable) showClone = false
         return
       }
+    }
+
+    // The composer's own chords, deliberately above the `inField` bail: they
+    // are *for* the fields, and a shortcut you have to leave the message to use
+    // is one nobody reaches mid-sentence. Both gate on the composer being the
+    // thing on screen — an overlay is a different task than the commit
+    // underneath it, and History isn't the composer at all.
+    if (meta && (e.key === 'Enter' || e.key === 'g')) {
+      if (modalOpen || $repoState.activeTab !== 'changes') return
+      e.preventDefault()
+      if (e.key === 'g') composer?.requestGenerate()
+      else composer?.requestCommit()
+      return
     }
 
     if (inField) return
@@ -1467,54 +1603,65 @@
       Both tab panes stay mounted and toggle via CSS so CommitMessage retains
       its in-progress draft (summary / description / co-authors) when the user
       switches to History and back. CommitList also keeps its scroll position.
+
+      The wrapper is what gets measured for the composer's height cap: the
+      Changes pane itself is `display: none` while History shows, and a pane
+      reporting zero height would collapse the cap on every tab round trip.
     -->
-    <div class="tab-pane" class:active={$repoState.activeTab === 'changes'}>
-      <div class="file-list-container">
-        <FileList
-          files={$repoState.status.files}
-          selectedFiles={$repoState.selectedFiles}
-          activeFile={$repoState.activeFile}
-          contextActions={fileContextActions}
-          onActivate={handleFileActivate}
-          onToggle={handleFileToggle}
-          onToggleAll={handleToggleAll}
-          onBulkToggle={handleBulkToggle}
-        />
+    <div class="tab-panes" bind:clientHeight={tabPanesHeight}>
+      <div class="tab-pane" class:active={$repoState.activeTab === 'changes'}>
+        <div class="file-list-container">
+          <FileList
+            files={$repoState.status.files}
+            selectedFiles={$repoState.selectedFiles}
+            activeFile={$repoState.activeFile}
+            contextActions={fileContextActions}
+            onActivate={handleFileActivate}
+            onToggle={handleFileToggle}
+            onToggleAll={handleToggleAll}
+            onBulkToggle={handleBulkToggle}
+          />
+        </div>
+        <div class="commit-section" style="height: {effectiveCommitHeight}px;">
+          <div
+            class="commit-resize-handle"
+            onmousedown={startCommitResize}
+            onkeydown={handleCommitKey}
+            role="slider"
+            tabindex="0"
+            aria-orientation="horizontal"
+            aria-label="Resize commit section"
+            aria-valuenow={effectiveCommitHeight}
+            aria-valuemin={COMMIT_MIN}
+            aria-valuemax={commitMax}
+          ></div>
+          <CommitMessage
+            bind:this={composer}
+            onCommitted={handleCommitted}
+            onStopAmending={handleStopAmending}
+            onRunInTerminal={runInTerminal}
+          />
+        </div>
       </div>
-      <div class="commit-section" style="height: {commitHeight}px;">
-        <div
-          class="commit-resize-handle"
-          onmousedown={startCommitResize}
-          onkeydown={handleCommitKey}
-          role="slider"
-          tabindex="0"
-          aria-orientation="horizontal"
-          aria-label="Resize commit section"
-          aria-valuenow={commitHeight}
-          aria-valuemin={COMMIT_MIN}
-          aria-valuemax={COMMIT_MAX}
-        ></div>
-        <CommitMessage onCommitted={handleCommitted} onStopAmending={handleStopAmending} />
-      </div>
-    </div>
-    <div class="tab-pane" class:active={$repoState.activeTab === 'history'}>
-      <div class="commit-list-container">
-        <CommitList
-          commits={$repoState.log.commits}
-          selectedSha={$repoState.activeCommit?.sha || null}
-          unpushedShas={$repoState.status.unpushedShas}
-          hasResolvedUpstream={$repoState.status.upstream !== ''}
-          headSha={$repoState.status.headSha}
-          windowStartOffset={$repoState.log.windowStartOffset}
-          resetSeq={$repoState.log.resetSeq}
-          loaded={$repoState.log.loaded}
-          onSelect={loadCommitFiles}
-          onLoadMore={loadMoreCommits}
-          onLoadEarlier={loadEarlierCommits}
-          onAmendCommit={handleStartAmending}
-          onUndoCommit={handleUndoCommit}
-          onCheckoutCommit={handleCheckoutCommit}
-        />
+      <div class="tab-pane" class:active={$repoState.activeTab === 'history'}>
+        <div class="commit-list-container">
+          <CommitList
+            commits={$repoState.log.commits}
+            selectedSha={$repoState.activeCommit?.sha || null}
+            unpushedShas={$repoState.status.unpushedShas}
+            hasResolvedUpstream={$repoState.status.upstream !== ''}
+            headSha={$repoState.status.headSha}
+            windowStartOffset={$repoState.log.windowStartOffset}
+            resetSeq={$repoState.log.resetSeq}
+            loaded={$repoState.log.loaded}
+            onSelect={loadCommitFiles}
+            onLoadMore={loadMoreCommits}
+            onLoadEarlier={loadEarlierCommits}
+            onAmendCommit={handleStartAmending}
+            onUndoCommit={handleUndoCommit}
+            onCheckoutCommit={handleCheckoutCommit}
+          />
+        </div>
       </div>
     </div>
   </div>
@@ -1542,11 +1689,12 @@
     />
 
     <!--
-      Background failures never take the window. The poll owns this strip: it
-      appears after a streak of failed ticks (the repo went away) and clears
-      itself the moment a tick succeeds, so the last good snapshot stays
-      readable behind it instead of being hidden by a modal the user has to
-      dismiss on every tick. User-initiated failures still go to ErrorModal.
+      Failures that aren't worth the window. Two of them share this strip and
+      differ only in who retires them: the poll's own (a streak of failed ticks
+      — the repo went away) clears the moment a tick succeeds, while an OS
+      hand-off that failed has no later success to disprove it and so carries a
+      ✕. Both leave the last good view of the repository readable behind them,
+      which is the whole point — a modal on every tick hid it.
     -->
     {#if $repoState.pollError}
       <div class="poll-banner" role="status">
@@ -1559,6 +1707,23 @@
           Can't read this repository — it may have been moved, deleted, or unmounted.
         </span>
         <span class="poll-banner-detail">{$repoState.pollError}</span>
+      </div>
+    {/if}
+
+    {#if $repoState.notice}
+      <div class="poll-banner" role="status">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M8 2.5 14.5 13.5h-13z" />
+          <line x1="8" y1="6.5" x2="8" y2="9.5" />
+          <circle cx="8" cy="11.6" r="0.6" fill="currentColor" stroke="none" />
+        </svg>
+        <span class="banner-message">{$repoState.notice}</span>
+        <button class="banner-dismiss" onclick={dismissNotice} aria-label="Dismiss">
+          <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+            <line x1="4" y1="4" x2="12" y2="12" />
+            <line x1="12" y1="4" x2="4" y2="12" />
+          </svg>
+        </button>
       </div>
     {/if}
 
@@ -1761,6 +1926,7 @@
           <div class="terminal-container">
             {#key `${$appState.repoPath}:${terminalSessionId}`}
               <Terminal
+                bind:this={terminal}
                 repoPath={$appState.repoPath}
                 shellId={$config?.terminal_shell}
                 expanded={terminalExpanded}
@@ -1858,7 +2024,8 @@
     <ErrorModal
       title="Error"
       message={$repoState.error}
-      onDismiss={dismissError}
+      onDismiss={dismissActionError}
+      onRetry={$repoState.errorRetry ? retryError : undefined}
     />
   {/if}
 </div>
@@ -1949,6 +2116,19 @@
   }
 
   /*
+    Holds both panes so the space they share has a height even while the one
+    being measured is hidden. Purely a measuring frame — it adds no box of its
+    own beyond the flex column the panes were already in.
+  */
+  .tab-panes {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  /*
     Both tab subtrees stay mounted (so CommitMessage doesn't drop its draft
     when the user peeks at History). Only the active one renders.
   */
@@ -2006,6 +2186,7 @@
   }
 
   .poll-banner-detail {
+    flex: 1;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -2014,6 +2195,38 @@
     font-family: var(--font-mono);
     font-size: 11px;
     user-select: text;
+  }
+
+  /* The notice's message IS the sentence, not a technical footnote under one,
+     so it reads at body weight rather than in the detail's muted mono. */
+  .banner-message {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    user-select: text;
+  }
+
+  .banner-dismiss {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    align-self: center;
+    flex-shrink: 0;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+
+  .banner-dismiss:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
   }
 
   .commit-body {

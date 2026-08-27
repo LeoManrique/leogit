@@ -30,6 +30,36 @@ final class CommitStore {
     /// config file. `"claude"` until `loadAIProvider` reads the real value.
     private(set) var aiProvider = "claude"
 
+    /// Why the AI provider can't serve a request, when it can't — see
+    /// `providerBlock`.
+    struct ProviderBlock: Equatable {
+        /// The provider this describes. An answer is stale only when the
+        /// picker has moved on, which is what `blockingProvider` checks.
+        let provider: String
+        /// Core's sentence, shown as-is.
+        let reason: String
+        /// A shell command that would fix it, for the terminal dock to run.
+        /// Empty when there is none worth offering.
+        let fixCommand: String
+        /// The failed request this was read out of, when it came from one —
+        /// the provider's own wording, kept as the row's tooltip.
+        let detail: String
+    }
+
+    /// The standing reason Generate is unavailable, or `nil`.
+    ///
+    /// Only the blocked case is stored, so `nil` covers both "ready" and "not
+    /// asked yet" — the same thing to the gate. Refusing on "not known" is
+    /// worse than letting a doomed request report itself.
+    private(set) var providerBlock: ProviderBlock?
+
+    /// The block while it still describes the selected provider. Tagging is
+    /// what makes switching provider drop its predecessor's block on the spot,
+    /// with no clearing step to forget.
+    var blockingProvider: ProviderBlock? {
+        providerBlock?.provider == aiProvider ? providerBlock : nil
+    }
+
     /// Failure text from the last commit, generate, or provider-save
     /// attempt — one shared slot, like the Tauri composer's inline error.
     /// Cleared when the next attempt starts, on success, and on `reset()`.
@@ -203,6 +233,75 @@ final class CommitStore {
         }
     }
 
+    /// Ask whether the selected provider can serve a request, so Generate can
+    /// say *why* it is greyed out instead of letting a doomed request report
+    /// it. Called when the composer appears, after a provider change, and
+    /// whenever the app is re-activated while something is blocking — every
+    /// way of fixing an unready provider leaves this app, so coming back is
+    /// exactly when the answer can have changed.
+    ///
+    /// The result is assigned only once it is in hand: clearing on the way in
+    /// would make the remedy blink out and back on every re-ask, and asking
+    /// Claude costs two process spawns.
+    func refreshProviderStatus() async {
+        // The picker's write may still be in flight, and the config read below
+        // reads the file it is writing — the same wait `generate` does.
+        await providerWrite?.value
+        let target = aiProvider
+        do {
+            let config = try await GitBridge.aiConfig()
+            // The file still names the provider being replaced, or the picker
+            // moved on while we asked: either way this answer is about the
+            // wrong provider.
+            guard config.provider == target, target == aiProvider else { return }
+            let status = try await GitBridge.providerStatus(config: config)
+            guard target == aiProvider else { return }
+            providerBlock = status.ready
+                ? nil
+                : ProviderBlock(
+                    provider: target,
+                    reason: status.reason,
+                    fixCommand: status.fixCommand,
+                    detail: ""
+                )
+        } catch {
+            // Core throws only for a provider name it doesn't know; anything
+            // else here is a wiring failure, not an answer, so nothing
+            // changes. In particular it must not clear a block a real failed
+            // request proved, which would put Generate back in front of a
+            // provider already known to be dead. An unasked question leaves
+            // the gate open, so a broken probe can't lock anyone out.
+            print("[ai] provider probe failed; leaving Generate enabled: \(error.displayMessage)")
+        }
+    }
+
+    /// Read a failed generate for a provider state the user can fix, and raise
+    /// the remedy if there is one.
+    ///
+    /// This is not a fallback for `refreshProviderStatus` — for an expired
+    /// session it is the only thing that works. Signing out deletes the
+    /// credentials, so the probe sees it; an expired session leaves them on
+    /// disk, so `claude auth status` still reports a signed-in CLI and only a
+    /// real request discovers the refresh failed.
+    ///
+    /// Only ever *raises* a block: a failure core doesn't recognize says
+    /// nothing about the provider.
+    private func classifyFailure(_ message: String) {
+        let target = aiProvider
+        let status = GitBridge.providerStatus(fromFailure: message, provider: target)
+        guard !status.ready else { return }
+        providerBlock = ProviderBlock(
+            provider: target,
+            reason: status.reason,
+            fixCommand: status.fixCommand,
+            detail: message
+        )
+        // The remedy replaces the raw failure rather than stacking under it:
+        // both describe one state, and the remedy is the half the user can act
+        // on. The provider's own wording survives as the row's tooltip.
+        errorMessage = nil
+    }
+
     /// The in-flight provider write, if any. Generate awaits it: the picker
     /// fires `setAIProvider` from a detached `Task`, so clicking Generate
     /// immediately after switching would otherwise read the *previous*
@@ -256,7 +355,9 @@ final class CommitStore {
             summary = message.title
             details = message.description
         } catch {
-            errorMessage = "Generate failed: \(error.displayMessage)"
+            let message = error.displayMessage
+            errorMessage = "Generate failed: \(message)"
+            classifyFailure(message)
         }
     }
 }

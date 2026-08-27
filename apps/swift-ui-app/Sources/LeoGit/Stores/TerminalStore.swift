@@ -28,7 +28,34 @@ final class TerminalStore {
     /// until the session reports in.
     var activeShellLabel = ""
 
+    /// A command waiting to be typed into the shell, cleared by the session
+    /// view once it has been. The panel is what owns the terminal, so a
+    /// caller elsewhere in the screen — the commit composer offering to fix
+    /// an unready AI provider — asks here rather than reaching for a session
+    /// that may not exist yet.
+    private(set) var pendingCommand: String?
+
     var hasSession: Bool { generation > 0 }
+
+    /// Show the terminal and type `command` into it, spawning the shell first
+    /// if this is the first expand.
+    ///
+    /// The app hands a fix to its own terminal rather than running it
+    /// silently: an interactive `claude auth login` needs a real terminal to
+    /// print its URL into, and asking for an auth code in app chrome is a
+    /// habit worth not teaching. The command is visible, and the user can see
+    /// exactly what ran.
+    func run(_ command: String) {
+        if generation == 0 { generation = 1 }
+        isExpanded = true
+        pendingCommand = command
+    }
+
+    /// The session typed `pendingCommand`; forget it so a later redraw can't
+    /// replay it.
+    func commandDidRun() {
+        pendingCommand = nil
+    }
 
     /// ⌘` and the header buttons. The PTY is lazy: none exists until the
     /// first expand asks for one.
@@ -54,5 +81,8 @@ final class TerminalStore {
         generation = 0
         isExpanded = false
         activeShellLabel = ""
+        // Anything still waiting for a shell dies with the panel rather than
+        // being typed into whichever session opens next.
+        pendingCommand = nil
     }
 }

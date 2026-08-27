@@ -90,7 +90,25 @@ export interface RepoState {
    * pre-populates the composer for a fresh commit.
    */
   restoreMessage: { summary: string; description: string; coAuthors: string[] } | null
+  /**
+   * Failure of an operation the user asked for and is waiting on — a transfer,
+   * a branch change, an explicit refresh. Takes the window, because the thing
+   * the user was doing did not happen. See {@link reportActionError}.
+   */
   error?: string
+  /**
+   * The same operation, bound for a second attempt. Set only where retrying is
+   * well defined; without it the modal offers Dismiss alone.
+   */
+  errorRetry?: () => void
+  /**
+   * Failure of something that was never the user's task — the file manager
+   * wouldn't open, the browser wouldn't launch. Reported in the non-blocking
+   * banner and dismissed by hand: unlike `pollError` there is no later success
+   * that disproves it, so nothing can retire it on the user's behalf.
+   * See {@link reportNotice}.
+   */
+  notice?: string
   /**
    * Set once the silent status poll has failed several ticks in a row — the
    * repository is genuinely unreadable (deleted, unmounted, permissions), not
@@ -160,6 +178,40 @@ export function resetRepoState() {
     // it compensating a slide that never happened.
     log: { ...defaultState.log, resetSeq: s.log.resetSeq + 1 },
   }))
+}
+
+/**
+ * Report a failure the user is waiting on: it takes the window, and offers a
+ * second attempt when `retry` is given.
+ *
+ * The classification is native's: an operation the user asked for gets a modal,
+ * an informational hand-off gets the banner ({@link reportNotice}). Both live
+ * here so each call site makes that choice by picking a function, rather than
+ * by copying a `repoState.update` shape — which is how every failure in this
+ * client, down to "couldn't reveal the file in Finder", ended up seizing the
+ * window.
+ */
+export function reportActionError(message: unknown, retry?: () => void) {
+  repoState.update((s) => ({ ...s, error: String(message), errorRetry: retry }))
+}
+
+/** Clear the action-failure modal along with whatever retry it carried. */
+export function dismissActionError() {
+  repoState.update((s) => ({ ...s, error: undefined, errorRetry: undefined }))
+}
+
+/**
+ * Report a failure that isn't the user's task — an OS hand-off that didn't
+ * take. States itself in the banner and stays out of the way; the last good
+ * view of the repository is still on screen behind it.
+ */
+export function reportNotice(message: unknown) {
+  repoState.update((s) => ({ ...s, notice: String(message) }))
+}
+
+/** Dismiss the informational banner. Nothing else ever clears it. */
+export function dismissNotice() {
+  repoState.update((s) => ({ ...s, notice: undefined }))
 }
 
 export const canCommit = derived(repoState, ($state) => {

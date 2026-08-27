@@ -219,6 +219,14 @@
     !allSelected && selectableFiles.some((f) => selectedFiles.has(f.path)),
   )
 
+  // What the header says, in the native client's words: how many of the files
+  // that *can* be committed are going into this commit. "12 changed files"
+  // restated the tab's own pill and answered a question the list already
+  // answers by being visible, while the number the user is about to act on —
+  // how many are checked — was nowhere. A dirty submodule is out of both
+  // counts, since it can never be staged from here.
+  const includedCount = $derived(selectableFiles.filter((f) => selectedFiles.has(f.path)).length)
+
   // `indeterminate` is a DOM property, not an attribute — Svelte can't render
   // it from markup. Reflect it via an effect whenever the derived flag flips.
   $effect(() => {
@@ -370,7 +378,7 @@
         onkeydown={(e) => e.stopPropagation()}
       />
       <span class="select-all-label">
-        {files.length} changed file{files.length === 1 ? '' : 's'}
+        {includedCount} of {selectableFiles.length} files included
       </span>
     </div>
   {/if}
@@ -460,17 +468,23 @@
             {#if file.embedded}
               <div
                 class="status-badge"
-                style="color: var(--status-blue)"
+                style="--badge-tint: var(--status-blue)"
                 title="Nested Git repository — commits as a link, not its files"
               >
                 ↪
               </div>
             {:else if file.submodule_dirty}
-              <div class="status-badge submodule-badge" title={SUBMODULE_DIRTY_HINT}>↪</div>
+              <div
+                class="status-badge"
+                style="--badge-tint: var(--text-muted)"
+                title={SUBMODULE_DIRTY_HINT}
+              >
+                ↪
+              </div>
             {:else}
               <div
                 class="status-badge"
-                style="color: {getStatusColor(file.status)}"
+                style="--badge-tint: {getStatusColor(file.status)}"
                 title={$fileStatusStyles[file.status]?.label ?? file.status}
               >
                 {$fileStatusStyles[file.status]?.letter ?? file.status.charAt(0)}
@@ -624,14 +638,25 @@
     outline-offset: 2px;
   }
 
+  /*
+    The status letter on a tinted plate of its own colour — the native client's
+    treatment, adopted here so the two clients read alike. The plate is what
+    makes the letter a badge at a glance rather than a stray glyph in a column
+    of filenames; `--badge-tint` is set per row so the letter and its wash can
+    never disagree about which status they are showing.
+  */
   .status-badge {
-    width: 14px;
+    width: 18px;
+    height: 18px;
     display: flex;
     align-items: center;
     justify-content: center;
+    border-radius: 4px;
+    color: var(--badge-tint, var(--text-secondary));
+    background: color-mix(in srgb, var(--badge-tint, var(--text-secondary)) 15%, transparent);
     font-family: var(--font-mono);
-    font-size: 11px;
-    font-weight: 600;
+    font-size: 10px;
+    font-weight: 700;
     flex-shrink: 0;
   }
 
@@ -658,10 +683,6 @@
   /* Dirty submodule: can't be staged from the parent, so the row reads as
      inactive (muted name) while still being clickable to view its diff. */
   .file-row.submodule-dirty :global(.filename) {
-    color: var(--text-muted);
-  }
-
-  .status-badge.submodule-badge {
     color: var(--text-muted);
   }
 </style>

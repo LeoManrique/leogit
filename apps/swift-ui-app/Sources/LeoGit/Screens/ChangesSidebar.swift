@@ -35,6 +35,11 @@ struct ChangesSidebar: View {
     /// report: the owner shows them in the screen's error banner.
     let onError: (String) -> Void
 
+    /// Run a shell command in the terminal dock — the composer's offer to fix
+    /// an unready AI provider. Owned by the repository screen, which is where
+    /// the dock lives.
+    let onRunInTerminal: (String) -> Void
+
     /// Snapshot of the files to commit while the embedded-repo confirmation
     /// is up, so the commit operates on what the user was shown.
     @State private var pendingFiles: [FileEntry] = []
@@ -81,7 +86,8 @@ struct ChangesSidebar: View {
                 includedCount: includedFiles.count,
                 autoSummary: CommitStore.autoSummary(for: includedFiles),
                 onSubmit: submit,
-                onGenerate: generate
+                onGenerate: generate,
+                onRunFixCommand: onRunInTerminal
             )
             .frame(height: effectiveComposerHeight)
         }
@@ -101,6 +107,13 @@ struct ChangesSidebar: View {
             // The provider picker mirrors the shared config file; one read
             // per appearance is enough (it's machine-global, not per-repo).
             await commitStore.loadAIProvider()
+        }
+        .task(id: commitStore.aiProvider) {
+            // Re-asked whenever the picker moves, so the gate always describes
+            // the provider Generate would actually run. Keyed on the provider
+            // rather than the whole config: an unrelated Settings save is not
+            // a reason to spawn `claude --version` again.
+            await commitStore.refreshProviderStatus()
         }
         .confirmationDialog(
             "Commit Embedded Repositories?",

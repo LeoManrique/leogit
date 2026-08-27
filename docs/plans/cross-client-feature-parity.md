@@ -1,6 +1,6 @@
 # Plan — Cross-client feature parity (SwiftUI ⇄ Tauri)
 
-> Status: **in progress — WS-A, WS-B and WS-C shipped (2026-08-27), WS-D is next.**
+> Status: **in progress — WS-A, WS-B, WS-C and WS-D shipped (2026-08-27), WS-E is next.**
 > The remaining work was re-cut into seventeen smaller workstreams (C…S) on
 > 2026-08-27 after WS-B proved too large to review as one piece — see §6.
 > Accepted 2026-08-27 with every open decision resolved. Per-workstream state
@@ -464,11 +464,11 @@ and matched, not that it was skipped.
 - **CH-2 · Space / keyboard toggle.** Native has **no keyboard route to
   include/exclude a file at all** (the highest-frequency action in the app);
   Tauri and GH Desktop toggle on Space, bulk-toggle in a selection. → WS-N
-- **CH-3 · Select-all header.** Tauri: true tri-state (the documented
-  contract); native: a binary toggle that lies the moment one file is
-  unchecked — but native's "3 of 12 files included" label beats Tauri's
-  "12 changed files" (which duplicates the tab pill). Combine: tri-state +
-  native's label, both clients. → WS-D, WS-N
+- **CH-3 · Select-all header.** Decided: **tri-state checkbox + native's label**,
+  both clients. ✅ *WS-D* for the label half — Tauri now says
+  "3 of 12 files included", counting *committable* files so a dirty submodule is
+  in neither figure. Native's binary toggle, which lies the moment one file is
+  unchecked, is the half left. → WS-N
 - **CH-4 · Status badge style.** The conflicted letter differs between the
   clients (`U` in Tauri, `!` natively): **verdict `U`** — git's own porcelain
   letter, which is the vocabulary native's own comment claims to follow. Hoist
@@ -483,8 +483,10 @@ and matched, not that it was skipped.
   `· merging` suffix. **Decided: the native 18×18 tinted plate behind the
   letter stays** and becomes the shared look — STYLE.md's old no-plate rule was
   a leftover of the earlier TUI-flavored direction, macOS style is the design
-  authority today, and the rule is rewritten to describe the plate; the Tauri
-  client adopts the plate here. → WS-D
+  authority today. ✅ *WS-D*: the Tauri badge is that plate — 18×18, 4px radius,
+  the status colour at 15% behind its own letter — set from one `--badge-tint`
+  per row so the letter and the wash can't name different statuses, and applied
+  to the embedded / dirty-submodule glyphs too so the column doesn't read ragged.
 - **CH-5 · Rename display.** Tauri and GH Desktop render `old → new`
   (STYLE.md mandates it); native shows only the destination —
   indistinguishable from an add. Also missing in the native diff header
@@ -520,29 +522,45 @@ and matched, not that it was skipped.
 - **CH-9 · Embedded-repo confirm.** Tauri's copy is better (names the outer
   repo, states the clone consequence, "Commit as link" verb); native's system
   `confirmationDialog` is the right container. Merge: native container +
-  Tauri text; fix Tauri's backdrop-cancels-mid-commit guard. → WS-D, WS-N
+  Tauri text. ✅ *WS-D* for the Tauri half: one `canCancel` gate now answers
+  the backdrop, Escape and the Cancel button, where only Escape had checked —
+  the tell that a per-dismissal list had already drifted once. → WS-N
 - **CH-10 · Composer details.** Port to native: the 72-char summary counter
   (STYLE.md; skip Tauri's silent 200-char hard cap — it truncates pasted
   and AI-generated summaries), the included-row weight cue, tooltip only when
-  truncated, keyboard resize on the handle (ROADMAP's composer-resize item), an in-flight
-  "Committing…" label. Port to Tauri: window-wide ⌘↩/⌘G (the field-scoped
-  version defeats the point; the a11y-lint excuse doesn't apply to a window
-  listener), the height clamp against short windows (STYLE.md — cap the
-  drag as well as the render so the stored height stays reachable), and the
-  provider-revert (ST-7) — D-10's lockout landed in WS-A. Native: coalesce the per-drag-frame
-  `UserDefaults` writes to drag-end. → WS-D, WS-N
-- **CH-11 · Row-action errors.** Native's non-blocking banner beats Tauri's
-  modal for non-decisional failures ("couldn't reveal file"); Tauri is
-  internally inconsistent (commit failures whisper inline, reveal failures
-  seize the window). Split by class in both: user-action failures → modal
-  with retry; background/informational → banner (see also SH-8). → WS-D, WS-N
-- **CH-12 · Copy File Path.** Tauri does an async IPC round trip to
-  concatenate two strings; git paths are always `/`-separated and the
-  in-repo join helper already exists. → WS-D
-- **CH-13 · First-file auto-select.** Native and GH Desktop auto-open the
-  first changed file; Tauri lands on an empty pane (its own commit-detail
-  pane auto-selects — internal inconsistency). Port to Tauri; pairs with
-  DF-1 so the auto-selected diff stays fresh. → WS-D
+  truncated, keyboard resize on the handle (ROADMAP's composer-resize item), an
+  in-flight "Committing…" label, and coalescing the per-drag-frame
+  `UserDefaults` writes to drag-end. ✅ *WS-D* for the Tauri half: ⌘↩/⌘G moved
+  to `MainLayout`'s window handler above its `inField` bail (the fields' own
+  listeners made them reachable only once you were already typing), inert on
+  History and under any dialog; and the height clamp landed, measured off a
+  wrapper around both tab panes because the Changes pane reports zero while
+  History shows. D-10's lockout landed in WS-A, and ST-7's revert turned out to
+  have landed in WS-B. → WS-N
+- **CH-11 · Row-action errors** (with **SH-5**). Decided: **split by class in
+  both** — an operation the user is waiting on takes the modal, with a retry
+  where the same attempt can just be made again; a failure that was never their
+  task states itself in the strip. ✅ *WS-D* for Tauri: `reportActionError` /
+  `reportNotice` in the repo store are that choice, so a call site picks a
+  function instead of copying the `repoState.update` shape from its neighbour —
+  which is how every failure in the client, down to "couldn't reveal the file",
+  came to seize the window. The strip gained a second, dismissible variant (the
+  poll's own has no ✕ because its own recovery retires it; nothing can retire
+  this one), and `ErrorModal` was finally passed the `onRetry` it has always
+  accepted. The rule is now FRONTEND §6.13. Native's remaining drift: discard,
+  checkout and undo failures go to its banner where the rule puts them in the
+  modal, and its banner still has no dismiss. → WS-N, WS-Q
+- **CH-12 · Copy File Path.** ✅ *WS-D.* Tauri crossed to the backend and back to
+  concatenate two strings it already held. `utils/path.ts` gained `absolutePath`
+  — the one place the filesystem path and git's always-`/` path meet — which
+  reads the separator off the repo root rather than assuming one, so a Windows
+  paste still gets backslashes.
+- **CH-13 · First-file auto-select.** ✅ *WS-D.* Tauri landed on an empty pane
+  beside a list of files while its own commit-detail pane had always
+  auto-selected. It now re-seats on native's two conditions and no others
+  (nothing open, or what was open left the tree), keyed on a `$derived` of the
+  *path list* so a 2 s tick that only changes content can't move the selection.
+  Pairs with DF-1 so the auto-selected diff stays fresh.
 
 ### 4.6 Diff viewer (DF)
 
@@ -837,8 +855,13 @@ and matched, not that it was skipped.
   old copies go with it — including the one that mattered: the model and the
   server URL now always belong to the provider actually about to run, rather
   than being spliced from a picker value over a separately-loaded config.
-- **ST-7 · Provider save failure.** Native reverts the picker; Tauri leaves
-  the optimistic value lying until restart. Port the revert (4 lines). → WS-D
+- **ST-7 · Provider save failure.** ✅ *WS-B*, ahead of the workstream it was
+  scheduled to — `patch_config`'s adoption rewrote `setProvider` and brought the
+  revert with it. WS-D found it already done and narrowed it: the rollback puts
+  back the one field rather than the whole config snapshot, which would have
+  reverted everything the store learned meanwhile — D-5's lost update, one layer
+  up. The Settings overlay's picker still has no revert, which ST-3 inherits.
+  → WS-H
 - **ST-8 · One model field, two providers.** Set `sonnet`, switch to Ollama,
   Generate fails — a shared design flaw; GitHub Desktop stores per-provider
   models. **Decided: split per provider, restructured cleanly** —
@@ -852,12 +875,30 @@ and matched, not that it was skipped.
   order in `Config` is now load-bearing — a TOML table swallows every key after
   it, so nothing scalar may be declared below those two (pinned by a
   round-trip test).
-- **ST-9 · `check_provider_available`.** Dead wrapper in Tauri, deliberately
-  unexported natively. **Decided: use it rather than delete it** — a dead
-  command path is exactly how BR-1 rotted, and the probe earns its keep: gate
-  Generate with a cheap `claude --version` at composer mount ("Claude CLI not
-  found" beats failing after a long request), and export it natively too.
-  → WS-D, WS-R
+- **ST-9 · `check_provider_status`.** **Decided: use it rather than delete
+  it** — a dead command path is exactly how BR-1 rotted. ✅ *WS-D*, both clients:
+  the probe (`ProviderStatus { ready, reason, fix_command }`) plus
+  `provider_status_from_failure`, the status strip, and the offer to run the fix
+  command in each client's own terminal. Details in FRONTEND §6.7 and TECHNICAL.
+  It took **four** corrections across three visual checks, and none of them was a
+  bug in the code — each was a wrong model of the problem. Read them before
+  building any other readiness gate:
+  - **`claude --version` answers the wrong question.** It proves the binary
+    exists, not that it will answer. Hence the second question, `claude auth
+    status`, read from its JSON payload rather than its exit code.
+  - **A probe cannot see an expired session at all.** Signing out *deletes* the
+    credentials; an expiry leaves them on disk, so `auth status` still reports a
+    signed-in CLI and only a real request discovers the refresh failed — with a
+    different message (`Not logged in · Please run /login` vs `Failed to
+    authenticate: OAuth session expired…`). **Testing with `logout` proves
+    nothing about the expired case.** That was the trap, and the user caught it.
+  - **Chained `{:else if}` made the remedy unreachable.** It was written after
+    the error block, so on a failed generate — the one case it existed for — it
+    was structurally impossible to render. A conditional whose sibling is *also*
+    true in the case that matters is not a chain.
+  - **A fix shipped to one client is not shipped.** The whole first pass was
+    Tauri-only while the parity plan's own subject is the two clients agreeing.
+    Port in the same change, or the gap is what the user finds.
 - **ST-10 · Scan-path editor.** **Decided: locked by default on both
   clients** — the field renders read-only with an **Edit** button beside it —
   the macOS list-editor pattern — Edit enables it, the button becomes
@@ -963,11 +1004,10 @@ and matched, not that it was skipped.
 - **SH-4 · Escape.** Tauri's global stack is duplicated in two files (already
   drifted) and closes *all* overlays at once; fold into one topmost-closing
   stack. Native's per-surface AppKit handling is fine. → WS-H
-- **SH-5 · Error model.** Split by class in both (CH-11): native's
-  non-dismissible background banner needs a dismiss ✕; Tauri needs to stop
-  seizing the window for informational failures and should finally pass the
-  `onRetry` its ErrorModal already accepts (ROADMAP's `RetryAction` is
-  the shared target). → WS-D, WS-Q
+- **SH-5 · Error model.** Split by class in both — the ruling and the Tauri half
+  are in CH-11. Native's remaining half: its background banner still has no
+  dismiss ✕, and the classes it puts in the banner that the rule puts in the
+  modal. → WS-N, WS-Q
 - **SH-6 · Window.** Tauri: add `tauri-plugin-window-state` (opens 1280×800
   every launch today; native gets restoration free) and set the window title
   to the repo name (QUICK-WINS item; match native's value). Min-size
@@ -1169,7 +1209,7 @@ is mostly adoption of already-proven native behavior.
    a `<fieldset disabled>` mid-clone freeze with progress outside it, row
    description tooltips, a *none / no matches* split, and a name tiebreak.
 
-   **What WS-D and later workstreams should know.**
+   **What the later workstreams should know.**
    - **A repo list is exactly what the scan paths cover** — neither client has a
      per-folder open action, by decision (RM-2). A workstream that finds a
      repository unreachable should reach for discovery or the scan-path setting,
@@ -1192,8 +1232,9 @@ is mostly adoption of already-proven native behavior.
      branch.** The clone dialog's re-arm effect read `tab` to decide whether to
      lazy-load, which made switching tabs re-run the whole reset and wipe a
      half-typed destination path. It now reads only `isOpen`, with the rest
-     under `untrack`. Worth checking wherever WS-D/WS-E touch an open/reset
-     effect.
+     under `untrack`. WS-D hit the same wall twice (the provider probe, the
+     first-file auto-select) and the fix generalized — see its entry for the
+     derived-key form.
    - **CL-7's per-tab error state needed no Tauri change**: `selectTab` already
      clears `cloneError`, and the gh-list failure is a separate state rendered
      inside the list. That half of CL-7 belongs to WS-L alone.
@@ -1208,19 +1249,83 @@ is mostly adoption of already-proven native behavior.
      because the destination path is derived from the selection and one press
      would clone before the user had seen where it lands. Flipping to one press
      is a two-line change in `handleListKeyDown` if the user prefers it.
-4. **WS-D — Tauri changes tab & composer (M). ← next.** The main loop. CH-13
-   (first-file auto-select — its own commit-detail pane already does this),
-   CH-3's Tauri half (adopt native's "3 of 12 files included" label over
-   "12 changed files", which duplicates the tab pill), CH-4's Tauri half (the
-   18×18 tinted plate behind WS-B's letter), CH-9's Tauri half (backdrop
-   cancels mid-commit), CH-10's Tauri half (window-wide ⌘↩/⌘G, and the height
-   clamp against short windows), CH-11 + SH-5's Tauri halves (split the error
-   model by class: stop seizing the window for informational failures, and
-   finally pass ErrorModal the `onRetry` it already accepts), CH-12 (drop the
-   IPC round trip that concatenates two strings), ST-7 (revert the provider
-   picker on save failure), ST-9's Generate gate (`claude --version` at composer
-   mount — the probe this plan decided to wire rather than delete).
-5. **WS-E — Tauri history & diff panes (M).** HI-2's Tauri half (the sliding
+4. ✅ **WS-D — Tauri changes tab & composer. Shipped 2026-08-27.** The main loop.
+   CH-13, CH-3(T), CH-4(T), CH-9(T), CH-10(T), CH-11 + SH-5(T), CH-12 and
+   ST-9's Generate gate **on both clients**; ST-7 turned out to have shipped in
+   WS-B. The changes
+   list now opens its first file and heads its rows with "N of M files
+   included"; the status letter sits on WS-B's specified 18×18 tinted plate;
+   ⌘↩/⌘G are window-wide; the composer can no longer clip its own Commit button
+   in a short window; Generate is gated on the provider answering; the
+   embedded-repo dialog's backdrop stops cancelling mid-commit; Copy File Path
+   stopped crossing the IPC boundary to join two strings. The largest piece is
+   the error split: **`reportActionError` / `reportNotice` in the repo store**,
+   with `ErrorModal` finally receiving the `onRetry` it always accepted.
+
+   **ST-9 was corrected four times across three visual checks**, and it grew a
+   native half in the process — it is the one item here that ended up shipping to
+   both clients. The gate now asks two sources, a probe before the click and a
+   reading of the request that failed, because an expired session is invisible to
+   the first; the fix command runs in each client's own terminal (Tauri
+   `Terminal.runCommand`, native `TerminalStore.run` → `TerminalController.run`,
+   both queueing until the shell is up). See ST-9 for the four wrong models.
+
+   **What WS-E and later workstreams should know.**
+   - **Ship both clients in the same change.** ST-9's first pass was Tauri-only,
+     and the user's next message was that nothing had appeared natively. The
+     subject of this plan is the two clients agreeing; a fix that lands in one is
+     a new parity item, not a finished one. Cost of porting late: an FFI export,
+     a bridge wrapper, a store, a view, and a re-verified count in FRONTEND §1.
+   - **Never clear state on the way *into* an async refresh.** Blanking the
+     provider verdict before re-probing made the remedy visibly blink out and
+     back on every window focus — the trigger the re-probe is bound to. Write the
+     answer when it arrives; hold the old one until then, and tag it with what it
+     describes so staleness is a comparison rather than a clearing step someone
+     forgets. Any WS-E pane that refetches on focus has this shape.
+   - **One strip per surface, not one per source.** The composer grew a red error
+     line and a separate caption row at opposite ends of the box, both describing
+     one state. They are now one block, and the remedy *replaces* the failure it
+     was read out of. HI-8 and DF-10 add rows to panes that already have an error
+     slot — join it rather than stacking beside it.
+   - **Check the code before implementing an inventory item.** ST-7 was listed
+     as open here and had been closed by WS-B, which rewrote `setProvider` for
+     `patch_config` and brought the revert along. WS-B's hoists reached further
+     into the clients than §5 records; the same is likely true of items still
+     marked open in areas it touched.
+   - **STYLE.md was ahead of the code, twice.** The 18×18 plate and the
+     composer's height clamp were both already written there as the shared
+     target — WS-D was implementing a rule, not inventing one. Read STYLE for
+     the surface you are about to change before designing it.
+   - **Failure classification is two functions, and WS-E owns call sites of
+     both.** HI-8's page-error demotion is `reportNotice`, not a third path.
+     DF-10's inline pane error *replaces* the `reportActionError(…, retry)` WS-D
+     put on the two diff loads — take the retry with it or drop it deliberately,
+     don't leave a modal and an inline error describing the same failure.
+   - **`modalOpen` in `MainLayout` is the one list of "something is on top".**
+     Overlays, confirmations, the error modal. The composer chords read it; a
+     new overlay joins it or joins nothing. SH-4 (WS-H) turns it into the real
+     topmost-closing stack, and should fold Escape's own list into it — Escape
+     still keeps a separate condition today because it needs the clone dialog's
+     busy state, which the chords don't.
+   - **A window-level chord that acts on a component reaches it by `bind:this`
+     plus an exported function**, not by lifting the component's state.
+     `CommitMessage.requestCommit` / `.requestGenerate` gate exactly as their
+     buttons do, which is the point: one gate, two entry points.
+   - **Auto-select is a `$derived` key read by an `untrack`ed `$effect`.** The
+     effect must not read the store directly, or it re-runs on every one of the
+     poll's ticks; a derived string of the path list settles first, so the body
+     runs when the *set* changes. **HI-3 is the same shape** — auto-select the
+     newest commit, re-seat when the selected sha is rewritten away — and should
+     reuse it rather than watch `commits` directly.
+   - **Measure a pane through a wrapper, not the pane.** The Changes tab pane is
+     `display: none` while History shows and reports zero height, which would
+     collapse the composer's cap on every tab round trip. `.tab-panes` exists to
+     be the thing with a height.
+   - **Native's error split disagrees with the rule this plan just wrote.**
+     Discard, checkout and undo failures go to native's banner; FRONTEND §6.13
+     puts them in the modal. WS-N and WS-Q close it, and native's banner needs
+     its dismiss ✕ in the same pass.
+5. **WS-E — Tauri history & diff panes (M). ← next.** HI-2's Tauri half (the sliding
    window becomes the bounded-append model — the structural half of D-1's bug
    class, inheriting `log.resetSeq` from WS-A), HI-3 (auto-select newest,
    re-seat after amend, right-click moves selection), HI-4's Tauri half
@@ -1457,8 +1562,9 @@ other decision lives inline with the item it governs, marked **Decided** in §4.
 Per workstream, matching the previous plan's bar:
 
 - Zero-warning `xcodebuild` via `just mac-build`; `pnpm check` (svelte-check)
-  0/0; `cargo test --workspace` green (**159 core + 24 bridge** after WS-B,
-  from the 120 + 24 this plan started at — every hoist landed with tests);
+  0/0; `cargo test --workspace` green (**164 core + 24 bridge** after WS-D,
+  from the 120 + 24 this plan started at — every hoist and every probe rule
+  landed with tests);
   `cargo clippy --workspace --all-targets -- -W clippy::pedantic` at
   **166** or better, never worse (the plan opened at 184; WS-B took it to 170,
   WS-C to 166 with the command it deleted). A Tauri workstream also runs

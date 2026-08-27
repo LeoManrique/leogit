@@ -104,44 +104,183 @@ pub async fn generate_commit_message(
     }
 }
 
+/// Whether a provider can actually serve a request — and when it can't, what to
+/// tell the user and what would fix it.
+///
+/// Deliberately richer than a boolean. "The binary is installed" and "the binary
+/// will answer" are different questions, and a gate that asks the first while
+/// the user is waiting on the second lets a doomed request through, then reports
+/// a failure the probe could have named before it started: an installed Claude
+/// CLI with an expired session passes `--version` and fails every generate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderStatus {
+    pub ready: bool,
+    /// Why not, as a sentence a client renders as-is. Empty when ready.
+    pub reason: String,
+    /// A shell command that would fix it, for a client with a terminal to offer
+    /// it in. Empty when there is none, or when we can't know it would help —
+    /// a remote Ollama is not fixed by starting a local one.
+    pub fix_command: String,
+}
+
+impl ProviderStatus {
+    fn ready() -> Self {
+        Self { ready: true, reason: String::new(), fix_command: String::new() }
+    }
+
+    fn blocked(reason: impl Into<String>, fix_command: &str) -> Self {
+        Self { ready: false, reason: reason.into(), fix_command: fix_command.to_string() }
+    }
+}
+
+const CLAUDE_MISSING: &str = "Claude CLI not found. Install it, or switch the provider to Ollama.";
+const CLAUDE_SIGNED_OUT: &str = "Claude is installed but not signed in.";
+const CLAUDE_AUTH_FAILED: &str = "Claude couldn't authenticate. Sign in again.";
+const CLAUDE_LOGIN_COMMAND: &str = "claude auth login";
+const OLLAMA_SERVE_COMMAND: &str = "ollama serve";
+
+/// Read a *failed request* for a provider state the user can fix.
+///
+/// This is not a fallback for [`check_provider_status`] — for the expired
+/// session it is the only thing that works. Signing out deletes the
+/// credentials, so a probe sees it; a session that expired leaves them on disk,
+/// so `claude auth status` still reports a signed-in CLI and only a real
+/// request discovers the refresh failed. Any gate built on the probe alone
+/// waves that case straight through, which is exactly what happened.
+///
+/// Matching on the CLI's wording is unavoidable here — it is the only place
+/// that state is ever reported — so it is done in one place, against the shapes
+/// actually observed, and only ever to *offer* a remedy. The message the user
+/// sees is still the CLI's own.
+#[must_use]
+pub fn provider_status_from_failure(provider: &str, error: &str) -> ProviderStatus {
+    if provider != "claude" {
+        return ProviderStatus::ready();
+    }
+    let lowered = error.to_ascii_lowercase();
+    let needs_sign_in = [
+        "not logged in",
+        "failed to authenticate",
+        "oauth",
+        "run /login",
+        "invalid api key",
+        "unauthorized",
+    ]
+    .iter()
+    .any(|marker| lowered.contains(marker));
+    if needs_sign_in {
+        ProviderStatus::blocked(CLAUDE_AUTH_FAILED, CLAUDE_LOGIN_COMMAND)
+    } else {
+        ProviderStatus::ready()
+    }
+}
+
+/// Probe whether `provider` is ready to take a request.
+///
+/// Every probe failure is an answer, never an error: the only `Err` is a
+/// provider name nothing here knows. And an answer we can't interpret opens the
+/// gate rather than closing it — locking a user out of Generate because a CLI
+/// changed its output format is worse than letting a request report itself.
+///
 /// # Errors
-/// Returns an error only for an unknown provider name; probe failures map to
-/// `Ok(false)` so the UI can gate features without surfacing raw errors.
-pub async fn check_provider_available(
+/// Returns an error only for an unknown provider name.
+pub async fn check_provider_status(
     provider: String,
     config: AiProviderConfig,
-) -> Result<bool, String> {
+) -> Result<ProviderStatus, String> {
     match provider.as_str() {
-        "claude" => {
-            let mut cmd = tokio::process::Command::new("claude");
-            cmd.arg("--version");
-            let out = super::process::hide_console_async(&mut cmd).output().await;
-            match out {
-                Ok(o) => Ok(o.status.success()),
-                Err(_) => Ok(false),
-            }
-        }
-        "ollama" => {
-            let base_url = config
-                .base_url
-                .unwrap_or_else(super::config::default_ollama_url);
-            let Ok(client) = reqwest::Client::builder()
-                .timeout(Duration::from_secs(5))
-                .build()
-            else {
-                return Ok(false);
-            };
-            match client
-                .get(format!("{}/api/tags", base_url.trim_end_matches('/')))
-                .send()
-                .await
-            {
-                Ok(resp) => Ok(resp.status().is_success()),
-                Err(_) => Ok(false),
-            }
-        }
+        "claude" => Ok(check_claude().await),
+        "ollama" => Ok(check_ollama(&config).await),
         _ => Err(format!("Unknown AI provider: {provider}")),
     }
+}
+
+/// Run `claude` with `args`, or `None` if it could not be spawned at all.
+async fn run_claude(args: &[&str]) -> Option<std::process::Output> {
+    let mut cmd = tokio::process::Command::new("claude");
+    cmd.args(args);
+    super::process::hide_console_async(&mut cmd).output().await.ok()
+}
+
+/// Installed *and* signed in — two separate questions, asked in that order so
+/// the reason names the one that actually blocks.
+async fn check_claude() -> ProviderStatus {
+    let installed = run_claude(&["--version"])
+        .await
+        .is_some_and(|out| out.status.success());
+    if !installed {
+        return ProviderStatus::blocked(CLAUDE_MISSING, "");
+    }
+    // Spawning worked a moment ago, so a failure here is a mystery rather than
+    // evidence — say ready and let the request speak for itself.
+    let Some(auth) = run_claude(&["auth", "status"]).await else {
+        return ProviderStatus::ready();
+    };
+    if !auth.status.success() || claude_signed_out(&String::from_utf8_lossy(&auth.stdout)) {
+        return ProviderStatus::blocked(CLAUDE_SIGNED_OUT, CLAUDE_LOGIN_COMMAND);
+    }
+    ProviderStatus::ready()
+}
+
+/// `claude auth status` reports through its JSON payload (`loggedIn`), not only
+/// through its exit code — a field that would be pointless if the status were in
+/// the exit alone. Anything unparseable counts as signed in, per the
+/// open-the-gate rule on [`check_provider_status`].
+fn claude_signed_out(stdout: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(stdout)
+        .ok()
+        .and_then(|payload| payload.get("loggedIn").and_then(serde_json::Value::as_bool))
+        .is_some_and(|logged_in| !logged_in)
+}
+
+async fn check_ollama(config: &AiProviderConfig) -> ProviderStatus {
+    let base_url = config
+        .base_url
+        .clone()
+        .unwrap_or_else(super::config::default_ollama_url);
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+    else {
+        return ProviderStatus::ready();
+    };
+    let reachable = matches!(
+        client
+            .get(format!("{}/api/tags", base_url.trim_end_matches('/')))
+            .send()
+            .await,
+        Ok(resp) if resp.status().is_success()
+    );
+    if reachable {
+        return ProviderStatus::ready();
+    }
+    ProviderStatus::blocked(
+        format!("Ollama isn't answering at {base_url}. Start it, or change the address in Settings."),
+        if is_loopback_url(&base_url) { OLLAMA_SERVE_COMMAND } else { "" },
+    )
+}
+
+/// Whether a URL points at this machine — the only case where "start Ollama" is
+/// advice the user can act on here. Pointed at a server, the fix is on that
+/// server, and offering to run `ollama serve` locally would start a second,
+/// empty instance that still isn't the one they configured.
+fn is_loopback_url(url: &str) -> bool {
+    let Some(host) = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase))
+    else {
+        return false;
+    };
+    if host == "localhost" {
+        return true;
+    }
+    // `host_str` brackets an IPv6 literal, which `IpAddr` won't parse. Going
+    // through `IpAddr` rather than matching strings is what makes the whole
+    // 127.0.0.0/8 block count, not just 127.0.0.1.
+    host.trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|addr| addr.is_loopback())
 }
 
 async fn generate_claude(diff: &str, config: &AiProviderConfig) -> Result<CommitMessage, String> {
@@ -422,6 +561,72 @@ fn parse_commit_message_text(text: &str) -> Result<CommitMessage, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The whole point of reading the payload rather than the exit code: the
+    // signed-out answer is a successful run that says `loggedIn: false`.
+    #[test]
+    fn claude_auth_status_is_read_from_its_payload() {
+        assert!(claude_signed_out(r#"{"loggedIn":false}"#));
+        assert!(!claude_signed_out(
+            r#"{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"max"}"#
+        ));
+    }
+
+    // Both real failures, copied verbatim from the two states that produce
+    // them. They are different states — signing out deletes the credentials, an
+    // expired session leaves them on disk — and only the second one is
+    // invisible to `claude auth status`, which is why this path exists at all.
+    #[test]
+    fn a_failed_request_names_the_sign_in_states() {
+        for error in [
+            "Claude CLI failed: Failed to authenticate: OAuth session expired and could not be refreshed",
+            "Claude CLI failed: Not logged in · Please run /login",
+            "Claude CLI failed: Invalid API key. Please run /login",
+        ] {
+            let status = provider_status_from_failure("claude", error);
+            assert!(!status.ready, "should offer a remedy for: {error}");
+            assert_eq!(status.fix_command, CLAUDE_LOGIN_COMMAND);
+        }
+    }
+
+    // Everything else is the provider working and the request failing — a rate
+    // limit, a crash, a timeout. Offering "sign in again" there is noise, and
+    // would disable Generate over something signing in cannot fix.
+    #[test]
+    fn an_unrelated_failure_offers_no_remedy() {
+        for error in [
+            "Claude CLI failed: API Error: 529 Overloaded. This is a server-side issue",
+            "Claude CLI failed (exit status: 1) with no error output",
+            "request timed out",
+        ] {
+            assert!(provider_status_from_failure("claude", error).ready);
+        }
+        // Ollama's failures are never a sign-in problem.
+        assert!(provider_status_from_failure("ollama", "Not logged in").ready);
+    }
+
+    // A probe that cannot understand the answer must open the gate, not close
+    // it — otherwise a CLI output change locks the user out of Generate with no
+    // way to disagree.
+    #[test]
+    fn unreadable_auth_status_counts_as_signed_in() {
+        assert!(!claude_signed_out(""));
+        assert!(!claude_signed_out("not json at all"));
+        assert!(!claude_signed_out(r#"{"someOtherShape":true}"#));
+    }
+
+    // "Start Ollama" is only advice we can act on when the address is this
+    // machine; against a server it would start a second, empty local instance.
+    #[test]
+    fn ollama_fix_command_is_offered_only_for_a_local_address() {
+        assert!(is_loopback_url("http://localhost:11434"));
+        assert!(is_loopback_url("http://127.0.0.1:11434"));
+        assert!(is_loopback_url("http://[::1]:11434"));
+        assert!(is_loopback_url("http://127.0.0.2:11434"));
+        assert!(!is_loopback_url("http://ollama.example.com:11434"));
+        assert!(!is_loopback_url("http://192.168.1.40:11434"));
+        assert!(!is_loopback_url("not a url"));
+    }
 
     // The regression this fixes: a transient API error (here the real 529
     // Overloaded envelope the CLI emits) must surface as an Err, NOT become the

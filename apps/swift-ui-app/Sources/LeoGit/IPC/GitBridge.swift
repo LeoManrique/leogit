@@ -482,6 +482,31 @@ enum GitBridge {
         try await generateCommitMessage(diff: diff, provider: config.provider, config: config)
     }
 
+    /// Whether `config.provider` could serve a request right now, so the
+    /// composer can say why Generate is greyed out rather than letting a
+    /// doomed request report it. Two process spawns for Claude
+    /// (`--version`, then `auth status`), an HTTP request for Ollama.
+    ///
+    /// Every probe failure is an answer, not a throw — the only error is a
+    /// provider name core doesn't know.
+    @concurrent
+    static func providerStatus(config: AiProviderConfig) async throws -> ProviderStatus {
+        try await checkProviderStatus(provider: config.provider, config: config)
+    }
+
+    /// Read a *failed* generate for a provider state the user can fix.
+    ///
+    /// Not a fallback for `providerStatus(config:)` — for an expired session
+    /// it is the only thing that works. Signing out deletes the credentials,
+    /// so the probe sees it; an expired session leaves them on disk, so
+    /// `claude auth status` still reports a signed-in CLI and only a real
+    /// request discovers the refresh failed.
+    ///
+    /// Pure string reading in core, so there is nothing to await or throw.
+    static func providerStatus(fromFailure message: String, provider: String) -> ProviderStatus {
+        providerStatusFromFailure(provider: provider, error: message)
+    }
+
     // MARK: - Repo directory & background refresh
 
     /// The whole shared configuration file, read fresh — the auto-fetch loop

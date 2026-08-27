@@ -662,6 +662,14 @@ export interface AiProviderConfig {
   timeout_secs: number
 }
 
+export interface ProviderStatus {
+  ready: boolean
+  /** Why not, as a sentence to render as-is. Empty when ready. */
+  reason: string
+  /** A shell command that would fix it, or empty when there is none to offer. */
+  fix_command: string
+}
+
 export const aiApi = {
   /**
    * The AI settings resolved for the selected provider. The config→provider
@@ -672,8 +680,22 @@ export const aiApi = {
   loadAiConfig: () => invoke<AiProviderConfig>('load_ai_config'),
   generateCommitMessage: (diff: string, provider: string, config: AiProviderConfig) =>
     invoke<CommitMessage>('generate_commit_message', { diff, provider, config }),
-  checkProviderAvailable: (provider: string, config: AiProviderConfig) =>
-    invoke<boolean>('check_provider_available', { provider, config }),
+  /**
+   * Whether the provider can actually serve a request. Richer than a boolean
+   * because "installed" and "will answer" are different questions — an
+   * installed Claude CLI with an expired session passes every presence check
+   * and fails every generate. `fix_command`, when core knows one, is a shell
+   * command the client may offer to run.
+   */
+  checkProviderStatus: (provider: string, config: AiProviderConfig) =>
+    invoke<ProviderStatus>('check_provider_status', { provider, config }),
+  /**
+   * The same answer, read out of a request that already failed. Not a fallback:
+   * an expired session leaves its credentials on disk, so the probe above sees
+   * a signed-in CLI and only the failure reveals it.
+   */
+  providerStatusFromFailure: (provider: string, error: string) =>
+    invoke<ProviderStatus>('provider_status_from_failure', { provider, error }),
 }
 
 export const reposApi = {
