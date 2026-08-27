@@ -57,7 +57,7 @@ static-linking or a local daemon (that decision is open; see the plan).
     `check_provider_available`, `copy_diff_text`, `generate_patch`,
     `generate_inverse_patch`, `get_ahead_behind`, `has_staged_changes`,
     `rename_branch`, `delete_remote_branch`. Each is a live item in the parity
-    plan — either being wired (ST-9, DF-5, DF-6) or being deleted (WS-H) — and a
+    plan — either being wired (ST-9, DF-5, DF-6) or being deleted (WS-S) — and a
     command that is neither should not stay on this list.
 
 ## 2. System context & architecture
