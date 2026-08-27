@@ -161,6 +161,18 @@ blank rather than flashing a sub-threshold spinner.
 Token `start`/`end` and `IntraLineRange` are code-point indices, which in Swift is the
 `AttributedString.unicodeScalars` view — never `characters`, whose grapheme clusters can span
 several code points.
+The diff settings feed this path from `AppConfigStore` (below): `DiffStore.load` takes
+`hideWhitespace` — working-tree targets pick the newly exported
+`get_diff_whitespace_ignored` (`git diff -w`); commit diffs have no such variant in either
+client — and `highlight`, whose off state skips the tokenize phase and drops any tokens on
+screen (the Tauri `if (!sh) return` after the plain render). Both flags live in `DiffView`'s
+`LoadKey`, so a Settings toggle re-keys the open diff through the seamless path above, where
+the equality skip keeps scroll when nothing textual changed. `tab_size` is presentation:
+SwiftUI `Text` honours no paragraph-style attributes, so `DiffLineText` expands tabs to
+spaces with CSS `tab-size` stop math (next multiple of N columns) and remaps every token and
+intra-line range through the expansion — a no-tab line pays one `contains` scan and nothing
+else. Long lines always wrap; `wrap_long_lines` and the Tauri client's no-wrap mode (and the
+fixed-height virtualization only that mode used) were removed everywhere.
 
 Committing crosses as the same two calls the Svelte client makes — `format_commit_message`,
 then `commit` — and needed no new type mirrors: core's `commit` owns the whole staging story
@@ -219,9 +231,9 @@ travels with it), the Tauri `main` now calls it from there, and the bridge expor
 `LeoGitApp.init` to run as the process's first Rust call.
 
 The repo switcher and background refresh cross as the picker/scheduler surface the Tauri
-client already had: `load_config` (a full `Config` mirror — the native client consumes
-`auto_fetch`/`fetch_interval_ms` and `scan_paths`/`scan_depth`, but the mirror restates all
-16 fields so it can't drift), `load_state`/`patch_state`/`record_recent_repo` over
+client already had: `load_config` (a full `Config` mirror — every field except `theme` and
+`side_by_side_diff` now has a native consumer, and the mirror restates all 15 fields so it
+can't drift), `load_state`/`patch_state`/`record_recent_repo` over
 `ReposState`/`ReposStatePatch` mirrors — the shared `repos-state.json`, where
 `last_opened_repo` is patched on every switch and restored at launch by *either* client,
 and the MRU list feeds the tiered badge scheduler — `discover_repos`/`effective_scan_paths`
@@ -250,9 +262,41 @@ stale until reselect — core's `FileEntry.stat_stamp` (an opaque mtime+size str
 is what makes the comparison see them. The epoch is deliberately not narrower than that:
 `RepoStore` signals possibility, and `DiffStore`'s equality skip is where reality is
 checked, so a bump for an unchanged file costs one subprocess and zero repaints. A `ConnectivityBreaker` (Tauri's
-numbers: 2 failures → 30 s backoff doubling to a 5 min cap) gates every background fetch,
-fed only by real attempts against real remotes; both loops also pause while the app is
-inactive — a deliberate native improvement the activation resync makes safe.
+numbers: 2 failures → 30 s backoff doubling to a 5 min cap) composes with
+`Services/NetworkPathObserver.swift` — one `NWPathMonitor` publishing `isOnline`, the
+analogue of the Tauri `navigator.onLine` half the breaker originally shipped without — as
+`RepoDirectoryStore.shouldAttemptBackground` (`isOnline && breaker.shouldAttempt`, the
+`connectivity.ts` `shouldAttemptBackground()` shape): every background fetch gates on it,
+fed only by real attempts against real remotes, and while offline badge syncs degrade to
+fetch-less local recomputes without burning failures into the breaker first. The
+offline→online edge fires the observer's `onRecover` kick (`ContentView.resyncOnReconnect`,
+Tauri's `initConnectivity` recovery): `breaker.reset()` — a named method, because
+`record(success: true)` where nothing was fetched would fabricate a success report — then a
+silent fetch + quiet refresh of the active repo under `canAutoFetch` and the throttled
+tier-0 sweep under `canRunRepoSweeps`, so recovery obeys the same predicates as the loops
+it shortcuts. Whether each loop may run *right now* is
+one type's answer: `Services/BackgroundSchedulingPolicy.swift` (@MainActor @Observable)
+owns the inputs — the network-op slot (mirrored in by `SyncStore` from a `didSet` on
+`activeOperation`), app activation (`NSApplication.didBecomeActive/didResignActive`), and
+the repo window's occlusion (`NSWindow.didChangeOcclusionStateNotification` on the window a
+zero-sized `NSViewRepresentable` accessor reports from `viewDidMoveToWindow` — deliberately
+not `NSApp.keyWindow`, which is nil exactly while the app is inactive) — and exposes named
+predicates each guard cites: `canPollStatus`/`canAutoFetch` (block only on the network op)
+and `canRunRepoSweeps` (also requires active + visible; the deferrable multi-repo fan-out,
+caught up by the refocus resync). The active repo's work never stops: the status poll runs
+a cadence ladder (2 s frontmost / 10 s visible-unfocused / 30 s hidden,
+`statusPollInterval`, re-read per tick) and auto-fetch stretches its configured interval ×3
+while the window is hidden (`autoFetchInterval(configured:)`) — fresher than pausing,
+cheaper than GH Desktop's flat always-on interval. The platform constraint that makes any
+of this real: `Services/AppNapSuppressor.swift` holds a
+`ProcessInfo.beginActivity(.background)` assertion exactly while (a repo is open) ∧ (some
+background work is allowed), driven from the policy's input transitions — without it App
+Nap coalesces an unfocused app's `Task.sleep` timers and the ladder silently never fires
+(`.background` doesn't block idle system sleep, so the Mac still sleeps normally). Both
+observer registrations use the classic block API with `MainActor.assumeIsolated` (the typed
+`NotificationCenter` message types are macOS 27-beta; the app targets 26) and are removed
+in `isolated deinit`s — a plain deinit is nonisolated under Swift 6 and cannot touch the
+non-Sendable tokens.
 
 The sync toolbar consuming all of this is one adaptive control (`SyncControls`), GitHub
 Desktop's model: a precedence ladder — loading → detached → publish repository → publish
@@ -543,18 +587,28 @@ success, shares the GitHub tab's `clone_sort_mode` with the Tauri dialog through
 dismissed sheet would orphan the clone. Success hands the fresh path to `RepoStore.open`,
 so the normal `.task(id:)` chain records it as recent and runs the warm-up fetch. The
 Settings scene (`Settings { }` in `LeoGitApp`, which is what binds ⌘, and the app-menu
-item) exposes only fields with native consumers — auto-fetch cadence, scan paths/depth,
-the terminal shell (via the newly exported `list_shells` + `ShellOption` mirror, with a
-stored-but-uninstalled id rendering as Automatic), and the AI knobs — never Tauri-only
-fields like `theme` or the diff toggles, which cross untouched: `SettingsStore.save()`
+item) exposes only fields with native consumers — auto-fetch cadence, the Diff section
+(hide whitespace, syntax highlighting, tab size 1–16), scan paths/depth, the terminal
+shell (via the newly exported `list_shells` + `ShellOption` mirror, with a
+stored-but-uninstalled id rendering as Automatic), and the AI knobs. Exactly two fields
+cross untouched as documented exemptions (FRONTEND.md §8): `theme` permanently — the
+native app follows the system appearance — and `side_by_side_diff` until the split
+layout gets its own design pass (ROADMAP). `SettingsStore.save()`
 loads a fresh `Config`, overlays just the managed fields, and writes whole via the newly
 exported `save_config` (the `save_ai_provider` read-modify-write pattern writ large,
 since core rewrites the entire file). Discrete controls save through a 300 ms debounce;
 text fields commit on focus-loss/Return, normalizing an emptied model to `None` and an
-emptied Ollama URL back to the default (Tauri persists `""` for both). And the native
-auto-fetch loop now re-reads the config every tick — a cheap TOML load — so interval and
-toggle changes apply within one interval, the live re-arm the Tauri client still lacks
-(its ROADMAP entry).
+emptied Ollama URL back to the default (Tauri persists `""` for both). Config
+consumption has one native owner: `Stores/AppConfigStore.swift` (@MainActor @Observable,
+created in `LeoGitApp` and put in the environment of both the main window and the
+Settings scene) holds the shared `Config` and reloads it at exactly three sites — launch,
+every successful Settings save (`SettingsStore` calls `reload()` after `save_config`
+lands, which is how an edit reaches the open diff and the auto-fetch loop live), and the
+activation resync (edits made from the Tauri client arrive on return to the app). The
+auto-fetch loop reads the store each tick instead of the per-tick TOML load it used to
+do, so interval and toggle changes still apply within one interval — the live re-arm the
+Tauri client still lacks (its ROADMAP entry) — and `DiffView`'s `LoadKey` reads it so the
+diff toggles re-key the open diff the moment a save lands.
 
 Publish closed the gh surface. `gh_publish_repo` crossed like `gh_clone` (already
 core-async over the blocking pool; no listener — `gh repo create` streams nothing parseable,

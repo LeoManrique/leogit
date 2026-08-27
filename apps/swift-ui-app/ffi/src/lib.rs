@@ -402,6 +402,21 @@ pub fn get_diff(repo_path: String, file: FileEntry) -> Result<String, GitError> 
     git::get_diff(repo_path, file).map_err(GitError::from)
 }
 
+/// [`get_diff`] with whitespace-only changes suppressed (`git diff -w`) —
+/// the read behind the `hide_whitespace` setting, working-tree only: commit
+/// diffs have no whitespace-ignored variant in either client.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when `git diff` fails.
+#[uniffi::export]
+pub fn get_diff_whitespace_ignored(
+    repo_path: String,
+    file: FileEntry,
+) -> Result<String, GitError> {
+    git::get_diff_whitespace_ignored(repo_path, file).map_err(GitError::from)
+}
+
 /// Parse a raw unified diff into hunks of typed lines.
 ///
 /// Returns `None` for input that contains no parseable diff — an empty string,
@@ -1168,7 +1183,6 @@ pub struct Config {
     pub scan_depth: u32,
     pub side_by_side_diff: bool,
     pub hide_whitespace: bool,
-    pub wrap_long_lines: bool,
     pub tab_size: u32,
     pub claude_timeout_secs: u32,
     pub ollama_server_url: String,

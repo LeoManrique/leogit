@@ -1,10 +1,10 @@
 # Plan — Background-refresh parity & diff continuity (native macOS app)
 
-> Status: **in progress — A and B landed and visually confirmed (2026-08-27);
-> C, D, E not started.** Five fixes from the Swift-vs-Tauri background/refresh
+> Status: **complete — all five workstreams (A–E) landed and visually
+> confirmed (2026-08-27).** Five fixes from the Swift-vs-Tauri background/refresh
 > audit (2026-08-26), ordered by user flow, each visually verified before the
-> next begins. Landed workstreams are kept as compact as-built records
-> (decision history included); pending ones keep their full design. This file
+> next began. Every workstream is kept as a compact as-built record
+> (decision history included). This file
 > stays the source of truth for what was actually built. Companion contract: [`FRONTEND.md`](../../FRONTEND.md) §6
 > (behavioral contract) and §8 (intentional divergences) — both get updated as
 > each workstream lands.
@@ -23,8 +23,8 @@ but *feels* different for two reasons:
    diff on screen and only falls back to a spinner after 150 ms
    (`SLOW_DIFF_THRESHOLD_MS`, ported from GitHub Desktop's
    `SeamlessDiffSwitcher`).
-2. **Everything pauses when the app isn't frontmost.** `backgroundPaused()`
-   gates *all three* loops on `!NSApp.isActive`. The Tauri client never pauses
+2. **Everything pauses when the app isn't frontmost** *(fixed — C below)*.
+   `backgroundPaused()` gated *all three* loops on `!NSApp.isActive`. The Tauri client never pauses
    on blur; GitHub Desktop pauses only the multi-repo indicator sweep and keeps
    the active repo's background fetcher alive. Worse, `NSApp.isActive` is false
    while the window is *visible but not key* — LeoGit sitting on half the screen
@@ -32,10 +32,11 @@ but *feels* different for two reasons:
    never do. And even a loop we *want* running unfocused would be throttled by
    App Nap unless we hold an activity assertion.
 
-Plus three smaller gaps: no OS connectivity signal (the breaker recovers only by
-timeout or refocus), the diff-rendering settings in `config.toml` are silently
-ignored by the native diff path, and the update checker / CLI launch integration
-are missing entirely (out of scope here — tracked in ROADMAP).
+Plus three smaller gaps: no OS connectivity signal *(fixed — D below)*, the
+diff-rendering settings in `config.toml` were silently ignored by the native
+diff path *(fixed — E below: wired or documented-exempt, and `wrap_long_lines`
+removed everywhere)*, and the update checker / CLI launch integration are
+missing entirely (out of scope here — tracked in ROADMAP).
 
 ## 2. Design principles
 
@@ -128,12 +129,23 @@ content visually — only the store state survives.
 
 ---
 
-## 5. Workstream C — Background scheduling policy (focus, visibility, App Nap)
+## 5. Workstream C — Background scheduling policy ✅ (landed 2026-08-27)
 
-**Current.** One predicate (`activeOperation != nil || !NSApp.isActive`) pauses
-the status poll, auto-fetch, tier scheduler, and sweeps alike.
+**As built** (new `Services/BackgroundSchedulingPolicy.swift` +
+`Services/AppNapSuppressor.swift`; rewired `Screens/ContentView.swift`,
+`Stores/RepoDirectoryStore.swift`, `Stores/SyncStore.swift`,
+`Screens/RepoSwitcher.swift` — full mechanics in TECHNICAL.md): one
+`@MainActor @Observable` policy owns the inputs (network-op slot, app
+activation, repo-window occlusion, repo-open) and exposes named predicates —
+`canPollStatus` / `canAutoFetch` (block only on the network op) and
+`canRunRepoSweeps` — plus the cadences (`statusPollInterval` ladder,
+`autoFetchInterval(configured:)` ×3 stretch). Every loop guard names its
+predicate; the old `backgroundPaused()` closure is gone. `AppNapSuppressor`
+holds `ProcessInfo.beginActivity(.background)` exactly while (repo open) ∧
+(work allowed) — with the final table that is "whenever a repo is open and no
+user transfer runs".
 
-**Target policy** (the GH-Desktop split, plus a native improvement):
+**Final policy** (amended in visual testing — see decisions):
 
 | Work | Pauses on network op | Pauses when app inactive | Pauses when window not visible |
 |---|---|---|---|
@@ -149,41 +161,7 @@ catch-up. The multi-repo fetch fan-out is the only genuinely deferrable work,
 and the existing refocus resync remains its catch-up path. The cadence ladder
 keeps every state honest without running full-rate forever.
 
-**Design.**
-
-- New `Services/BackgroundSchedulingPolicy.swift`: a small `@MainActor
-  @Observable` type owning the three inputs and exposing named predicates —
-  `canPollStatus`, `canAutoFetch`, `canRunRepoSweeps` — plus
-  `statusPollInterval` (2 s active / 10 s inactive). Inputs:
-  - `networkOpInFlight` — fed by `SyncStore` (replaces the closure capture).
-  - `isAppActive` — `NSApplication.didBecomeActive/didResignActive`
-    notifications.
-  - `isWindowVisible` — the key window's `occlusionState`
-    (`NSWindow.didChangeOcclusionStateNotification`); a fully occluded or
-    miniaturized window stops everything, which is *more* battery-polite than
-    today while the *visible* case gets livelier.
-- `ContentView`'s loops and `RepoDirectoryStore.runScheduler`/`sweepVisible`/
-  `refocusSweep` take the policy object instead of the `isPaused` closure; each
-  call site names the predicate it checks. The policy type's doc comment
-  carries the table above — the one place the rules live.
-- **App Nap**: a `Services/AppNapSuppressor.swift` holding a
-  `ProcessInfo.beginActivity(options: .background, reason: "leogit background
-  git refresh")` token **only while** (a repo is open) ∧ (`canPollStatus` ∨
-  `canAutoFetch`). Acquired/released from the policy's state transitions, so
-  the assertion can never outlive the reason for it. Without this, unfocused
-  `Task.sleep` timers get coalesced and the whole workstream silently doesn't
-  work — this is the platform constraint the audit surfaced.
-- `FRONTEND.md` §8 gains a row: *focus/visibility scheduling — intentional
-  divergence; native pauses per-window visibility, Tauri runs always.*
-
-**Files.** New `Services/BackgroundSchedulingPolicy.swift` +
-`Services/AppNapSuppressor.swift`; edits in `Screens/ContentView.swift`,
-`Stores/RepoDirectoryStore.swift`, `Stores/SyncStore.swift` (publish op state
-into the policy), `Screens/RepoSwitcher.swift` (threads the policy through to
-`sweepVisible` — it carried the old `isPaused` closure).
-
-**Decisions made while implementing (2026-08-27, pending visual
-confirmation):**
+**Decisions (kept from implementation):**
 
 - **"The key window" can't literally feed `isWindowVisible`:**
   `NSApp.keyWindow` is *nil* while the app is inactive — exactly the
@@ -222,103 +200,128 @@ confirmation):**
   is open (released only while a user transfer holds the network slot);
   `isWindowVisible` feeds cadences, not gates. Un-occluding without
   activating the app can take up to one 30 s beat to catch up — activating
-  resyncs immediately, as before.
-
-**Test.** Window visible beside a terminal, app not focused: commit from the
-terminal → History/Changes update within ~10 s without touching LeoGit.
-Minimize the window → Activity Monitor shows no periodic `git` spawns. ⌘Tab
-back → refocus resync still fires once (unchanged).
+  resyncs immediately, as before. Visually confirmed: terminal commits
+  appear in an unfocused window, and a hidden window is already current on
+  return.
 
 ---
 
-## 6. Workstream D — OS connectivity signal (`NWPathMonitor`)
+## 6. Workstream D — OS connectivity signal ✅ (landed 2026-08-27)
 
-**Current.** `ConnectivityBreaker` is the Tauri breaker minus its
-`navigator.onLine` half — documented at the time as having "no free AppKit
-analogue." Network.framework's `NWPathMonitor` *is* the analogue.
+**As built** (new `Services/NetworkPathObserver.swift`; edits in
+`Services/ConnectivityBreaker.swift`, `Stores/RepoDirectoryStore.swift`,
+`Screens/ContentView.swift` — full mechanics in TECHNICAL.md): one
+`NWPathMonitor` wrapped in a `@MainActor @Observable` observer publishing
+`isOnline` (`path.status == .satisfied`, queue callbacks hopped to the main
+actor); `RepoDirectoryStore.shouldAttemptBackground` composes
+`isOnline && breaker.shouldAttempt` — the Tauri `shouldAttemptBackground()`
+shape — and gates the tier `sync`, the auto-fetch loop, and the activation
+resync. While offline, fetching syncs degrade to fetch-less local recomputes
+without burning failures into the breaker first. The offline→online edge
+fires `ContentView.resyncOnReconnect` (the Tauri `initConnectivity` kick):
+breaker reset, silent fetch + quiet refresh of the active repo, throttled
+tier-0 sweep. `ConnectivityBreaker`'s "no free AppKit analogue" deviation
+note is retired; the breaker itself stays pure backoff math.
 
-**Design.**
+**Decisions (kept from implementation):**
 
-- `ConnectivityBreaker` stays exactly as is: pure backoff math, no OS imports,
-  unit-testable. (Single responsibility — don't grow it.)
-- New `Services/NetworkPathObserver.swift`: wraps one `NWPathMonitor`, hops its
-  queue callbacks to the main actor, and publishes `isOnline`
-  (`path.status == .satisfied`). On the offline→online edge it invokes a
-  registered `onRecover` callback.
-- Composition happens where the breaker already lives
-  (`RepoDirectoryStore.breaker`'s owner): background gates become
-  `observer.isOnline && breaker.shouldAttempt` — mirroring the Tauri client's
-  `shouldAttemptBackground()` shape exactly. `onRecover` does what the Tauri
-  `initConnectivity` kick does: reset the breaker, one silent fetch + quiet
-  refresh of the active repo, one tier-0 sweep. Recovery honors Workstream C's
-  policy (an invisible window doesn't fetch just because Wi-Fi returned; it
-  catches up on next visibility).
-- While `isOnline == false`, fetching syncs degrade to local recomputes — the
-  breaker's existing downgrade path, now reached without burning failures first.
+- **`ConnectivityBreaker` grew one method after all:** the recovery kick
+  needs to close the breaker, and `record(success: true)` at a site where
+  nothing was fetched would fabricate a success report — so `reset()` says
+  what it means ("stop waiting"), and `record`'s success path delegates to
+  it. Everything else about the breaker is untouched.
+- **The composed gate lives on `RepoDirectoryStore`:**
+  `shouldAttemptBackground` (`networkObserver.isOnline &&
+  breaker.shouldAttempt`) sits beside the breaker it composes, consumed by
+  the tier `sync`, the auto-fetch loop, and the activation resync — the
+  Tauri `shouldAttemptBackground()` shape, one owner.
+- **Recovery honors the *amended* C policy, not the original wording:** the
+  plan's "an invisible window doesn't fetch just because Wi-Fi returned"
+  predates C's hidden-≠-paused amendment. As built, the kick runs unless a
+  user transfer holds the slot (`canAutoFetch`) — a hidden window *does*
+  catch up, by design — and the tier-0 sweep keeps its own
+  `canRunRepoSweeps` gate plus the 30 s refocus throttle.
+- **`onRecover` registers with the repository screen** (its unkeyed
+  `.task`), reading the open repo at fire time; on Welcome nothing is
+  registered because nothing needs catching up. `isOnline` starts `true` so
+  the monitor's first real report can't fire a spurious launch kick.
 
-**Files.** New `Services/NetworkPathObserver.swift`; edits in
-`Services/ConnectivityBreaker.swift` (doc comment only — the deviation note
-retires), `Stores/RepoDirectoryStore.swift`, `Screens/ContentView.swift`.
-
-**Test.** Toggle Wi-Fi off: within a tick, no `git fetch` spawns (Console
-logs); make a local commit → dirty/ahead badges still update. Toggle Wi-Fi on:
-badges refresh within seconds, without waiting out a backoff window.
+Visually confirmed: Wi-Fi off → background fetches stop, local commits keep
+updating badges; Wi-Fi on → badges refresh within seconds, no backoff wait.
 
 ---
 
-## 7. Workstream E — Diff settings: wire or explicitly exempt
+## 7. Workstream E — Diff settings ✅ (landed 2026-08-27)
 
-**Current.** `SettingsStore` round-trips `hide_whitespace`,
-`side_by_side_diff`, `wrap_long_lines`, `tab_size`, `syntax_highlighting`, and
-`theme` through `config.toml` untouched; the native diff path reads none of
-them. `get_diff_whitespace_ignored` exists in core
-([`git.rs:910`](../../core/src/git.rs#L910)) but has no FFI export.
-
-**Scope decision — wire the content settings, exempt the presentation ones:**
-
-| Setting | Native fate | Why |
-|---|---|---|
-| `hide_whitespace` | **wire** | Content-level; core already implements it |
-| `syntax_highlighting` | **wire** | Skipping phase two is one guard |
-| `tab_size` | **wire** | One rendering constant in `DiffLineText` |
-| `wrap_long_lines` | **wire** | Wrap vs. horizontal scroll in `DiffRowView` |
-| `side_by_side_diff` | **exempt** (ROADMAP) | A layout feature, not a flag — needs its own design pass |
-| `theme` | **exempt** (permanent) | Native follows system appearance; a web-only concept |
-
-Exemptions get one sentence each in `SettingsStore`'s header comment and a
-`FRONTEND.md` §8 row, so "silently ignored" becomes "documented divergence."
-
-**Design.**
-
-- New `Stores/AppConfigStore.swift` (`@MainActor @Observable`): the single
-  native owner of the shared `Config`. Loaded at launch; `reload()` called on
-  Settings save (via `flushPendingSave`/`scheduleSave` completion) and on the
-  activation resync (picks up edits made from the Tauri client). The auto-fetch
-  loop reads it instead of re-reading TOML every tick — the live re-arm
-  behavior survives because Settings saves reload the store in the same
-  process.
-- FFI: export `get_diff_whitespace_ignored` in
-  [`ffi/src/lib.rs`](../../apps/swift-ui-app/ffi/src/lib.rs) + a `GitBridge`
-  wrapper — same thin-delegation pattern as `get_diff`.
-- `DiffView`'s `LoadKey` gains `hideWhitespace: Bool`; toggling the setting
-  re-keys the task and reloads through the seamless path (Workstream A), which
-  is exactly the Tauri client's `lastHideWhitespace` effect, for free.
-  `DiffStore.load` picks the raw-diff call by that flag and skips phase two
-  when highlighting is off. `tab_size`/`wrap_long_lines` flow into
-  `DiffLineText`/`DiffRowView` as plain parameters from the config store.
-- Settings window gains a **Diff** section (four controls, same
-  debounced-save plumbing as the existing sections).
-
-**Files.** New `Stores/AppConfigStore.swift`; edits in `ffi/src/lib.rs`,
+**As built** (new `Stores/AppConfigStore.swift`; edits in `ffi/src/lib.rs`,
 `IPC/GitBridge.swift`, `Stores/DiffStore.swift`, `Screens/DiffView.swift`,
 `Design/DiffLineText.swift`, `Stores/SettingsStore.swift`,
-`Screens/SettingsView.swift`, `Screens/ContentView.swift` (auto-fetch loop
-reads the store).
+`Screens/SettingsView.swift`, `Screens/ContentView.swift`, plus — for the
+wrap removal — `core/src/config.rs`, the Tauri `DiffViewer`/`MainLayout`/
+`SettingsOverlay`/`commands.ts`; full mechanics in TECHNICAL.md):
+`AppConfigStore` is the single native `Config` owner (created in `LeoGitApp`,
+in both scenes' environment; reloaded at launch, on every successful Settings
+save, and on the activation resync — the Tauri-edit path). The auto-fetch
+loop reads it per tick instead of the TOML file. `get_diff_whitespace_ignored`
+crossed the FFI (`GitBridge.rawDiffIgnoringWhitespace`); `DiffStore.load`
+gained `hideWhitespace` (working-tree targets only) and `highlight` (off
+skips phase two and drops tokens); both sit in `DiffView.LoadKey`, so
+toggles reload through A's seamless path. `tab_size` renders via tab
+expansion in `DiffLineText`. The Settings window gained a **Diff** section
+(hide whitespace / syntax highlighting / tab size 1–16, Tauri's labels).
 
-**Test.** Toggle hide-whitespace with an indentation-only diff open → diff
-empties/refills in place, no flash. Toggle highlighting off → colors drop,
-plain text stays. Change the same settings from the Tauri client → native
-picks them up on next activation.
+**Final scope table** (amended in visual testing — see decisions):
+
+| Setting | Fate | How |
+|---|---|---|
+| `hide_whitespace` | **wired** | picks `git diff -w` for working-tree loads; re-keys the open diff |
+| `syntax_highlighting` | **wired** | in `LoadKey` too; off skips tokenize and drops colors live |
+| `tab_size` | **wired** | tab expansion in `DiffLineText` (see decisions) |
+| `wrap_long_lines` | **removed everywhere** | long lines always wrap — both clients, core schema too |
+| `side_by_side_diff` | exempt (ROADMAP) | a layout feature needing its own design pass |
+| `theme` | exempt (permanent) | native follows system appearance |
+
+Exemptions are documented in `SettingsStore`'s header and FRONTEND.md §8.
+
+**Decisions (kept from implementation):**
+
+- **`syntax_highlighting` joined `LoadKey`** beyond the planned guard: the
+  toggle must act on the *open* diff, and re-keying through the seamless
+  path costs one subprocess with the equality skip absorbing the repaint —
+  the Tauri client re-renders without refetching, a mechanism difference
+  with identical behavior (plain text stays, colors drop/return live).
+- **`tab_size` is baked into the string, not an attribute:** doc check
+  confirmed SwiftUI `Text` renders no paragraph-style attributes (only the
+  SwiftUI scope + a subset of Foundation intents), so tab stops can't be
+  set the AppKit way. `DiffLineText` expands tabs to spaces with CSS
+  `tab-size` stop math and remaps every token/intra range; a no-tab line
+  pays one `contains` scan. Known cost: copying a tabbed line yields
+  spaces where the WebView preserves tabs.
+- **Amendment after the first visual pass (user decision):
+  `wrap_long_lines` removed everywhere, not wired.** The as-planned no-wrap
+  mode (two-axis ScrollView + per-row min-width) broke the lazy layout, and
+  GitHub Desktop — checked in `lms-github-desktop` — offers no wrap setting
+  at all: diff content is permanently `pre-wrap`; its tab size is one CSS
+  property. Chosen: always wrap, delete the setting from the native app,
+  the Tauri app, and the core schema. The Tauri `DiffViewer` lost its
+  fixed-height virtualization with it (only the no-wrap mode used it — the
+  default wrap mode already rendered whole). Old config files still parse:
+  the key is an ignored unknown, pinned by `config_ignores_retired_keys`
+  next to `show_pull_requests`.
+- **`AppConfigStore` reaches `SettingsStore` by property injection**
+  (`SettingsView`'s `.task` sets `store.configStore` — environment values
+  can't reach a store's init); `save()` calls `reload()` after the write
+  lands, which is the whole live-propagation story.
+- **Tab size only shows on tab-indented files** (Go, Makefiles) — space-
+  indented files render identically at any width; noted here because the
+  first visual pass read that as "setting does nothing".
+
+Visually confirmed: hide-whitespace empties/refills an indentation-only
+diff in place; highlighting off drops colors with plain text staying;
+Settings edits apply to the open diff on save, Tauri-side edits on
+activation; both clients wrap long lines identically. Verified: zero-warning
+`xcodebuild`, `svelte-check` clean (129 files), 120 core + 24 bridge tests,
+clippy-pedantic baseline unchanged (184).
 
 ---
 
@@ -329,16 +332,16 @@ verified before the next starts.
 
 1. ✅ **A — seamless diff** (landed; biggest felt win, no dependencies).
 2. ✅ **B — epoch semantics + stat stamp** (landed; B depends on A).
-3. **C — scheduling policy + App Nap** (next; independent of A/B; lands the
-   "works while unfocused" behavior the audit was about).
-4. **D — connectivity observer** (composes with C's policy; do after C so
-   recovery kicks respect visibility).
-5. **E — diff settings + AppConfigStore** (uses A's reload path; touches the
-   most files, so it goes last).
+3. ✅ **C — scheduling policy + App Nap** (landed; the "works while
+   unfocused" behavior the audit was about, amended to "never stops").
+4. ✅ **D — connectivity observer** (landed; composes with C's policy —
+   recovery kicks run under its predicates).
+5. ✅ **E — diff settings + AppConfigStore** (landed; used A's reload path,
+   and grew cross-client scope with the `wrap_long_lines` removal).
 
-Each workstream ends with: `just mac-run` + the listed visual checks (ask for
-confirmation, no screenshots), `cargo clippy --workspace` clean for any Rust
-touched (E), and the doc updates below.
+Each workstream ended with: `just mac-run` + the listed visual checks (ask
+for confirmation, no screenshots), `cargo clippy --workspace` clean for any
+Rust touched (B, E), and the doc updates below.
 
 ## 9. Documentation updates on completion
 
@@ -348,17 +351,28 @@ shared across clients; §5.2 `stat_stamp` field; §8 open-diff-freshness
 divergence row), `ROADMAP.md` (token-cache motivation note; new item: Tauri
 adopting `stat_stamp` to fix its own open-diff staleness).
 
-Still owed by C–E:
+Done for C: `TECHNICAL.md` (policy + suppressor mechanics folded into the
+refresh-machinery paragraph), `FRONTEND.md` (§6.1 hidden/blurred behavior
+made platform policy; §8 background-cadence divergence row), `DESIGN.md`
+(flow 7: the freshness-while-unfocused product decision). Nothing in
+`ROADMAP.md` — no existing item covered it.
 
-- `TECHNICAL.md` — new Services types, `AppConfigStore` ownership, the
-  scheduling-policy table.
-- `FRONTEND.md` — §8: focus/visibility divergence row,
-  `theme`/`side_by_side_diff` exemption rows.
-- `ROADMAP.md` — check off "Settings re-arm intervals" (native half), add
-  `side_by_side_diff` native support as an explicit item; keep the update
-  checker / CLI-launch gaps (out of scope here) listed.
-- `DESIGN.md` — the unfocused-but-visible freshness behavior is a product
-  decision worth recording.
+Done for D: `TECHNICAL.md` (observer + composed gate + recovery kick folded
+into the same paragraph), `ROADMAP.md` (the sixth-chunk entry's "no OS
+online/offline signal" deviation marked *since superseded*). `FRONTEND.md` /
+`DESIGN.md` needed nothing — D restores §6.5 parity rather than diverging,
+and DESIGN's offline bullet already described the recovered behavior.
+
+Done for E: `TECHNICAL.md` (`AppConfigStore` ownership + reload sites in the
+Settings paragraph; the diff-settings wiring, tab expansion, and always-wrap
+folded into the diff paragraph; the Config mirror sentence updated to 15
+fields), `FRONTEND.md` (§5 Config row minus `wrap_long_lines`; §8 `theme`
+exemption folded into the Theme row + a new `side_by_side_diff` row),
+`ROADMAP.md` (re-arm item's native parenthetical now names `AppConfigStore`;
+new native side-by-side item; eighth-chunk entry's "diff toggles cross
+untouched" marked *since superseded*; update checker / CLI-launch gaps stay
+listed), `DESIGN.md` (native Settings sentence gains the Diff section and
+the two exemptions; the Tauri diff-viewer bullet records always-wrap).
 
 ## 10. Findings log (pending items discovered en route)
 

@@ -19,12 +19,6 @@
     showSelection?: boolean
     syntaxHighlighting?: boolean
     sideBySide?: boolean
-    /** When true, long lines wrap to fit the viewer; the diff body is rendered
-     *  WITHOUT virtualization (variable row heights break the offset math).
-     *  When false, lines stay one-line tall and the body horizontal-scrolls,
-     *  keeping the cheap fixed-height virtualization that makes 10K-line
-     *  diffs cost the same as 30-line ones. */
-    wrapLongLines?: boolean
     tabSize?: number
     onLineToggle?: (lineIndex: number) => void
     onHunkToggle?: (hunkIndex: number) => void
@@ -37,7 +31,6 @@
     showSelection = false,
     syntaxHighlighting = true,
     sideBySide = false,
-    wrapLongLines = true,
     tabSize = 4,
     onLineToggle = () => {},
     onHunkToggle = () => {},
@@ -140,24 +133,13 @@
     return ' '
   }
 
-  /*
-    Virtualization. The diff body keeps only the visible window in the DOM
-    (plus an OVERSCAN buffer on either side). A 5K-line diff previously
-    mounted 30K+ spans; with virtualization, only ~30 .diff-line nodes are
-    live regardless of the diff's total size.
-
-    Uniform row heights make this cheap: `white-space: pre` on the line body
-    (no wrap) gives every diff line ROW_HEIGHT, every hunk header
-    HEADER_HEIGHT. Cumulative offsets are recomputed once per fileDiff
-    change and binary-searched to find the visible slice from scrollTop.
-  */
-  const ROW_HEIGHT = 18
-  const HEADER_HEIGHT = 24
-  const OVERSCAN = 8
+  // Rows render whole, wrapped to the viewer width. The fixed-height
+  // virtualization this viewer once had was retired with the no-wrap mode
+  // that needed it — wrapped rows have variable heights, which break the
+  // offset math, and wrap has been the only mode since `wrap_long_lines`
+  // was removed.
 
   let scrollContainer = $state<HTMLDivElement | null>(null)
-  let scrollTop = $state(0)
-  let containerHeight = $state(0)
 
   type DiffRow = {
     kind: 'header' | 'line'
@@ -165,7 +147,6 @@
     lineIdx: number
     globalIdx: number
     line: DiffLine
-    height: number
     key: string
   }
 
@@ -184,7 +165,6 @@
           lineIdx: i,
           globalIdx: g,
           line,
-          height: kind === 'header' ? HEADER_HEIGHT : ROW_HEIGHT,
           key: kind === 'header' ? `H-${g}` : `L-${g}`,
         })
         g++
@@ -193,72 +173,11 @@
     return out
   })
 
-  const rowOffsets = $derived.by(() => {
-    const offsets = new Array<number>(rows.length + 1)
-    offsets[0] = 0
-    for (let i = 0; i < rows.length; i++) offsets[i + 1] = offsets[i] + rows[i].height
-    return offsets
-  })
-  const totalHeight = $derived(rowOffsets[rowOffsets.length - 1] ?? 0)
-
-  type SbsRow = { pair: SbsPair; height: number; key: string }
+  type SbsRow = { pair: SbsPair; key: string }
 
   const sbsRows = $derived.by((): SbsRow[] => {
     if (!sideBySide || !diff) return []
-    return diff.sbs_pairs.map((p, i) => ({
-      pair: p,
-      height: p.is_hunk_header ? HEADER_HEIGHT : ROW_HEIGHT,
-      key: `S-${i}`,
-    }))
-  })
-
-  const sbsOffsets = $derived.by(() => {
-    const offsets = new Array<number>(sbsRows.length + 1)
-    offsets[0] = 0
-    for (let i = 0; i < sbsRows.length; i++) offsets[i + 1] = offsets[i] + sbsRows[i].height
-    return offsets
-  })
-  const sbsTotal = $derived(sbsOffsets[sbsOffsets.length - 1] ?? 0)
-
-  function findIndexAt(offsets: number[], y: number, count: number): number {
-    if (count === 0) return 0
-    let lo = 0
-    let hi = count - 1
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1
-      if (offsets[mid + 1] <= y) lo = mid + 1
-      else hi = mid
-    }
-    return lo
-  }
-
-  const startIndex = $derived(Math.max(0, findIndexAt(rowOffsets, scrollTop, rows.length) - OVERSCAN))
-  const endIndex = $derived(
-    Math.min(rows.length, findIndexAt(rowOffsets, scrollTop + containerHeight, rows.length) + OVERSCAN + 1),
-  )
-  const visibleRows = $derived(rows.slice(startIndex, endIndex))
-  const offsetPx = $derived(rowOffsets[startIndex] ?? 0)
-
-  const sbsStartIndex = $derived(
-    Math.max(0, findIndexAt(sbsOffsets, scrollTop, sbsRows.length) - OVERSCAN),
-  )
-  const sbsEndIndex = $derived(
-    Math.min(sbsRows.length, findIndexAt(sbsOffsets, scrollTop + containerHeight, sbsRows.length) + OVERSCAN + 1),
-  )
-  const visibleSbsRows = $derived(sbsRows.slice(sbsStartIndex, sbsEndIndex))
-  const sbsOffsetPx = $derived(sbsOffsets[sbsStartIndex] ?? 0)
-
-  // Keep containerHeight in sync with the scroll container's actual size (handles
-  // pane resizes and tab visibility toggles). Mirrors CommitList's pattern.
-  $effect(() => {
-    const el = scrollContainer
-    if (!el) return
-    const ro = new ResizeObserver(() => {
-      containerHeight = el.clientHeight
-    })
-    ro.observe(el)
-    containerHeight = el.clientHeight
-    return () => ro.disconnect()
+    return diff.sbs_pairs.map((p, i) => ({ pair: p, key: `S-${i}` }))
   })
 
   // Reset scroll position when the user opens a different file or toggles the
@@ -266,16 +185,12 @@
   // them mid-file in the new diff (often past its end).
   let lastDiffKey = $state<string | null>(null)
   let lastSideBySide = $state<boolean | null>(null)
-  let lastWrap = $state<boolean | null>(null)
   $effect(() => {
     const key = fileDiff ? `${fileDiff.old_path}|${fileDiff.new_path}` : null
     const sbs = sideBySide
-    const wrap = wrapLongLines
-    if (key !== lastDiffKey || sbs !== lastSideBySide || wrap !== lastWrap) {
+    if (key !== lastDiffKey || sbs !== lastSideBySide) {
       lastDiffKey = key
       lastSideBySide = sbs
-      lastWrap = wrap
-      scrollTop = 0
       if (scrollContainer) scrollContainer.scrollTop = 0
     }
   })
@@ -302,102 +217,80 @@
         <p>This binary file has changed.</p>
       </div>
     {:else if sideBySide}
-      {@const renderedSbsRows = wrapLongLines ? sbsRows : visibleSbsRows}
-      <div
-        class="diff-body"
-        class:wrap={wrapLongLines}
-        bind:this={scrollContainer}
-        onscroll={(e) => (scrollTop = (e.currentTarget as HTMLDivElement).scrollTop)}
-      >
-        <div class="diff-virtual" style:height={wrapLongLines ? 'auto' : `${sbsTotal}px`}>
-          <div class="diff-visible" style:transform={wrapLongLines ? 'none' : `translateY(${sbsOffsetPx}px)`}>
-            {#each renderedSbsRows as row (row.key)}
-              {@const left = row.pair.left !== null ? flatLines[row.pair.left] : null}
-              {@const right = row.pair.right !== null ? flatLines[row.pair.right] : null}
-              {#if row.pair.is_hunk_header && left}
-                <div class="hunk-header sbs-hunk-header" style:height={wrapLongLines ? null : `${HEADER_HEIGHT}px`}>
-                  <span class="hunk-text">{left.text}</span>
-                </div>
-              {:else}
-                <div class="sbs-row" style:height={wrapLongLines ? null : `${ROW_HEIGHT}px`}>
-                  <div class="sbs-side sbs-left {left ? lineTypeClass(left.line_type) : 'sbs-empty'}">
-                    <span class="line-number">{left?.old_line_no ?? ''}</span>
-                    <span class="line-prefix">{left ? linePrefix(left) : ' '}</span>
-                    <span class="line-content">
-                      {#if left && row.pair.left !== null && highlightedHtml[row.pair.left]}
-                        {@html highlightedHtml[row.pair.left]}
-                      {:else if left}
-                        {left.content}
-                      {/if}
-                    </span>
-                  </div>
-                  <div class="sbs-side sbs-right {right ? lineTypeClass(right.line_type) : 'sbs-empty'}">
-                    <span class="line-number">{right?.new_line_no ?? ''}</span>
-                    <span class="line-prefix">{right ? linePrefix(right) : ' '}</span>
-                    <span class="line-content">
-                      {#if right && row.pair.right !== null && highlightedHtml[row.pair.right]}
-                        {@html highlightedHtml[row.pair.right]}
-                      {:else if right}
-                        {right.content}
-                      {/if}
-                    </span>
-                  </div>
-                </div>
-              {/if}
-            {/each}
-          </div>
-        </div>
+      <div class="diff-body" bind:this={scrollContainer}>
+        {#each sbsRows as row (row.key)}
+          {@const left = row.pair.left !== null ? flatLines[row.pair.left] : null}
+          {@const right = row.pair.right !== null ? flatLines[row.pair.right] : null}
+          {#if row.pair.is_hunk_header && left}
+            <div class="hunk-header sbs-hunk-header">
+              <span class="hunk-text">{left.text}</span>
+            </div>
+          {:else}
+            <div class="sbs-row">
+              <div class="sbs-side sbs-left {left ? lineTypeClass(left.line_type) : 'sbs-empty'}">
+                <span class="line-number">{left?.old_line_no ?? ''}</span>
+                <span class="line-prefix">{left ? linePrefix(left) : ' '}</span>
+                <span class="line-content">
+                  {#if left && row.pair.left !== null && highlightedHtml[row.pair.left]}
+                    {@html highlightedHtml[row.pair.left]}
+                  {:else if left}
+                    {left.content}
+                  {/if}
+                </span>
+              </div>
+              <div class="sbs-side sbs-right {right ? lineTypeClass(right.line_type) : 'sbs-empty'}">
+                <span class="line-number">{right?.new_line_no ?? ''}</span>
+                <span class="line-prefix">{right ? linePrefix(right) : ' '}</span>
+                <span class="line-content">
+                  {#if right && row.pair.right !== null && highlightedHtml[row.pair.right]}
+                    {@html highlightedHtml[row.pair.right]}
+                  {:else if right}
+                    {right.content}
+                  {/if}
+                </span>
+              </div>
+            </div>
+          {/if}
+        {/each}
       </div>
     {:else}
-      {@const renderedRows = wrapLongLines ? rows : visibleRows}
-      <div
-        class="diff-body"
-        class:diff-body-scroll={!wrapLongLines}
-        class:wrap={wrapLongLines}
-        bind:this={scrollContainer}
-        onscroll={(e) => (scrollTop = (e.currentTarget as HTMLDivElement).scrollTop)}
-      >
-        <div class="diff-virtual" style:height={wrapLongLines ? 'auto' : `${totalHeight}px`}>
-          <div class="diff-visible" style:transform={wrapLongLines ? 'none' : `translateY(${offsetPx}px)`}>
-            {#each renderedRows as row (row.key)}
-              {#if row.kind === 'header'}
-                <div
-                  class="hunk-header"
-                  style:height={wrapLongLines ? null : `${HEADER_HEIGHT}px`}
-                  onclick={(e) => { if (e.shiftKey) onHunkToggle(row.hunkIdx) }}
-                  onkeydown={(e) => { if ((e.key === 'Enter' || e.key === ' ') && e.shiftKey) { e.preventDefault(); onHunkToggle(row.hunkIdx) } }}
-                  role="button"
-                  tabindex="0"
-                >
-                  <span class="hunk-text">{row.line.text}</span>
-                  {#if showSelection}<span class="hunk-hint">Shift+click for hunk</span>{/if}
-                </div>
-              {:else}
-                <div class="diff-line {lineTypeClass(row.line.line_type)}" style:height={wrapLongLines ? null : `${ROW_HEIGHT}px`}>
-                  <span class="line-number old">{row.line.old_line_no ?? ''}</span>
-                  <span class="line-number new">{row.line.new_line_no ?? ''}</span>
-                  <span class="line-prefix">{linePrefix(row.line)}</span>
-                  <span class="line-content">
-                    {#if highlightedHtml[row.globalIdx]}
-                      {@html highlightedHtml[row.globalIdx]}
-                    {:else}
-                      {row.line.content}
-                    {/if}
-                  </span>
-                  {#if showSelection && (row.line.line_type === 'Add' || row.line.line_type === 'Delete')}
-                    <button
-                      class="selection-dot"
-                      class:selected={isLineSelected(row.globalIdx)}
-                      onclick={() => onLineToggle(row.globalIdx)}
-                      title="Toggle line selection"
-                      aria-label="Toggle line selection"
-                    ></button>
-                  {/if}
-                </div>
+      <div class="diff-body" bind:this={scrollContainer}>
+        {#each rows as row (row.key)}
+          {#if row.kind === 'header'}
+            <div
+              class="hunk-header"
+              onclick={(e) => { if (e.shiftKey) onHunkToggle(row.hunkIdx) }}
+              onkeydown={(e) => { if ((e.key === 'Enter' || e.key === ' ') && e.shiftKey) { e.preventDefault(); onHunkToggle(row.hunkIdx) } }}
+              role="button"
+              tabindex="0"
+            >
+              <span class="hunk-text">{row.line.text}</span>
+              {#if showSelection}<span class="hunk-hint">Shift+click for hunk</span>{/if}
+            </div>
+          {:else}
+            <div class="diff-line {lineTypeClass(row.line.line_type)}">
+              <span class="line-number old">{row.line.old_line_no ?? ''}</span>
+              <span class="line-number new">{row.line.new_line_no ?? ''}</span>
+              <span class="line-prefix">{linePrefix(row.line)}</span>
+              <span class="line-content">
+                {#if highlightedHtml[row.globalIdx]}
+                  {@html highlightedHtml[row.globalIdx]}
+                {:else}
+                  {row.line.content}
+                {/if}
+              </span>
+              {#if showSelection && (row.line.line_type === 'Add' || row.line.line_type === 'Delete')}
+                <button
+                  class="selection-dot"
+                  class:selected={isLineSelected(row.globalIdx)}
+                  onclick={() => onLineToggle(row.globalIdx)}
+                  title="Toggle line selection"
+                  aria-label="Toggle line selection"
+                ></button>
               {/if}
-            {/each}
-          </div>
-        </div>
+            </div>
+          {/if}
+        {/each}
       </div>
     {/if}
   </div>
@@ -477,43 +370,15 @@
   .del-count { color: var(--diff-remove-fg); }
 
   /*
-    .diff-body is the scroll container for the virtualized list. The unified
-    layout adds .diff-body-scroll to allow horizontal scroll for long lines
-    (forced no-wrap below); side-by-side keeps overflow-x: hidden so the two
-    columns stay aligned and clip long lines instead of scrolling.
-
-    .diff-virtual sets the full content height so the scrollbar is sized
-    correctly even though only the visible window is mounted. .diff-visible
-    is translated to the offset of the first visible row.
+    .diff-body is the scroll container. Vertical only: long lines wrap
+    (`pre-wrap` on .line-content below), so a wide line never needs a
+    horizontal scrollbar and rows have variable heights.
   */
   .diff-body {
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
     position: relative;
-  }
-
-  .diff-body-scroll {
-    overflow-x: auto;
-  }
-
-  .diff-virtual {
-    position: relative;
-    width: 100%;
-  }
-
-  .diff-visible {
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    will-change: transform;
-  }
-
-  .diff-body-scroll .diff-visible :global(.diff-line),
-  .diff-body-scroll .diff-visible :global(.hunk-header) {
-    width: max-content;
-    min-width: 100%;
   }
 
   .hunk-header {
@@ -539,9 +404,11 @@
     color: var(--text-faint);
   }
 
+  /* The gutter (line numbers + prefix) top-aligns with the first wrapped
+     line instead of centring against a row a long line has made taller. */
   .diff-line {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     box-sizing: border-box;
   }
 
@@ -589,11 +456,19 @@
   .diff-remove .line-prefix,
   .sbs-side.diff-remove .line-prefix { color: var(--diff-remove-fg); }
 
+  /*
+    `overflow-wrap: anywhere` breaks even unbroken token runs (long URLs,
+    minified blobs), which matches the user expectation of "no horizontal
+    scroll". `word-break: break-word` would leave English-ish strings intact
+    but allow breaks at any character — `anywhere` is more aggressive and
+    safer for code.
+  */
   .line-content {
     flex: 1;
     min-width: 0;
     padding: 0 8px;
-    white-space: pre;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
   /*
@@ -645,10 +520,11 @@
     box-sizing: border-box;
   }
 
+  /* Columns grow vertically with wrapped text (no clipping), gutters
+     top-aligned like the unified rows. */
   .sbs-side {
     display: flex;
-    align-items: center;
-    overflow: hidden;
+    align-items: flex-start;
     border-right: 1px solid var(--border-inactive);
   }
 
@@ -660,40 +536,4 @@
     background: var(--surface-hover);
   }
 
-  /*
-    Wrap mode. `.diff-body.wrap` flips `.line-content` from `pre` to `pre-wrap`
-    and forces the gutter (line numbers + prefix) to stay top-aligned with the
-    first wrapped line instead of centring against the now-taller row. With
-    wrap on, virtualization is disabled (variable row heights break the
-    fixed-height offset math) and the .diff-virtual / .diff-visible wrappers
-    are inert (height: auto, transform: none from the template).
-
-    `overflow-wrap: anywhere` breaks even unbroken token runs (long URLs,
-    minified blobs), which matches the user expectation of "no horizontal
-    scroll". `word-break: break-word` would leave English-ish strings intact
-    but allow breaks at any character — `anywhere` is more aggressive and
-    safer for code.
-  */
-  .diff-body.wrap :global(.line-content) {
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-  }
-  .diff-body.wrap :global(.diff-line),
-  .diff-body.wrap :global(.sbs-side) {
-    align-items: flex-start;
-  }
-  /* Drop the min-width rule that forces unified rows to be at least as wide
-     as the scroll container — with wrap on, we want each row to live within
-     the container's intrinsic width. */
-  .diff-body.wrap :global(.diff-line),
-  .diff-body.wrap :global(.hunk-header) {
-    width: auto;
-    min-width: 0;
-  }
-  /* Side-by-side: the columns clip with overflow: hidden in non-wrap mode.
-     With wrap on, let them grow vertically so the right side's wrapped
-     text is visible. */
-  .diff-body.wrap :global(.sbs-side) {
-    overflow: visible;
-  }
 </style>

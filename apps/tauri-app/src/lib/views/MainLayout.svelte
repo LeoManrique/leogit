@@ -1361,7 +1361,6 @@
             syntaxHighlighting={$config?.syntax_highlighting ?? true}
             sideBySide={$config?.side_by_side_diff ?? false}
             tabSize={$config?.tab_size ?? 4}
-            wrapLongLines={$config?.wrap_long_lines ?? true}
           />
         {:else}
           <div class="diff-empty">

@@ -233,7 +233,7 @@ codegen decision is open (plan §10.7).
 | Branches / remote | `BranchInfo` (name, is_remote, is_current); `AheadBehind`; `RepoSync` (ahead, behind, has_remote, fetched, dirty); `RepoIdentifier` (owner, name); `MergeResult` (success, fast_forward, conflicts[], error_message?) |
 | Diff | `DiffLine` (incl. `intra_line_diff: IntraLineRange`), `IntraLineRange`, `HunkHeader`, `Hunk`, `FileDiff` (old_path, new_path, file_header, hunks[], is_binary); `SbsPair`; `ParsedDiff` (file_diff, html[], sbs_pairs[], additions, deletions); `Token` (start, end, class: `TokenClass`) / `TokenLine` — the structured highlight layer under the HTML (§7); `DiffSelection` |
 | Commit composer | `CommitMessage` (title, description) |
-| Config / persistence | `Config` (theme, fetch_interval_ms, ai_provider, ai_model, ai_api_key, auto_fetch, syntax_highlighting, scan_paths[], scan_depth, side_by_side_diff, hide_whitespace, wrap_long_lines, tab_size, claude_timeout_secs, ollama_server_url, terminal_shell?); `ReposState`; `ReposStatePatch` |
+| Config / persistence | `Config` (theme, fetch_interval_ms, ai_provider, ai_model, ai_api_key, auto_fetch, syntax_highlighting, scan_paths[], scan_depth, side_by_side_diff, hide_whitespace, tab_size, claude_timeout_secs, ollama_server_url, terminal_shell?); `ReposState`; `ReposStatePatch` |
 | GitHub | `GhRepo` (name_with_owner, name, description, is_private, pushed_at) |
 | AI | `AiProviderConfig` (provider, model?, api_key?, base_url?) |
 | Terminal | `ShellOption`; `PtyInfo` (backend, build_number); `StartedTerminal` (pid, shell_id, shell_label) |
@@ -255,7 +255,9 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
 1. **Status polling** — poll `get_status` every **2s** and `get_head_sha`
    periodically while a repo is open. Auto-fetch (`fetch`/`repo_sync_status`) every
    **30s** when `auto_fetch` is on. **Pause all polling** while a network op is in
-   flight and while the window is hidden/blurred; resync on refocus.
+   flight; resync on refocus. What happens while the window is hidden or blurred is
+   platform policy — §8 (Tauri pauses everything; native slows a cadence ladder
+   instead of stopping).
 2. **Network-op mutual exclusion** — push/pull/publish are mutually exclusive; only
    one runs at a time, with a shared progress slot fed by `git-progress`.
 3. **Seamless diff loads** — loading a file/commit diff must **guard stale responses**
@@ -328,7 +330,7 @@ every deliberate difference here.
 | Concern | Tauri (Win/Linux) | SwiftUI (macOS) |
 |---|---|---|
 | Window chrome | Tauri window | native `WindowGroup` / AppKit |
-| Theme | CSS tokens in `app.css`, dark/light via `data-theme` | `Color` assets, system appearance |
+| Theme | CSS tokens in `app.css`, dark/light via `data-theme`, driven by the `theme` config field | `Color` assets, system appearance — the `theme` field is never read (permanent exemption: a stored theme is a web-only concept) |
 | Folder picker | `plugin-dialog.open` | `NSOpenPanel` / `.fileImporter` |
 | Home dir / path join | `@tauri-apps/api/path` | `FileManager` |
 | Reveal / open / open-url | core `os::*` commands (unchanged) | core `os::*` commands (unchanged) |
@@ -340,6 +342,8 @@ every deliberate difference here.
 | Repo-search path root (§6.9) | scan folders only — the frontend can't resolve `~`, so a repo outside them is searched by its whole path | scan folders, then `NSHomeDirectory()` |
 | Context-menu scope (§6.10) | multi-row selection, so discard also acts on a whole selection | single-selection lists, so every item acts on the right-clicked row |
 | Open-diff freshness | stale until reselect — the poll never reloads the open diff (adopting `stat_stamp` the same way would fix it; ROADMAP) | reloads within a poll tick: `stat_stamp` makes the status comparison see content edits, `workingTreeEpoch` re-keys the load, the equality skip absorbs no-ops |
+| Background cadence while unfocused/hidden (§6.1) | pauses all polling while the window is hidden/blurred (DOM `focus`/`visibilitychange`) | the active repo never stops: status poll 2 s frontmost / 10 s visible-unfocused / 30 s hidden; auto-fetch interval ×3 while hidden; only the multi-repo sweeps pause when inactive (`BackgroundSchedulingPolicy` + an App Nap assertion held while a repo is open) |
+| Side-by-side diff (`side_by_side_diff`) | split layout toggle, honoured by `DiffViewer` | not implemented — unified only; a layout feature awaiting its own design pass (ROADMAP), the config field crosses saves untouched |
 
 ## 9. Non-goals / intentionally absent
 

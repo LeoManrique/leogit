@@ -8,11 +8,14 @@ import Foundation
 /// VPN down, dead host) is retried on a backoff instead of hammered on every
 /// tick.
 ///
-/// Deviation from the Tauri client: no OS online/offline signal (its
-/// `navigator.onLine` check and `online`-event recovery kick have no free
-/// AppKit analogue). The recovery paths here are the backoff expiring and the
-/// refocus resync — which the user triggers naturally by coming back to the
-/// app once their connection returns.
+/// The OS half lives in `NetworkPathObserver` (Network.framework's
+/// `NWPathMonitor` — the analogue of the Tauri `navigator.onLine` +
+/// `online` event this type once shipped without):
+/// `RepoDirectoryStore.shouldAttemptBackground` composes
+/// `isOnline && shouldAttempt` exactly like `shouldAttemptBackground()` in
+/// `connectivity.ts`, and the observer's recovery kick calls `reset()`.
+/// This type stays pure backoff math with zero OS imports — signals feed
+/// it, they never live in it.
 @MainActor
 final class ConnectivityBreaker {
     private static let failureThreshold = 2
@@ -25,13 +28,21 @@ final class ConnectivityBreaker {
     /// Whether background network work should be attempted right now.
     var shouldAttempt: Bool { Date.now >= openUntil }
 
+    /// Close the breaker immediately — the OS said the network is back, so
+    /// an open backoff window no longer describes reality. Not a success
+    /// report: nothing was fetched, so nothing is being claimed beyond
+    /// "stop waiting".
+    func reset() {
+        consecutiveFailures = 0
+        openUntil = .distantPast
+    }
+
     /// Report one background fetch's outcome. Only real attempts belong here —
     /// a fetch skipped because there was no remote to reach is not a signal
     /// about connectivity.
     func record(success: Bool) {
         guard !success else {
-            consecutiveFailures = 0
-            openUntil = .distantPast
+            reset()
             return
         }
         consecutiveFailures += 1

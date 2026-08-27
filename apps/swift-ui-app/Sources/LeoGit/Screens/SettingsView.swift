@@ -9,6 +9,7 @@ import SwiftUI
 /// overlay's explicit Save/Cancel pair.
 struct SettingsView: View {
     @State private var store = SettingsStore()
+    @Environment(AppConfigStore.self) private var appConfig
     @FocusState private var focusedField: TextInput?
 
     /// The free-text controls, tracked so leaving one commits it.
@@ -21,6 +22,7 @@ struct SettingsView: View {
     var body: some View {
         Form {
             gitSection
+            diffSection
             discoverySection
             terminalSection
             aiSection
@@ -35,7 +37,10 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 480)
         .frame(minHeight: 540)
-        .task { await store.load() }
+        .task {
+            store.configStore = appConfig
+            await store.load()
+        }
         .onChange(of: focusedField) { previous, _ in
             // Leaving any text field commits it; entering the first one
             // commits nothing (previous == nil).
@@ -59,6 +64,24 @@ struct SettingsView: View {
             Text("Git")
         } footer: {
             Text("Applies to the open repository within one interval — no restart needed.")
+                .settingsFooter()
+        }
+    }
+
+    private var diffSection: some View {
+        Section {
+            Toggle("Hide whitespace changes", isOn: saving($store.hideWhitespace))
+            Toggle("Syntax highlighting", isOn: saving($store.syntaxHighlighting))
+            Stepper(
+                value: saving($store.tabSize),
+                in: SettingsStore.tabSizeRange
+            ) {
+                LabeledContent("Tab size", value: "\(store.tabSize)")
+            }
+        } header: {
+            Text("Diff")
+        } footer: {
+            Text("Applies to the open diff immediately.")
                 .settingsFooter()
         }
     }

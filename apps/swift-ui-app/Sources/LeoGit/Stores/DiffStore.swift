@@ -82,7 +82,20 @@ final class DiffStore {
 
     /// Load `file`'s diff from `target`. What's on screen stays until the
     /// result lands — and stays untouched entirely when the result is equal.
-    func load(repoPath: String, file: FileEntry, target: DiffTarget) async {
+    ///
+    /// `hideWhitespace` picks the whitespace-ignored raw read for working-tree
+    /// targets (commit diffs have no such variant — the caller passes `false`
+    /// there); `highlight` off skips phase two and drops any tokens on screen,
+    /// the Tauri client's `syntaxHighlighting` guard. Both settings re-key
+    /// `DiffView`'s load task, so a toggle flows through this same seamless
+    /// path — the Tauri client's `lastHideWhitespace` effect, for free.
+    func load(
+        repoPath: String,
+        file: FileEntry,
+        target: DiffTarget,
+        hideWhitespace: Bool,
+        highlight: Bool
+    ) async {
         generation += 1
         let current = generation
         phase = .loading(slow: false)
@@ -101,7 +114,10 @@ final class DiffStore {
             let raw: String
             switch target {
             case .workingTree:
-                raw = try await GitBridge.rawDiff(of: repoPath, for: file)
+                raw =
+                    hideWhitespace
+                    ? try await GitBridge.rawDiffIgnoringWhitespace(of: repoPath, for: file)
+                    : try await GitBridge.rawDiff(of: repoPath, for: file)
             case .commit(let sha):
                 raw = try await GitBridge.commitDiff(in: repoPath, sha: sha, filePath: file.path)
             }
@@ -128,6 +144,14 @@ final class DiffStore {
                 tokens = nil
             }
             phase = .idle
+
+            // Highlighting off skips phase two entirely and drops whatever
+            // colour is on screen — plain text stays, exactly the Tauri
+            // client's `if (!sh) return` after publishing the plain render.
+            guard highlight else {
+                if tokens != nil { tokens = nil }
+                return
+            }
 
             // Phase two: syntax colour. Runs even when the payload was equal —
             // context lines can change colour when surrounding blob content

@@ -24,6 +24,7 @@ enum RepoTab: String, CaseIterable, Identifiable {
 /// decided here: every guard names a `BackgroundSchedulingPolicy` predicate.
 struct ContentView: View {
     @Environment(RepoStore.self) private var store
+    @Environment(AppConfigStore.self) private var appConfig
     @State private var branchStore = BranchStore()
     @State private var directoryStore = RepoDirectoryStore()
     @State private var terminalStore = TerminalStore()
@@ -163,6 +164,12 @@ struct ContentView: View {
             await directoryStore.runScheduler(activePath: repoPath, policy: schedulingPolicy)
         }
         .task {
+            // The offline→online kick registers with the screen (not a
+            // repo): the closure reads the open repo at fire time, and on
+            // Welcome no registration exists — nothing to catch up there.
+            directoryStore.networkObserver.onRecover = {
+                Task { await resyncOnReconnect() }
+            }
             // Discovery is a filesystem walk that takes a moment on a deep
             // scan tree, so it starts as soon as this screen exists rather
             // than when the switcher first opens — otherwise that first open
@@ -415,11 +422,14 @@ struct ContentView: View {
     }
 
     /// Auto-fetch for the open repository, driven by `auto_fetch` and
-    /// `fetch_interval_ms` from the shared config — re-read every tick, a
-    /// cheap TOML load, so a change in the Settings window applies within
-    /// one interval: the re-arm the Tauri client never got (it reads the
-    /// pair once per repo switch). While disabled, the loop idles on a 30 s
-    /// re-check instead of exiting, so flipping the toggle revives it.
+    /// `fetch_interval_ms` read from the shared `AppConfigStore` each tick —
+    /// every Settings save reloads that store in-process, so a change in the
+    /// Settings window still applies within one interval: the re-arm the
+    /// Tauri client never got (it reads the pair once per repo switch).
+    /// Edits made from the *Tauri* client arrive via the activation
+    /// resync's reload instead of the per-tick file read this loop used to
+    /// do. While disabled, the loop idles on a 30 s re-check instead of
+    /// exiting, so flipping the toggle revives it.
     /// Fetches are held back while typing (a fetch can reorder the file
     /// list mid-keystroke), while the breaker is open, and — a deliberate
     /// improvement over Tauri — for repos with no remote, whose fetch could
@@ -430,7 +440,7 @@ struct ContentView: View {
     @MainActor
     private func autoFetchLoop(repoPath: String) async {
         while !Task.isCancelled {
-            let config = try? await GitBridge.appConfig()
+            let config = appConfig.config
             let intervalMs = config?.autoFetch == true ? (config?.fetchIntervalMs ?? 0) : 0
             // The 30 s idle re-check while disabled is deliberately not
             // stretched: it fetches nothing, it only re-arms the toggle.
@@ -444,7 +454,7 @@ struct ContentView: View {
                 schedulingPolicy.canAutoFetch,
                 !isTextInputFocused,
                 store.status?.hasRemote == true,
-                directoryStore.breaker.shouldAttempt
+                directoryStore.shouldAttemptBackground
             else { continue }
             let reached = await syncStore.silentFetch(repoPath: repoPath)
             directoryStore.breaker.record(success: reached)
@@ -452,8 +462,10 @@ struct ContentView: View {
         }
     }
 
-    /// Coming back to the app: fetch, refresh status silently, force the
-    /// open diff to reload (a file can change on disk without its status row
+    /// Coming back to the app: reload the shared config (Settings edits made
+    /// from the Tauri client land here — the open diff re-keys itself if a
+    /// diff setting changed), fetch, refresh status silently, force the open
+    /// diff to reload (a file can change on disk without its status row
     /// changing), and give the most-recent repos' badges a throttled
     /// catch-up — the Tauri client's `resyncOnActive`.
     @MainActor
@@ -464,9 +476,10 @@ struct ContentView: View {
         isResyncing = true
         defer { isResyncing = false }
 
+        await appConfig.reload()
         if let repoPath = store.repoPath,
             store.status?.hasRemote == true,
-            directoryStore.breaker.shouldAttempt
+            directoryStore.shouldAttemptBackground
         {
             let reached = await syncStore.silentFetch(repoPath: repoPath)
             directoryStore.breaker.record(success: reached)
@@ -476,6 +489,25 @@ struct ContentView: View {
             activePath: store.repoPath,
             policy: schedulingPolicy
         )
+    }
+
+    /// The offline→online kick, ported from the Tauri client's
+    /// `initConnectivity` recovery: the OS says the network is back, so the
+    /// breaker's backoff window no longer describes reality — close it,
+    /// catch the active repo up quietly, and give the top tier's badges
+    /// their throttled sweep. Each piece runs under the same policy
+    /// predicate as its background twin, so Wi-Fi returning mid-transfer or
+    /// while the app is inactive changes nothing those predicates protect.
+    @MainActor
+    private func resyncOnReconnect() async {
+        directoryStore.breaker.reset()
+        guard let repoPath = store.repoPath else { return }
+        if schedulingPolicy.canAutoFetch, store.status?.hasRemote == true {
+            let reached = await syncStore.silentFetch(repoPath: repoPath)
+            directoryStore.breaker.record(success: reached)
+            await store.refreshQuietly()
+        }
+        await directoryStore.refocusSweep(activePath: repoPath, policy: schedulingPolicy)
     }
 
     // MARK: History row actions

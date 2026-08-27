@@ -51,6 +51,17 @@ final class RepoDirectoryStore {
     /// here and the active repo's auto-fetch loop both consult and feed it.
     let breaker = ConnectivityBreaker()
 
+    /// The OS connectivity signal the breaker composes with; owned here so
+    /// signal and breaker live in one place. `ContentView` registers the
+    /// recovery kick on it.
+    let networkObserver = NetworkPathObserver()
+
+    /// The Tauri client's `shouldAttemptBackground()` shape, exactly:
+    /// online per the OS path monitor, and the breaker's backoff window
+    /// closed. Every background fetch gates on this — while offline the
+    /// network goes quiet without burning failures into the breaker first.
+    var shouldAttemptBackground: Bool { networkObserver.isOnline && breaker.shouldAttempt }
+
     /// The most recent walk's result, kept so a refresh in progress can
     /// republish the MRU without dropping rows the last walk found.
     private var discovered: [String] = []
@@ -238,16 +249,17 @@ final class RepoDirectoryStore {
         return Array(eligible[range.lowerBound..<min(range.upperBound, eligible.count)])
     }
 
-    /// One repo's badge refresh. An open breaker downgrades a fetching sync
-    /// to a local one rather than skipping it (the Tauri client's exact
-    /// fallback), and only real fetch attempts against a real remote feed the
-    /// breaker — a repo with no remote says nothing about connectivity.
+    /// One repo's badge refresh. Being offline or an open breaker downgrades
+    /// a fetching sync to a local one rather than skipping it (the Tauri
+    /// client's exact fallback — badges keep tracking local edits), and only
+    /// real fetch attempts against a real remote feed the breaker — a repo
+    /// with no remote says nothing about connectivity.
     private func sync(_ path: String, fetching: Bool) async {
         guard !inFlight.contains(path) else { return }
         inFlight.insert(path)
         defer { inFlight.remove(path) }
 
-        let fetch = fetching && breaker.shouldAttempt
+        let fetch = fetching && shouldAttemptBackground
         guard let summary = try? await GitBridge.syncSummary(of: path, fetching: fetch) else {
             return
         }

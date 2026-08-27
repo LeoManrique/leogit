@@ -198,7 +198,6 @@ export interface Config {
   scan_depth: number
   side_by_side_diff: boolean
   hide_whitespace: boolean
-  wrap_long_lines: boolean
   tab_size: number
   claude_timeout_secs: number
   ollama_server_url: string

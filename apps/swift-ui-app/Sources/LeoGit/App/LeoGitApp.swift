@@ -4,6 +4,12 @@ import SwiftUI
 struct LeoGitApp: App {
     @State private var store = RepoStore()
 
+    /// The one native owner of the shared config (see its doc comment for
+    /// the reload sites). Created here so the main window and the Settings
+    /// scene observe the same instance — the pair the Tauri client gets from
+    /// its single `$config` store.
+    @State private var appConfig = AppConfigStore()
+
     init() {
         // The process's first Rust call, before any other thread could be
         // reading the environment: repair the minimal PATH a Finder launch
@@ -15,7 +21,11 @@ struct LeoGitApp: App {
         WindowGroup {
             ContentView()
                 .environment(store)
-                .task { await store.loadCoreVersion() }
+                .environment(appConfig)
+                .task {
+                    await store.loadCoreVersion()
+                    await appConfig.reload()
+                }
         }
         .defaultSize(width: 980, height: 660)
         .windowToolbarStyle(.unified)
@@ -42,6 +52,7 @@ struct LeoGitApp: App {
         // reads, so a change here applies to both.
         Settings {
             SettingsView()
+                .environment(appConfig)
         }
     }
 }

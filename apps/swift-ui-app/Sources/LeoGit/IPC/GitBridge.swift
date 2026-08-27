@@ -65,6 +65,16 @@ enum GitBridge {
         try getDiff(repoPath: repoPath, file: file)
     }
 
+    /// `rawDiff` with whitespace-only changes suppressed (`git diff -w`) —
+    /// the `hide_whitespace` setting's read. Working-tree only, same as the
+    /// Tauri client: commit diffs have no whitespace-ignored variant.
+    @concurrent
+    static func rawDiffIgnoringWhitespace(of repoPath: String, for file: FileEntry) async throws
+        -> String
+    {
+        try getDiffWhitespaceIgnored(repoPath: repoPath, file: file)
+    }
+
     /// Structure a raw diff into hunks of typed lines, or `nil` when there is
     /// nothing textual to show.
     @concurrent

@@ -10,12 +10,26 @@ struct DiffView: View {
 
     @State private var store = DiffStore()
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(AppConfigStore.self) private var appConfig
 
     /// Reload whenever the selection or the source changes — a new file, a
-    /// status epoch bump, or a different commit.
+    /// status epoch bump, a different commit — or a diff *content* setting:
+    /// toggling either one re-runs the load through the seamless path (the
+    /// Tauri client's `lastHideWhitespace` effect), where the equality skip
+    /// keeps scroll when nothing textual changed. Tab size is presentation —
+    /// it re-renders without reloading, so it stays out.
     private struct LoadKey: Equatable {
         let path: String
         let target: DiffTarget
+        let hideWhitespace: Bool
+        let highlight: Bool
+    }
+
+    /// Whitespace hiding applies to working-tree diffs only — core has no
+    /// whitespace-ignored commit read, and the Tauri client fetches commit
+    /// diffs the same way — so a commit target never re-keys on the toggle.
+    private var hideWhitespace: Bool {
+        if case .workingTree = target { appConfig.hideWhitespace } else { false }
     }
 
     var body: some View {
@@ -30,8 +44,21 @@ struct DiffView: View {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .task(id: LoadKey(path: file.path, target: target)) {
-            await store.load(repoPath: repoPath, file: file, target: target)
+        .task(
+            id: LoadKey(
+                path: file.path,
+                target: target,
+                hideWhitespace: hideWhitespace,
+                highlight: appConfig.syntaxHighlighting
+            )
+        ) {
+            await store.load(
+                repoPath: repoPath,
+                file: file,
+                target: target,
+                hideWhitespace: hideWhitespace,
+                highlight: appConfig.syntaxHighlighting
+            )
         }
     }
 
@@ -100,6 +127,8 @@ struct DiffView: View {
         }
     }
 
+    /// Long lines always wrap — the GitHub Desktop model, shared by both
+    /// clients since `wrap_long_lines` was removed. Vertical scrolling only.
     private var diffRows: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
@@ -107,7 +136,8 @@ struct DiffView: View {
                     DiffRowView(
                         row: row,
                         tokens: tokens(for: row),
-                        palette: palette
+                        palette: palette,
+                        tabSize: appConfig.tabSize
                     )
                 }
             }
@@ -134,6 +164,8 @@ private struct DiffRowView: View {
     let row: DiffRow
     let tokens: [Token]
     let palette: DiffPalette
+    /// Tab stop width in columns, from the shared `tab_size` setting.
+    let tabSize: Int
 
     var body: some View {
         switch row.line.lineType {
@@ -208,7 +240,8 @@ private struct DiffRowView: View {
             tokens: tokens,
             intra: row.line.intraLineDiff,
             lineType: row.line.lineType,
-            palette: palette
+            palette: palette,
+            tabSize: tabSize
         )
     }
 }
