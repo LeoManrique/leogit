@@ -171,8 +171,7 @@ the equality skip keeps scroll when nothing textual changed. `tab_size` is prese
 SwiftUI `Text` honours no paragraph-style attributes, so `DiffLineText` expands tabs to
 spaces with CSS `tab-size` stop math (next multiple of N columns) and remaps every token and
 intra-line range through the expansion — a no-tab line pays one `contains` scan and nothing
-else. Long lines always wrap; `wrap_long_lines` and the Tauri client's no-wrap mode (and the
-fixed-height virtualization only that mode used) were removed everywhere.
+else. Long lines always wrap, in both clients — the GitHub Desktop model.
 
 Committing crosses as the same two calls the Svelte client makes — `format_commit_message`,
 then `commit` — and needed no new type mirrors: core's `commit` owns the whole staging story
@@ -256,7 +255,7 @@ working tree may differ from what any derived view shows, re-derive if you care"
 status value changed — plus unconditionally on app re-activation
 (`NSApplication.didBecomeActiveNotification`, the native `resyncOnActive`). Content edits
 count as a status change: porcelain v2 carries no worktree hash, so a same-row edit
-(modified → still modified) used to be invisible to the comparison and the open diff went
+(modified → still modified) would be invisible to the comparison and leave the open diff
 stale until reselect — core's `FileEntry.stat_stamp` (an opaque mtime+size string,
 `get_status`-only, `None` off-disk; pinned by `stat_stamp_sees_content_edits_and_absence`)
 is what makes the comparison see them. The epoch is deliberately not narrower than that:
@@ -305,10 +304,9 @@ button for the rest, whose chevron always offers Fetch and,
 only while diverged, force push with lease (the ladder makes divergence reachable only in
 the pull state, so the item lands exactly where GitHub Desktop puts it). The old toolbar
 Refresh button is gone; its jobs are split between View ▸ Refresh (⌘R), which posts
-`leogitRefreshRequested` for `ContentView` — where the stores live — to perform the
-visible reload — a scene-to-window notification, the pattern the Settings window used
-before its live-propagating field was retired —
-and the automatics: `refreshQuietly` now counts consecutive status failures and surfaces
+`leogitRefreshRequested` for `ContentView` to perform the visible reload — a
+scene-to-window notification, because commands live on the scene while the stores live
+in the window — and the automatics: `refreshQuietly` now counts consecutive status failures and surfaces
 the error banner after three, with a flag marking the message poll-owned so only the
 poll's own recovery clears it (an explicit action's failure text is never swept away by a
 background tick), and the branch list stays fresh because `BranchMenu`'s content reloads
@@ -605,8 +603,8 @@ Settings scene) holds the shared `Config` and reloads it at exactly three sites 
 every successful Settings save (`SettingsStore` calls `reload()` after `save_config`
 lands, which is how an edit reaches the open diff and the auto-fetch loop live), and the
 activation resync (edits made from the Tauri client arrive on return to the app). The
-auto-fetch loop reads the store each tick instead of the per-tick TOML load it used to
-do, so interval and toggle changes still apply within one interval — the live re-arm the
+auto-fetch loop reads the store each tick, so interval and toggle changes apply within
+one interval — the live re-arm the
 Tauri client still lacks (its ROADMAP entry) — and `DiffView`'s `LoadKey` reads it so the
 diff toggles re-key the open diff the moment a save lands.
 
@@ -615,12 +613,9 @@ core-async over the blocking pool; no listener — `gh repo create` streams noth
 so the sheet and the toolbar banner stay indeterminate), and `SyncStore` gained a `.publish`
 case in the same single `activeOperation` slot as push/pull — Tauri's `'publish'` network op
 — so every background loop pauses for its duration. `check_auth` remains unexported: every gh
-call's own error text already distinguishes "gh missing" from "not authenticated". A
-pull-request surface (`list_prs`/`get_pr_checks`/`create_pr`/`checkout_pr`, a native tab, and
-a `show_pull_requests` config gate) shipped here and was **retired** on request — PRs are a
-GitHub feature, not a git one, and the web UI serves them. The config key is now an ignored
-unknown, pinned by `config_ignores_retired_keys`, which also guards against a future
-`deny_unknown_fields` invalidating every file already on disk.
+call's own error text already distinguishes "gh missing" from "not authenticated".
+There is deliberately no pull-request surface in either client — PRs are a GitHub
+feature, not a git one, and the web UI serves them.
 
 `scripts/build-rust.sh` builds the static lib and regenerates the bindings, and Xcode runs it as
 a pre-build phase — so the Swift API can never be stale relative to the Rust it calls.
@@ -684,7 +679,7 @@ Release builds set `windows_subsystem = "windows"` (in `main.rs`), so the app ru
 
 Every remote-touching command is engineered so an unreachable or flaky network degrades a badge — it never freezes the app. Three layers:
 
-1. **Off the main thread.** Every command that spawns a subprocess or touches the filesystem — the whole of `git.rs` (except the pure `format_commit_message`), all of `diff.rs`, and the four `gh` commands — is declared `#[tauri::command(async)]`. A plain synchronous Tauri command runs inline on the **main thread**: a blocking `git` spawn there freezes the window, and the failure mode is sneaky — commands that are normally instant (`get_status`, `rev-parse`) turn slow exactly when a big push/pull saturates the repo's disk, so the 2 s poll used to stall the UI thread every tick for the whole transfer. `(async)` runs them on tokio worker threads instead. One refinement on top: a `(async)` sync fn still pins one of the ~num-cpus *core* workers for its whole duration, so the commands that can legitimately run for minutes (`fetch`, `pull`, `push`, `clone_repo`, `delete_remote_branch`, `gh_publish_repo`, `gh_clone`) are `async fn`s delegating to `process::run_blocking` (tokio's dedicated blocking pool) — a 10-minute push can never starve the worker pool on a low-core machine.
+1. **Off the main thread.** Every command that spawns a subprocess or touches the filesystem — the whole of `git.rs` (except the pure `format_commit_message`), all of `diff.rs`, and the four `gh` commands — is declared `#[tauri::command(async)]`. A plain synchronous Tauri command runs inline on the **main thread**: a blocking `git` spawn there freezes the window, and the failure mode is sneaky — commands that are normally instant (`get_status`, `rev-parse`) turn slow exactly when a big push/pull saturates the repo's disk, so a synchronous 2 s poll would stall the UI thread every tick for the whole transfer. `(async)` runs them on tokio worker threads instead. One refinement on top: a `(async)` sync fn still pins one of the ~num-cpus *core* workers for its whole duration, so the commands that can legitimately run for minutes (`fetch`, `pull`, `push`, `clone_repo`, `delete_remote_branch`, `gh_publish_repo`, `gh_clone`) are `async fn`s delegating to `process::run_blocking` (tokio's dedicated blocking pool) — a 10-minute push can never starve the worker pool on a low-core machine.
 2. **Time-boxed subprocesses.** `process::run_timed(cmd, label, timeout)` is the single chokepoint: it spawns the child, drains both pipes on helper threads (so a chatty `git --progress` can't pipe-buffer-deadlock), and **kills the child** if it outlives `timeout`, returning a `… timed out …` error. `run_timed_streaming` is the same runner with an incremental stderr reader — each `\r`/`\n`-terminated line is handed to a callback as it arrives (git repaints its meter with bare `\r`), which is how live `--progress` output reaches the UI. `git_net_cmd` additionally bakes transport timeouts into the command — `GIT_SSH_COMMAND="ssh -o ConnectTimeout=N -o BatchMode=yes"` (SSH connect cap + no interactive prompts) and `-c http.lowSpeedLimit=1000 -c http.lowSpeedTime=N` (abort an HTTP transfer that stalls). Budgets: **background** badge fetches are short (8s connect/stall, 12s hard kill — fail fast, keep last-known counts); **user-initiated** transfers are generous (15/30s, 600s hard kill — never kill a real large transfer, only a wedged one). Unit-tested in `process::tests` (`run_timed_kills_a_hung_child_promptly`, `run_timed_streaming_splits_stderr_on_cr_and_lf`).
 3. **Don't keep firing when down.** [services/connectivity.ts](apps/tauri-app/src/lib/services/connectivity.ts) gates *automatic/background* fetches (the auto-fetch timer, the tiered scheduler, the refocus/cold-open resync) on `navigator.onLine` plus a consecutive-failure circuit breaker: after 2 failures it opens with an exponential backoff window (30s → 5min cap), suppressing background fetches until the window lapses, when exactly one probe is allowed through. `repo_sync_status` returns a `fetched` flag so the breaker can tell a real fetch failure from a no-remote repo. User-initiated actions (Pull/Push/switch) always attempt (still bounded by the backend timeout) and their outcome feeds the breaker, so a successful manual pull — or the OS `online` event — re-opens background syncing immediately and triggers a resync.
 4. **One transfer at a time.** The [stores/networkOps.ts](apps/tauri-app/src/lib/stores/networkOps.ts) `activeNetworkOp` store marks a user push/pull/publish as in flight. All handlers guard on it (mutual exclusion), and the 2 s poll, auto-fetch, refocus resync, and the tiered scheduler pause while it's set — polling mid-transfer only spawns git processes that contend with the transfer for the repo's disk, locks, and bandwidth; the op's own completion refresh covers what they would have found.
@@ -881,12 +876,12 @@ It returns `StartedTerminal { pid, shell_id, shell_label }` — the label is res
 
 `CommandBuilder::new` already assembles the right environment. On Windows it seeds from the current process, then overlays `HKLM\…\Session Manager\Environment` and merges `HKCU\Environment`, so `PATH` becomes the same system+user merge Explorer and Windows Terminal hand their children.
 
-`start_terminal` used to copy `std::env::vars()` over the top of that, which broke the terminal two ways on Windows:
+`start_terminal` deliberately does not copy `std::env::vars()` over the top of that — doing so breaks the terminal two ways on Windows:
 
-- **Launched from Git Bash** (the `leogit` shell function), the inherited `PATH` is MSYS-style (`/usr/bin`, `/c/Program Files/...`). Win32 cannot resolve a single entry, so essentially every command failed.
+- **Launched from Git Bash** (the `leogit` shell function), the inherited `PATH` is MSYS-style (`/usr/bin`, `/c/Program Files/...`). Win32 cannot resolve a single entry, so essentially every command fails.
 - **Launched from Explorer**, the inherited `PATH` is a login-time snapshot that misses anything installed since.
 
-Only deliberate additions go on top now. `session_env` is a pure function returning those additions, and `session_env_never_overrides_path` is the regression test.
+Only deliberate additions go on top. `session_env` is a pure function returning those additions, and `session_env_never_overrides_path` is the regression test.
 
 ### UTF-8 across read boundaries
 
@@ -925,7 +920,7 @@ They're `#[tauri::command(async)]` (worker thread) and routed through `process::
 Defined in [core/src/config.rs](core/src/config.rs).
 
 - Config dir is resolved via `directories::BaseDirs::config_dir().join("leogit")` (`~/.config/leogit` on Linux, `~/Library/Application Support/leogit` on macOS, `%APPDATA%\leogit` on Windows). It's created if missing.
-- `config.toml` — every field on the `Config` struct. New fields carry `#[serde(default = "…")]` so users on older configs keep working. Defaults are written to disk on first run so the file is discoverable.
+- `config.toml` — every field on the `Config` struct. New fields carry `#[serde(default = "…")]` so users on older configs keep working, and unknown keys — a retired field still sitting in an older file — parse as ignored, never an error (`config_ignores_retired_keys` pins it, guarding against a future `deny_unknown_fields` invalidating files already on disk). Defaults are written to disk on first run so the file is discoverable.
 - `repos-state.json` — `last_opened_repo`, `last_clone_dir`, the two sort-toggle preferences (`repo_sort_mode`, `clone_sort_mode`), and `recent_repos` (MRU order, capped at `MAX_RECENT_REPOS = 50`). Every field is `Option`/`#[serde(default)]` so older state files load fine. JSON instead of TOML to keep it cheap to extend.
 - Every read runs `normalize_repo_paths`, which converts the stored paths (see [Path normalisation](#path-normalisation)) and de-dupes `recent_repos` afterwards. A file written before that change holds Windows verbatim paths, which no longer match anything `discover_repos` returns — `last_opened_repo` would silently stop resolving (the app forgets the open repo and lands in the picker) and the MRU list would grow a second entry per folder. It runs on every read rather than as a one-shot migration because it's idempotent and the next write persists it, so the file heals itself with no schema version to carry.
 - Writes go through two commands that each run one read-modify-write under a process-wide `STATE_LOCK` (Tauri runs commands concurrently; two interleaved load+save cycles would drop the slower writer's fields): `patch_state(ReposStatePatch)` merges the supplied fields (`None` = leave as-is; `recent_repos` is deliberately not patchable), and `record_recent_repo(path)` owns the MRU move-to-front/de-dupe/cap. Both return the resulting state so the frontend reseeds from the authoritative copy. A corrupt state file self-heals inside `update_state`: it logs, starts from defaults, and lets the save rewrite it, instead of wedging every future patch on the same parse error. Covered by the `prepend_recent_*` / `apply_patch_*` tests.

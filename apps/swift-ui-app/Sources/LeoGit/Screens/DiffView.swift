@@ -128,7 +128,7 @@ struct DiffView: View {
     }
 
     /// Long lines always wrap — the GitHub Desktop model, shared by both
-    /// clients since `wrap_long_lines` was removed. Vertical scrolling only.
+    /// clients. Vertical scrolling only.
     private var diffRows: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {

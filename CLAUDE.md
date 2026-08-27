@@ -10,6 +10,17 @@ Constantly update these documents without repeating information between them.
 - Update `./ROADMAP.md` after completing any point mentioned there. Also add new features that come up while developing.
 - Update `./README.md` after completing some change that affects the escense of the project. Keep it concise and remove obsolete information.
 
+"Remove obsolete information" means rewrite: these documents describe the current
+state only, as if older behavior never existed. Never append retirement or
+supersede notes ("since superseded", "formerly", "was removed", "used to"), and
+never leave a stale claim standing next to its correction — delete the claim and
+say only what is true now. When an obsolete passage carried a constraint worth
+keeping, restate the constraint in present tense ("deliberately does not X,
+because…"). History and decision records belong in git and in `docs/plans/`
+as-built records — those keep their amendment notes; the living docs do not.
+ROADMAP's checked entries log what each completed chunk did at the time and may
+be contradicted by later entries; that is fine — but never patch one with a note.
+
 ## Implementation order
 
 Don't implement too many multiple features at once, make the feature implementation order what the user flow is, and make sure it is tested before proceeding to the next one.

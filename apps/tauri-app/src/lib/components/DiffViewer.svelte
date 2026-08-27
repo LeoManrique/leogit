@@ -133,11 +133,9 @@
     return ' '
   }
 
-  // Rows render whole, wrapped to the viewer width. The fixed-height
-  // virtualization this viewer once had was retired with the no-wrap mode
-  // that needed it — wrapped rows have variable heights, which break the
-  // offset math, and wrap has been the only mode since `wrap_long_lines`
-  // was removed.
+  // Rows render whole, wrapped to the viewer width. Deliberately no
+  // virtualization: wrapped rows have variable heights, which break
+  // fixed-height offset math.
 
   let scrollContainer = $state<HTMLDivElement | null>(null)
 
