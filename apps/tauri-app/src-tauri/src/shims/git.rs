@@ -233,11 +233,6 @@ pub async fn clone_repo(
 }
 
 #[tauri::command(async)]
-pub fn get_last_commit_timestamp(repo_path: String) -> i64 {
-    git::get_last_commit_timestamp(repo_path)
-}
-
-#[tauri::command(async)]
 pub fn effective_scan_paths(scan_paths: Vec<String>) -> Vec<String> {
     git::effective_scan_paths(scan_paths)
 }

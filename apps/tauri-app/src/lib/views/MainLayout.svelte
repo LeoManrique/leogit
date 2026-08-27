@@ -9,6 +9,8 @@
   import { setRepoSync } from '$lib/stores/repoSync'
   import { activeNetworkOp } from '$lib/stores/networkOps'
   import { repoSyncScheduler } from '$lib/services/repoSyncScheduler'
+  import { rediscoverRepos } from '$lib/services/repoDiscovery'
+  import { resolveCloneDefaultDir, rememberCloneDir } from '$lib/services/cloneFlow'
   import {
     shouldAttemptBackground,
     recordResult,
@@ -17,7 +19,6 @@
   import {
     gitApi,
     diffApi,
-    configApi,
     WEBVIEW_DIFF_OPTIONS,
     type FileEntry,
     type CommitInfo,
@@ -845,6 +846,12 @@
     if (resyncing || $activeNetworkOp || $appState.phase !== 'main') return
     resyncing = true
     try {
+      // The config file is shared with the native client and editable outside
+      // this process, so re-read it before anything that consumes it. Without
+      // this a save made elsewhere — theme, diff settings, provider — never
+      // reached a running window at all: the staleness window was the lifetime
+      // of the app. Re-read first so the refreshes below already see it.
+      await refreshConfig()
       // Coming back to the app: fetch the active repo so a remote that moved
       // while we were away surfaces on the Pull button, then refresh local state.
       await fetchActiveRemote()
@@ -1156,27 +1163,45 @@
     await handleSwitchRepo(path)
   }
 
-  // Open the Clone dialog from the repo picker, seeding its destination from
-  // the last-used clone folder (falling back to the first scan path, then ~/Dev).
+  // Open the Clone dialog from the repo dropdown, seeding its destination from
+  // the shared rule (last-used clone folder → first scan path → ~/Dev).
   async function openClone() {
     showRepos = false
-    let lastDir: string | undefined
-    try {
-      lastDir = (await configApi.loadState()).last_clone_dir
-    } catch {}
-    cloneDefaultDir = lastDir || $config?.scan_paths?.[0] || '~/Dev'
+    cloneDefaultDir = await resolveCloneDefaultDir()
     showClone = true
   }
 
   // A clone finished: remember where it landed, make it selectable, and open it.
   async function handleCloned(repoPath: string, parentDir: string) {
     showClone = false
-    await patchReposState({ last_clone_dir: parentDir })
+    await rememberCloneDir(parentDir)
     appState.update((s) => ({
       ...s,
       repos: s.repos.includes(repoPath) ? s.repos : [...s.repos, repoPath],
     }))
     await handleSwitchRepo(repoPath)
+  }
+
+  /**
+   * Show the repo dropdown, re-walking first so a repo cloned from a terminal
+   * or a folder just added to the scan paths is in the list the user is about
+   * to read. Not awaited: the list on screen is already usable, and the walk
+   * publishes into it when it lands.
+   */
+  function openRepos() {
+    showRepos = true
+    void rediscoverRepos()
+  }
+
+  /**
+   * Settings closed. The scan paths are what discovery walks, so re-walk — the
+   * main phase used to need a restart for a scan-path edit to mean anything,
+   * while the picker phase re-walked immediately: the same setting behaving two
+   * different ways depending on where you opened it from.
+   */
+  function closeSettings() {
+    showSettings = false
+    void rediscoverRepos()
   }
 
   async function handleSwitchBranch(branch: string) {
@@ -1301,7 +1326,10 @@
       const cloneDismissable = showClone && !(cloneOverlay?.isBusy() ?? false)
       if (showRepos || cloneDismissable || showBranches || showSettings || showHelp || showMerge) {
         e.preventDefault()
-        showRepos = showBranches = showSettings = showHelp = showMerge = false
+        // Escape closes Settings the same way its own close button does — a
+        // scan-path edit must re-walk however the dialog was dismissed.
+        if (showSettings) closeSettings()
+        showRepos = showBranches = showHelp = showMerge = false
         if (cloneDismissable) showClone = false
         return
       }
@@ -1320,7 +1348,8 @@
       showHelp = !showHelp
     } else if (meta && e.key === ',') {
       e.preventDefault()
-      showSettings = !showSettings
+      if (showSettings) closeSettings()
+      else showSettings = true
     } else if (meta && e.key === 'r') {
       e.preventDefault()
       refreshStatus()
@@ -1505,7 +1534,7 @@
 
   <div class="main-content">
     <Header
-      onOpenRepos={() => (showRepos = true)}
+      onOpenRepos={openRepos}
       onOpenBranches={() => (showBranches = true)}
       onOpenSettings={() => (showSettings = true)}
       onOpenHelp={() => (showHelp = true)}
@@ -1759,6 +1788,7 @@
           currentRepo={$appState.repoPath}
           onSelect={handleSwitchRepo}
           onClone={openClone}
+          onOpenSettings={() => { showRepos = false; showSettings = true }}
         />
       </div>
     </div>
@@ -1802,7 +1832,7 @@
     />
   {/if}
 
-  <SettingsOverlay isOpen={showSettings} onClose={() => (showSettings = false)} />
+  <SettingsOverlay isOpen={showSettings} onClose={closeSettings} />
   <HelpOverlay isOpen={showHelp} onClose={() => (showHelp = false)} />
 
   {#if discardTarget}

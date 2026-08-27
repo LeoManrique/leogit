@@ -34,7 +34,6 @@
 // required rather than avoidable.
 #![allow(clippy::needless_pass_by_value)]
 
-use std::path::Path;
 use std::sync::Arc;
 
 use leogit_core::events::{CoreEvent, EventSink};
@@ -428,9 +427,7 @@ pub fn fix_path_env() {
 /// Returns [`GitError`] when `path` is not inside a git repository.
 #[uniffi::export]
 pub fn resolve_repo_root(path: String) -> Result<String, GitError> {
-    git::repo_root(Path::new(&path)).ok_or_else(|| GitError::Failed {
-        message: format!("{path} is not a git repository"),
-    })
+    git::resolve_repo_root(&path).map_err(|message| GitError::Failed { message })
 }
 
 /// The display name for the repository at `path` (its directory name).
@@ -1695,6 +1692,7 @@ pub fn list_shells() -> Vec<ShellOption> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn resolve_repo_root_rejects_non_repo() {

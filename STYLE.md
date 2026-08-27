@@ -192,6 +192,7 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 - Backdrop: `rgba(0,0,0,0.3)` light, `rgba(0,0,0,0.5)` dark. No backdrop blur (skip in the desktop app where opaque windows make the effect inert).
 - Close affordance: a tiny X in the header corner. `Escape` dismisses. Backdrop click dismisses for non-destructive dialogs (Settings, Help, Branches); destructive dialogs (Force push, Discard changes) require an explicit button.
 - One concern per modal. Prefer in-page sections (sidebar tabs, settings categories) over spawning a modal.
+- **A dialog running an uncancellable operation freezes its inputs with one `<fieldset disabled>`, not a `disabled` per control.** Per-control flags are a list that a later control forgets to join — which is how the Clone dialog stayed editable mid-clone and let a new selection rewrite the "Clones into…" preview to a path nothing was being written to. Group the controls that choose *what* the operation acts on; reset the fieldset to `border: none; margin: 0; padding: 0; min-inline-size: 0` (its default `min-content` inline size refuses to shrink and would widen the dialog), and dim it ~0.55 so "not yet" is visible rather than discovered by clicking. **Progress and errors stay outside** it: the bar reporting the operation must not be dimmed by the operation.
 - **Error modal** ([ErrorModal.svelte](apps/tauri-app/src/lib/components/ErrorModal.svelte)): title in `--status-red` semibold, body in `--text-primary`, single `[OK]` button right-aligned. No icon-in-tinted-square next to the title.
 
 ### Branch picker
@@ -200,6 +201,13 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 - Top: a single search input (placeholder "Filter branches…"). No label.
 - List below: 22–24px rows, branch name in `--text-primary`, ahead/behind indicator in 11px mono `--text-muted` on the right, current branch marked with a thin accent left bar OR a small accent dot to the left of the name — pick one, not both.
 - Footer row: "Create branch…" ghost button. Trailing `…` because it opens an input.
+
+### Repo pickers (switcher popover + startup modal)
+
+- **The two are one component family**, and anything shown in both is shared code, not a matched pair of copies. They drifted before — the startup modal had a diagnosable empty state while the dropdown said "No repositories" for every cause — so the empty state ([RepoListEmptyState.svelte](apps/tauri-app/src/lib/components/RepoListEmptyState.svelte)) and the footer are literally the same markup in each.
+- **Footer row**, a hairline above it, 8×10px padding: `Clone Repository…` at the trailing edge. A ghost text button at 12px `--text-secondary`, brightening to `--text-primary` on a `--surface-hover` fill, with a trailing `…` because it opens something. Text, not an icon — it is the list's one escape hatch, and it reads better labelled than as a second glyph competing with the sort toggle above it.
+- **The footer lives outside the list**, so it survives every empty state. That is the whole point of it — the states where the user most needs a way out are the ones with no rows.
+- List rows are 24px, name in `--text-primary` ellipsized, indicators trailing (see *Status indicators*). The scrolling list gets `min-height: 0` so it shrinks instead of pushing the footer out of the popover.
 
 ### Terminal
 
@@ -214,6 +222,7 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 ### Empty states
 
 - **An empty state that a setting can fix must carry the fix.** "No repositories found" alone is a dead end; name what was searched, then offer the action. Pattern: a plain title in `--text-faint`, an 11px explanatory line inheriting it, the searched values as an 11px mono list in `--text-muted` (paths are data — mono), then a single tertiary button. Left-aligned text would fight the centred modal, so the whole stack stays centred.
+- **Say which emptiness this is.** One string for every cause is the failure the pattern above exists to prevent: *still looking* (a small spinner over the title), *nothing found anywhere* (title + what was searched), and *nothing matched your filter* (title alone) are different problems with different fixes. The searched-folders list belongs only to the middle one — the user who typed a query knows the list isn't empty. The fix button belongs to both non-loading states: "none matched" is what you see when the repo you want lives somewhere discovery was never pointed at.
 - Don't stack more than one action. The contextual button and the persistent header control are enough; a third route reads as uncertainty about which one works.
 - **A sidebar list with no rows shows one faint centred line** (`No changes`, `No commits`), never the icon-and-headline treatment: that is sized for a pane, and the pane-sized story ("The working tree is clean.") is the detail column's to tell. The composer stays put underneath — the placeholder claims exactly the list's slot.
 - **An empty state that replaces only part of a pane must still claim the whole pane.** Sized to its own content, it leaves the pane's stack shorter than the slot it sits in, so the layout centres the stack — and a header meant to sit at the top drifts to the middle, where it reads as oversized chrome rather than as a short body. The header stays pinned; the empty state takes the rest and centres inside it. This is what the binary-file and "no textual changes" diff bodies do.

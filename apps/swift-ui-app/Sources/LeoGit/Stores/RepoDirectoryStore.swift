@@ -5,9 +5,10 @@ import Foundation
 /// (dirty / behind / ahead) the switcher renders.
 ///
 /// The repo list merges filesystem discovery under the configured scan folders
-/// with the shared MRU list, so a repo opened via "Open Other…" keeps its row
-/// across launches even when it lives outside the scan folders — a deliberate
-/// improvement over the Tauri picker, which forgets such repos on restart.
+/// with the shared MRU list (`known_repos`, which both clients call), so a repo
+/// that arrived by clone or `leogit <dir>` keeps its row across launches even
+/// when it lives outside the scan folders, and a path that no longer exists
+/// loses one.
 ///
 /// Badge freshness follows the Tauri client's `repoSyncScheduler` exactly:
 /// fetch-less sweeps for rows the switcher is about to show (cheap — two git

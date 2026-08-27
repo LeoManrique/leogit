@@ -1,6 +1,6 @@
 # Plan — Cross-client feature parity (SwiftUI ⇄ Tauri)
 
-> Status: **in progress — WS-A and WS-B shipped (2026-08-27), WS-C is next.**
+> Status: **in progress — WS-A, WS-B and WS-C shipped (2026-08-27), WS-D is next.**
 > The remaining work was re-cut into seventeen smaller workstreams (C…S) on
 > 2026-08-27 after WS-B proved too large to review as one piece — see §6.
 > Accepted 2026-08-27 with every open decision resolved. Per-workstream state
@@ -83,10 +83,10 @@ in code. "Make the current features work well" starts here (workstream A).
 
 ### 3.1 Defects — fixed
 
-Fifteen of the twenty are closed: twelve in WS-A, and D-5 / D-7 / D-17's
-structural half with their hoists in WS-B. Kept as a register (IDs are
-referenced from §4) and trimmed to what each fix *is*, since the code now
-carries the reasoning.
+Sixteen of the twenty are closed: twelve in WS-A, D-5 / D-7 / D-17's
+structural half with their hoists in WS-B, and D-6 in WS-C. Kept as a register
+(IDs are referenced from §4) and trimmed to what each fix *is*, since the code
+now carries the reasoning.
 
 | ID | Client | Fixed | Left over |
 |---|---|---|---|
@@ -103,6 +103,7 @@ carries the reasoning.
 | D-18 | Native | The warm-up fetch ran offline, and against remote-less repos, discarding its outcome. Now gated on the breaker *and* `status.hasRemote`, and reports to the breaker (RM-10). Waits on the new `RepoStore.awaitLoadSettled()` so the gate reads a real status. | — |
 | D-19 | Tauri | The `\ No newline at end of file` marker rendered its backslash twice. `linePrefix` no longer adds one — core keeps it in `content`. | DF-8's other three alignments. |
 | D-5 | Tauri | **Config lost-update on a shared file.** A save posted the whole config as it looked when the dialog *opened*, so a native-side `tab_size` change was silently reverted. `patch_config` (H-10) is now the only writer: a surface names the fields it owns and cannot touch the rest, and core reads-edits-writes under a lock the file never had. | — |
+| D-6 | Tauri | **Config never re-read while running** — a native-side save reached a running Tauri window never, so theme, diff settings, auto-fetch and provider stayed at their launch values for the lifetime of the app. WS-C: `resyncOnActive` calls `refreshConfig` first, before the refreshes that consume it. D-5 stopped this client from *clobbering* the shared file; this is the other half — reading it. | BG-2's live re-arm of the fetch timer (a config read still doesn't restart the interval) → WS-J. |
 | D-7 | Both / core | **Empty-string AI config poisoned Generate in both clients.** `Some("")` is not `None`, so `--model ""` and a hostless Ollama URL sailed past every `unwrap_or`. `Config::normalized()` (H-10) treats blank-after-trim as absent on every read and every write, so an already-poisoned file heals on first load whichever client opens it. | — |
 
 ### 3.2 Defects still open
@@ -110,7 +111,6 @@ carries the reasoning.
 | ID | Client | Defect | Severity |
 |---|---|---|---|
 | D-4 | Tauri | **Terminal listener-registration race.** Output and exit listeners are registered two async IPC round trips *after* `start_terminal` returns, while the reader thread is already emitting; Tauri drops events with no listener (`Terminal.svelte:145,154,164`; `event_sink.rs:35-42`). A fast-printing shell loses its first prompt; an instantly-dying shell (the broken-`.zshrc` case the docs claim is handled) can lose `terminal-closed` entirely. Native passes the listener as an argument to the spawn — structurally immune. | High |
-| D-6 | Tauri | **Config never re-read while running.** `resyncOnActive` doesn't call `refreshConfig` (`MainLayout.svelte:715-732`) — a native-side save never reaches a running Tauri app: theme, diff settings, auto-fetch, provider all stale with an unbounded window. Native reloads `AppConfigStore` on every activation. | High |
 | D-9 | Native | **Collapsing the terminal reflows the emulator to one row.** The zero-height frame is full-width, so SwiftTerm's degenerate-size bail (width *and* height zero) doesn't fire; the buffer reflows to `MINIMUM_ROWS = 1` and each collapse/expand cycle sends a spurious `SIGWINCH` (TerminalDock's `.frame(height: 0)` + SwiftTerm `AppleTerminalView.swift:353-356`). | Medium |
 | D-14 | Native | **Stale-diff scroll: no reset on file switch.** No `ScrollViewReader` exists; `DiffRow.id` is a flat index, so switching files lands at the previous file's scroll offset (verified — no `scrollPosition`/`scrollTo` anywhere in `Sources/LeoGit`). Both Tauri and GitHub Desktop reset on file change. | Medium |
 | D-15 | Native | **Copying from a diff yields garbage.** `.textSelection(.enabled)` spans the gutters, so a copy includes line numbers and `+`/`−` glyphs; tab expansion means tabs come out as spaces (`DiffView.swift:145`; `DiffLineText.swift:86-88`). GitHub Desktop rebuilds clipboard text from the model. | Medium |
@@ -127,7 +127,7 @@ behavior change the user would notice — except battery.
 | E-2 | Tauri | `pollHeadSha` spawns `git rev-parse HEAD` every tick although `status.head_sha` from the same tick already holds it. | ~30 spawns/min |
 | E-3 | Tauri | No visibility gating anywhere: hidden window keeps the 2 s poll (≈120 subprocesses/min if the engine doesn't throttle) and the tier scheduler fetching up to 19 remotes on a 2/5/10-min rotation, forever. Native: 30 s ladder + paused sweeps. | ~60× hidden-state cost |
 | E-4 | Tauri | Three independent tier `setInterval`s collide every 10 min — up to 3 concurrent background `git fetch` + auto-fetch + a visible sweep. The "sequential" comment is only true within a tier. | 4 concurrent fetches worst case |
-| E-5 | Tauri | Dropdown open fires `get_repo_identifier` + `get_last_commit_timestamp` per repo, **unbounded in parallel** — the only unbounded fan-out in either client. | 2N processes at once (N = repos) |
+| E-5 | Tauri | **Half closed in WS-C**: RM-4's MRU sort deleted the `get_last_commit_timestamp` call with the store that made it. Dropdown open still fires `get_repo_identifier` per repo, unbounded in parallel — the only unbounded fan-out left in either client. | was 2N processes at once, now N (N = repos) |
 | E-6 | Tauri | Poll publishes a fresh `repoState` (plus two new `Set`s) every tick even when nothing changed → every subscriber re-renders every 2 s on an idle repo. Native equality-skips. | continuous idle re-render |
 | E-7 | Native | Every discard/ignore triggers a **full** reload — status + up to 500-commit log + `is_merging` + a progress-bar flash — though neither can change history. Tauri does a silent status refresh. | one `git log`@500 per row action |
 | E-8 | ✅ *WS-B.* `DiffOptions` makes the render artifacts opt-in, so the native path no longer builds HTML and pairings for the bridge to drop (H-8). `DiffLine.text` became `Option` in the same pass, dropping a duplicate of every line's content from both wires. | was ~40 k allocations per 20 k-line diff load |
@@ -157,12 +157,30 @@ and matched, not that it was skipped.
   Reuse the switcher's list as the Welcome body and start discovery from
   Welcome. Adopt Tauri's "exactly one discovered repo → auto-open" rule
   (deliberately *not* after a Settings edit). Keep native's no-back-to-welcome
-  model — both clients agree repos switch in place. → WS-L
-- **RM-2 · Open a repo outside the scan paths.** Native has `.fileImporter`
-  (Welcome ⌘O + switcher "Open Other…"); the Tauri client has **no** way to
-  open such a repo except the CLI or a config edit. **Native right** (and
-  GitHub Desktop's File ▸ Add Local Repository ⌘O agrees). Add "Open Other…"
-  to `RepoDropdown`'s footer and the picker's empty state. → WS-C
+  model — both clients agree repos switch in place. **The same change removes
+  Welcome's `Open Repository…` / ⌘O** (RM-2): it exists only because there is
+  no list here yet, and until the list replaces it, it is the sole way into a
+  repository on a machine with no `last_opened_repo`. Neither half ships
+  without the other. → WS-L
+- **RM-2 · Open a repo outside the scan paths.** **Decided: neither client gets
+  a per-folder open action**, GitHub Desktop's File ▸ Add Local Repository ⌘O
+  notwithstanding. A repo list is *what the scan paths cover*, so a local
+  repository missing from it means the paths are wrong; sending the user to
+  Settings fixes the cause and holds next launch, where a one-off open patches
+  one symptom and invites the list to disagree with its own configuration. The
+  empty state's "Choose folders to search" CTA is the sanctioned route, and a
+  repo genuinely outside every scan path still arrives by clone or
+  `leogit <dir>` and then keeps its row via RM-3's MRU union. ✅ *WS-C*: neither
+  switcher offers one — the Tauri client never had it, and native's footer
+  action is gone, leaving both footers `Clone Repository…` alone.
+
+  **One entry point survives, and only because it is load-bearing.** Native's
+  Welcome screen has no discovery list at all (RM-1), no toolbar, and no
+  `leogit <dir>` (SH-1) — so its `Open Repository…` / ⌘O is not a second way
+  into a list, it is the *only* way in on a machine with no
+  `last_opened_repo`. **It goes as part of RM-1, in the same change that makes
+  Welcome the discovery picker** — removing it before that strands a fresh
+  install on a clone-only screen. → WS-L
 - **RM-3 · Row-list membership.** Native unions discovery with the
   existence-checked MRU, so an Open-Other repo keeps its row across launches;
   Tauri's list is discovery-only — clones, CLI opens, and Open-Other rows all
@@ -172,20 +190,22 @@ and matched, not that it was skipped.
   clients call it, so a clone, a CLI open or an Open-Other repo keeps its row
   across restarts and a path that no longer exists loses one — which also stops
   native tiering dead MRU entries and burning a time-boxed fetch on each per
-  tier interval (the reverse defect). Still open: Tauri's `last_opened_repo`
-  restore is conditioned on discovery re-finding the repo. → WS-C
-- **RM-4 · Switcher sort order.** Native: MRU + active-first (zero
-  subprocesses). Tauri: last-commit-time via one `git log -1` per repo
-  (E-5), list reordering under the user as timestamps stream in, plus a
-  persisted clock↔A-Z toggle the native client ignores (a shared-state hazard:
-  a Tauri-set "alphabetical" silently does nothing natively). GitHub Desktop:
-  alphabetical + a small Recent group. **Decided: MRU-of-use on both** — zero
+  tier interval (the reverse defect). ✅ *WS-C* for the rest: the
+  `last_opened_repo` restore now tests that the path is still a repository
+  instead of that this launch's walk re-found it, and lists it itself when the
+  union didn't — a repo outside the scan paths that aged out of the MRU's cap
+  used to drop the user into the picker with the repo they were just in
+  missing from it.
+- **RM-4 · Switcher sort order.** Decided: **MRU-of-use on both** — zero
   subprocesses, a list that doesn't move while you're aiming at it, and the
   signal a switcher is actually for (last-commit-time answers "where did a
   commit land most recently", which can be someone else's work you just
-  fetched). Keep the persisted name toggle (native implements it — its rank
-  function already has a name-ordered tail), and delete `repoActivity` +
-  `get_last_commit_timestamp` (which then has no consumer). → WS-C
+  fetched). ✅ *WS-C* for the Tauri half: the dropdown ranks active → MRU index
+  → name-ordered tail, native's rank function in TS, and `repoActivity` +
+  `get_last_commit_timestamp` are deleted with their last consumer — which is
+  also half of E-5. The persisted clock↔A-Z toggle stays; **native still
+  ignores it** (a Tauri-set "alphabetical" silently does nothing there), which
+  is the shared-state hazard left. → WS-L
 - **RM-5 · Row labels + search input set.** Tauri labels rows with the GitHub
   `owner/name` (colliding basenames get a muted `owner/` prefix — GitHub
   Desktop's rule) and searches over those names; native shows bare basenames
@@ -204,25 +224,31 @@ and matched, not that it was skipped.
   scroll-into-view across all three of its pickers. **Tauri right**; native
   gets it via `List(selection:)` in the popover. → WS-L
 - **RM-7 · Empty/loading states.** Native's switcher distinguishes
-  looking/none-found(+searched folders)/no-matches; Tauri's dropdown says
-  "No repositories" for everything (the rich diagnosable state exists only in
-  the startup picker) — and neither the native empty state nor the dropdown
-  offers a "Choose folders to search" action (native's is a `SettingsLink`
-  away). Port the states into the dropdown; add the CTA to both. → WS-C, WS-L
-- **RM-8 · Switching mid-transfer.** Native disables the switcher while a
-  network op runs; Tauri lets you switch away mid-push — the old repo's
-  transfer keeps running while the new repo's header shows "Pushing…" with no
-  progress, and the slot gates the new repo's polling for invisible reasons.
-  **Native right** given the single global slot (GitHub Desktop allows it, but
-  scopes state per repo — out of reach without per-repo op state). Same for
-  Refresh/⌘R during a transfer (D-13's neighbor). → WS-C, WS-F (⌘R with SH-3)
-- **RM-9 · Discovery freshness.** Native re-walks on every switcher open and
-  re-reads scan paths every load; Tauri discovers once per launch, and a
-  scan-path edit re-runs discovery **only** when Settings closes in the picker
-  phase — from the main view it needs a restart. **Native right**; wire
-  `rediscoverRepos()` into the main-phase Settings close and the dropdown
-  open. One native refinement: run the walk concurrently with the badge sweep
-  instead of before it. → WS-C
+  looking/none-found(+searched folders)/no-matches; Tauri's dropdown said
+  "No repositories" for everything, with the rich state only in the startup
+  picker. ✅ *WS-C* for Tauri: one shared `RepoListEmptyState` answers all three
+  in both lists, and the "Choose folders to search" CTA is on **both** dead
+  ends, not only the empty one — "none matched" is what you see when the repo
+  you want lives somewhere discovery was never pointed at. (The "looking" state
+  is unreachable in the dropdown by construction: the open repo is always
+  listed there. It is live in the picker, the phase that can have none.)
+  Native still has no CTA at all. → WS-L
+- **RM-8 · Switching mid-transfer.** **Native right** given the single global
+  slot (GitHub Desktop allows it, but scopes state per repo — out of reach
+  without per-repo op state). ✅ *WS-C*: the Tauri switcher chip disables on
+  `activeNetworkOp`, with a title saying why. Switching away used to leave the
+  old repo's transfer running while the new repo's header read "Pushing…" with
+  no progress, and gated the new repo's polling for invisible reasons.
+  Refresh/⌘R during a transfer (D-13's neighbor) is the other half.
+  → WS-F (⌘R with SH-3)
+- **RM-9 · Discovery freshness.** **Native right.** ✅ *WS-C* for Tauri:
+  `services/repoDiscovery.ts` re-walks on dropdown open and on Settings close
+  in *both* phases (button, Escape and ⌘, all route through one handler), with
+  a single in-flight pass shared rather than duplicated and the open repo
+  re-added if a walk racing the fire-and-forget MRU write would drop its row.
+  The main view used to need a restart for a scan-path edit or a terminal
+  clone. One native refinement left: run the walk concurrently with the badge
+  sweep instead of before it. → WS-L
 - **RM-10 · On-switch breaker feed.** ✅ *WS-A.* The native warm-up fetch now
   reports its outcome to the breaker like every other real attempt, in the
   extracted `ContentView.warmUpFetch` alongside D-18's gating.
@@ -694,25 +720,26 @@ and matched, not that it was skipped.
 
 ### 4.8 Clone & gh (CL)
 
-- **CL-1 · Reachability.** Tauri: clone is unreachable with no repo open (the
-  entry lives inside the main-phase dropdown) — the first-run user most
-  likely to want it can't get to it. Native: reachable from Welcome and the
-  switcher; but its entry sits under the switcher's transfer-disable (cloning
-  a different repo contends with nothing — clone deliberately claims no slot
-  in either client). Fix both: a picker-phase entry in Tauri; a menu-item /
-  un-disabled entry natively. → WS-C, WS-L
-- **CL-2 · List caching.** Native refetches `gh repo list` on every sheet
-  open (a 20 s dead zone each time, and the filter is disabled during it);
-  Tauri caches once per app run with no refresh affordance (stale until
-  restart). GitHub Desktop: cache **plus** an always-visible refresh button —
-  adopt that on both. Keep the filter live during loads (Tauri/GH Desktop are
-  right). → WS-C, WS-L
-- **CL-3 · Keyboard.** Native's GitHub tab is mouse-only (no autofocus, no
-  cursor, no Enter-to-select — FRONTEND §6.9's first-row-acts-on-Return applies);
-  Tauri has the full combobox pattern. Conversely Return-to-clone works
-  natively (`defaultAction`) and does nothing in Tauri (no form). Port each
-  other's half; GH Desktop's Enter-on-row-clones is the finishing touch.
-  → WS-C, WS-L
+- **CL-1 · Reachability.** ✅ *WS-C* for Tauri: `Clone Repository…` is in the
+  footer of the startup picker as well as the switcher, so the first-run user
+  most likely to want it can finally reach it. Native is reachable from Welcome
+  and the switcher, but its entry sits under the switcher's transfer-disable —
+  cloning a different repo contends with nothing, since clone deliberately
+  claims no slot in either client. → WS-L
+- **CL-2 · List caching.** GitHub Desktop's shape — cache **plus** an
+  always-visible refresh button — adopted on both. ✅ *WS-C* for Tauri: the
+  once-per-run cache keeps its per-open speed and gains a Refresh button beside
+  the filter, so a repo created since launch is no longer unreachable until
+  restart; the filter already stayed live during loads. Native still refetches
+  on every sheet open (a 20 s dead zone each time, filter disabled throughout).
+  → WS-L
+- **CL-3 · Keyboard.** ✅ *WS-C* for Tauri: Return clones from anywhere in the
+  dialog when Clone is enabled — the `defaultAction` the native sheet has and
+  this one, having no `<form>`, never did. In the gh list, Return on a row the
+  cursor hasn't picked yet selects it and the *next* Return clones: one press
+  would clone before the derived destination path had ever been on screen.
+  Native's GitHub tab is still mouse-only (no autofocus, no cursor, no
+  Enter-to-select — FRONTEND §6.9's first-row-acts-on-Return applies). → WS-L
 - **CL-4 · URL/name derivation has drifted** (the "ported verbatim" pair):
   `.git`-on-shorthand handled differently, whitespace trimmed only natively
   (an untrimmed Tauri path creates literal `" …"` directories and persists the
@@ -725,43 +752,51 @@ and matched, not that it was skipped.
   the app is about to succeed. Both latent bugs are covered, and the
   destination join keeps a bare root (`/`) that the old trailing-slash strip
   turned into a relative path.
-- **CL-5 · Mid-clone state.** Native freezes every input (correct); Tauri
-  leaves tabs/filter/rows/URL/destination editable — clicking another repo
-  mid-clone rewrites the "Clones into…" preview to a lie. One `<fieldset
-  disabled>`. → WS-C
+- **CL-5 · Mid-clone state.** ✅ *WS-C.* Tauri left tabs/filter/rows/URL/
+  destination editable, so clicking another repo mid-clone rewrote the
+  "Clones into…" preview to a path nothing was being written to. One
+  `<fieldset disabled>` now covers every control that chooses *what* to clone —
+  a group rather than a per-control list a later control can forget to join —
+  dimmed so the freeze is visible, with progress and errors moved outside it so
+  the bar reporting the clone isn't dimmed by the clone.
 - **CL-6 · Progress.** Native always shows motion (indeterminate for gh
   clones); Tauri shows nothing for a gh clone but the button label.
   ✅ *WS-B*: `gh repo clone … -- --progress` forwards to `git clone`, so
   `gh_clone` reuses the streaming seam a URL clone already had and both routes
   report real numbers. Nothing was wrong with the plumbing — nobody had passed
   the flag through.
-- **CL-7 · Small deltas.** Empty-state discrimination (no repos vs no
-  matches — native right); description tooltip (native surfaces what both
-  fetch); per-tab error state (GH Desktop's shape; native currently shows a
-  URL-tab failure over the GitHub tab); persist the *tab*, reset the *inputs*
-  across opens (GH Desktop's split — native resets everything, Tauri
-  persists everything including a stale selection); sort-collation nit
-  (diacritic-insensitive is friendlier; also add a stable tiebreak natively —
-  Swift's sort isn't stable and equal names can flicker). Filter-then-sort +
-  memoize natively (currently sorts 200 rows per keystroke per body pass).
-  → WS-C, WS-L
+- **CL-7 · Small deltas.** ✅ *WS-C* for Tauri: empty-state discrimination (you
+  have none vs none matched), the description as a row tooltip, the *tab kept /
+  inputs cleared* split across opens (it used to persist everything, including
+  a stale selection with Clone already lit), and a name tiebreak on the
+  recency sort. Its per-tab error state needed nothing — `selectTab` already
+  clears the clone error and a gh-list failure is its own state inside the
+  list. Native still owes: the same empty-state split, the per-tab error state
+  (a URL-tab failure currently shows over the GitHub tab), tab-vs-input reset
+  (it resets everything), diacritic-insensitive collation with a stable
+  tiebreak (Swift's sort isn't stable and equal names can flicker), and
+  filter-then-sort + memoize (it sorts 200 rows per keystroke per body pass).
+  → WS-L
 - **CL-8 · `check_auth`.** Tauri spawns `gh auth status` on every launch to
   write a field with **zero readers** (the PR feature that consumed it was
   retired); the FFI deliberately doesn't export it and gh's own error text
   ("Run `gh auth login`") is the better UX. Delete the call + wrapper; drop
-  the command from the contract (surface 68) or record the exemption. → WS-S
+  the command from FRONTEND §3's tables (and its registered count) or record
+  the exemption. → WS-S
 
 ### 4.9 Settings, config, AI (ST)
 
 - **ST-1 · The field matrix.** All 15 `Config` fields audited (full matrix in
   the research notes). Live-apply: native applies auto-fetch/interval within
-  one tick and diff settings immediately; Tauri needs a restart or repo
-  switch for auto-fetch (BG-2) and never sees cross-client edits (D-6).
+  one tick and diff settings immediately; Tauri now re-reads the shared file on
+  every window activation (D-6, ✅ *WS-C*), so a cross-client edit lands within
+  one focus — but still needs a restart or repo switch for the auto-fetch
+  *timer* to re-arm (BG-2).
   ✅ *WS-B* for the dead fields: the AI timeout now travels on
   `AiProviderConfig` and bounds both providers' requests — a control that
   persisted a value nobody read was worse than no control, because the user
   believed the timeout was set — and `ai_api_key`, mapped but read by neither
-  provider, is gone. → WS-C (D-6), WS-H, WS-J
+  provider, is gone. → WS-H, WS-J
 - **ST-2 · Save semantics** — ✅ *WS-B.* `patch_config` is the only writer, and
   it reads-edits-normalizes-writes under a lock the shared file never had, so
   a surface can only change the fields it names. `Config::normalized()` runs on
@@ -1033,7 +1068,7 @@ is mostly adoption of already-proven native behavior.
    ground with their hoists in WS-B. Of the rest, D-4 needs the Channel
    transport, D-9 the native terminal frame, and D-14/D-15/D-20 the native diff
    renderer, so they stay with those areas in WS-I/WS-R/WS-P — but D-6 turned
-   out not to need its area at all and moves forward to WS-C.)
+   out not to need its area at all and shipped early, in WS-C.)
 2. ~~**WS-B — Core convergence layer (L).**~~ **Shipped 2026-08-27.** Eighteen
    of the twenty hoists landed with tests, regenerated bindings, and adoption
    in **both** clients — a hoist nothing calls is the dead wiring BR-1, CL-8
@@ -1117,24 +1152,63 @@ is mostly adoption of already-proven native behavior.
      deliberate exception to the no-dead-surface rule in this workstream,
      because DF-6 lands their UI in WS-E/WS-P and splitting the helper from its
      tests would have been worse. Wire it there or delete it.
-3. **WS-C — Tauri repo switcher & clone (M). ← next.** How you get into a repo,
-   where the user flow starts. RM-2 (Open Other… in the dropdown footer and the
-   picker's empty state — a repo outside the scan paths is unreachable today
-   except by CLI), RM-3's remainder (stop conditioning the `last_opened_repo`
-   restore on discovery re-finding it — WS-B's `known_repos` already answers
-   membership), RM-4 (MRU-of-use sort; delete `repoActivity` and
-   `get_last_commit_timestamp`, which then has no consumer — that also removes
-   half of E-5), RM-7's Tauri half (the picker's diagnosable states, plus the
-   "Choose folders to search" CTA), RM-8 (no switching mid-transfer), RM-9
-   (rediscover on main-phase Settings close and on dropdown open), and the Tauri
-   halves of CL-1 (picker-phase clone entry), CL-2 (cache + refresh button),
-   CL-3 (Return-to-clone), CL-5 (`<fieldset disabled>` mid-clone) and CL-7.
-   **Plus D-6, pulled forward out of its area** (ST-1's cross-client row). It
-   is a High-severity defect with an unbounded staleness window, and it is one
-   line: `resyncOnActive` (`MainLayout.svelte:842-859`) never calls
-   `refreshConfig`, though the file already imports it and calls it elsewhere.
-   None of ST-3's rewrite is needed to fix it, so it should not wait for WS-H.
-4. **WS-D — Tauri changes tab & composer (M).** The main loop. CH-13
+3. ✅ **WS-C — Tauri repo switcher & clone. Shipped 2026-08-27.** RM-3's
+   remainder, RM-4, RM-7(T), RM-8, RM-9, CL-1/2/3/5/7(T) and **D-6**; RM-2 was
+   decided against instead, in *both* clients — the one line of native this
+   workstream touched (see its §4.1 entry). Both Tauri repo
+   lists gained a `Clone Repository…` footer, which is what finally put clone in
+   the startup picker; `last_opened_repo` restores on the path being a
+   repository rather than on this launch's walk re-finding it; discovery re-runs
+   on switcher-open and Settings-close in both phases through one coalesced pass
+   (`services/repoDiscovery.ts`); both lists answer *looking / none found (with
+   the folders walked) / none matched* from one shared component; the switcher
+   sorts active → MRU → name tail, deleting `repoActivity` and
+   `get_last_commit_timestamp` (half of E-5); the switcher locks mid-transfer;
+   config is re-read on window activation (D-6). Clone gained Return-to-clone, a
+   Refresh button beside the cached gh list, tab-kept/inputs-cleared re-arming,
+   a `<fieldset disabled>` mid-clone freeze with progress outside it, row
+   description tooltips, a *none / no matches* split, and a name tiebreak.
+
+   **What WS-D and later workstreams should know.**
+   - **A repo list is exactly what the scan paths cover** — neither client has a
+     per-folder open action, by decision (RM-2). A workstream that finds a
+     repository unreachable should reach for discovery or the scan-path setting,
+     not add a second way in. The one exception is native Welcome's
+     `Open Repository…`, which **WS-L must delete in the same change that gives
+     Welcome the discovery list** (RM-1). `resolve_repo_root` is FFI-only; the
+     Tauri launch restore uses `is_git_repo`, the cheap existence check it wants.
+   - **Settings' close is now a handler, not `showSettings = false`.** All three
+     dismissals in `MainLayout` (button, Escape, `⌘,`) route through
+     `closeSettings()`. **WS-H rewrites this dialog (ST-3) and must keep every
+     dismissal on that handler**, or a scan-path edit silently stops re-walking.
+   - **`RepoListEmptyState.svelte` is the shared empty state for both repo
+     lists.** WS-L ports the same three answers natively; change the strings
+     there, not in a copy.
+   - **The `<fieldset disabled>` freeze is the pattern for uncancellable
+     dialogs** (STYLE.md, *Modals / dialogs*). Reset `min-inline-size: 0` or the
+     fieldset refuses to shrink and widens the dialog; keep progress and errors
+     outside it or the bar reporting the operation is dimmed by it.
+   - **`$effect` in Svelte 5 tracks every reactive read, including ones inside a
+     branch.** The clone dialog's re-arm effect read `tab` to decide whether to
+     lazy-load, which made switching tabs re-run the whole reset and wipe a
+     half-typed destination path. It now reads only `isOpen`, with the rest
+     under `untrack`. Worth checking wherever WS-D/WS-E touch an open/reset
+     effect.
+   - **CL-7's per-tab error state needed no Tauri change**: `selectTab` already
+     clears `cloneError`, and the gh-list failure is a separate state rendered
+     inside the list. That half of CL-7 belongs to WS-L alone.
+   - **RM-7's "still looking" state is unreachable in the main-view dropdown**
+     by construction — the open repo is always in the list, so `repos` is never
+     empty there. It is live in the startup picker, which is the phase that can
+     have none. Not a gap; don't "fix" it by showing a spinner over a populated
+     list.
+   - **One deliberate divergence from this plan's text.** CL-3 called for GitHub
+     Desktop's Enter-on-row-clones; the dialog implements it as **two presses**
+     (the first commits the cursor's row as the selection, the second clones),
+     because the destination path is derived from the selection and one press
+     would clone before the user had seen where it lands. Flipping to one press
+     is a two-line change in `handleListKeyDown` if the user prefers it.
+4. **WS-D — Tauri changes tab & composer (M). ← next.** The main loop. CH-13
    (first-file auto-select — its own commit-detail pane already does this),
    CH-3's Tauri half (adopt native's "3 of 12 files included" label over
    "12 changed files", which duplicates the tab pill), CH-4's Tauri half (the
@@ -1231,7 +1305,10 @@ is mostly adoption of already-proven native behavior.
 12. **WS-L — Native welcome, switcher & clone (M).** The native block starts
     where the user does. RM-1 (Welcome is a dead end today — reuse the
     switcher's list as its body, run discovery from it, adopt the
-    exactly-one-discovered-repo auto-open rule), RM-5's native half (GitHub
+    exactly-one-discovered-repo auto-open rule, and **delete Welcome's
+    `Open Repository…` / ⌘O with the `.fileImporter` behind it** — RM-2's last
+    entry point, which only exists because there is no list here yet and must
+    not outlive the list arriving, or precede it), RM-5's native half (GitHub
     identifiers on the rows, the half WS-B's shared search rule doesn't supply
     — port them lazily, visible rows only), RM-6 (↑/↓ cursor via
     `List(selection:)`), RM-7's native half (the "Choose folders to search"
@@ -1383,7 +1460,9 @@ Per workstream, matching the previous plan's bar:
   0/0; `cargo test --workspace` green (**159 core + 24 bridge** after WS-B,
   from the 120 + 24 this plan started at — every hoist landed with tests);
   `cargo clippy --workspace --all-targets -- -W clippy::pedantic` at
-  **170** or better, never worse (the plan opened at 184).
+  **166** or better, never worse (the plan opened at 184; WS-B took it to 170,
+  WS-C to 166 with the command it deleted). A Tauri workstream also runs
+  `pnpm build` clean, so the bundle is proven rather than only typechecked.
 - Visual checks per workstream (ask for confirmation, no screenshots), on
   **both** clients whenever a change touches shared core or a ported
   behavior — the checklist comes from the workstream's inventory items.
@@ -1410,8 +1489,10 @@ written as each chunk lands, no duplication between documents:
   per-flow
   client hedges retire as parity closes them.
 - **STYLE.md** — the status-letter row settled on `U` + the purple token with
-  H-13 (done); the header-strip bullet collapses to one description when SY-1
-  converges the two headers.
+  H-13 (done); WS-C added the *Repo pickers* section (the two lists are one
+  component family, with the shared footer and empty state) and the
+  `<fieldset disabled>` rule for uncancellable dialogs; the header-strip bullet
+  collapses to one description when SY-1 converges the two headers.
 - **ROADMAP.md** — items close as their workstreams land; the deferrals this
   plan makes (per-line staging, diff virtualization, branch rename +
   delete-on-remote) are already filed there. WS-B added one: GitHub identifiers

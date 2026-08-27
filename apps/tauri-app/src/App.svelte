@@ -3,12 +3,15 @@
   import { get } from 'svelte/store'
   import { listen } from '@tauri-apps/api/event'
   import { appState } from '$lib/stores/app'
-  import { config, loadFileStatusStyles, refreshConfig, scanFolders } from '$lib/stores/config'
+  import { loadFileStatusStyles, refreshConfig, scanFolders } from '$lib/stores/config'
   import { ghApi, gitApi, configApi, appApi, reposApi, type LaunchTarget } from '$lib/api/commands'
   import { patchReposState, recordRecentRepo } from '$lib/stores/reposState'
+  import { rediscoverRepos } from '$lib/services/repoDiscovery'
+  import { resolveCloneDefaultDir, rememberCloneDir } from '$lib/services/cloneFlow'
   import { updateChecker } from '$lib/services/updateChecker'
   import MainLayout from '$lib/views/MainLayout.svelte'
   import RepoPicker from '$lib/views/RepoPicker.svelte'
+  import CloneOverlay from '$lib/views/CloneOverlay.svelte'
   import SettingsOverlay from '$lib/views/SettingsOverlay.svelte'
   import HelpOverlay from '$lib/views/HelpOverlay.svelte'
   import Header from '$lib/components/Header.svelte'
@@ -22,6 +25,14 @@
   // nothing can't reach the setting that would fix it.
   let showSettings = $state(false)
   let showHelp = $state(false)
+
+  // Clone from the picker phase. Same reasoning as Settings above, and sharper:
+  // clone used to live only inside the main-view dropdown, so the first-run user
+  // with nothing to open — the one most likely to want to clone — was the one
+  // user who couldn't reach it.
+  let showClone = $state(false)
+  let cloneDefaultDir = $state('~/Dev')
+  let cloneOverlay = $state<{ isBusy: () => boolean } | null>(null)
 
   // `leogit <dir>` pointed at a folder that isn't a repository yet. The prompt
   // lives here rather than in MainLayout because it isn't scoped to the open
@@ -137,9 +148,25 @@
       // prompt lands over the picker (or the last repo) rather than a blank app.
       if (launchTarget) promptInit(launchTarget.path)
 
-      if (state.last_opened_repo && repos.includes(state.last_opened_repo)) {
-        appState.update((s) => ({ ...s, phase: 'main', repos, repoPath: state.last_opened_repo! }))
-        return
+      // Reopen where the user left off. `known_repos` already unions discovery
+      // with the existence-checked MRU, so anything it lists is openable — but
+      // the remembered repo can legitimately be absent from that list (aged out
+      // of the MRU's cap while living outside the scan paths, or last opened by
+      // the other client). Conditioning the restore on discovery re-finding it
+      // dropped those users into the picker with the repo they were just in
+      // missing from it, so verify the path instead and list it ourselves.
+      const last = state.last_opened_repo
+      if (last) {
+        const listed = repos.includes(last)
+        if (listed || (await gitApi.isGitRepo(last).catch(() => false))) {
+          appState.update((s) => ({
+            ...s,
+            phase: 'main',
+            repos: listed ? repos : [...repos, last],
+            repoPath: last,
+          }))
+          return
+        }
       }
       if (repos.length === 1) {
         appState.update((s) => ({ ...s, phase: 'main', repos, repoPath: repos[0] }))
@@ -160,30 +187,32 @@
     patchReposState({ last_opened_repo: repo })
   }
 
+  async function openClone() {
+    cloneDefaultDir = await resolveCloneDefaultDir()
+    showClone = true
+  }
+
+  /** A clone finished: remember where it landed, then open it. */
+  async function handleCloned(repoPath: string, parentDir: string) {
+    showClone = false
+    await rememberCloneDir(parentDir)
+    enterRepo(repoPath)
+  }
+
   /**
-   * Re-run discovery after Settings closes so a scan-path change takes effect
-   * without a restart — otherwise the user fixes the setting and still faces
-   * "No repositories found", which is the same dead end one step later.
+   * Re-walk after Settings closes so a scan-path change takes effect without a
+   * restart — otherwise the user fixes the setting and still faces "No
+   * repositories found", which is the same dead end one step later. Settings
+   * saved before closing and `refreshConfig` re-resolved the scan folders with
+   * it, so only the walk itself is left to redo.
    *
    * Deliberately stays on the picker even if exactly one repo now matches:
    * auto-entering a repo the user never chose would be a surprising way for a
    * settings dialog to end. Cold start still auto-enters; this isn't that.
    */
-  async function rediscoverRepos() {
-    const cfg = get(config)
-    try {
-      // Settings saved before closing, and `refreshConfig` re-resolved the
-      // scan folders with it — only the walk itself is left to redo.
-      const repos = await reposApi.knownRepos(cfg?.scan_paths ?? [], cfg?.scan_depth ?? 3)
-      appState.update((s) => ({ ...s, repos }))
-    } catch (error) {
-      console.error('[repos] rediscovery after settings failed', error)
-    }
-  }
-
   function closeSettings() {
     showSettings = false
-    if (get(appState).phase === 'repo-picker') rediscoverRepos()
+    if (get(appState).phase === 'repo-picker') void rediscoverRepos()
   }
 
   // Mirrors MainLayout's shortcuts so the two phases behave the same. Only
@@ -195,7 +224,13 @@
     const inField = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement
 
     if (e.key === 'Escape') {
-      if (showSettings) {
+      // Escape never dismisses a clone in flight — hiding the dialog wouldn't
+      // cancel the clone, just orphan its progress bar and eventual error.
+      // Same rule MainLayout applies; the dialog is the same component.
+      if (showClone && !(cloneOverlay?.isBusy() ?? false)) {
+        e.preventDefault()
+        showClone = false
+      } else if (showSettings) {
         e.preventDefault()
         closeSettings()
       } else if (showHelp) {
@@ -244,12 +279,20 @@
           repos={$appState.repos}
           onSelect={handleRepoSelect}
           onOpenSettings={() => (showSettings = true)}
+          onClone={openClone}
           scannedPaths={$scanFolders}
         />
       {/if}
     </div>
   </div>
 
+  <CloneOverlay
+    bind:this={cloneOverlay}
+    isOpen={showClone}
+    defaultDir={cloneDefaultDir}
+    onClose={() => (showClone = false)}
+    onCloned={handleCloned}
+  />
   <SettingsOverlay isOpen={showSettings} onClose={closeSettings} />
   <HelpOverlay isOpen={showHelp} onClose={() => (showHelp = false)} />
 {/if}

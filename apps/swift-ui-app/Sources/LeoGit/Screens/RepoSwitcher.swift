@@ -14,7 +14,6 @@ struct RepoSwitcher: View {
     let policy: BackgroundSchedulingPolicy
 
     let onSelect: (String) -> Void
-    let onOpenOther: () -> Void
     let onClone: () -> Void
 
     @State private var isPresented = false
@@ -39,10 +38,6 @@ struct RepoSwitcher: View {
                     isPresented = false
                     onSelect(path)
                 },
-                onOpenOther: {
-                    isPresented = false
-                    onOpenOther()
-                },
                 onClone: {
                     isPresented = false
                     onClone()
@@ -52,13 +47,12 @@ struct RepoSwitcher: View {
     }
 }
 
-/// The popover's content: filter field, repository rows, Open Other footer.
+/// The popover's content: filter field, repository rows, Clone footer.
 private struct RepoSwitcherList: View {
     let activePath: String
     let directory: RepoDirectoryStore
     let policy: BackgroundSchedulingPolicy
     let onSelect: (String) -> Void
-    let onOpenOther: () -> Void
     let onClone: () -> Void
 
     @State private var filter = ""
@@ -112,8 +106,12 @@ private struct RepoSwitcherList: View {
 
             Divider()
 
+            // Getting a repository that isn't listed. There is deliberately no
+            // "open this one folder" action beside it: the list is what the
+            // scan paths cover, so a local repository missing from it means the
+            // paths are wrong — a Settings edit that also holds next launch,
+            // where a one-off open would not.
             HStack {
-                Button("Open Other…", action: onOpenOther)
                 Spacer()
                 Button("Clone Repository…", action: onClone)
             }

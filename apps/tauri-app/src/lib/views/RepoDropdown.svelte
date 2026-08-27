@@ -1,11 +1,12 @@
 <script lang="ts">
   import { ensureRepoIdentifiers, repoIdentifiers } from '$lib/stores/repoIdentifiers'
-  import { ensureRepoActivity, repoActivity } from '$lib/stores/repoActivity'
   import { repoSync } from '$lib/stores/repoSync'
   import { repoSyncScheduler } from '$lib/services/repoSyncScheduler'
-  import { repoSortMode, setRepoSortMode } from '$lib/stores/reposState'
+  import { discoveringRepos } from '$lib/services/repoDiscovery'
+  import { recentRepos, repoSortMode, setRepoSortMode } from '$lib/stores/reposState'
   import type { RepoIdentifier } from '$lib/api/commands'
   import RepoTooltip from '$lib/components/RepoTooltip.svelte'
+  import RepoListEmptyState from '$lib/components/RepoListEmptyState.svelte'
   import { scanFolders } from '$lib/stores/config'
   import { reposApi } from '$lib/api/commands'
   import { autofocus } from '$lib/actions/autofocus'
@@ -17,9 +18,12 @@
     currentRepo: string
     onSelect: (repo: string) => void
     onClone: () => void
+    /** Opens Settings, for the empty state's call to action — the scan paths
+     *  are what discovery walks, so "found nothing" leads here. */
+    onOpenSettings: () => void
   }
 
-  let { repos = [], currentRepo = '', onSelect, onClone }: Props = $props()
+  let { repos = [], currentRepo = '', onSelect, onClone, onOpenSettings }: Props = $props()
 
   let filter = $state('')
   // Sort mode lives in the persisted store so toggling sticks across opens and
@@ -36,12 +40,11 @@
   const TOOLTIP_DELAY_MS = 500
   let tooltipTimer: ReturnType<typeof setTimeout> | null = null
 
-  // Fetch identifiers (labels) and last-commit timestamps (recency sort) for
-  // every repo whenever the list changes. Both caches are module-level, so
-  // reopening the dropdown is free after the first time.
+  // Fetch identifiers (row labels) for every repo whenever the list changes.
+  // The cache is module-level, so reopening the dropdown is free after the
+  // first time.
   $effect(() => {
     ensureRepoIdentifiers(repos)
-    ensureRepoActivity(repos)
     // Badges + dirty dot for rows the tiered scheduler never reaches: a
     // fetch-less local sweep, run while the list is actually on screen.
     void repoSyncScheduler.syncVisibleRepos(repos)
@@ -57,29 +60,36 @@
     return id ? `${id.owner}/${id.name}` : basename(path)
   }
 
+  /*
+    Row order: the open repo, then most-recently-*used* first, then a
+    name-ordered tail of everything never opened in this app.
+
+    Recency of use, not of last commit. The old sort shelled out one
+    `git log -1` per repo on every open — unbounded in parallel — to answer a
+    different question than a switcher is asked: "where did a commit land most
+    recently" can easily be someone else's work you just fetched. It also
+    reordered the list under the cursor as the timestamps streamed in, so the
+    row you were aiming at moved while you clicked. The MRU is already on disk,
+    already loaded, and costs nothing.
+  */
   const sortedRepos = $derived.by(() => {
     const ids = $repoIdentifiers
-    const activity = $repoActivity
+    const mru = $recentRepos
     const byName = (a: string, b: string) =>
       primaryLabel(a, ids.get(a)).localeCompare(primaryLabel(b, ids.get(b)), undefined, {
         sensitivity: 'base',
       })
-    // Recent: newest last-commit first, tie-broken alphabetically — so before
-    // timestamps stream in (all 0) the list reads alphabetical, then settles
-    // into recency order as they arrive rather than jumping to a random order.
-    const list = [...repos].sort((a, b) =>
-      $repoSortMode === 'name'
-        ? byName(a, b)
-        : (activity.get(b) ?? 0) - (activity.get(a) ?? 0) || byName(a, b),
-    )
-    if (currentRepo) {
-      const idx = list.indexOf(currentRepo)
-      if (idx > 0) {
-        list.splice(idx, 1)
-        list.unshift(currentRepo)
-      }
+    // Anything the MRU has never seen shares the last rank, so the name order
+    // below decides the tail.
+    const rank = (path: string) => {
+      const index = mru.indexOf(path)
+      return index === -1 ? Number.MAX_SAFE_INTEGER : index
     }
-    return list
+    const activeFirst = (a: string, b: string) =>
+      Number(b === currentRepo) - Number(a === currentRepo)
+    return $repoSortMode === 'name'
+      ? [...repos].sort((a, b) => activeFirst(a, b) || byName(a, b))
+      : [...repos].sort((a, b) => activeFirst(a, b) || rank(a) - rank(b) || byName(a, b))
   })
 
   // Best match first, and only then the chosen sort order — the keyboard
@@ -195,12 +205,13 @@
       use:autofocus
     />
     <!-- Sort toggle — same clock / A→Z control as the Clone dialog. The glyph
-         itself is the state label; recency uses each repo's last-commit date. -->
+         itself is the state label; recency here is when you last opened the
+         repo, which is the question a switcher is actually asked. -->
     <button
       class="icon-btn"
       onclick={toggleSort}
-      title={$repoSortMode === 'recent' ? 'Sorted by recently modified' : 'Sorted alphabetically'}
-      aria-label={$repoSortMode === 'recent' ? 'Sorted by recently modified' : 'Sorted alphabetically'}
+      title={$repoSortMode === 'recent' ? 'Sorted by recently opened' : 'Sorted alphabetically'}
+      aria-label={$repoSortMode === 'recent' ? 'Sorted by recently opened' : 'Sorted alphabetically'}
     >
       {#if $repoSortMode === 'recent'}
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -220,27 +231,16 @@
         </svg>
       {/if}
     </button>
-    <!-- Clone lives right next to the filter, so "I don't see my repo" flows
-         straight into cloning it (matches GH Desktop's repo-list clone action). -->
-    <button
-      class="clone-btn"
-      onclick={onClone}
-      title="Clone repository"
-      aria-label="Clone repository"
-    >
-      <!-- Download-to-tray: a copy pulled down onto the local disk (the
-           established "clone" convention, à la GH Desktop's Clone action). -->
-      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M8 1.75v7.5" />
-        <path d="M4.75 6.5 8 9.75l3.25-3.25" />
-        <path d="M2.75 11.25v1.5c0 .69.56 1.25 1.25 1.25h8c.69 0 1.25-.56 1.25-1.25v-1.5" />
-      </svg>
-    </button>
   </div>
 
   <div class="repo-list">
     {#if filteredRepos.length === 0}
-      <div class="empty">No repositories</div>
+      <RepoListEmptyState
+        discovering={$discoveringRepos && repos.length === 0}
+        hasRepos={repos.length > 0}
+        scannedPaths={$scanFolders}
+        {onOpenSettings}
+      />
     {:else}
       {#each filteredRepos as repo, i (repo)}
         {@const id = $repoIdentifiers.get(repo)}
@@ -290,6 +290,17 @@
         </button>
       {/each}
     {/if}
+  </div>
+
+  <!--
+    Getting a repository that isn't in the list. Outside the list branch on
+    purpose, so it is still there in the empty and no-matches states — which is
+    exactly when the user needs it, and the reason the empty state used to be a
+    dead end. A repository that exists locally and isn't here is one the scan
+    paths don't cover; that is Settings' job, which the empty state links to.
+  -->
+  <div class="footer">
+    <button class="footer-btn" onclick={onClone}>Clone Repository…</button>
   </div>
 </div>
 
@@ -341,10 +352,9 @@
     box-shadow: 0 0 0 2px var(--cursor-bg);
   }
 
-  /* Icon-only filter-row buttons (sort toggle, clone trigger); tooltips come
-     from each button's title. */
-  .icon-btn,
-  .clone-btn {
+  /* Icon-only filter-row button (the sort toggle); its tooltip comes from the
+     button's title. */
+  .icon-btn {
     flex: 0 0 auto;
     display: inline-flex;
     align-items: center;
@@ -362,25 +372,49 @@
       background 100ms ease;
   }
 
-  .icon-btn:hover,
-  .clone-btn:hover {
+  .icon-btn:hover {
     color: var(--text-primary);
     background: var(--surface-hover);
   }
 
   .repo-list {
     flex: 1;
+    min-height: 0;
     overflow-y: auto;
     padding: 4px;
     display: flex;
     flex-direction: column;
   }
 
-  .empty {
-    padding: 24px 16px;
-    text-align: center;
-    color: var(--text-faint);
+  /* Footer action: a text button rather than the filter row's icon treatment —
+     it is the one escape hatch from the list, so it reads better labelled than
+     as a glyph competing with the sort toggle above it. */
+  .footer {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding: 8px 10px;
+    border-top: 1px solid var(--border-inactive);
+  }
+
+  .footer-btn {
+    padding: 3px 8px;
+    background: transparent;
+    color: var(--text-secondary);
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: inherit;
     font-size: 12px;
+    white-space: nowrap;
+    transition:
+      color 100ms ease,
+      background 100ms ease;
+  }
+
+  .footer-btn:hover {
+    color: var(--text-primary);
+    background: var(--surface-hover);
   }
 
   .repo-item {

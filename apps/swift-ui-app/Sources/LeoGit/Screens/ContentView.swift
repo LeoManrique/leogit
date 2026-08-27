@@ -207,7 +207,6 @@ struct ContentView: View {
                     directory: directoryStore,
                     policy: schedulingPolicy,
                     onSelect: switchRepo,
-                    onOpenOther: { isChoosingFolder = true },
                     onClone: { isCloneSheetPresented = true }
                 )
                 // Switching mid-transfer would reset the sync UI out from

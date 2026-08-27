@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onMount, untrack } from 'svelte'
   import { listen } from '@tauri-apps/api/event'
   import { ghApi, gitApi, reposApi, type GhRepo, type GitProgressEvent } from '$lib/api/commands'
   import { cloneSortMode, setCloneSortMode } from '$lib/stores/reposState'
@@ -62,15 +62,35 @@
   // URL tab state.
   let url = $state('')
 
-  // Re-arm the dialog every time it opens: reset transient state and seed the
-  // destination from the caller's remembered folder.
+  /*
+    Re-arm the dialog every time it opens.
+
+    The *tab* is remembered, everything you typed into it is not — GitHub
+    Desktop's split, and the one that matches what each thing means. The tab is
+    a preference ("I clone by URL"), so carrying it over saves a click every
+    time. The inputs are one clone's worth of intent; carrying those over meant
+    reopening the dialog on a stale selection with a Clone button already lit,
+    one Return away from cloning a repository the user hadn't looked at.
+
+    The fetched *list* survives on purpose (CL-2): `gh repo list` takes seconds,
+    and the Refresh button next to the filter is how you ask for a newer one.
+
+    `isOpen` is the only dependency — everything else is read under `untrack`.
+    Reading `tab` reactively made this re-run on every tab switch, which reset
+    the destination path out from under a user who had just typed one.
+  */
   $effect(() => {
-    if (isOpen) {
+    if (!isOpen) return
+    untrack(() => {
       destDir = defaultDir
       cloneError = ''
+      url = ''
+      ghFilter = ''
+      selectedRepo = null
+      activeIndex = 0
       // Lazily pull the user's repos the first time the GitHub tab is shown.
-      if (tab === 'github' && !reposLoaded && !reposLoading) loadRepos()
-    }
+      if (tab === 'github' && !reposLoaded && !reposLoading) void loadRepos()
+    })
   })
 
   async function loadRepos() {
@@ -92,18 +112,22 @@
     if (next === 'github' && !reposLoaded && !reposLoading) loadRepos()
   }
 
+  // Case- and diacritic-insensitive, so casing and accents never split what
+  // reads as one group.
+  const byName = (a: GhRepo, b: GhRepo) =>
+    a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+
   const filteredRepos = $derived.by(() => {
     const q = ghFilter.trim().toLowerCase()
     const list = q
       ? repos.filter((r) => r.name_with_owner.toLowerCase().includes(q))
       : [...repos]
     // Recently-modified (newest pushedAt first — ISO-8601 sorts lexically) or
-    // alphabetical by repo name (case-insensitive so casing doesn't split groups).
+    // alphabetical by repo name. Recency tie-breaks by name so two repos pushed
+    // in the same second have a fixed order instead of a re-render-dependent one.
     return $cloneSortMode === 'name'
-      ? list.sort((a, b) =>
-          a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }),
-        )
-      : list.sort((a, b) => b.pushed_at.localeCompare(a.pushed_at))
+      ? list.sort(byName)
+      : list.sort((a, b) => b.pushed_at.localeCompare(a.pushed_at) || byName(a, b))
   })
 
   // A new query rebuilds the list; snap the highlight back to the top match.
@@ -118,9 +142,18 @@
     filteredRepos[activeIndex] ? `clone-repo-opt-${activeIndex}` : undefined,
   )
 
-  // Arrow keys move the cursor; Enter picks the highlighted repo as the clone
-  // target (the destination path/Clone button take it from there). Shared by
-  // the filter input and the list, so it works whether focus sits on either.
+  /*
+    Arrow keys move the cursor; Enter picks the highlighted repo as the clone
+    target. Shared by the filter input and the list, so it works whether focus
+    sits on either.
+
+    Enter on a row the cursor has *already* selected falls through to the
+    dialog's Return-to-clone instead of re-selecting it, which is GitHub
+    Desktop's Enter-on-row-clones reached in two presses: the first commits the
+    choice, the second acts on it. Deliberately not one press — the destination
+    path is derived from the selection, and cloning before the user has seen
+    where it lands is not a shortcut worth having.
+  */
   function handleListKeyDown(e: KeyboardEvent) {
     if (e.key === 'ArrowDown') {
       e.preventDefault()
@@ -130,11 +163,29 @@
       activeIndex = nextActiveIndex(activeIndex, filteredRepos.length, -1)
     } else if (e.key === 'Enter') {
       const repo = filteredRepos[activeIndex]
-      if (repo) {
+      if (repo && repo.name_with_owner !== selectedRepo?.name_with_owner) {
         e.preventDefault()
+        e.stopPropagation()
         selectedRepo = repo
       }
     }
+  }
+
+  /**
+   * Return clones, from anywhere in the dialog — the `defaultAction` the native
+   * sheet has had all along and this one, having no `<form>`, never did. Only
+   * fires when Clone is actually enabled, so it can't act on a half-filled
+   * dialog; the list's own handler stops the event first when Enter still has a
+   * selection to commit.
+   */
+  function handleModalKeyDown(e: KeyboardEvent) {
+    if (e.key !== 'Enter' || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return
+    // A focused button already turns Enter into its own click — Cancel must
+    // stay Cancel, not become Clone because the key also reached the dialog.
+    if (e.target instanceof HTMLButtonElement) return
+    if (!canClone) return
+    e.preventDefault()
+    void handleClone()
   }
 
   /*
@@ -238,7 +289,8 @@
     }}
     onkeydown={handleOverlayKeyDown}
   >
-    <div class="modal" role="dialog" aria-modal="true" tabindex="-1">
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <div class="modal" role="dialog" aria-modal="true" tabindex="-1" onkeydown={handleModalKeyDown}>
       <div class="modal-header">
         <h2>Clone a repository</h2>
         <button class="close-btn" onclick={onClose} disabled={isCloning} aria-label="Close">
@@ -249,6 +301,14 @@
         </button>
       </div>
 
+      <!--
+        Everything that chooses *what* to clone freezes while a clone runs.
+        There is no cancel — core has none — so an editable dialog mid-clone
+        could only lie: picking another repo rewrote the "Clones into…" preview
+        to a path nothing was being written to. One fieldset, so a control added
+        later inherits the rule instead of having to remember it.
+      -->
+      <fieldset class="dialog-fields" disabled={isCloning}>
       <div class="tabs" role="tablist">
         <button
           class="tab"
@@ -312,10 +372,29 @@
                 </svg>
               {/if}
             </button>
+            <!-- The list is cached for the life of the app run, because
+                 `gh repo list` takes seconds and paying that on every open made
+                 the dialog feel broken. A cache with no way to refresh is the
+                 opposite failure — a repo created since launch was
+                 unreachable until restart — so the button is always here, not
+                 only after an error. -->
+            <button
+              class="sort-btn"
+              onclick={loadRepos}
+              disabled={reposLoading}
+              title="Refresh the list from GitHub"
+              aria-label="Refresh the list from GitHub"
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M13.8 8a5.8 5.8 0 1 1-1.7-4.1" />
+                <polyline points="12.6,1.6 12.6,4.4 9.8,4.4" />
+              </svg>
+            </button>
           </div>
           <!-- One tab stop for the whole list (rows are tabindex=-1 below), so
-               Tab flows filter → sort → list → path → Browse → actions. Arrow
-               keys and Enter navigate it whether focus is here or in the filter. -->
+               Tab flows filter → sort → refresh → list → path → Browse →
+               actions. Arrow keys and Enter navigate it whether focus is here
+               or in the filter. -->
           <div
             id="clone-repo-list"
             class="repo-list"
@@ -332,8 +411,12 @@
                 {reposError}
                 <button class="retry" onclick={loadRepos}>Retry</button>
               </div>
-            {:else if filteredRepos.length === 0}
+            {:else if repos.length === 0}
               <div class="list-note">No repositories found.</div>
+            {:else if filteredRepos.length === 0}
+              <!-- Distinct from the line above: "you have none" and "none match
+                   what you typed" are different problems with different fixes. -->
+              <div class="list-note">No matching repositories.</div>
             {:else}
               {#each filteredRepos as repo, i (repo.name_with_owner)}
                 <button
@@ -345,6 +428,7 @@
                   aria-selected={i === activeIndex}
                   tabindex="-1"
                   use:scrollIntoViewWhenActive={i === activeIndex}
+                  title={repo.description || undefined}
                   onclick={() => {
                     selectedRepo = repo
                     activeIndex = i
@@ -371,30 +455,37 @@
         <label class="field-label" for="clone-dest">Local path</label>
         <div class="dest-row">
           <input id="clone-dest" type="text" class="text-input mono" bind:value={destDir} />
-          <button class="browse-btn" onclick={browse} disabled={isCloning}>Browse…</button>
+          <button class="browse-btn" onclick={browse}>Browse…</button>
         </div>
         {#if targetPath}
           <div class="path-preview">Clones into <code>{targetPath}</code></div>
         {/if}
-
-        {#if cloneError}
-          <div class="clone-error">{cloneError}</div>
-        {/if}
-
-        {#if isCloning && cloneProgress}
-          <div class="clone-progress">
-            <div class="clone-progress-bar">
-              <div
-                class="clone-progress-fill"
-                style:transform="scaleX({cloneProgress.percent / 100})"
-              ></div>
-            </div>
-            <div class="clone-progress-text" title={cloneProgress.text}>
-              {cloneProgress.text}
-            </div>
-          </div>
-        {/if}
       </div>
+      </fieldset>
+
+      <!-- Outcome, outside the frozen fieldset: the progress bar is the one
+           thing that must stay bright while everything above it is dimmed. -->
+      {#if cloneError || (isCloning && cloneProgress)}
+        <div class="modal-status">
+          {#if cloneError}
+            <div class="clone-error">{cloneError}</div>
+          {/if}
+
+          {#if isCloning && cloneProgress}
+            <div class="clone-progress">
+              <div class="clone-progress-bar">
+                <div
+                  class="clone-progress-fill"
+                  style:transform="scaleX({cloneProgress.percent / 100})"
+                ></div>
+              </div>
+              <div class="clone-progress-text" title={cloneProgress.text}>
+                {cloneProgress.text}
+              </div>
+            </div>
+          {/if}
+        </div>
+      {/if}
 
       <div class="modal-footer">
         <button class="btn-secondary" onclick={onClose} disabled={isCloning}>Cancel</button>
@@ -497,6 +588,29 @@
     color: var(--text-primary);
     font-weight: 600;
     border-bottom-color: var(--border-active);
+  }
+
+  /* Grouping element only — it exists so one `disabled` reaches every control
+     that chooses what to clone. Stripped back to a plain flex column so it is
+     invisible in the layout. */
+  .dialog-fields {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    border: none;
+    /* A fieldset's default `min-inline-size: min-content` refuses to shrink
+       below its widest child, which would stop the repo rows from ellipsizing
+       and push the dialog wider than its own max-width. */
+    min-inline-size: 0;
+  }
+
+  /* Dim the frozen half during a clone, so "you can't touch this yet" is
+     visible rather than only discovered by clicking. */
+  .dialog-fields:disabled {
+    opacity: 0.55;
   }
 
   .modal-body {
@@ -707,6 +821,15 @@
   .path-preview code {
     font-family: var(--font-mono);
     color: var(--text-secondary);
+  }
+
+  /* Error / progress strip between the frozen fields and the actions. Shares
+     the body's horizontal padding so it lines up with the fields above. */
+  .modal-status {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 0 16px 12px;
   }
 
   .clone-error {

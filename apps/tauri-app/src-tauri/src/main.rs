@@ -75,7 +75,6 @@ fn main() {
             git::init_repo,
             git::get_repo_name,
             git::clone_repo,
-            git::get_last_commit_timestamp,
             diff::get_parsed_diff,
             diff::get_parsed_commit_diff,
             diff::copy_diff_text,

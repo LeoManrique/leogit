@@ -35,14 +35,14 @@ static-linking or a local daemon (that decision is open; see the plan).
   Frontends never re-derive git state the core already returns (e.g. file status
   categories, ahead/behind, merge conflicts).
 - Today's surface: **4 events, ~35 DTOs**, and a command catalogue (§3) each host exposes
-  **to the extent it consumes it**. The Tauri host registers **73** `#[tauri::command]`s,
+  **to the extent it consumes it**. The Tauri host registers **72** `#[tauri::command]`s,
   each with a wrapper in `apps/tauri-app/src/lib/api/commands.ts`; the UniFFI bridge
   exports **59** functions. The two sets are deliberately not identical, and a command
   reaching one host does not oblige the other — what is required is that the difference be
   recorded, here or in §8, never left silent.
   - No native export: `check_auth`, `check_for_update`, `check_provider_available`,
     `delete_remote_branch`, `generate_patch`, `generate_inverse_patch`, `get_ahead_behind`,
-    `get_head_sha`, `get_last_commit_timestamp`, `get_repo_identifier`, `get_repo_name`,
+    `get_head_sha`, `get_repo_identifier`, `get_repo_name`,
     `has_staged_changes`, `highlight_diff`, `init_repo`, `is_git_repo`, `open_url`,
     `rename_branch`, `take_pending_launch_target`, `terminal_pty_info`. Three of those the
     native client reaches under another name (`repo_display_name` for `get_repo_name`,
@@ -107,7 +107,7 @@ Clearing an optional field is patching it to `""` — the config's standing
 |---|---|---|
 | `take_pending_launch_target` | – | `LaunchTarget \| null` (cold-start `leogit <dir>` claim) |
 
-### 3.3 Git — status / diff / log — 6
+### 3.3 Git — status / diff / log — 5
 | Command | Args | Returns |
 |---|---|---|
 | `get_status` | `repoPath` | `RepoStatus` |
@@ -116,7 +116,6 @@ Clearing an optional field is patching it to `""` — the config's standing
 | `get_selected_diff` | `repoPath, files` | `string` (the AI input; never parsed) |
 | `get_log` | `repoPath, opts:{max_count, skip}` | `CommitInfo[]` |
 | `get_commit_detail` | `repoPath, sha` | `CommitDetail` (files + totals, one `git log`) |
-| `get_last_commit_timestamp` | `repoPath` | `number` |
 
 The raw-diff getters are gone: reading and parsing were always done together,
 and fusing them (§3.10) removed a round trip per file selection and gave the
@@ -471,7 +470,7 @@ every deliberate difference here.
 |---|---|---|
 | Window chrome | Tauri window | native `WindowGroup` / AppKit |
 | Theme | CSS tokens in `app.css`, dark/light via `data-theme`, driven by the `theme` config field | `Color` assets, system appearance — the `theme` field is never read (permanent exemption: a stored theme is a web-only concept) |
-| Opening a repository from disk | no picker — repositories arrive from discovery under `scan_paths`, from the startup `RepoPicker`, or from `leogit <dir>`; the one `plugin-dialog.open` call chooses a *clone destination* | `.fileImporter` on Welcome (⌘O) and *Open Other…* in the repo switcher's footer, so a repo outside the scan folders opens directly (and keeps its row across launches) |
+| Opening a repository from disk | the one `plugin-dialog.open` call chooses a *clone destination*; repositories otherwise arrive from discovery, a clone, or `leogit <dir>` | a `.fileImporter` on Welcome (⌘O) only — Welcome has no discovery list yet, so this is the sole way in without a `last_opened_repo`; it retires with that list |
 | Home dir / path join | `@tauri-apps/api/path` | `FileManager` |
 | Reveal / open / open-url | core `os::*` commands (unchanged) | core `os::*` commands (unchanged) |
 | Launch target / second instance | the whole contract: `leogit <dir>` resolves through `core::launch`, a cold start claims it with `take_pending_launch_target`, and a second invocation focuses the window and forwards an `open-repo` event via `plugin-single-instance` | not implemented — no app delegate, no `onOpenURL`, no `CFBundleURLTypes`/`CFBundleDocumentTypes`, and neither launch command is exported to the bridge. The native client restores `last_opened_repo` at launch and otherwise waits on Welcome |
@@ -488,6 +487,13 @@ every deliberate difference here.
 | History paging (§6.8) | 50-commit pages into a bidirectional **sliding window** capped at 500: scrolling past either end drops from the far end and `windowStartOffset` tracks the absolute index of row 0, with `scrollTop` compensated so the visible row stays pinned. A HEAD move *replaces* the window with a fresh page 1 instead of sliding it, which is a distinct signal (`log.resetSeq`) precisely so it is not compensated — the list scrolls to the new HEAD | 100-commit pages **appended** without dropping, de-duplicated by sha against what is already loaded; only a *refresh* is capped, at the same 500 |
 | Relative-date ticking (§6.12) | a 10 s tick re-renders the visible rows, skipped while the History pane is hidden or the window is backgrounded, so an open list never goes stale | formatted once per refresh and not re-ticked; the 2 s poll is what moves the labels on |
 | Side-by-side diff (`side_by_side_diff`) | split layout toggle, honoured by `DiffViewer` | not implemented — unified only; a layout feature awaiting its own design pass (ROADMAP), the config field crosses saves untouched |
+
+Neither repo switcher offers a per-folder open action, deliberately and in both
+clients: a repo list is exactly what `scan_paths` covers, so a local repository
+missing from it means the paths are wrong — a Settings edit, which both empty
+states link to and which still holds next launch, where a one-off open would be
+forgotten. That is why the row above is a Welcome-only entry, and why it retires
+with the Welcome screen's own list.
 
 ## 9. Non-goals / intentionally absent
 

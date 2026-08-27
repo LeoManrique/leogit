@@ -2807,17 +2807,6 @@ pub async fn clone_repo(
     .await?
 }
 
-/// Unix timestamp (seconds) of a repo's most recent commit, or 0 when it has
-/// none / isn't readable. Powers the repo picker's "recently modified" sort;
-/// returns 0 rather than erroring so one bad repo never breaks the sort.
-#[must_use]
-pub fn get_last_commit_timestamp(repo_path: String) -> i64 {
-    run_git(&repo_path, &["log", "-1", "--format=%ct"])
-        .ok()
-        .and_then(|s| s.trim().parse::<i64>().ok())
-        .unwrap_or(0)
-}
-
 fn scan_for_repos(
     dir: &Path,
     root: &Path,
@@ -2983,6 +2972,18 @@ pub fn repo_root(path: &Path) -> Option<String> {
         }
     }
     is_git_repo_path(path).then_some(dir)
+}
+
+/// [`repo_root`] as a fallible call: the repository root containing `path`, or
+/// an error naming what was wrong with it.
+///
+/// The sentence a client shows when a chosen folder isn't a repository lives
+/// here, not in the client, so it can't drift if a second one ever needs it.
+///
+/// # Errors
+/// When `path` is not inside a git repository.
+pub fn resolve_repo_root(path: &str) -> Result<String, String> {
+    repo_root(Path::new(path)).ok_or_else(|| format!("{path} is not a git repository"))
 }
 
 pub fn is_git_repo(path: &str) -> bool {

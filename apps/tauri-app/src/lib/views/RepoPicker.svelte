@@ -3,6 +3,8 @@
   import { nextActiveIndex, scrollIntoViewWhenActive } from '$lib/actions/listNavigation'
   import { reposApi } from '$lib/api/commands'
   import { basename } from '$lib/utils/path'
+  import { discoveringRepos } from '$lib/services/repoDiscovery'
+  import RepoListEmptyState from '$lib/components/RepoListEmptyState.svelte'
 
   interface Props {
     repos: string[]
@@ -10,12 +12,16 @@
     /** Opens Settings, for the empty state's call to action. The app header
      *  above carries the persistent entry point; this is the contextual one. */
     onOpenSettings: () => void
+    /** Opens the Clone dialog. The user least likely to have a repo to open is
+     *  the one most likely to want to clone one, so this phase needs the entry
+     *  as much as the main-view dropdown does. */
+    onClone: () => void
     /** Folders discovery actually searched: named by the empty state, and
      *  trimmed off a repo's path before the filter searches it. */
     scannedPaths?: string[]
   }
 
-  let { repos = [], onSelect, onOpenSettings, scannedPaths = [] }: Props = $props()
+  let { repos = [], onSelect, onOpenSettings, onClone, scannedPaths = [] }: Props = $props()
 
   let searchInput = $state('')
 
@@ -102,24 +108,12 @@
 
     <div class="repos-list">
       {#if filteredRepos.length === 0}
-        <div class="empty-repos">
-          {#if repos.length === 0}
-            <p class="empty-title">No repositories found</p>
-            {#if scannedPaths.length > 0}
-              <p class="empty-detail">Searched these folders:</p>
-              <ul class="scanned-paths">
-                {#each scannedPaths as path (path)}
-                  <li>{path}</li>
-                {/each}
-              </ul>
-            {/if}
-            <button class="empty-action" onclick={onOpenSettings}>
-              Choose folders to search
-            </button>
-          {:else}
-            <p class="empty-title">No matching repositories</p>
-          {/if}
-        </div>
+        <RepoListEmptyState
+          discovering={$discoveringRepos && repos.length === 0}
+          hasRepos={repos.length > 0}
+          {scannedPaths}
+          {onOpenSettings}
+        />
       {:else}
         {#each filteredRepos as repo, i (repo)}
           <button
@@ -132,6 +126,16 @@
           </button>
         {/each}
       {/if}
+    </div>
+
+    <!--
+      Same footer as the main-view dropdown. This phase is where a first-run
+      user lands, so it is the one that most needs it — cloning used to be
+      reachable only from inside a repo, which is the one place you no longer
+      need it.
+    -->
+    <div class="footer">
+      <button class="footer-btn" onclick={onClone}>Clone Repository…</button>
     </div>
   </div>
 </div>
@@ -186,66 +190,40 @@
 
   .repos-list {
     flex: 1;
+    min-height: 0;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
     padding: 4px;
   }
 
-  .empty-repos {
-    flex: 1;
+  /* Same footer as the main-view dropdown, so the two pickers read as one
+     component family: a trailing text button. */
+  .footer {
     display: flex;
-    flex-direction: column;
     align-items: center;
-    justify-content: center;
-    gap: 8px;
-    color: var(--text-faint);
-    padding: 32px 20px;
-    text-align: center;
+    justify-content: flex-end;
+    padding: 8px 10px;
+    border-top: 1px solid var(--border-inactive);
   }
 
-  .empty-title {
-    margin: 0;
-  }
-
-  .empty-detail {
-    margin: 0;
-    font-size: 11px;
-  }
-
-  /* The folders discovery actually walked. Mono because these are paths, and
-     seeing them is what turns "found nothing" into something the user can act
-     on — usually "that's not where my code lives". */
-  .scanned-paths {
-    margin: 0;
-    padding: 0;
-    list-style: none;
-    font-family: ui-monospace, 'SF Mono', Menlo, Monaco, 'Cascadia Mono', monospace;
-    font-size: 11px;
-    color: var(--text-muted);
-    max-height: 120px;
-    overflow-y: auto;
-  }
-
-  .scanned-paths li {
-    line-height: 1.6;
-    word-break: break-all;
-  }
-
-  .empty-action {
-    margin-top: 4px;
-    padding: 5px 12px;
-    font-size: 12px;
-    font-family: inherit;
-    color: var(--text-primary);
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border-strong);
+  .footer-btn {
+    padding: 3px 8px;
+    background: transparent;
+    color: var(--text-secondary);
+    border: none;
     border-radius: 6px;
     cursor: pointer;
-    transition: background 100ms ease;
+    font-family: inherit;
+    font-size: 12px;
+    white-space: nowrap;
+    transition:
+      color 100ms ease,
+      background 100ms ease;
   }
 
-  .empty-action:hover {
+  .footer-btn:hover {
+    color: var(--text-primary);
     background: var(--surface-hover);
   }
 
