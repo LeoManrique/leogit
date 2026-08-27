@@ -1,9 +1,11 @@
 # Plan — Background-refresh parity & diff continuity (native macOS app)
 
-> Status: **planning**. Nothing here is implemented yet. This lays out the target
-> shape for the five fixes identified in the Swift-vs-Tauri background/refresh
-> audit (2026-08-26), ordered by user flow, each testable on its own before the
-> next begins. Companion contract: [`FRONTEND.md`](../../FRONTEND.md) §6
+> Status: **in progress — A and B landed and visually confirmed (2026-08-27);
+> C, D, E not started.** Five fixes from the Swift-vs-Tauri background/refresh
+> audit (2026-08-26), ordered by user flow, each visually verified before the
+> next begins. Landed workstreams are kept as compact as-built records
+> (decision history included); pending ones keep their full design. This file
+> stays the source of truth for what was actually built. Companion contract: [`FRONTEND.md`](../../FRONTEND.md) §6
 > (behavioral contract) and §8 (intentional divergences) — both get updated as
 > each workstream lands.
 
@@ -13,13 +15,14 @@ The audit found the native client is *architecturally* faithful to the Tauri
 client's refresh machinery (same tiers, same breaker numbers, same poll cadence)
 but *feels* different for two reasons:
 
-1. **Every diff reload blanks the pane.** `DiffStore.load` clears
-   `payload/rows/tokens` before fetching, and `statusEpoch` re-keys the load on
-   every status change and every app activation — so refocusing the app, or any
-   background tick that changes status, flashes the open diff to a spinner and
-   resets its scroll. The Tauri client keeps the old diff on screen and only
-   falls back to a spinner after 150 ms (`SLOW_DIFF_THRESHOLD_MS`, ported from
-   GitHub Desktop's `SeamlessDiffSwitcher`).
+1. **Every diff reload blanked the pane** *(fixed — A and B below)*.
+   `DiffStore.load` cleared `payload/rows/tokens` before fetching, and the
+   status epoch re-keyed the load on every status change and every app
+   activation — so refocusing the app, or any background tick, flashed the
+   open diff to a spinner and reset its scroll. The Tauri client keeps the old
+   diff on screen and only falls back to a spinner after 150 ms
+   (`SLOW_DIFF_THRESHOLD_MS`, ported from GitHub Desktop's
+   `SeamlessDiffSwitcher`).
 2. **Everything pauses when the app isn't frontmost.** `backgroundPaused()`
    gates *all three* loops on `!NSApp.isActive`. The Tauri client never pauses
    on blur; GitHub Desktop pauses only the multi-repo indicator sweep and keeps
@@ -63,91 +66,65 @@ named below (`occlusionState`, `beginActivity`, `NWPathMonitor`,
 
 ---
 
-## 3. Workstream A — Seamless diff switching (kill the blank)
+## 3. Workstream A — Seamless diff switching ✅ (landed 2026-08-27)
 
-**Current.** [`DiffStore.load`](../../apps/swift-ui-app/Sources/LeoGit/Stores/DiffStore.swift)
-opens with `payload = nil; rows = []; tokens = nil`, so every re-key of
-`DiffView`'s `.task(id: LoadKey)` drops the pane to `ProgressView`, loses scroll
-position, and re-parses + re-tokenizes even when the result is identical.
+**As built** (`Stores/DiffStore.swift`, `Screens/DiffView.swift`; no FFI
+changes — the full mechanics live in TECHNICAL.md's diff paragraph):
 
-**Target.** The Tauri/GH-Desktop contract, natively:
+- `DiffStore` no longer clears `payload/rows/tokens` when a load starts; it
+  tracks `phase: idle / loading(slow:) / failed` beside them.
+- A 150 ms slow-load escalation (`slowLoadThreshold`, Tauri's
+  `SLOW_DIFF_THRESHOLD_MS`) runs as an unstructured timer task racing the load
+  under the existing `generation` guard — unstructured because `.task(id:)`
+  cancelling the load must not cancel the escalation while the blocking FFI
+  call is still running.
+- **Value-equality skip**: a parse equal to what's shown publishes nothing
+  (`DiffPayload: Equatable`) — rows, scroll, tokens survive. Tokens still
+  refresh in the background on an equal payload (context lines can recolour
+  when blob content changed without the diff text changing) and swap in only
+  when different.
+- View rule: last-shown state stays during a reload; spinner only on
+  `loading(slow: true)`; a fast first load stays blank rather than flashing a
+  sub-threshold spinner.
 
-- The previous diff **stays on screen** while the replacement loads.
-- A **150 ms slow-load threshold**: only if the load outlives it does the pane
-  fall back to a spinner (constant shared in name and value with the Tauri
-  client's `SLOW_DIFF_THRESHOLD_MS`).
-- **Value-equality skip**: the generated `DiffPayload`/`FileDiff` are already
-  `Equatable` — if the fresh parse equals what's shown, publish nothing (rows,
-  scroll, and tokens all survive untouched). This is what makes epoch bumps
-  (Workstream B) harmless.
-- When the payload *did* change, swap `rows` in place. Rows are `Identifiable`
-  by flat index, so SwiftUI diffs the list instead of rebuilding it; tokens
-  reset to `nil` and the plain-text phase shows immediately — that two-phase
-  paint is already the contract (`FRONTEND.md` §7).
-
-**Design.**
-
-- `DiffStore` gains an explicit tiny state model instead of four loose flags:
-  the published surface becomes `payload/rows/tokens` (what's on screen) plus
-  `phase: Phase` where `Phase` is `idle / loading(slow: Bool) / failed(String)`.
-  The view's rule collapses to: show content whenever `payload != nil`, spinner
-  only when `payload == nil || phase == .loading(slow: true)`.
-- The slow-threshold timer is a child `Task.sleep(for: .milliseconds(150))`
-  guarded by the existing `generation` counter (the blocking FFI call can't be
-  cancelled, so generation stays the correctness mechanism; the timer is just
-  another racer against it).
-- Re-tokenization: when the new payload equals the old, still refresh `tokens`
-  in the background and swap them in place (recolor without flash) — context
-  lines can change color when surrounding blob content changed even though the
-  diff text didn't. No debounce timer needed: unlike the Svelte effect, `load`
-  only runs on a real key change, and the equality skip absorbs the churny
-  callers. (This also settles ROADMAP's deferred "token cache" item for now:
-  the skip guard removes the repeat-tokenize cost that motivated it.)
-
-**Files.** `Stores/DiffStore.swift`, `Screens/DiffView.swift`. No FFI changes.
-
-**Test (visual, per CLAUDE.md).** Open a large diff, scroll mid-way, ⌘Tab away
-and back → no flash, scroll preserved. Switch between two files → old diff
-visible until the new one paints. Throttle with a huge diff → spinner appears
-only after the threshold.
+**Decision (kept from implementation):** one deliberate improvement over
+Tauri — at the slow threshold Tauri also *drops* the old payload, so a
+slow-but-identical reload repaints from scratch; the native store keeps it, so
+the equality skip preserves scroll even then. The spinner still replaces the
+content visually — only the store state survives.
 
 ---
 
-## 4. Workstream B — `statusEpoch` semantics (reload without guessing)
+## 4. Workstream B — Working-tree epoch + content stamp ✅ (landed 2026-08-27)
 
-**Current.** `RepoStore` bumps `statusEpoch` on any status delta, on every
-explicit `refresh()`, and unconditionally on refocus — each bump re-keys the
-open `DiffView`.
+**As built:**
 
-**Analysis.** Narrowing the bump *at the RepoStore level* is a dead end:
-`git status` cannot tell whether the *selected file's diff content* changed
-when its row looks identical (modified → still modified). Any row-comparison
-heuristic would reintroduce the Tauri client's staleness bug (its poll never
-reloads the open diff, so edits made through the embedded terminal go stale
-until reselect). The native client's "reload whenever status moved" is the
-*more correct* behavior — it was only expensive because reloads blanked.
-
-**Target.** Keep the epoch honest and cheap instead of clever:
-
-- Rename to `workingTreeEpoch` and document its one meaning: *"the working
-  tree may differ from what any derived view shows — re-derive if you care."*
-  Bump when status changed, on explicit refresh, and on refocus
-  (`forceDiffReload`), exactly as today.
-- Correctness of "did anything actually change" lives **only** in
-  `DiffStore`'s equality skip (Workstream A). RepoStore signals possibility;
-  DiffStore verifies reality. Single responsibility, no duplicated guessing.
-- The only real waste left is a `git diff` + parse per epoch bump for an
-  unchanged file. That is one short-lived subprocess on a 2 s-poll *status
-  change* (not per tick) — accepted, and cheap to revisit later with a
-  blob-OID cache (ROADMAP item) if it ever measures hot.
-
-**Files.** `Stores/RepoStore.swift` (rename + doc comment),
-`Screens/ChangesDetailPane.swift`, `Stores/DiffStore.swift` (comment linking the
-two halves of the contract).
-
-**Test.** With a file's diff open, `touch`/edit a *different* file in a
-terminal → open diff does not repaint (equality skip); edit the *open* file →
-diff updates in place within a poll tick, no flash.
+- `RepoStore.statusEpoch` → `workingTreeEpoch`, one documented meaning: *"the
+  working tree may differ from what any derived view shows — re-derive if you
+  care."* Bumps on status change, explicit refresh, and refocus, exactly as
+  planned. RepoStore signals possibility; `DiffStore`'s equality skip (A) is
+  where reality is checked — deliberately no narrower heuristic, which would
+  reintroduce the Tauri client's staleness bug.
+- **Amendment found in visual testing:** "bump when status changed" could not
+  see *content* edits at all — `RepoStatus`/`FileEntry` carried nothing
+  content-derived (porcelain v2 has HEAD/index hashes, no worktree hash), so
+  editing a file whose row already read "modified"/"new" produced a
+  byte-identical status and the open diff went stale until refocus/reselect.
+  Options considered: (a) an opaque **stat stamp in core**; (b) bump the epoch
+  every poll tick (Swift-only, but a per-tick `git diff` subprocess and a
+  starvation risk for loads slower than the tick); (c) accept Tauri parity.
+  **Chosen: (a)** for long-term correctness.
+- `FileEntry.stat_stamp: Option<String>` — opaque `"{mtime_ns}:{size}"`, git's
+  own stat-cache pair; filled only by `get_status` in one end-of-function
+  pass; `None` off-disk (deletions) and in `get_commit_files` (immutable
+  history). A string because the Tauri wire is JSON, where nanosecond mtimes
+  exceed 2^53 and a number would silently lose precision. Core derives
+  `PartialEq` on `FileEntry`/`RepoStatus` (+ `Eq`/`Copy` on `FileStatus`);
+  pinned by `stat_stamp_sees_content_edits_and_absence`.
+- Scope grew beyond the original file list: `core/src/git.rs`,
+  `ffi/src/lib.rs` (mirror field), regenerated bindings, the Tauri TS
+  `FileEntry` type (additive, unused there for now). Clippy-pedantic baseline
+  unchanged (184); 120 core + 24 bridge tests green.
 
 ---
 
@@ -160,16 +137,17 @@ the status poll, auto-fetch, tier scheduler, and sweeps alike.
 
 | Work | Pauses on network op | Pauses when app inactive | Pauses when window not visible |
 |---|---|---|---|
-| 2 s status poll (active repo, local) | yes | **no** — slows to 10 s | yes |
-| Auto-fetch loop (active repo, network) | yes | no | yes |
+| 2 s status poll (active repo, local) | yes | **no** — slows to 10 s | **no** — slows to 30 s |
+| Auto-fetch loop (active repo, network) | yes | no | **no** — interval stretched ×3 |
 | Tier scheduler + sweeps (other repos) | yes | **yes** (GH Desktop model) | yes |
 
 Rationale: a visible-but-not-key window keeps telling the truth (the audit's
 "stale in plain sight" case — the web clients never had this failure mode
-because DOM timers don't know about key windows); the multi-repo fetch fan-out
-is the only genuinely deferrable work, and the existing refocus resync remains
-its catch-up path. The slower unfocused poll cadence keeps the visible window
-honest without running full-rate forever.
+because DOM timers don't know about key windows), and a hidden window keeps
+refreshing slowly so refocusing reveals a current screen instead of a sudden
+catch-up. The multi-repo fetch fan-out is the only genuinely deferrable work,
+and the existing refocus resync remains its catch-up path. The cadence ladder
+keeps every state honest without running full-rate forever.
 
 **Design.**
 
@@ -201,7 +179,50 @@ honest without running full-rate forever.
 **Files.** New `Services/BackgroundSchedulingPolicy.swift` +
 `Services/AppNapSuppressor.swift`; edits in `Screens/ContentView.swift`,
 `Stores/RepoDirectoryStore.swift`, `Stores/SyncStore.swift` (publish op state
-into the policy).
+into the policy), `Screens/RepoSwitcher.swift` (threads the policy through to
+`sweepVisible` — it carried the old `isPaused` closure).
+
+**Decisions made while implementing (2026-08-27, pending visual
+confirmation):**
+
+- **"The key window" can't literally feed `isWindowVisible`:**
+  `NSApp.keyWindow` is *nil* while the app is inactive — exactly the
+  visible-but-not-key case this workstream exists to fix. Instead the policy
+  tracks the window hosting the repo UI: a zero-sized `NSViewRepresentable`
+  in the policy's file (`View.trackWindowVisibility(with:)`, attached to
+  `ContentView`'s root) reports its hosting `NSWindow` via
+  `viewDidMoveToWindow`, and the policy observes that window's occlusion
+  notification. Side effect worth knowing: a visible Settings window doesn't
+  keep loops alive while the repo window is minimized — the repo window is
+  the one that counts.
+- **Classic notification API, not typed messages:** the concurrency-native
+  `NSWindow.DidChangeOcclusionStateMessage` / `NotificationCenter`
+  message types are macOS 27-beta; the app targets macOS 26. Block observers
+  on `.main` with `MainActor.assumeIsolated` inside (these AppKit
+  notifications post on the main thread), removed in an `isolated deinit`
+  (SE-0371) — a plain deinit is nonisolated under Swift 6 and can't touch
+  the non-Sendable tokens.
+- **A fourth policy input, `isRepoOpen`:** the App Nap formula (repo open ∧
+  work allowed) needs repo-open state, which the three planned inputs don't
+  carry. Fed by `ContentView` from `store.repoPath`; only the assertion
+  reads it — the loops it would gate don't exist without a repo.
+- **`SyncStore` gets the policy by init injection** and mirrors
+  `activeOperation` into `networkOpInFlight` from a `didSet`, so any future
+  writer of the slot keeps the mirror honest; `ContentView.init` creates the
+  pair together.
+- **Amendment after the first visual pass (user decision): hidden ≠ paused.**
+  The as-planned build stopped everything while the window was occluded or
+  minimized, so refocusing revealed a sudden catch-up. Chosen instead: the
+  active repo's work never stops — the status poll slows to 30 s while
+  hidden (ladder 2 s / 10 s / 30 s) and auto-fetch stretches its configured
+  interval ×3 while hidden ("a bit more efficient than GH Desktop", which
+  fetches at one flat interval regardless). Only the multi-repo tier
+  scheduler and sweeps still pause when the app is inactive. Consequence:
+  the App Nap assertion is now held for effectively the whole time a repo
+  is open (released only while a user transfer holds the network slot);
+  `isWindowVisible` feeds cadences, not gates. Un-occluding without
+  activating the app can take up to one 30 s beat to catch up — activating
+  resyncs immediately, as before.
 
 **Test.** Window visible beside a terminal, app not focused: commit from the
 terminal → History/Changes update within ~10 s without touching LeoGit.
@@ -306,10 +327,9 @@ picks them up on next activation.
 Per `CLAUDE.md`: one workstream at a time, in user-flow order, visually
 verified before the next starts.
 
-1. **A — seamless diff** (biggest felt win; no dependencies).
-2. **B — epoch semantics** (tiny once A's equality skip exists; A depends on
-   nothing, B depends on A).
-3. **C — scheduling policy + App Nap** (independent of A/B; lands the
+1. ✅ **A — seamless diff** (landed; biggest felt win, no dependencies).
+2. ✅ **B — epoch semantics + stat stamp** (landed; B depends on A).
+3. **C — scheduling policy + App Nap** (next; independent of A/B; lands the
    "works while unfocused" behavior the audit was about).
 4. **D — connectivity observer** (composes with C's policy; do after C so
    recovery kicks respect visibility).
@@ -322,14 +342,30 @@ touched (E), and the doc updates below.
 
 ## 9. Documentation updates on completion
 
-- `TECHNICAL.md` — new Services types, `AppConfigStore` ownership,
-  `DiffStore` phase model, the scheduling-policy table.
-- `FRONTEND.md` — §6: seamless-diff threshold becomes a shared behavioral
-  rule; §8: focus/visibility divergence row, `theme`/`side_by_side_diff`
-  exemption rows.
-- `ROADMAP.md` — check off "Settings re-arm intervals" (native half), note the
-  token-cache item's motivation change (A's equality skip), add
+Done for A + B: `TECHNICAL.md` (DiffStore phase model + seamless mechanics;
+`workingTreeEpoch` + stat-stamp contract), `FRONTEND.md` (§6.3 seamless rule
+shared across clients; §5.2 `stat_stamp` field; §8 open-diff-freshness
+divergence row), `ROADMAP.md` (token-cache motivation note; new item: Tauri
+adopting `stat_stamp` to fix its own open-diff staleness).
+
+Still owed by C–E:
+
+- `TECHNICAL.md` — new Services types, `AppConfigStore` ownership, the
+  scheduling-policy table.
+- `FRONTEND.md` — §8: focus/visibility divergence row,
+  `theme`/`side_by_side_diff` exemption rows.
+- `ROADMAP.md` — check off "Settings re-arm intervals" (native half), add
   `side_by_side_diff` native support as an explicit item; keep the update
   checker / CLI-launch gaps (out of scope here) listed.
 - `DESIGN.md` — the unfocused-but-visible freshness behavior is a product
   decision worth recording.
+
+## 10. Findings log (pending items discovered en route)
+
+- **Tauri open-diff staleness is now fixable for free** — `stat_stamp` reaches
+  the Tauri client on every poll; adopting the native reload shape would
+  retire its "stale until reselect" behavior. Filed in ROADMAP; §8's
+  divergence row stands until then.
+- **Equal-payload re-tokenize is the one remaining repeat cost** on an epoch
+  bump (the token-cache ROADMAP item's note). Not measured hot; revisit only
+  if it ever is.

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use super::paths;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FileStatus {
     New,
     Modified,
@@ -17,7 +17,7 @@ pub enum FileStatus {
     Conflicted,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileEntry {
     pub path: String,
     pub orig_path: Option<String>,
@@ -42,6 +42,19 @@ pub struct FileEntry {
     /// produced no changes". A submodule whose pointer *did* move is committable
     /// and leaves this false.
     pub submodule_dirty: bool,
+    /// Opaque content-change stamp for the working-tree side of this entry —
+    /// mtime (nanoseconds) + size, git's own stat-cache heuristic — so that
+    /// *editing* a file changes its status entry even when the row otherwise
+    /// reads the same (modified → still modified, untracked → still
+    /// untracked): porcelain v2 carries HEAD/index hashes but no worktree
+    /// hash, which left content edits invisible to a status comparison and
+    /// the open diff stale until reselect. Filled only by `get_status`
+    /// (`None` for deletions, where nothing exists on disk, and always `None`
+    /// from `get_commit_files`, whose entries are immutable history). A
+    /// string, not integers: the Tauri wire is JSON, where nanosecond mtimes
+    /// exceed 2^53 and a number would silently lose precision. Compare it,
+    /// never parse it.
+    pub stat_stamp: Option<String>,
 }
 
 /// Aggregate line-change totals for a single commit, summed across every file
@@ -131,7 +144,7 @@ pub struct RepoSync {
 
 /// Full status payload returned by `get_status`.
 /// Includes branch metadata parsed from `# branch.*` headers as well as the file list.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RepoStatus {
     pub branch: String,
     pub upstream: String,
@@ -504,6 +517,23 @@ fn is_dirty_submodule(sub: &str) -> bool {
 
 /// Parse a type-1 ordinary changed entry: `1 XY sub mH mI mW hH hI <path>`
 /// (9 fields total; the 9th field captures the full path, including spaces).
+/// The opaque `FileEntry::stat_stamp` for one working-tree path: mtime in
+/// nanoseconds since the epoch plus the byte size — the pair git's index
+/// stat-cache trusts. `symlink_metadata` so a symlink stamps as itself (its
+/// target may be outside the repo or missing); any stat failure — a deleted
+/// file, a permission wall — is `None`, which still compares stably.
+fn stat_stamp(repo_path: &str, rel_path: &str) -> Option<String> {
+    let meta = std::fs::symlink_metadata(Path::new(repo_path).join(rel_path)).ok()?;
+    let mtime = meta.modified().ok()?;
+    // Files predating the epoch (or a skewed clock) land on the Err side of
+    // `duration_since`; keep them distinguishable rather than collapsing to 0.
+    let nanos: i128 = match mtime.duration_since(std::time::UNIX_EPOCH) {
+        Ok(after) => i128::try_from(after.as_nanos()).unwrap_or(i128::MAX),
+        Err(before) => -i128::try_from(before.duration().as_nanos()).unwrap_or(i128::MAX),
+    };
+    Some(format!("{nanos}:{len}", len = meta.len()))
+}
+
 fn parse_ordinary_entry(seg: &str) -> Option<FileEntry> {
     let parts: Vec<&str> = seg.splitn(9, ' ').collect();
     if parts.len() < 9 {
@@ -523,6 +553,7 @@ fn parse_ordinary_entry(seg: &str) -> Option<FileEntry> {
         display_dir,
         embedded: false,
         submodule_dirty,
+        stat_stamp: None,
     })
 }
 
@@ -549,6 +580,7 @@ fn parse_rename_entry(seg: &str, orig_path: String) -> Option<FileEntry> {
         display_dir,
         embedded: false,
         submodule_dirty: false,
+        stat_stamp: None,
     })
 }
 
@@ -571,6 +603,7 @@ fn parse_unmerged_entry(seg: &str) -> Option<FileEntry> {
         display_dir,
         embedded: false,
         submodule_dirty: false,
+        stat_stamp: None,
     })
 }
 
@@ -794,6 +827,7 @@ pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
                 display_dir,
                 embedded,
                 submodule_dirty: false,
+                stat_stamp: None,
             });
         } else if seg_str.starts_with("1 ") {
             if let Some(e) = parse_ordinary_entry(seg_str) {
@@ -822,6 +856,14 @@ pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
     }
 
     sort_file_entries(&mut result.files);
+
+    // One pass, one place: stamp every entry's working-tree side so a content
+    // edit changes the status value (see `FileEntry::stat_stamp`). A stat per
+    // changed file per poll tick — the list is short, and `git status` itself
+    // just statted the whole tree.
+    for entry in &mut result.files {
+        entry.stat_stamp = stat_stamp(&repo_path, &entry.path);
+    }
 
     Ok(result)
 }
@@ -1304,6 +1346,9 @@ pub fn get_commit_files(repo_path: String, sha: String) -> Result<Vec<FileEntry>
             display_dir,
             embedded: false,
             submodule_dirty: false,
+            // Immutable history — a commit's files can't be edited, so the
+            // working-tree stamp stays absent by design.
+            stat_stamp: None,
         });
     }
 
@@ -2834,6 +2879,7 @@ mod tests {
             display_dir: String::new(),
             embedded: false,
             submodule_dirty: false,
+            stat_stamp: None,
         }
     }
 
@@ -3556,6 +3602,51 @@ mod tests {
         assert_eq!(st.head_sha, head, "head_sha matches HEAD");
     }
 
+    /// Editing a file must change its status *value* even when its row reads
+    /// the same — the stat stamp is what lets a status comparison see content
+    /// edits, which porcelain v2 alone cannot (no worktree hash). Pins: an
+    /// on-disk entry carries a stamp, an edit that keeps the status letters
+    /// changes it (size differs, so this can't pass on mtime granularity
+    /// luck), and a deletion stamps `None`.
+    #[test]
+    fn stat_stamp_sees_content_edits_and_absence() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_test_repo(repo);
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+
+        fs::write(repo.join("a.txt"), "1\n").expect("write file");
+        let before = get_status(repo_path.clone()).expect("get_status");
+        let entry = |st: &RepoStatus| st.files[0].clone();
+        assert_eq!(before.files.len(), 1, "one untracked file");
+        assert!(
+            entry(&before).stat_stamp.is_some(),
+            "an on-disk file carries a stamp"
+        );
+
+        // Same row (untracked → still untracked), different content.
+        fs::write(repo.join("a.txt"), "1\n2\n").expect("edit file");
+        let after = get_status(repo_path.clone()).expect("get_status");
+        assert_eq!(entry(&after).xy, entry(&before).xy, "row letters unchanged");
+        assert_ne!(
+            entry(&after).stat_stamp,
+            entry(&before).stat_stamp,
+            "a content edit must change the stamp — this is what re-keys the open diff"
+        );
+        assert_ne!(after, before, "…and therefore the whole status value");
+
+        // Commit, then delete: the row exists but nothing is on disk.
+        commit(repo_path.clone(), "c1".into(), vec![new_file("a.txt")], None).expect("commit");
+        fs::remove_file(repo.join("a.txt")).expect("delete file");
+        let deleted = get_status(repo_path).expect("get_status");
+        assert_eq!(deleted.files.len(), 1, "the deletion is listed");
+        assert_eq!(
+            entry(&deleted).stat_stamp,
+            None,
+            "nothing on disk → no stamp"
+        );
+    }
+
     /// After `checkout_commit` onto an older commit, `get_status` reports a
     /// detached HEAD: `detached = true`, an empty branch, and `head_sha` equal
     /// to the checked-out commit. Reattaching to a branch clears it. This pins
@@ -3660,6 +3751,7 @@ mod tests {
             display_dir: String::new(),
             embedded: false,
             submodule_dirty: false,
+            stat_stamp: None,
         }
     }
 
@@ -3673,6 +3765,7 @@ mod tests {
             display_dir: String::new(),
             embedded: false,
             submodule_dirty: false,
+            stat_stamp: None,
         }
     }
 

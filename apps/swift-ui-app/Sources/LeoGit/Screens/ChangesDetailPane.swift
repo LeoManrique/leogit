@@ -8,13 +8,15 @@ struct ChangesDetailPane: View {
     let repoPath: String
     let files: [FileEntry]
     let selectedPath: String?
-    /// Bumped by every status reload; the diff re-reads when it changes.
-    let statusEpoch: Int
+    /// `RepoStore.workingTreeEpoch` — "the working tree may have changed";
+    /// re-keys the diff load, whose equality skip decides whether anything
+    /// on screen actually moves.
+    let workingTreeEpoch: Int
 
     var body: some View {
         Group {
             if let file = files.first(where: { $0.path == selectedPath }) {
-                DiffView(repoPath: repoPath, file: file, target: .workingTree(epoch: statusEpoch))
+                DiffView(repoPath: repoPath, file: file, target: .workingTree(epoch: workingTreeEpoch))
             } else if files.isEmpty {
                 ContentUnavailableView(
                     "No Changes",

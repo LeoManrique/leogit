@@ -146,6 +146,18 @@ core's `ParsedDiff`, which also carries phase-1 HTML strings and side-by-side ro
 `WebView` presentation the native client should not pay to marshal. The diff view keeps the
 Tauri client's two-phase shape (`get_diff` → `parse_diff` paints the structure immediately;
 `tokenize_diff`, blob-backed so multi-line constructs highlight correctly, recolours in place).
+Reloads are seamless: `DiffStore` never clears what's on screen when a load starts — it
+tracks a `phase` (`idle` / `loading(slow:)` / `failed`) beside the published
+`payload`/`rows`/`tokens`, escalates to a spinner only when the load outlives
+`slowLoadThreshold` (150 ms, Tauri's `SLOW_DIFF_THRESHOLD_MS`, via an unstructured timer task
+racing the load under the same `generation` guard — `.task(id:)` cancelling the load must not
+cancel the escalation for a blocking FFI call still running), and publishes nothing when the
+fresh parse equals what's shown (`DiffPayload: Equatable`), so rows, scroll position, and
+tokens survive an epoch bump untouched; tokens still refresh in the background on an equal
+payload — context lines can recolour when blob content changed without the diff text changing
+— and swap in only when different. `DiffView`'s content rule mirrors it: last-shown state
+stays during a reload, spinner only on `loading(slow: true)`, and a fast first load stays
+blank rather than flashing a sub-threshold spinner.
 Token `start`/`end` and `IntraLineRange` are code-point indices, which in Swift is the
 `AttributedString.unicodeScalars` view — never `characters`, whose grapheme clusters can span
 several code points.
@@ -227,10 +239,17 @@ number-for-number: 2/5/10 min over the MRU with 1.5/4/8 s launch kicks, sequenti
 repo excluded) — so a repo switch or close cancels and restarts them structurally, the
 teardown the Tauri client does with `clearInterval` bookkeeping. The poll's
 `RepoStore.refreshQuietly` never touches `isLoading`, refetches history only when
-`head_sha` moved, and bumps `statusEpoch` (the diff-reload key) only when status actually
-changed — plus unconditionally on app re-activation
-(`NSApplication.didBecomeActiveNotification`, the native `resyncOnActive`), since a file
-can change on disk without its status row changing. A `ConnectivityBreaker` (Tauri's
+`head_sha` moved, and bumps `workingTreeEpoch` (the diff-reload key; one meaning — "the
+working tree may differ from what any derived view shows, re-derive if you care") when the
+status value changed — plus unconditionally on app re-activation
+(`NSApplication.didBecomeActiveNotification`, the native `resyncOnActive`). Content edits
+count as a status change: porcelain v2 carries no worktree hash, so a same-row edit
+(modified → still modified) used to be invisible to the comparison and the open diff went
+stale until reselect — core's `FileEntry.stat_stamp` (an opaque mtime+size string,
+`get_status`-only, `None` off-disk; pinned by `stat_stamp_sees_content_edits_and_absence`)
+is what makes the comparison see them. The epoch is deliberately not narrower than that:
+`RepoStore` signals possibility, and `DiffStore`'s equality skip is where reality is
+checked, so a bump for an unchanged file costs one subprocess and zero repaints. A `ConnectivityBreaker` (Tauri's
 numbers: 2 failures → 30 s backoff doubling to a 5 min cap) gates every background fetch,
 fed only by real attempts against real remotes; both loops also pause while the app is
 inactive — a deliberate native improvement the activation resync makes safe.

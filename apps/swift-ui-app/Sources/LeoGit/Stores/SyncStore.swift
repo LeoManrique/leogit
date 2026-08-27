@@ -23,7 +23,12 @@ enum NetworkOperation {
 @Observable
 final class SyncStore {
     /// The single in-flight operation; the sync buttons disable while set.
-    private(set) var activeOperation: NetworkOperation?
+    /// Mirrored into the scheduling policy on every hand-off, so the
+    /// background loops pause without capturing this store — the native
+    /// replacement for each Tauri loop reading `activeNetworkOp`.
+    private(set) var activeOperation: NetworkOperation? {
+        didSet { schedulingPolicy.networkOpInFlight = activeOperation != nil }
+    }
 
     /// Aggregate progress of the in-flight operation, 0–100. `nil` before the
     /// first tick and for fetch, which streams no progress — show an
@@ -39,6 +44,16 @@ final class SyncStore {
     /// stderr-reader thread can deliver a straggler after the await resolves,
     /// which must not repaint a dismissed bar.
     private var generation = 0
+
+    /// Where `activeOperation`'s occupancy is published for the background
+    /// loops. Injected: the policy and this store are created together by
+    /// `ContentView`, and a store that could exist unpoliced would let a
+    /// transfer run while background git work races it.
+    private let schedulingPolicy: BackgroundSchedulingPolicy
+
+    init(schedulingPolicy: BackgroundSchedulingPolicy) {
+        self.schedulingPolicy = schedulingPolicy
+    }
 
     /// Forget everything on repo switch.
     func reset() {

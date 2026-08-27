@@ -48,11 +48,18 @@ final class RepoStore {
     /// the subtitle badge and the branch menu's Abort Merge item.
     private(set) var isMerging = false
 
-    /// Bumped on every successful status load. Views that derive from the
-    /// working tree beyond `status` itself — the open diff, most notably —
-    /// key their reload on this, since a refresh can change a file's diff
-    /// without changing its row in the file list.
-    private(set) var statusEpoch = 0
+    /// One meaning, exactly: *the working tree may differ from what any
+    /// derived view shows — re-derive if you care.* Bumped when the status
+    /// changed, on explicit refresh, and on refocus (`forceDiffReload`) —
+    /// deliberately not narrower: `git status` cannot tell whether an open
+    /// file's *diff content* changed when its row looks identical
+    /// (modified → still modified), and any row-comparison heuristic here
+    /// would reintroduce the Tauri client's staleness bug (its poll never
+    /// reloads the open diff, so terminal edits go stale until reselect).
+    /// This store signals possibility; `DiffStore`'s equality skip is where
+    /// reality is checked, so a bump for an unchanged file costs one
+    /// subprocess and zero repaints.
+    private(set) var workingTreeEpoch = 0
 
     /// Set when the last operation failed; surfaced as a banner and cleared on
     /// the next successful load.
@@ -110,7 +117,7 @@ final class RepoStore {
     /// (`errorMessage` stays whatever the last real action left — only a
     /// failure *streak* surfaces a banner, and only the poll's recovery
     /// clears it), history refetched only when HEAD actually moved (how
-    /// commits made in an outside terminal appear), and `statusEpoch` bumped
+    /// commits made in an outside terminal appear), and `workingTreeEpoch` bumped
     /// only when the status changed — so an idle tick never makes the open
     /// diff reload.
     ///
@@ -144,7 +151,7 @@ final class RepoStore {
             status = newStatus
         }
         if statusChanged || forceDiffReload {
-            statusEpoch += 1
+            workingTreeEpoch += 1
         }
         isMerging = (try? await GitBridge.mergeInProgress(in: repoPath)) ?? false
         if headMoved {
@@ -201,7 +208,7 @@ final class RepoStore {
             status = newStatus
             commits = newCommits
             hasMoreHistory = newCommits.count == Int(historyLimit)
-            statusEpoch += 1
+            workingTreeEpoch += 1
             errorMessage = nil
         } catch {
             errorMessage = error.displayMessage

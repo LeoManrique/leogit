@@ -22,6 +22,13 @@ export interface FileEntry {
    * first. The UI disables the row instead of letting the commit fail.
    */
   submodule_dirty: boolean
+  /**
+   * Opaque content-change stamp (mtime + size) for the working-tree side, so
+   * a status comparison can see content edits; absent when nothing is on disk
+   * (deletions) and in commit-file lists. This client doesn't read it yet —
+   * the native client keys its open-diff reload on it. Compare, never parse.
+   */
+  stat_stamp?: string
 }
 
 export interface RepoStatus {

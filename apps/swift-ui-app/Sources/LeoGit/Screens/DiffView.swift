@@ -65,14 +65,22 @@ struct DiffView: View {
         .padding(.vertical, 8)
     }
 
+    /// Seamless-switching rule (the Tauri/GH-Desktop contract, carried by
+    /// `DiffStore.phase`): whatever was last shown — diff rows, the binary or
+    /// empty notice — stays on screen while a reload runs, and the spinner
+    /// appears only once the load outlives the slow threshold. A fast first
+    /// load, with nothing old to keep showing, stays blank rather than
+    /// flashing a sub-threshold spinner.
     @ViewBuilder
     private var content: some View {
-        if let errorMessage = store.errorMessage {
+        if case .failed(let message) = store.phase {
             ContentUnavailableView(
                 "Couldn't Load Diff",
                 systemImage: "exclamationmark.triangle",
-                description: Text(errorMessage)
+                description: Text(message)
             )
+        } else if store.phase == .loading(slow: true) {
+            ProgressView()
         } else if store.payload?.fileDiff.isBinary == true {
             ContentUnavailableView(
                 "Binary File",
@@ -86,9 +94,7 @@ struct DiffView: View {
                 description: Text("The file changed without changing any lines — a mode change or rename, for example.")
             )
         } else if store.payload == nil {
-            // First load; kept quiet unless it actually takes long enough for
-            // the spinner to be information rather than flicker.
-            ProgressView()
+            Color.clear
         } else {
             diffRows
         }

@@ -9,8 +9,9 @@ struct RepoSwitcher: View {
     let activePath: String
     let directory: RepoDirectoryStore
 
-    /// Sweeps and switches hold off while a network operation runs.
-    let isPaused: @MainActor () -> Bool
+    /// Gates the open-popover badge sweep (`canRunRepoSweeps` — in practice
+    /// only a network operation can block it while the popover is open).
+    let policy: BackgroundSchedulingPolicy
 
     let onSelect: (String) -> Void
     let onOpenOther: () -> Void
@@ -33,7 +34,7 @@ struct RepoSwitcher: View {
             RepoSwitcherList(
                 activePath: activePath,
                 directory: directory,
-                isPaused: isPaused,
+                policy: policy,
                 onSelect: { path in
                     isPresented = false
                     onSelect(path)
@@ -55,7 +56,7 @@ struct RepoSwitcher: View {
 private struct RepoSwitcherList: View {
     let activePath: String
     let directory: RepoDirectoryStore
-    let isPaused: @MainActor () -> Bool
+    let policy: BackgroundSchedulingPolicy
     let onSelect: (String) -> Void
     let onOpenOther: () -> Void
     let onClone: () -> Void
@@ -126,7 +127,7 @@ private struct RepoSwitcherList: View {
             // discovery plus a fetch-less sweep of the rows (throttled inside
             // the store), exactly like the Tauri dropdown's open effect.
             await directory.refreshDirectory()
-            await directory.sweepVisible(activePath: activePath, isPaused: isPaused)
+            await directory.sweepVisible(activePath: activePath, policy: policy)
         }
     }
 

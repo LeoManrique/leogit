@@ -120,6 +120,7 @@ pub struct FileEntry {
     pub display_dir: String,
     pub embedded: bool,
     pub submodule_dirty: bool,
+    pub stat_stamp: Option<String>,
 }
 
 /// Mirrors [`leogit_core::git::RepoStatus`].

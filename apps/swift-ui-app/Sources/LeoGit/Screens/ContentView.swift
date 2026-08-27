@@ -20,13 +20,20 @@ enum RepoTab: String, CaseIterable, Identifiable {
 /// refresh-on-activate resync. Each is a `.task(id: repoPath)` loop, so a
 /// repo switch or close cancels and restarts them structurally — no timer
 /// bookkeeping, which is where the Tauri client needs explicit
-/// `clearInterval` teardown.
+/// `clearInterval` teardown. Whether each loop may run right now is not
+/// decided here: every guard names a `BackgroundSchedulingPolicy` predicate.
 struct ContentView: View {
     @Environment(RepoStore.self) private var store
     @State private var branchStore = BranchStore()
-    @State private var syncStore = SyncStore()
     @State private var directoryStore = RepoDirectoryStore()
     @State private var terminalStore = TerminalStore()
+
+    /// "May background work run right now?" — the policy every loop below
+    /// consults by predicate name; its doc comment carries the table.
+    /// Created alongside `syncStore` in `init` because the store publishes
+    /// its network-op slot into the policy, so the pair must share identity.
+    @State private var schedulingPolicy: BackgroundSchedulingPolicy
+    @State private var syncStore: SyncStore
     /// Lives here, not in `ChangesSidebar`: switching tabs rebuilds that
     /// pane, which would drop an in-progress commit message — and amend mode
     /// is started from the *History* tab, so it has to survive the switch
@@ -51,6 +58,12 @@ struct ContentView: View {
     /// Dedupes the activate resync — activation notifications can burst.
     @State private var isResyncing = false
 
+    init() {
+        let policy = BackgroundSchedulingPolicy()
+        _schedulingPolicy = State(initialValue: policy)
+        _syncStore = State(initialValue: SyncStore(schedulingPolicy: policy))
+    }
+
     var body: some View {
         Group {
             if let repoPath = store.repoPath {
@@ -65,6 +78,14 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 720, minHeight: 460)
+        // The policy's two inputs this view owns: which window hosts the UI
+        // (its occlusion gates everything) and whether a repo is open (the
+        // App Nap assertion's other half). Attached to the root so they
+        // survive the welcome ⇄ repository swap.
+        .trackWindowVisibility(with: schedulingPolicy)
+        .onChange(of: store.repoPath, initial: true) { _, path in
+            schedulingPolicy.isRepoOpen = path != nil
+        }
         .fileImporter(
             isPresented: $isChoosingFolder,
             allowedContentTypes: [.folder]
@@ -139,7 +160,7 @@ struct ContentView: View {
         .task(id: repoPath) { await statusPollLoop() }
         .task(id: repoPath) { await autoFetchLoop(repoPath: repoPath) }
         .task(id: repoPath) {
-            await directoryStore.runScheduler(activePath: repoPath, isPaused: backgroundPaused)
+            await directoryStore.runScheduler(activePath: repoPath, policy: schedulingPolicy)
         }
         .task {
             // Discovery is a filesystem walk that takes a moment on a deep
@@ -183,7 +204,7 @@ struct ContentView: View {
                 RepoSwitcher(
                     activePath: repoPath,
                     directory: directoryStore,
-                    isPaused: backgroundPaused,
+                    policy: schedulingPolicy,
                     onSelect: switchRepo,
                     onOpenOther: { isChoosingFolder = true },
                     onClone: { isCloneSheetPresented = true }
@@ -295,7 +316,7 @@ struct ContentView: View {
                     repoPath: repoPath,
                     files: store.status?.files ?? [],
                     selectedPath: selectedPath,
-                    statusEpoch: store.statusEpoch
+                    workingTreeEpoch: store.workingTreeEpoch
                 )
             case .history:
                 HistoryDetailPane(
@@ -348,14 +369,6 @@ struct ContentView: View {
 
     // MARK: Background refresh
 
-    /// Background work holds off while a network operation runs (the Tauri
-    /// guard) and while the app is inactive — a native improvement the
-    /// activate resync makes safe, since it catches up immediately on return.
-    @MainActor
-    private func backgroundPaused() -> Bool {
-        syncStore.activeOperation != nil || !NSApp.isActive
-    }
-
     /// Whether a text field (the commit composer, a sheet's name field, the
     /// switcher's filter) or the embedded terminal has keyboard focus —
     /// SwiftUI text editing runs through AppKit's field editor, an
@@ -368,16 +381,22 @@ struct ContentView: View {
         return firstResponder is NSTextView || firstResponder is TerminalView
     }
 
-    /// The 2 s status poll, ported from the Tauri client: how changes made
+    /// The status poll, ported from the Tauri client: how changes made
     /// outside the app — the terminal, an editor — appear by themselves.
     /// Sequential by construction (each tick awaits the last), so the Tauri
-    /// in-flight guard has no equivalent here.
+    /// in-flight guard has no equivalent here. Deliberate divergence from
+    /// the Tauri 2 s cadence (FRONTEND.md §8): the poll never stops — the
+    /// policy's ladder slows it while unfocused and again while the window
+    /// is hidden, so refocusing reveals a current screen instead of a
+    /// catch-up. The interval is re-read per tick, so a focus or visibility
+    /// change applies within one old interval; the activate resync covers
+    /// the gap sooner anyway.
     @MainActor
     private func statusPollLoop() async {
         while !Task.isCancelled {
-            try? await Task.sleep(for: .seconds(2))
+            try? await Task.sleep(for: schedulingPolicy.statusPollInterval)
             if Task.isCancelled { return }
-            guard !backgroundPaused(), !store.isLoading else { continue }
+            guard schedulingPolicy.canPollStatus, !store.isLoading else { continue }
             let previousHead = store.status?.headSha
             await store.refreshQuietly()
             if let repoPath = store.repoPath, let status = store.status {
@@ -404,18 +423,25 @@ struct ContentView: View {
     /// Fetches are held back while typing (a fetch can reorder the file
     /// list mid-keystroke), while the breaker is open, and — a deliberate
     /// improvement over Tauri — for repos with no remote, whose fetch could
-    /// only ever fail and poison the breaker.
+    /// only ever fail and poison the breaker. Runs under `canAutoFetch`
+    /// (FRONTEND.md §8): unlike the old `NSApp.isActive` gate, neither
+    /// losing focus nor a hidden window stops it — hiding stretches the
+    /// interval instead, so ahead/behind are already right on return.
     @MainActor
     private func autoFetchLoop(repoPath: String) async {
         while !Task.isCancelled {
             let config = try? await GitBridge.appConfig()
             let intervalMs = config?.autoFetch == true ? (config?.fetchIntervalMs ?? 0) : 0
+            // The 30 s idle re-check while disabled is deliberately not
+            // stretched: it fetches nothing, it only re-arms the toggle.
             let interval: Duration =
-                intervalMs > 0 ? .milliseconds(Int64(intervalMs)) : .seconds(30)
+                intervalMs > 0
+                ? schedulingPolicy.autoFetchInterval(configured: .milliseconds(Int64(intervalMs)))
+                : .seconds(30)
             try? await Task.sleep(for: interval)
             if Task.isCancelled { return }
             guard intervalMs > 0,
-                !backgroundPaused(),
+                schedulingPolicy.canAutoFetch,
                 !isTextInputFocused,
                 store.status?.hasRemote == true,
                 directoryStore.breaker.shouldAttempt
@@ -448,7 +474,7 @@ struct ContentView: View {
         await store.refreshQuietly(forceDiffReload: true)
         await directoryStore.refocusSweep(
             activePath: store.repoPath,
-            isPaused: backgroundPaused
+            policy: schedulingPolicy
         )
     }
 

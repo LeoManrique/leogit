@@ -167,9 +167,10 @@ final class RepoDirectoryStore {
 
     /// Fetch-less badge sweep for the rows the switcher is showing: rows with
     /// no cached summary always fill, a full re-sweep at most once per 30 s.
-    /// Local-only, so it works offline and costs no network.
-    func sweepVisible(activePath: String?, isPaused: @MainActor () -> Bool) async {
-        guard !isPaused() else { return }
+    /// Local-only, so it works offline and costs no network. Obeys
+    /// `canRunRepoSweeps` — the other-repos row of the policy table.
+    func sweepVisible(activePath: String?, policy: BackgroundSchedulingPolicy) async {
+        guard policy.canRunRepoSweeps else { return }
         let full = Date.now.timeIntervalSince(lastFullSweep) >= Self.sweepThrottle
         if full {
             lastFullSweep = .now
@@ -183,17 +184,21 @@ final class RepoDirectoryStore {
     /// Refocus catch-up: re-fetch the most-recent tier so its badges reflect
     /// remote activity that happened while the app was in the background.
     /// Throttled to once per 30 s, like the Tauri client's `refocusSync`.
-    func refocusSweep(activePath: String?, isPaused: @MainActor () -> Bool) async {
-        guard !isPaused() else { return }
+    /// Obeys `canRunRepoSweeps` — it runs right after activation, so the
+    /// check only ever blocks it while a network operation holds the slot.
+    func refocusSweep(activePath: String?, policy: BackgroundSchedulingPolicy) async {
+        guard policy.canRunRepoSweeps else { return }
         guard Date.now.timeIntervalSince(lastRefocusSweep) >= Self.refocusThrottle else { return }
         lastRefocusSweep = .now
-        await run(tier: 0, activePath: activePath, isPaused: isPaused)
+        await run(tier: 0, activePath: activePath, policy: policy)
     }
 
     /// The background badge loop, structured to the owning screen's lifetime:
     /// each tier first fires after its short kick, then repeats on its
-    /// interval. Cancellation (repo switch, repo closed) ends it.
-    func runScheduler(activePath: String, isPaused: @MainActor () -> Bool) async {
+    /// interval. Cancellation (repo switch, repo closed) ends it. Obeys
+    /// `canRunRepoSweeps` — the deferrable fan-out pauses on blur (the GH
+    /// Desktop model) and catches up via `refocusSweep`.
+    func runScheduler(activePath: String, policy: BackgroundSchedulingPolicy) async {
         // The tiers need the MRU. Normally the screen's prime pass has it
         // already; if that failed or is still running, this coalesces with it
         // rather than loading the list a second way.
@@ -207,17 +212,18 @@ final class RepoDirectoryStore {
             if Task.isCancelled { return }
             for tier in due.indices where Date.now >= due[tier] {
                 due[tier] = Date.now.addingTimeInterval(Self.tierIntervals[tier])
-                await run(tier: tier, activePath: activePath, isPaused: isPaused)
+                await run(tier: tier, activePath: activePath, policy: policy)
             }
         }
     }
 
-    /// Sync one tier's members sequentially, with a fetch. A pause (a network
-    /// operation starting mid-tier) abandons the rest of the tier, exactly as
-    /// the Tauri scheduler aborts its loop.
-    private func run(tier: Int, activePath: String?, isPaused: @MainActor () -> Bool) async {
+    /// Sync one tier's members sequentially, with a fetch. Losing
+    /// `canRunRepoSweeps` mid-tier (a network operation starting, focus or
+    /// visibility lost) abandons the rest of the tier, exactly as the Tauri
+    /// scheduler aborts its loop.
+    private func run(tier: Int, activePath: String?, policy: BackgroundSchedulingPolicy) async {
         for path in tierMembers(tier, activePath: activePath) {
-            guard !isPaused() else { return }
+            guard policy.canRunRepoSweeps else { return }
             await sync(path, fetching: true)
         }
     }

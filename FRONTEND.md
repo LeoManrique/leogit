@@ -228,7 +228,7 @@ codegen decision is open (plan §10.7).
 ### 5.2 Structures by domain
 | Domain | Types (key fields) |
 |---|---|
-| Working tree / status | `FileEntry` (path, status, xy, display_name, display_dir, embedded, submodule_dirty); `RepoStatus` (branch, upstream, ahead, behind, files[], has_remote, unpushed_shas[], detached, head_sha) |
+| Working tree / status | `FileEntry` (path, status, xy, display_name, display_dir, embedded, submodule_dirty, stat_stamp — an opaque mtime+size string so a status comparison sees content edits; compare, never parse); `RepoStatus` (branch, upstream, ahead, behind, files[], has_remote, unpushed_shas[], detached, head_sha) |
 | History | `CommitInfo` (sha, short_sha, summary, body, author, committer, parents[], trailers[], co_authors[], body_without_coauthors, tags[]); `CommitStats` (additions, deletions) |
 | Branches / remote | `BranchInfo` (name, is_remote, is_current); `AheadBehind`; `RepoSync` (ahead, behind, has_remote, fetched, dirty); `RepoIdentifier` (owner, name); `MergeResult` (success, fast_forward, conflicts[], error_message?) |
 | Diff | `DiffLine` (incl. `intra_line_diff: IntraLineRange`), `IntraLineRange`, `HunkHeader`, `Hunk`, `FileDiff` (old_path, new_path, file_header, hunks[], is_binary); `SbsPair`; `ParsedDiff` (file_diff, html[], sbs_pairs[], additions, deletions); `Token` (start, end, class: `TokenClass`) / `TokenLine` — the structured highlight layer under the HTML (§7); `DiffSelection` |
@@ -258,9 +258,13 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    flight and while the window is hidden/blurred; resync on refocus.
 2. **Network-op mutual exclusion** — push/pull/publish are mutually exclusive; only
    one runs at a time, with a shared progress slot fed by `git-progress`.
-3. **Diff-load races** — loading a file/commit diff must **guard stale responses**
-   (drop results if the user moved on) and use a **~150ms slow-load threshold**
-   before showing a "Loading…" state to avoid flicker.
+3. **Seamless diff loads** — loading a file/commit diff must **guard stale responses**
+   (drop results if the user moved on), keep the **previous diff on screen** while the
+   replacement loads, and use a **150ms slow-load threshold** (`SLOW_DIFF_THRESHOLD_MS` /
+   `DiffStore.slowLoadThreshold`) before falling back to a "Loading…" state — ported from
+   GitHub Desktop's `SeamlessDiffSwitcher`. The native client additionally skips publishing
+   a result equal to what's shown, so scroll and tokens survive; a permitted refinement,
+   not a divergence (the observable rule — no flash under the threshold — is shared).
 4. **File selection semantics** — maintain selection as `selectedFiles` **plus**
    `userDeselected` so the 2s poll does not re-check files the user just unchecked.
    Support shift-click range and keyboard (arrows/Home/End/Space). Staging is
@@ -335,6 +339,7 @@ every deliberate difference here.
 | Pane geometry persistence | `localStorage` (sidebar width, composer height, commit-files width) | `UserDefaults` (composer height, `commitComposerHeight`); sidebar and commit-files widths are per-session |
 | Repo-search path root (§6.9) | scan folders only — the frontend can't resolve `~`, so a repo outside them is searched by its whole path | scan folders, then `NSHomeDirectory()` |
 | Context-menu scope (§6.10) | multi-row selection, so discard also acts on a whole selection | single-selection lists, so every item acts on the right-clicked row |
+| Open-diff freshness | stale until reselect — the poll never reloads the open diff (adopting `stat_stamp` the same way would fix it; ROADMAP) | reloads within a poll tick: `stat_stamp` makes the status comparison see content edits, `workingTreeEpoch` re-keys the load, the equality skip absorbs no-ops |
 
 ## 9. Non-goals / intentionally absent
 
