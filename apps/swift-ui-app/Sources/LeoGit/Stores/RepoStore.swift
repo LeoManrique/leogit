@@ -80,13 +80,61 @@ final class RepoStore {
 
     var isRepoOpen: Bool { repoPath != nil }
 
+    /// Everyone suspended in `awaitLoadSettled()`. Main-actor-isolated, so
+    /// append and resume never race.
+    private var loadWaiters: [CheckedContinuation<Void, Never>] = []
+
+    /// How many explicit loads are in flight. `isLoading` is the flag the
+    /// progress bar reads and would be enough for it; the *count* is what says
+    /// when the waiters below are actually settled. `refresh()` can overlap
+    /// `open()` — a branch action's `onWorkingTreeChanged`, a clone handing
+    /// its path straight to `open` — and a Bool would let the inner one's exit
+    /// release everyone while the outer load still has no status.
+    private var loadDepth = 0
+
+    /// Suspend until no explicit load is in flight.
+    ///
+    /// `open()` publishes `repoPath` *before* it has status, so the
+    /// `.task(id: repoPath)` chain it starts can run against a `nil` status.
+    /// Anything whose decision depends on the repository's status — the
+    /// warm-up fetch's no-remote gate — has to wait for it rather than read
+    /// `nil` and guess, or the gate silently stops applying whenever the load
+    /// happens to be slower than its caller.
+    ///
+    /// Not cancellation-aware, deliberately: a cancelled waiter is one whose
+    /// `.task(id: repoPath)` was torn down by a repo switch, and a switch
+    /// *is* an `open()`, so the next `finishLoad()` resumes it — where its
+    /// caller's own `repoPath` check drops it.
+    func awaitLoadSettled() async {
+        guard loadDepth > 0 else { return }
+        await withCheckedContinuation { loadWaiters.append($0) }
+    }
+
+    /// Claim a load. Paired with `finishLoad()` on every exit path.
+    private func beginLoad() {
+        loadDepth += 1
+        isLoading = true
+    }
+
+    /// Release the claim, and — once the last one is gone — everyone waiting
+    /// on it. Called on every exit from an explicit load, including the
+    /// failing ones: a repo that couldn't be read has still settled.
+    private func finishLoad() {
+        loadDepth -= 1
+        guard loadDepth == 0 else { return }
+        isLoading = false
+        let waiters = loadWaiters
+        loadWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+
     /// Open the repository containing `url`, then load its status and history.
     ///
     /// Accepts a subdirectory as well as a repository root, matching the
     /// `leogit <path>` CLI behaviour.
     func open(at url: URL) async {
-        isLoading = true
-        defer { isLoading = false }
+        beginLoad()
+        defer { finishLoad() }
 
         do {
             let root = try await GitBridge.repoRoot(of: url.path(percentEncoded: false))
@@ -106,8 +154,8 @@ final class RepoStore {
     /// Re-read status and history for the already-open repository.
     func refresh() async {
         guard let repoPath else { return }
-        isLoading = true
-        defer { isLoading = false }
+        beginLoad()
+        defer { finishLoad() }
         await loadRepoData(repoPath, historyLimit: currentHistoryLimit)
     }
 
@@ -216,6 +264,10 @@ final class RepoStore {
         // Whatever the outcome, the banner now reflects an explicit load,
         // not the poll — the poll must not clear another action's failure.
         errorSurfacedByPoll = false
+        // The streak describes one repository's readability, and this load may
+        // be a different repository: carrying it over would let two failures on
+        // the previous repo plus one here raise a banner about this one.
+        quietFailureStreak = 0
         // Best-effort, like the Tauri client's poll: failure reads as "not
         // merging" rather than an error.
         isMerging = (try? await mergingResult) ?? false

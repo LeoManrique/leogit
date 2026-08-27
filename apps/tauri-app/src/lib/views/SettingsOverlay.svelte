@@ -21,6 +21,31 @@
   /** What "Automatic" resolves to, so the choice isn't a mystery. */
   let autoShellLabel = $derived(shells[0]?.label ?? '')
 
+  /**
+   * Bounds for the numeric fields, matching the native client's
+   * `SettingsStore` ranges. The `min`/`max` attributes on `<input
+   * type=number>` are advisory only — typing 999 or clearing the field both
+   * pass straight through, and Svelte's numeric binding turns an emptied
+   * field into `null`, which used to reach the backend and fail with a raw
+   * serde error the user couldn't escape without refilling the field. Every
+   * value is clamped on the way out, and the clamped value is written back
+   * into the form so the correction is visible rather than silent.
+   */
+  const BOUNDS = {
+    tabSize: { min: 1, max: 16, fallback: 4 },
+    // Milliseconds on the wire; 5 s–1 h, the native client's range in seconds.
+    fetchIntervalMs: { min: 5_000, max: 3_600_000, fallback: 30_000 },
+    claudeTimeoutSecs: { min: 10, max: 3_600, fallback: 120 },
+    scanDepth: { min: 1, max: 10, fallback: 3 },
+  } as const
+
+  /** The nearest in-range integer, or the default when the field is empty or
+   *  unparseable. */
+  function clamp(value: number | null | undefined, b: { min: number; max: number; fallback: number }): number {
+    if (value === null || value === undefined || !Number.isFinite(value)) return b.fallback
+    return Math.min(Math.max(Math.round(value), b.min), b.max)
+  }
+
   async function loadConfig() {
     try {
       const [cfg, available] = await Promise.all([
@@ -50,6 +75,10 @@
     error = ''
     try {
       config.terminal_shell = shellChoice || undefined
+      config.tab_size = clamp(config.tab_size, BOUNDS.tabSize)
+      config.fetch_interval_ms = clamp(config.fetch_interval_ms, BOUNDS.fetchIntervalMs)
+      config.claude_timeout_secs = clamp(config.claude_timeout_secs, BOUNDS.claudeTimeoutSecs)
+      config.scan_depth = clamp(config.scan_depth, BOUNDS.scanDepth)
       await configApi.saveConfig(config)
       await refreshConfig()
       onClose()
@@ -125,7 +154,13 @@
           </div>
           <div class="setting-group">
             <label for="tab-size">Tab size</label>
-            <input id="tab-size" type="number" bind:value={config.tab_size} min="1" max="16" />
+            <input
+              id="tab-size"
+              type="number"
+              bind:value={config.tab_size}
+              min={BOUNDS.tabSize.min}
+              max={BOUNDS.tabSize.max}
+            />
           </div>
 
           <h3>Terminal</h3>
@@ -151,7 +186,14 @@
           </div>
           <div class="setting-group">
             <label for="fetch-interval">Fetch interval (ms)</label>
-            <input id="fetch-interval" type="number" bind:value={config.fetch_interval_ms} min="5000" step="1000" />
+            <input
+              id="fetch-interval"
+              type="number"
+              bind:value={config.fetch_interval_ms}
+              min={BOUNDS.fetchIntervalMs.min}
+              max={BOUNDS.fetchIntervalMs.max}
+              step="1000"
+            />
           </div>
 
           <h3>AI</h3>
@@ -172,13 +214,25 @@
           </div>
           <div class="setting-group">
             <label for="claude-timeout">Claude timeout (s)</label>
-            <input id="claude-timeout" type="number" bind:value={config.claude_timeout_secs} min="10" />
+            <input
+              id="claude-timeout"
+              type="number"
+              bind:value={config.claude_timeout_secs}
+              min={BOUNDS.claudeTimeoutSecs.min}
+              max={BOUNDS.claudeTimeoutSecs.max}
+            />
           </div>
 
           <h3>Repository discovery</h3>
           <div class="setting-group">
             <label for="scan-depth">Scan depth</label>
-            <input id="scan-depth" type="number" bind:value={config.scan_depth} min="1" max="10" />
+            <input
+              id="scan-depth"
+              type="number"
+              bind:value={config.scan_depth}
+              min={BOUNDS.scanDepth.min}
+              max={BOUNDS.scanDepth.max}
+            />
           </div>
           <div class="setting-group">
             <label for="scan-paths">Scan paths (one per line)</label>

@@ -13,6 +13,7 @@
   import { availableUpdate, updateDismissed } from '$lib/stores/update'
   import { ensureRepoIdentifiers, repoIdentifiers } from '$lib/stores/repoIdentifiers'
   import { basename } from '$lib/utils/path'
+  import { isFromTerminal } from '$lib/utils/keyboard'
   import ContextMenu, { type ContextMenuItem } from './ContextMenu.svelte'
   import ForcePushConfirm from './ForcePushConfirm.svelte'
   import PublishRepository from './PublishRepository.svelte'
@@ -25,9 +26,22 @@
     onOpenBranches?: () => void
     onOpenSettings: () => void
     onOpenHelp: () => void
+    /**
+     * The one refresh path. Owned by `MainLayout` because a status write is
+     * more than the fields `get_status` returns: it also carries `is_merging`,
+     * reconciles `userDeselected` against the files that still exist, drops a
+     * diff whose file is gone, and feeds the picker's badge for this repo.
+     * The header used to hand-roll its own write and forgot all four, which is
+     * how a stale `MERGING` badge outlived an abort.
+     *
+     * Optional like the other repo-scoped callbacks: everything that can reach
+     * it — the Refresh button and the post-transfer refreshes — is inside the
+     * `hasRepo` block, so the pre-main header never supplies one.
+     */
+    onRefresh?: () => Promise<void>
   }
 
-  let { onOpenRepos, onOpenBranches, onOpenSettings, onOpenHelp }: Props = $props()
+  let { onOpenRepos, onOpenBranches, onOpenSettings, onOpenHelp, onRefresh }: Props = $props()
 
   /**
    * Whether a repository is open. The header also renders in the pre-main
@@ -130,30 +144,10 @@
 
   async function handleRefresh() {
     if (isRefreshing) return
-    const repoPath = $appState.repoPath
-    if (!repoPath) return
+    if (!$appState.repoPath) return
     isRefreshing = true
     try {
-      const status = await gitApi.getStatus(repoPath)
-      repoState.update((s) => ({
-        ...s,
-        status: {
-          ...s.status,
-          branch: status.branch,
-          upstream: status.upstream,
-          hasUpstream: status.has_upstream,
-          ahead: status.ahead,
-          behind: status.behind,
-          files: status.files,
-          hasRemote: status.has_remote,
-          unpushedShas: new Set(status.unpushed_shas ?? []),
-          detached: status.detached,
-          headSha: status.head_sha,
-        },
-        error: undefined,
-      }))
-    } catch (error) {
-      repoState.update((s) => ({ ...s, error: String(error) }))
+      await onRefresh?.()
     } finally {
       isRefreshing = false
     }
@@ -320,8 +314,11 @@
   // Ctrl/Cmd+P triggers the primary split-button action — push, or publish when
   // the branch has no remote yet — mirroring the button's own enabled state.
   // Registered globally (not gated on focus) so it works while composing a
-  // commit, matching how desktop Git clients bind push.
+  // commit, matching how desktop Git clients bind push. The one place it is
+  // *not* ours is the embedded terminal, where Ctrl+P is readline's
+  // previous-history and the shell owns the key (see `utils/keyboard.ts`).
   function handleGlobalKeyDown(e: KeyboardEvent) {
+    if (isFromTerminal(e)) return
     const meta = e.ctrlKey || e.metaKey
     if (meta && (e.key === 'p' || e.key === 'P')) {
       e.preventDefault()

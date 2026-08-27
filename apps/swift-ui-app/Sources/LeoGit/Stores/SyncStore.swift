@@ -74,11 +74,20 @@ final class SyncStore {
 
     /// One fetch attempt that claims no slot and surfaces no errors — the
     /// open-a-repo warm-up the Tauri client also runs at startup, so the
-    /// behind badge reflects the remote within moments. Returns whether the
-    /// fetch reached the remote (callers refresh status only then).
-    func silentFetch(repoPath: String) async -> Bool {
-        guard activeOperation == nil else { return false }
-        guard let remote = try? await GitBridge.remoteName(in: repoPath) else { return false }
+    /// behind badge reflects the remote within moments.
+    ///
+    /// `nil` means **no attempt was made**: the transfer slot was taken, or
+    /// resolving the remote name failed locally. Neither says anything about
+    /// the network, so callers must not report them to the connectivity
+    /// breaker — a local `git remote` failure counted as an unreachable remote
+    /// is the same class of poisoning D-2 was about. `true`/`false` mean a
+    /// fetch actually ran and did or didn't reach the remote; only then does
+    /// the caller refresh status, and only then does the breaker hear about it.
+    /// (The Tauri client's `fetchActiveRemote` draws the same line, returning
+    /// early without `recordResult` when `get_remote` fails.)
+    func silentFetch(repoPath: String) async -> Bool? {
+        guard activeOperation == nil else { return nil }
+        guard let remote = try? await GitBridge.remoteName(in: repoPath) else { return nil }
         return (try? await GitBridge.fetchRemote(in: repoPath, remote: remote)) != nil
     }
 

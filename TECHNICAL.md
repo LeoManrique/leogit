@@ -254,7 +254,16 @@ of timers: `ContentView` owns `.task(id: repoPath)` loops — the 2 s status pol
 config-driven auto-fetch, and `RepoDirectoryStore`'s tier scheduler (Tauri's cadence
 number-for-number: 2/5/10 min over the MRU with 1.5/4/8 s launch kicks, sequential, active
 repo excluded) — so a repo switch or close cancels and restarts them structurally, the
-teardown the Tauri client does with `clearInterval` bookkeeping. The poll's
+teardown the Tauri client does with `clearInterval` bookkeeping. Those loops start when
+`repoPath` is *published*, which `open()` does before it has a status — so anything whose
+decision depends on the repository's status (the warm-up fetch's no-remote gate) first
+awaits `RepoStore.awaitLoadSettled()`, a main-actor continuation list released when the
+last explicit load exits, success or failure. The claim is a *depth count*, not the
+`isLoading` Bool the progress bar reads: `refresh()` can nest inside `open()` (a branch
+action's `onWorkingTreeChanged`, a clone handing its path straight to `open`), and a Bool
+would let the inner one's exit release everyone while the outer load still has no status.
+Reading a `nil` status and guessing is how a gate silently stops applying whenever the
+load happens to be slower than its caller. The poll's
 `RepoStore.refreshQuietly` never touches `isLoading`, refetches history only when
 `head_sha` moved, and bumps `workingTreeEpoch` (the diff-reload key; one meaning — "the
 working tree may differ from what any derived view shows, re-derive if you care") when the
@@ -273,7 +282,16 @@ analogue of the Tauri `navigator.onLine` half the breaker originally shipped wit
 `RepoDirectoryStore.shouldAttemptBackground` (`isOnline && breaker.shouldAttempt`, the
 `connectivity.ts` `shouldAttemptBackground()` shape): every background fetch gates on it,
 fed only by real attempts against real remotes, and while offline badge syncs degrade to
-fetch-less local recomputes without burning failures into the breaker first. The
+fetch-less local recomputes without burning failures into the breaker first. "Every"
+includes the warm-up fetch on repo open, which is the same automatic fetch as any other:
+gated on the breaker *and* on `status.hasRemote`, and reporting its outcome back — an
+ungated one runs up to 15 s of a blocking-pool thread per repo open, and against a
+remote-less repo (where `get_remote` answers `"origin"` regardless) it can only fail, which
+would then hold every *other* repo's background sync closed. "Real attempts" is enforced by
+`SyncStore.silentFetch` returning `Bool?`: `nil` when no fetch ran at all — the transfer
+slot was taken, or `git remote` failed locally — so its four callers report only the two
+outcomes that describe the network. A local failure counted as an unreachable remote is
+the same poisoning, one layer up. The
 offline→online edge fires the observer's `onRecover` kick (`ContentView.resyncOnReconnect`,
 Tauri's `initConnectivity` recovery): `breaker.reset()` — a named method, because
 `record(success: true)` where nothing was fetched would fabricate a success report — then a
@@ -608,7 +626,20 @@ loads a fresh `Config`, overlays just the managed fields, and writes whole via t
 exported `save_config` (the `save_ai_provider` read-modify-write pattern writ large,
 since core rewrites the entire file). Discrete controls save through a 300 ms debounce;
 text fields commit on focus-loss/Return, normalizing an emptied model to `None` and an
-emptied Ollama URL back to the default (Tauri persists `""` for both). Config
+emptied Ollama URL back to the default (Tauri persists `""` for both). Closing the window
+is neither a focus-loss nor a Return, so `flushPendingSave()` handles both ways an edit can
+be pending: it fires a debounce still counting down, and — for a field the user typed into
+and never left — compares the current values overlaid onto `lastPersisted` against
+`lastPersisted` itself, writing only if that differs. Without the second case ⌘W silently
+dropped the typed value, in the one surface whose premise is that you never press Save.
+Two details make the guard mean what it says. `lastPersisted` holds the **normalized** form
+of what the fields held at the last load or save, never the raw file: a config written by
+the other client is often not already normalized (`ai_model: Some("")`, an out-of-range
+`tab_size`), and comparing against the raw file would answer "is the file tidy?" instead of
+"did anything change?" — rewriting the shared file on an open-and-close that edited
+nothing. And a debounce that runs to completion clears `pendingSave` (guarded by a
+generation counter so it can't clear a newer one), or the first toggle of a session would
+leave it set and make every subsequent close save unconditionally. Config
 consumption has one native owner: `Stores/AppConfigStore.swift` (@MainActor @Observable,
 created in `LeoGitApp` and put in the environment of both the main window and the
 Settings scene) holds the shared `Config` and reloads it at exactly three sites — launch,
@@ -724,7 +755,7 @@ Every command is registered in [src-tauri/src/main.rs](apps/tauri-app/src-tauri/
 The three core writable Svelte stores, all in [src/lib/stores](apps/tauri-app/src/lib/stores):
 
 - **`appState`** — top-level phase machine (`loading` / `repo-picker` / `main` / `error`), the discovered repo list, the chosen repo path, and whether `gh` is authenticated. `App.svelte` renders `MainLayout` for `main` and, for every other phase, a `.pre-main` column of `<Header>` + the phase's content — so app-level chrome exists in all of them (see *Repo-less phases*).
-- **`repoState`** — everything tied to the currently open repo: status (branch, upstream, ahead/behind, files, isMerging), log pagination, branches, the user's selection sets (`selectedFiles`, `userDeselected`), per-file diff selection (`Map<path, DiffSelection>`), active file/diff, active commit/files/diff, loading flags, last error.
+- **`repoState`** — everything tied to the currently open repo: status (branch, upstream, ahead/behind, files, isMerging), log pagination, branches, the user's selection sets (`selectedFiles`, `userDeselected`), per-file diff selection (`Map<path, DiffSelection>`), active file/diff, active commit/files/diff, loading flags, a `statusLoaded` flag (default status ≠ loaded status — anything that *skips* work on a status field has to know the difference, since `hasRemote` defaults to false and a switch resets it), and **two error fields with different owners**: `error` is whatever the last user-initiated action failed with and goes to the blocking `ErrorModal`; `pollError` is written only by refreshes the app started itself — set after three consecutive failures, cleared by any successful read, rendered as a non-blocking strip under the header. `refreshStatus` takes `{silent, background}` as two separate opts for exactly this: *silent* means "don't write `error`", which a user action's follow-up refresh also wants, while *background* means "this one is mine" and is what feeds the streak. Conflating them let three `index.lock` races behind a commit and two discards accuse a healthy repository of having vanished. Keeping `error` and `pollError` apart is what lets a repository that really has gone away say so without a modal the user must dismiss every two seconds.
 - **`config`** — the live Config object. `refreshConfig()` reloads from disk and also calls `applyTheme()` which flips `document.documentElement.dataset.theme`.
 
 Alongside these are smaller purpose-built stores: **`networkOps`** holds the user-initiated network op in flight (`activeNetworkOp` — the poll/auto-fetch/scheduler pause on it and the Push/Pull handlers use it for mutual exclusion) and its live transfer progress (`networkProgress`, fed from `git-progress` events), **`repoIdentifiers`** and **`repoActivity`** lazily cache each repo's GitHub identifier and last-commit timestamp (module-level maps that re-publish on each fetch, so reopening the repo picker is free), **`repoSync`** caches each repo's ahead/behind counts and working-tree `dirty` flag for the picker's pull/push badges and dirty dot (`setRepoSync` records values the active poll already computed; `syncRepo` fetches + recomputes one repo, with per-path in-flight de-duplication; its change-equality guard compares every field, so a new one must be added there too or its transitions get swallowed), and **`reposState`** mirrors the persisted `repos-state.json` document — the `repoSortMode` / `cloneSortMode` / `recentRepos` writables plus thin wrappers over the backend's atomic writers: `patchReposState` → the `patch_state` command (one field-wise read-modify-write under a process-wide lock, so a patch can never clobber another writer's field), `recordRecentRepo` → the `record_recent_repo` command (backend owns the MRU move-to-front/de-dupe/cap and returns the authoritative list, which reseeds the `recentRepos` store), and `hydrateReposState` (startup seed). Both wrappers log-and-swallow failures, so callers never need a rejection path for lost preferences.
@@ -747,11 +778,13 @@ This is what keeps polling unobtrusive: a 2 s status refresh never silently re-s
 
 [CommitList.svelte](apps/tauri-app/src/lib/components/CommitList.svelte) virtualizes the same way (50px rows, spacer of `commits.length * 50px`). It measures the viewport height with a **ResizeObserver**, not a one-shot `clientHeight` read: the History pane is `display: none` while the Changes tab is active, so a single measurement at mount can capture 0 and strand the rendered range at `ceil(0 / ROW_HEIGHT) + buffer` ≈ 5 rows. The observer re-measures when the pane gains size, so the full window of commits renders once History is shown.
 
+The list distinguishes two ways the parent can move that window, because they need opposite treatment. A **slide** (page in at one end, drop from the other) shifts the same commits within the array, so `scrollTop` is compensated by `delta × ROW_HEIGHT` and the visible row stays pinned; `windowStartOffset` is the signal. A **replacement** — a fresh page 1 after HEAD moved, the first load, a different repository — shares no rows with what was there, so there is nothing to compensate: `log.resetSeq` marks it and the list scrolls to row 0, which is the new HEAD. Treating the second as the first is a real bug, not a nicety: the reset drives `windowStartOffset` from N to 0, compensation reads that as a backward slide, `scrollTop` jumps by the whole old offset, and the list lands at the end of the fresh page — which immediately triggers another page fetch.
+
 ### Polling and lifecycle
 
 `MainLayout.svelte` owns two intervals plus the tiered sync scheduler:
 
-- **Status poll** — every 2000 ms. Runs `get_status` silently, then a second `get_head_sha`. That second call is redundant: porcelain v2 emits the HEAD OID as `# branch.oid`, so `RepoStatus.head_sha` is already filled by the first call, and comparing it costs no subprocess (this is exactly what the native poll does). If the HEAD SHA changed, the commit log is refreshed in place keeping the same loaded count so the user doesn't lose scroll position. Each run also pushes the active repo's ahead/behind + dirty flag into the `repoSync` store (via `setRepoSync`) so the picker badges and dot for the open repo stay live without a dedicated fetch. An in-flight guard skips a tick while the previous cycle is still running (cycles can outlive the interval when the repo's disk is busy), and the poll pauses entirely while `activeNetworkOp` is set.
+- **Status poll** — every 2000 ms. Every status write in this client goes through the one `refreshStatus` in `MainLayout`, including the header's Refresh button (which takes it as a prop) and `Ctrl+R` — because a status write is more than the fields `get_status` returns: it also carries `is_merging`, reconciles `userDeselected` against the paths that still exist, drops the open diff when its file leaves the working tree, and feeds `repoSync`'s badge for this repo. A second implementation forgets some of those, which is how the `MERGING` chip used to outlive an abort. Runs `get_status` silently, then a second `get_head_sha`. That second call is redundant: porcelain v2 emits the HEAD OID as `# branch.oid`, so `RepoStatus.head_sha` is already filled by the first call, and comparing it costs no subprocess (this is exactly what the native poll does). If the HEAD SHA changed, the commit log is refreshed in place keeping the same loaded count so the user doesn't lose scroll position. Each run also pushes the active repo's ahead/behind + dirty flag into the `repoSync` store (via `setRepoSync`) so the picker badges and dot for the open repo stay live without a dedicated fetch. An in-flight guard skips a tick while the previous cycle is still running (cycles can outlive the interval when the repo's disk is busy), and the poll pauses entirely while `activeNetworkOp` is set.
 - **Auto-fetch** — every `fetch_interval_ms` (default 30 000). Skipped if the user is currently typing in an input/textarea or a network op is in flight; there is no visibility term, so a hidden window keeps fetching at whatever cadence the host WebView's timer throttling allows. Calls `fetchActiveRemote` (`git fetch --prune --recurse-submodules=on-demand` against the first remote) then a silent `get_status`. `fetchActiveRemote` self-skips when offline / backing off and reports its outcome to the connectivity breaker (see *Network resilience*).
 - **Tiered repo-sync scheduler** ([repoSyncScheduler.ts](apps/tauri-app/src/lib/services/repoSyncScheduler.ts)) — three intervals (2 / 5 / 10 min) plus staggered startup kicks. Each tick slices the `recentRepos` list (active excluded) into tiers — next 4, next 5, next 10 — and refreshes each via `repo_sync_status` sequentially *within* its tier. The three tiers do not coordinate: they are independent `setInterval`s with no shared lock, so on a common multiple (every 10 min) all three walk their lists at once. Tier syncs are tagged `background`, so while offline / backing off each `syncRepo` consults the breaker and downgrades to a **fetch-less local recompute** instead of grinding through dead fetches — the network goes quiet but the dirty dot keeps tracking local edits, since it needs no remote. A tier bails between repos while a user transfer runs so badge fetches never steal its bandwidth. The tiers cover only the ~19 most recent repos, so the dropdown additionally calls `syncVisibleRepos` whenever its list is on screen: a sequential fetch-less sweep that always fills rows with no cached entry and, at most once per 30 s, re-checks the whole visible list. Started in `initialize` (after `hydrateReposState` resolves, so recents are seeded) and stopped on unmount.
 
@@ -883,6 +916,15 @@ Both providers run with a 120 s timeout (`DEFAULT_TIMEOUT_SECS`). Diff caps: 20 
 It returns `StartedTerminal { pid, shell_id, shell_label }` — the label is resolved backend-side because the stored preference may name an uninstalled shell, and the panel header shows what actually launched.
 
 `write_terminal` / `resize_terminal` / `close_terminal` go through `session_for(pid)`, which locks the session map, clones the `Arc`, and drops the map lock before the caller touches the session. `close_terminal` calls `child.kill()` (portable-pty's escalation: SIGHUP → a short `try_wait` grace loop → SIGKILL) but deliberately does **not** remove the entry — the reader thread owns teardown, and it needs the child handle still in the session to collect the exit status after the kill (which then reports the fatal signal rather than a clean exit).
+
+### Key ownership between the app and the shell (Tauri)
+
+Every key the app binds is `Ctrl`-or-`Cmd`, and on Windows and Linux `Ctrl` is also the shell's modifier — so inside the terminal a single keystroke had two owners. Two mechanisms, one rule (FRONTEND.md §6.11): **while the terminal has focus, the shell gets everything except the chord that toggles the panel.**
+
+- `Terminal.svelte` installs an `attachCustomKeyEventHandler` that returns `false` only for the toggle. Returning `false` means xterm neither handles the event nor calls `preventDefault`, so it bubbles to the window listener that owns it; returning `true` for everything else keeps `Ctrl+P`, `Ctrl+R` and `Escape` with readline and vim.
+- The window-level handlers (`MainLayout.handleKeyDown`, `Header.handleGlobalKeyDown`) re-check the event's origin through `utils/keyboard.ts`'s `isFromTerminal`, which tests for an `.xterm` ancestor — the class xterm puts on the element it was opened into. An `instanceof HTMLTextAreaElement` test cannot do this job in either direction: xterm's input sink *is* a textarea, so the old `if (inField) return` swallowed the toggle exactly where it was most wanted, while the push shortcut, deliberately ungated, fired straight through it.
+
+`.xterm` rather than the dock's `.terminal-section` is deliberate: the dock header's buttons are ordinary app chrome and must keep the app's shortcuts.
 
 ### Child environment — do not forward the parent env
 

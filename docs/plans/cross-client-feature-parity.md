@@ -1,7 +1,9 @@
 # Plan — Cross-client feature parity (SwiftUI ⇄ Tauri)
 
-> Status: **accepted (2026-08-27) — every open decision resolved;
-> implementation not started.** Produced by a three-way
+> Status: **in progress — WS-A shipped (2026-08-27), WS-B is next.**
+> Accepted 2026-08-27 with every open decision resolved. Per-workstream state
+> is in §6; what WS-A found that WS-B needs is in §6's WS-B entry, not here.
+> Produced by a three-way
 > audit of the SwiftUI client, the Tauri client, and the GitHub Desktop source
 > at `/Users/leo/Dev/LeoManrique/Desktop/lms-github-desktop` (reference only —
 > used to judge approaches to features LeoGit already has, never as a source of
@@ -40,7 +42,7 @@ goals, in the user's priority order:
 3. **End-user convenience** — where the clients differ, the more seamless /
    responsive / honest behavior wins, whichever client has it.
 4. **Efficiency** — low or reasonable CPU, network, and memory. The audit
-   quantified several standing wastes (§3.2); the fixes ride the same
+   quantified several standing wastes (§3.3); the fixes ride the same
    workstreams.
 5. **Shared core over duplication** — where the same logic is hand-written
    twice (and in several cases has already drifted), hoist it into
@@ -76,32 +78,40 @@ goals, in the user's priority order:
 These are behaviors that are wrong *today*, ranked by severity. All verified
 in code. "Make the current features work well" starts here (workstream A).
 
-### 3.1 Defects
+### 3.1 Defects — fixed in WS-A
+
+Twelve of the twenty are closed. Kept as a register (IDs are referenced from
+§4) and trimmed to what each fix *is*, since the code now carries the reasoning.
+
+| ID | Client | Fixed | Left over |
+|---|---|---|---|
+| D-1 | Tauri | **Destructive.** Amend/Undo/Checkout gated on the row's index into the *loaded window*, so past a slide Undo reset the real HEAD and seeded the composer from another commit. Now gated on `status.head_sha`, per FRONTEND §6.10. | — |
+| D-2 | Tauri | A remote-less repo's doomed `git fetch origin` opened the breaker against every other repo. `fetchActiveRemote` now gates on `status.hasRemote`, like the tier path already did — and on the new `statusLoaded`, since `hasRemote` defaults to false and an unqualified read would decide "no remote" about a repo nobody has looked at yet. Natively, `silentFetch` returns `Bool?` so a slot conflict or a local `git remote` failure stops being reported as a network failure. | The dead `if (!remote)` guard it was supposed to have — H-2 makes `get_remote` honest. |
+| D-3 | Tauri | Silent poll failures vanished forever. Three consecutive **background** failures now raise a non-blocking banner off `repoState.pollError` — native's shape and threshold, and its ownership: `refreshStatus` grew a `background` opt separate from `silent`, because four of the seven silent callers are user actions whose own `index.lock` races would otherwise accuse a healthy repo. Reset per repository in both clients. | BG-4's equality gate (the other half of that item). |
+| D-8 | Native | ⌘W with a text field still focused dropped the typed value. `flushPendingSave` now also writes an edit that never scheduled a save, guarded by a diff against `lastPersisted` — which holds the *normalized* form of the fields, not the raw file, or a config written by the other client would be rewritten on an open-and-close that changed nothing. A completed debounce also clears `pendingSave` now (generation-guarded), which it never did. | — |
+| D-10 | Tauri | A commit could land mid-Generate and have the late result overwrite the cleared composer. `canSubmit` gained `!isGenerating`, and the lockout runs off `isCommitInProgress` — `isCommitting` is still false while the embedded-repo confirmation waits, and its Confirm calls `performCommit` past `canSubmit` entirely, so the composer stayed live behind the dialog. | — |
+| D-11 | Tauri | The HEAD-move reset was read as a backward slide and scrolled to the bottom of the fresh page, paging again. `log.resetSeq` now distinguishes a *replacement* from a *slide*; a replacement scrolls to the new HEAD, and the counter is monotonic across a repo switch too. | `refreshLog`'s `headChanged` still needs `skip > 0`, so a *same-offset* replacement (a new commit while parked at offset 0, or a checkout's different history) bumps nothing. HI-2's append model removes the case rather than patching it. |
+| D-12 | Tauri | An empty parse fell through to "Select a file to view its diff" with a file selected. Both diff panes now have an explicit "No Textual Changes" state, blank while the fetch is in flight. The test is `hasRenderableDiff`, not `!== null`: `parse_diff` returns null only for empty input, while a mode change or pure rename parse into a header with zero hunks — a blank pane, the same dead end one layer along. | The *reason* (H-9 / DF-7); today the copy names the common causes. And a failed load currently reaches the same branch — DF-10 is what separates them. |
+| D-13 | Tauri | The header hand-rolled a status write that skipped `is_merging`, the `userDeselected` reconciliation, and the badge feed. It now takes `refreshStatus` as a prop: **one status writer in the client**. Checkout and undo also reload branches. | SY-8's "post-op = status + log". |
+| D-16 | Tauri | `Ctrl+P` reached the shell *and* pushed; ⌃` could not leave a focused terminal; Escape closed overlays instead of reaching `vim`. One rule now (FRONTEND §6.11): `attachCustomKeyEventHandler` releases only the toggle, and the window handlers test the event's origin. | TE-1's modifier narrowing (Tauri still accepts ⌘` too). |
+| D-17 | Tauri | `tab_size: 999` and emptied fields persisted (and the emptied ones failed the save with a raw serde error). All four numeric fields clamp on save, and the clamped value is written back into the form. | H-10's `Config::normalized()` — the structural version, which also covers writers that never see this form. |
+| D-18 | Native | The warm-up fetch ran offline, and against remote-less repos, discarding its outcome. Now gated on the breaker *and* `status.hasRemote`, and reports to the breaker (RM-10). Waits on the new `RepoStore.awaitLoadSettled()` so the gate reads a real status. | — |
+| D-19 | Tauri | The `\ No newline at end of file` marker rendered its backslash twice. `linePrefix` no longer adds one — core keeps it in `content`. | DF-8's other three alignments. |
+
+### 3.2 Defects still open
 
 | ID | Client | Defect | Severity |
 |---|---|---|---|
-| D-1 | Tauri | **Amend/Undo/Checkout gate on `contextMenu.idx === 0`** — an index into the *loaded sliding window*, not the repo log (`CommitList.svelte:73,84,95`). Once the 500-row window slides (`windowStartOffset > 0`), row 0 is not HEAD, yet Undo runs `git reset --mixed HEAD~1` against the **real** HEAD and seeds the composer with the wrong commit's message. Forbidden by FRONTEND §6.10; the native client gates on `commit.sha == status.headSha` (`HistorySidebar.swift:92-98`). | **Destructive** |
-| D-2 | Tauri + core | **Remote-less repo poisons the breaker app-wide.** `fetchActiveRemote`'s `if (!remote) return` guard is dead code because `core::git::get_remote` falls back to `Ok("origin")` (`core/src/git.rs:2357-2359`, verified). A repo with no remote makes every auto-fetch tick run a doomed `git fetch origin`, two ticks open the breaker, and the open breaker then suppresses **all** background fetches — tier badges, refocus sweeps, and the update check — at the 5-minute cap for as long as that repo is open. The tier path is correctly guarded (`repoSync.ts:78`); only the active-repo path is broken. | High |
-| D-3 | Tauri | **Silent poll failure, forever.** `refreshStatus({silent:true})`'s catch does nothing (`MainLayout.svelte:284-288`). A repo that is deleted, unmounted, or loses permissions keeps rendering its last good snapshot with zero indication. Native surfaces a banner after a 3-tick streak, tagged so only the poll's own recovery clears it (`RepoStore.swift:69-79,133-146`). | High |
 | D-4 | Tauri | **Terminal listener-registration race.** Output and exit listeners are registered two async IPC round trips *after* `start_terminal` returns, while the reader thread is already emitting; Tauri drops events with no listener (`Terminal.svelte:145,154,164`; `event_sink.rs:35-42`). A fast-printing shell loses its first prompt; an instantly-dying shell (the broken-`.zshrc` case the docs claim is handled) can lose `terminal-closed` entirely. Native passes the listener as an argument to the spawn — structurally immune. | High |
 | D-5 | Tauri | **Config lost-update on a shared file.** `handleSave` posts the entire config captured when the overlay opened; `setProvider` spreads a possibly-hours-stale `$config` (`SettingsOverlay.svelte:47-56`; `CommitMessage.svelte:154-164`). A native-side `tab_size` change is silently reverted by the next Tauri save. Compounded by D-6. `config.toml` has **no write lock** in core (unlike `repos-state.json`). | High |
 | D-6 | Tauri | **Config never re-read while running.** `resyncOnActive` doesn't call `refreshConfig` (`MainLayout.svelte:715-732`) — a native-side save never reaches a running Tauri app: theme, diff settings, auto-fetch, provider all stale with an unbounded window. Native reloads `AppConfigStore` on every activation. | High |
 | D-7 | Both / core | **Empty-string AI config poisons Generate in both clients.** Tauri persists `""` for `ai_model` / `ollama_server_url`; `Some("")` is not `None`, so core's `unwrap_or` never fires — Ollama POSTs to `"/api/generate"`, Claude runs `--model ""` (`core/src/ai.rs:268-272,118-126`). One client's emptied field breaks Generate in the *other* client until a native save heals the file. | High |
-| D-8 | Native | **Settings text edits can be lost silently.** `flushPendingSave` only flushes an already-*scheduled* save (`SettingsStore.swift:118`); closing the window (⌘W) with a field still first responder loses the typed model / Ollama URL / scan paths with no feedback — in the surface whose whole model is "you never press Save". | Medium |
 | D-9 | Native | **Collapsing the terminal reflows the emulator to one row.** The zero-height frame is full-width, so SwiftTerm's degenerate-size bail (width *and* height zero) doesn't fire; the buffer reflows to `MINIMUM_ROWS = 1` and each collapse/expand cycle sends a spurious `SIGWINCH` (TerminalDock's `.frame(height: 0)` + SwiftTerm `AppleTerminalView.swift:353-356`). | Medium |
-| D-10 | Tauri | **Commit stays live mid-Generate.** `canSubmit` has no `isGenerating` term (`CommitMessage.svelte:73,327`) — a commit can land and then the late AI result writes a message for already-committed changes into the cleared composer. Native locks both directions. | Medium |
-| D-11 | Tauri | **HEAD-move reset defeated by its own scroll compensation.** `refreshLog` resets to page 1 "so the new HEAD is visible", then `CommitList`'s slide compensation misreads the reset as a backward slide and scrolls to the *bottom* of the fresh page, immediately triggering another page fetch (`MainLayout.svelte:322-349`; `CommitList.svelte:253-265`). | Medium |
-| D-12 | Tauri | **Empty-parse diff renders "Select a file to view its diff" while a file is selected** — `parse_diff → null` (mode change, rename, or whitespace-only edit under hide-whitespace) leaves `activeFileDiff` null and the template falls through to the no-selection branch (`MainLayout.svelte:508-520,1365-1373`). Native has an explicit "No Textual Changes" state. | Medium |
-| D-13 | Tauri | **Stale `MERGING` badge and inconsistent refresh.** `Header.handleRefresh` hand-rolls a status write that skips `is_merging`, the `userDeselected` reconciliation, and the badge feed (`Header.svelte:131-160`) — the Tauri client has three refresh paths that have drifted. Also: checkout-commit and undo never refresh the branch list. | Medium |
 | D-14 | Native | **Stale-diff scroll: no reset on file switch.** No `ScrollViewReader` exists; `DiffRow.id` is a flat index, so switching files lands at the previous file's scroll offset (verified — no `scrollPosition`/`scrollTo` anywhere in `Sources/LeoGit`). Both Tauri and GitHub Desktop reset on file change. | Medium |
 | D-15 | Native | **Copying from a diff yields garbage.** `.textSelection(.enabled)` spans the gutters, so a copy includes line numbers and `+`/`−` glyphs; tab expansion means tabs come out as spaces (`DiffView.swift:145`; `DiffLineText.swift:86-88`). GitHub Desktop rebuilds clipboard text from the model. | Medium |
-| D-16 | Tauri | **`Ctrl+P` reaches both the shell and the push handler**; ⌃` cannot close a focused terminal; Escape closes overlays instead of reaching `vim` (`Header.svelte:320-333`; `MainLayout.svelte:1128-1144`). One rule fixes all three: while the terminal has focus, only the panel's own chord is global (`term.attachCustomKeyEventHandler`). | Medium |
-| D-17 | Tauri | **Number inputs accept out-of-range and empty values** — `tab_size: 999` persists (and the native client renders with it); an emptied field becomes `null` and the save fails with a raw serde error the user can't escape without refilling (`SettingsOverlay.svelte:128,154`; Svelte numeric binding). | Medium |
-| D-18 | Native | **Warm-up fetch ungated** — runs offline and against remote-less repos (doomed via D-2's `"origin"` fallback), up to 15 s of a blocking-pool thread per repo open (`ContentView.swift:157`). | Low |
-| D-19 | Tauri | **`NoNewline` marker renders doubled** (`\` prefix + content that already starts with `\`) (`DiffViewer.svelte:123,131`). | Low |
 | D-20 | Both | **Slow-load threshold destroys state it claims to keep**: native keeps the payload but replaces the `ScrollView` with a `ProgressView` (scroll lost — `DiffStore.swift:70-74`'s comment overstates); Tauri drops the payload entirely (full repaint + re-tokenize after every slow load). GitHub Desktop dims the old diff in place and never unmounts. | Low |
 
-### 3.2 Standing efficiency wastes (quantified)
+### 3.3 Standing efficiency wastes (quantified)
 
 The user's second priority. Each is attached to a workstream; none requires a
 behavior change the user would notice — except battery.
@@ -202,10 +212,9 @@ and matched, not that it was skipped.
   `rediscoverRepos()` into the main-phase Settings close and the dropdown
   open. One native refinement: run the walk concurrently with the badge sweep
   instead of before it. → WS-C
-- **RM-10 · On-switch breaker feed.** Tauri's on-switch sync records its
-  outcome to the breaker (the contract: manual outcomes feed it); native's
-  warm-up fetch discards the result. **Tauri right**; one-line native fix
-  (`breaker.record` at `ContentView.swift:157`), plus D-18's gating. → WS-A
+- **RM-10 · On-switch breaker feed.** ✅ *WS-A.* The native warm-up fetch now
+  reports its outcome to the breaker like every other real attempt, in the
+  extracted `ContentView.warmUpFetch` alongside D-18's gating.
 - **RM-11 · Sweep re-check granularity.** Tauri re-checks the network slot
   between every repo of a sweep and bails mid-list; native's visible sweep
   checks once at entry (its tier runner *does* re-check — internal
@@ -239,10 +248,11 @@ and matched, not that it was skipped.
   WS-D, and the native client retires `NetworkPathObserver` once the macOS
   backend proves equivalent. Until it lands, `navigator.onLine` stays
   authoritative-negative only. → WS-B, WS-D
-- **BG-4 · Poll equality + failure surfacing.** E-6 and D-3: port the native
-  equality skip (a `stat_stamp`-aware fingerprint makes it free) and the
-  3-tick failure streak with the poll-owned banner flag. The same fingerprint
-  is the hook for DF-1 (Tauri's stale open diff). → WS-D
+- **BG-4 · Poll equality + failure surfacing.** The failure half landed in WS-A
+  (D-3: the 3-tick streak on the poll-owned `pollError` flag, reset on repo
+  switch in both clients). What remains is E-6: port the native equality skip
+  (a `stat_stamp`-aware fingerprint makes it free), which is also the hook for
+  DF-1 (Tauri's stale open diff). → WS-D
 - **BG-5 · Update checker.** Tauri-only today (confirmed: zero
   `check_for_update` references in the FFI). Everything platform-independent
   is already in core (release request, strict version compare, per-platform
@@ -311,9 +321,10 @@ and matched, not that it was skipped.
   from a cached remote, wrong in that case, and spends an extra `git remote`
   per repo open purely for dialog text). Take each other's half. → WS-C, WS-F
 - **SY-8 · Post-op refresh.** Native reloads status+log+`is_merging` so a
-  pull's commits appear immediately; Tauri's `Header.handleRefresh` reloads
-  status only (D-13) and History catches up ≤2 s later via the poll. Collapse
-  Tauri's three refresh paths into one and make post-op = status+log. → WS-C
+  pull's commits appear immediately; Tauri reloads status only and History
+  catches up ≤2 s later via the poll. The collapse half landed in WS-A (D-13:
+  one `refreshStatus`, which now carries `is_merging`), so what remains is
+  making post-op = status **+ log** — one call added beside it. → WS-C
 - **SY-9 · Chevron contents.** Tauri's menu in the publish states duplicates
   the face (a chevron revealing only what the button already says); GitHub
   Desktop hides the dropdown for publish-repo and offers Fetch for
@@ -466,8 +477,8 @@ and matched, not that it was skipped.
   "Committing…" label. Port to Tauri: window-wide ⌘↩/⌘G (the field-scoped
   version defeats the point; the a11y-lint excuse doesn't apply to a window
   listener), the height clamp against short windows (STYLE.md — cap the
-  drag as well as the render so the stored height stays reachable), D-10's
-  lockout, the provider-revert (ST-7). Native: coalesce the per-drag-frame
+  drag as well as the render so the stored height stays reachable), and the
+  provider-revert (ST-7) — D-10's lockout landed in WS-A. Native: coalesce the per-drag-frame
   `UserDefaults` writes to drag-end. → WS-F, WS-C
 - **CH-11 · Row-action errors.** Native's non-blocking banner beats Tauri's
   modal for non-decisional failures ("couldn't reveal file"); Tauri is
@@ -540,16 +551,20 @@ and matched, not that it was skipped.
   on the `+/-` prefix; native scope `.textSelection` to the content text.
   A core helper ("plain text of a flat line range") keeps the two clients
   byte-identical. → WS-F, WS-C, WS-B
-- **DF-7 · Empty-parse reason** (D-12). Core returns bare `None` for both
-  "empty input" and "no hunks"; return a reason
+- **DF-7 · Empty-parse reason** (D-12). WS-A gave the Tauri client the *state*
+  (both diff panes now render "No Textual Changes" rather than the
+  no-selection copy), which is where the reason plugs in. Core still returns a
+  bare `None` for both "empty input" and "no hunks"; return a reason
   (`NoTextualChanges | WhitespaceOnly | Empty`) so both clients render an
   honest message — the whitespace case matters because hide-whitespace makes
-  it common. → WS-B, WS-C
+  it common — and add a *load failed* variant, or the Tauri branch keeps
+  claiming "No Textual Changes" behind DF-10's error. → WS-B, WS-C
 - **DF-8 · Header details.** Tauri shows `old → new` for renames (native:
   nothing — source it from the parsed diff, which describes what's rendered);
   Tauri suppresses `+0 −0` (native shows it on binary diffs, misleading);
-  Tauri's `NoNewline` row is doubled (D-19); STYLE.md's `−` (U+2212) is what
-  native uses and Tauri doesn't. Align all four. → WS-F, WS-C
+  STYLE.md's `−` (U+2212) is what native uses and Tauri doesn't. Align the
+  three (D-19's doubled `NoNewline` row was the fourth; fixed in WS-A).
+  → WS-F, WS-C
 - **DF-9 · Slow-load presentation** (D-20). Converge on GitHub Desktop: never
   unmount the old diff — dim it and overlay the spinner. Fixes native's
   scroll loss and Tauri's full repaint in one shape. Also write the
@@ -576,7 +591,9 @@ and matched, not that it was skipped.
 
 ### 4.7 History (HI)
 
-- **HI-1 · HEAD gating** — D-1 (destructive, first in WS-A).
+- **HI-1 · HEAD gating** — ✅ *WS-A.* D-1: both clients now gate the rewriting
+  actions on `status.head_sha`, and the Tauri context menu no longer carries a
+  row index at all.
 - **HI-2 · Log windowing.** Tauri's 500-row bidirectional window is the right
   *memory* policy; native's append-only "row 0 is always HEAD" is the right
   *correctness* policy (it's what makes D-1 impossible) — but native's
@@ -588,8 +605,11 @@ and matched, not that it was skipped.
   structurally impossible rather than merely fixed, and bounds memory at the
   far end of the list, away from HEAD. It retires the FRONTEND §8 paging row
   (§6.8 keeps only the shared invariants: the 500-commit refresh cap and
-  refetch-on-HEAD-move). Fix D-11 (Tauri); on HEAD move both clients prepend
-  and scroll to top. → WS-F, WS-C
+  refetch-on-HEAD-move). On HEAD move both clients prepend and scroll to top —
+  WS-A already built the Tauri half of that signal for D-11 (`log.resetSeq`
+  marks a window *replacement*, which `CommitList` answers by scrolling to row
+  0 instead of compensating), so the append conversion inherits it rather than
+  inventing one. → WS-F, WS-C
 - **HI-3 · Selection behavior.** Native auto-selects the newest commit on
   entry and re-seats when the selected sha disappears (post-amend); Tauri
   lands on an empty pane and keeps rendering a *rewritten-away* commit's
@@ -726,14 +746,17 @@ and matched, not that it was skipped.
   fields; scan paths, the one destructive text input, is the exception to
   field-level instant-apply and locks behind ST-10's Edit ▸ Done cycle on
   both clients. Native still adopts Tauri's load-failure
-  handling (don't render editable defaults that aren't the user's settings)
-  and fixes D-8. Port native's per-section footers ("Applies to the open diff
+  handling (don't render editable defaults that aren't the user's settings);
+  D-8's lost text edit is already fixed. Port native's per-section footers ("Applies to the open diff
   immediately") to Tauri — honest only once BG-2 lands, which is a feature of
   the suggestion. → WS-C, WS-F
-- **ST-4 · Units and bounds.** Native shows fetch interval in seconds
-  (better; keep ms on the wire), clamps on write; Tauri shows raw ms with
-  advisory-only bounds (D-17). Native's load-clamp floors to 1 s while its
-  own control starts at 5 — clamp to the range. → WS-C, WS-F
+- **ST-4 · Units and bounds.** Native shows fetch interval in seconds (better;
+  keep ms on the wire); Tauri still shows raw ms. Both clamp on save now
+  (D-17), but in **three** disagreeing places — `SettingsStore`'s three ranges
+  in seconds, `SettingsOverlay`'s `BOUNDS` in milliseconds, and core's
+  `default_*` — which is exactly what H-10's `Config::normalized()` collapses.
+  Native's load-clamp also floors to 1 s while its own control starts at 5 —
+  clamp to the range. → WS-C, WS-F
 - **ST-5 · `ai_provider` ownership.** Native has **two independent owners**
   (composer's CommitStore and SettingsStore) that never observe each other —
   with both windows open the pickers can disagree, and a Settings save of any
@@ -778,9 +801,21 @@ and matched, not that it was skipped.
 
 ### 4.10 Terminal (TE)
 
-- **TE-1 · Key routing** — D-16 (Tauri) and the modifier: Tauri accepts ⌘`
-  too, hijacking macOS window cycling; native deliberately ⌃` only. Narrow
-  Tauri to Ctrl. → WS-C
+- **TE-1 · Key routing** — the routing half landed in WS-A (D-16: the shell
+  owns every key but the panel's toggle, FRONTEND §6.11). What remains is the
+  modifier: Tauri still accepts ⌘` too, hijacking macOS window cycling; native
+  is deliberately ⌃` only. Narrow Tauri to Ctrl — in *two* places now, the
+  window handler and `Terminal.svelte`'s custom key handler, which must keep
+  agreeing or the chord becomes unreachable from inside the panel.
+  WS-A's modifier-blind rule leaves ⌘,/⌘B/⌘L/⌘R/⌘P inert with the terminal
+  focused, which is right for `Ctrl` (the shell really does want `Ctrl+R`) and
+  wrong for `Cmd` (no shell consumes it, and macOS reserves ⌘, for Preferences).
+  **Decided by the user: the modifier follows the platform** — ⌘ on macOS, Ctrl
+  on Windows and Linux — which resolves the capture as a side effect rather than
+  as a second rule. **Not scheduled here**: the narrowed capture is correct on
+  the shipping platforms and only imperfect on a macOS Tauri build, so it ships
+  as-is and reopens if it is actually noticed. ROADMAP carries the decision with
+  the affected-chord table. → WS-C (the toggle's own ⌃-only narrowing)
 - **TE-2 · Transport** — D-4 plus E-11/E-12: move Tauri to a
   frontend-created `Channel` passed into `start_terminal` (mirrors the
   native seam, kills the race and the per-chunk JSON), mark
@@ -920,19 +955,53 @@ Per CLAUDE.md: one at a time, user-flow order inside each, visually verified
 before the next starts. Every workstream ends with the §8 gates. Sizes are
 relative (S/M/L).
 
-1. **WS-A — Defect burn-down (S/M).** D-1 (with the `headSha` prop), D-2's
-   client-side gate (`status.hasRemote`), D-3's streak counter, D-10, D-11,
-   D-12's minimal state split, D-13's refresh collapse, D-16's one-rule key
-   routing, D-17's clamp-on-save, D-19, RM-10, D-8, D-18. Small, surgical,
-   independently verifiable; several become redundant when their workstream
-   lands properly and are cheap insurance anyway. (D-4/D-5/D-6/D-7/D-9/D-14/
-   D-15/D-20 need their area's structure and land in B/C/F.)
-2. **WS-B — Core convergence layer (L).** H-1 … H-20 (in the table's order;
-   H-2/H-10/H-11 carry D-2/D-5/D-7 to ground; H-17's Linux backend gets
+1. ~~**WS-A — Defect burn-down (S/M).**~~ **Shipped 2026-08-27.** All thirteen
+   items landed — D-1, D-2's client gate, D-3, D-8, D-10, D-11, D-12, D-13,
+   D-16, D-17, D-18, D-19 and RM-10 — each summarized in §3.1 with what it left
+   for a later workstream. Four pieces of state the plan did not anticipate,
+   each because a gate is only as good as what it can see:
+   `repoState.log.resetSeq` (a *replacement* of the commit window is not a
+   *slide*, and D-11 cannot be fixed without saying which one happened),
+   `repoState.statusLoaded` (D-2's gate reads `hasRemote`, which defaults to
+   false, so "not loaded" had to be distinguishable from "no remote"),
+   `RepoStore.awaitLoadSettled()` with a load-depth count (D-18's gate would
+   otherwise read the `nil` status that `.task(id: repoPath)` races, or be
+   released early by a `refresh()` nested inside an `open()`), and
+   `SyncStore.silentFetch` returning `Bool?` (D-18 added a third breaker feed,
+   and feeding it a *local* failure is the same poisoning D-2 is about). One new
+   shared file, `apps/tauri-app/src/lib/utils/keyboard.ts`, holds D-16's rule.
+   Gates: `pnpm check` 0/0, prettier clean, zero-warning `xcodebuild`, 120 core
+   + 24 bridge tests, clippy-pedantic at the 184 baseline. (D-4/D-5/D-6/D-7/D-9/
+   D-14/D-15/D-20 always needed their area's structure and remain in B/C/F.)
+2. **WS-B — Core convergence layer (L). ← next.** H-1 … H-20 (in the table's
+   order; H-2/H-10/H-11 carry D-2/D-5/D-7 to ground; H-17's Linux backend gets
    verified on the user's Linux machine). Mostly pure-Rust + bridge work, all
    test-covered; regenerated bindings; both hosts adopt as the later
    workstreams touch each surface. Tests pin every new function; clippy
-   baseline unchanged.
+   baseline unchanged. What WS-A changed under it:
+   - **H-1** has exactly one Tauri adopter now: `MainLayout.refreshStatus` is
+     the client's only status writer (D-13), so folding `merging` into
+     `RepoStatus` deletes one `gitApi.isMerging` call there and two natively
+     (`RepoStore.loadRepoData` and `refreshQuietly`).
+   - **H-2** must update three call sites, not one: `MainLayout`'s
+     `fetchActiveRemote` and `SyncStore.silentFetch` both call `get_remote`
+     unconditionally *after* a `has_remote` gate WS-A added — keep the gates
+     (they skip a subprocess), and drop the now-dead `if (!remote) return`.
+     `Header`'s pull/push path is the third, and is the one place the
+     `"origin"` assumption legitimately belongs (per the hoist's own note).
+   - **H-9** lands in three render sites, all now shaped the same way: the
+     Tauri changes pane, the Tauri commit pane, and native `DiffView`. Give the
+     enum a variant for *load failed* as well, or DF-10 has to arrive with it —
+     the Tauri branch currently cannot tell an empty parse from a failed load
+     and will claim "No Textual Changes" behind the error modal.
+   - **H-10**'s `Config::normalized()` replaces **three** bound tables that must
+     already agree: `SettingsStore.fetchIntervalRange/scanDepthRange/
+     tabSizeRange` (native, seconds), `SettingsOverlay`'s `BOUNDS` (Tauri,
+     milliseconds), and core's own `default_*` functions. Collapsing them to one
+     is most of this hoist's value; note the unit difference at the boundary.
+   - **H-14**'s `resize_terminal` guard is unaffected by WS-A, but the terminal
+     touched in D-16 is the same file — `Terminal.svelte` now owns an
+     `attachCustomKeyEventHandler`, which TE-2's `Channel` rewrite must keep.
 3. **WS-C — Tauri catches up (L).** The Tauri client adopts what the native
    client (and GH Desktop) got right: SY-1…SY-9 (adaptive ladder on H-3,
    fetch, publish dialog), BR-1…BR-7 + BR-11 (merge/abort/freshness/busy),
@@ -942,8 +1011,8 @@ relative (S/M/L).
    RM-7/RM-8/RM-9, CH-4's Tauri half (plate + `U`), ST-9's Generate gate,
    DF-5's interim neutralize.
 4. **WS-D — Tauri background parity (M).** BG-1 (cadence ladder + sweep
-   pause + skew), BG-2 (self-scheduling re-arm), BG-4 (equality gate +
-   failure streak if not landed in A), BG-6, D-6 (activation config reload),
+   pause + skew), BG-2 (self-scheduling re-arm), BG-4's remaining half (the
+   equality gate — the failure streak landed in A), BG-6, D-6 (activation config reload),
    E-2 (drop `pollHeadSha`), E-4 (single tier loop), E-5 (bounded fan-out —
    already halved by RM-4's `repoActivity` deletion), and H-17 adoption
    (`navigator.onLine` demoted to a negative-only hint). Mostly deletion and

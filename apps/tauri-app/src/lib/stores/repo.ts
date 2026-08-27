@@ -28,8 +28,17 @@ export interface RepoStatus {
   headSha: string
 }
 
+/**
+ * Whether `status` has ever been filled for the open repository, as opposed to
+ * holding the defaults a repo switch resets it to. Anything that *skips* work
+ * on a status field has to know the difference: `hasRemote` defaults to false,
+ * and a gate reading that between the switch and the first load would decide
+ * "no remote" about a repo it has not looked at yet.
+ */
+
 export interface RepoState {
   status: RepoStatus
+  statusLoaded: boolean
   log: {
     commits: CommitInfo[]
     hasMore: boolean
@@ -40,6 +49,14 @@ export interface RepoState {
      * scrolls, so the absolute position is tracked separately from the array.
      */
     windowStartOffset: number
+    /**
+     * Bumped whenever the window is *replaced* by a fresh page-1 load (HEAD
+     * moved, a different repo, the first load) rather than slid by one page.
+     * `CommitList` compensates `scrollTop` for a slide; a replacement is not
+     * a slide, so it has to be told apart — compensating for one scrolls the
+     * user to the bottom of the new page and immediately pages again.
+     */
+    resetSeq: number
   }
   branches: BranchInfo[]
   selectedFiles: Set<string>
@@ -74,6 +91,14 @@ export interface RepoState {
    */
   restoreMessage: { summary: string; description: string; coAuthors: string[] } | null
   error?: string
+  /**
+   * Set once the silent status poll has failed several ticks in a row — the
+   * repository is genuinely unreadable (deleted, unmounted, permissions), not
+   * momentarily locked mid-write. Owned exclusively by the poll: only its own
+   * recovery clears it, so an explicit action's failure (which goes to
+   * `error`, and to the modal) is never swept away by a background tick.
+   */
+  pollError?: string
 }
 
 const defaultStatus: RepoStatus = {
@@ -92,11 +117,13 @@ const defaultStatus: RepoStatus = {
 
 const defaultState: RepoState = {
   status: defaultStatus,
+  statusLoaded: false,
   log: {
     commits: [],
     hasMore: true,
     loaded: false,
     windowStartOffset: 0,
+    resetSeq: 0,
   },
   branches: [],
   selectedFiles: new Set(),
@@ -122,12 +149,17 @@ const defaultState: RepoState = {
 export const repoState = writable<RepoState>(defaultState)
 
 export function resetRepoState() {
-  repoState.set({
+  repoState.update((s) => ({
     ...defaultState,
     selectedFiles: new Set(),
     userDeselected: new Set(),
     diffSelection: new Map(),
-  })
+    // A repo switch replaces the commit window like any other replacement, so
+    // the counter keeps going up rather than restarting at 0 — `CommitList`
+    // reads *a change* in it, and 0-after-0 would read as no change and leave
+    // it compensating a slide that never happened.
+    log: { ...defaultState.log, resetSeq: s.log.resetSeq + 1 },
+  }))
 }
 
 export const canCommit = derived(repoState, ($state) => {

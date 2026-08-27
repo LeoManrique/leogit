@@ -15,6 +15,15 @@
      */
     hasResolvedUpstream?: boolean
     /**
+     * SHA of the repository's real HEAD, from `get_status`. Amend, undo and
+     * checkout are gated on it — never on a row's index, which is an index
+     * into the *loaded window* and stops meaning "HEAD" the moment that window
+     * slides. Undo runs `git reset --mixed HEAD~1` against the real HEAD, so a
+     * row-index gate offers it on the wrong commit and seeds the composer with
+     * that commit's message (FRONTEND.md §6.10 forbids the index form).
+     */
+    headSha?: string
+    /**
      * Absolute index (0 = HEAD) of `commits[0]` in the full repo log. The
      * parent slides this window forward/backward as the user scrolls past
      * the cap. When it changes between renders, we compensate `scrollTop`
@@ -22,6 +31,14 @@
      * slide (otherwise the user's cursor would jump up/down by N rows).
      */
     windowStartOffset?: number
+    /**
+     * Bumped by the parent when it *replaces* the window with a fresh page-1
+     * load instead of sliding it (HEAD moved, or a different repo). A
+     * replacement is not a slide: compensating for it scrolls to the bottom
+     * of the new page, which then immediately pages again. We scroll to the
+     * new HEAD instead.
+     */
+    resetSeq?: number
     /**
      * Whether the initial history load has completed. Gates the "No commits
      * yet" empty state so it only shows for a genuinely empty repo (e.g. a
@@ -42,7 +59,9 @@
     selectedSha = null,
     unpushedShas = new Set<string>(),
     hasResolvedUpstream = false,
+    headSha = '',
     windowStartOffset = 0,
+    resetSeq = 0,
     loaded = true,
     onSelect,
     onLoadMore,
@@ -52,15 +71,32 @@
     onCheckoutCommit,
   }: Props = $props()
 
-  let contextMenu = $state<{ x: number; y: number; commit: CommitInfo; idx: number } | null>(
-    null,
-  )
+  let contextMenu = $state<{ x: number; y: number; commit: CommitInfo } | null>(null)
 
-  function openContextMenu(e: MouseEvent, commit: CommitInfo, idx: number) {
+  function openContextMenu(e: MouseEvent, commit: CommitInfo) {
     e.preventDefault()
     e.stopPropagation()
-    contextMenu = { x: e.clientX, y: e.clientY, commit, idx }
+    contextMenu = { x: e.clientX, y: e.clientY, commit }
   }
+
+  /**
+   * Whether the right-clicked commit is the repository's actual HEAD. `headSha`
+   * comes from `get_status`, so this stays true only for the commit the
+   * rewriting actions would really act on — no matter where the loaded window
+   * currently sits. An empty `headSha` (unborn branch, status not loaded yet)
+   * matches nothing, which disables the rewriting actions rather than
+   * mis-enabling them.
+   */
+  const isHeadCommit = $derived(
+    contextMenu !== null && headSha !== '' && contextMenu.commit.sha === headSha,
+  )
+
+  /** A commit we can prove is *not* HEAD — the checkout target. Unknown HEAD
+   *  disables it too: detaching onto the commit you are already on is a
+   *  surprise, not a no-op. */
+  const isPastCommit = $derived(
+    contextMenu !== null && headSha !== '' && contextMenu.commit.sha !== headSha,
+  )
 
   const menuItems = $derived<ContextMenuItem[]>(
     contextMenu === null
@@ -68,20 +104,19 @@
       : [
           {
             label: 'Amend last commit…',
-            // Only the top commit (idx 0 AND it's still the head of the loaded log)
-            // can be amended without rewriting earlier history.
-            enabled: contextMenu.idx === 0 && onAmendCommit !== undefined,
+            // Only HEAD can be amended without rewriting earlier history.
+            enabled: isHeadCommit && onAmendCommit !== undefined,
             action: () => {
               if (contextMenu) onAmendCommit?.(contextMenu.commit)
             },
           },
           {
             label: 'Undo last commit…',
-            // Only the top commit, and only when we believe it's still local —
-            // either we can prove it's unpushed, or we couldn't resolve an
-            // upstream at all (so we can't prove it's pushed either).
+            // HEAD only, and only when we believe it's still local — either we
+            // can prove it's unpushed, or we couldn't resolve an upstream at
+            // all (so we can't prove it's pushed either).
             enabled:
-              contextMenu.idx === 0 &&
+              isHeadCommit &&
               onUndoCommit !== undefined &&
               (!hasResolvedUpstream || unpushedShas.has(contextMenu.commit.sha)),
             action: () => {
@@ -90,9 +125,9 @@
           },
           {
             label: 'Checkout commit',
-            // Any commit except the current HEAD (idx 0) — checking out HEAD is a
+            // Any commit except the current HEAD — checking out HEAD is a
             // no-op. Lands the user in a detached HEAD, matching GitHub Desktop.
-            enabled: contextMenu.idx !== 0 && onCheckoutCommit !== undefined,
+            enabled: isPastCommit && onCheckoutCommit !== undefined,
             action: () => {
               if (contextMenu) onCheckoutCommit?.(contextMenu.commit)
             },
@@ -241,20 +276,43 @@
   const offsetPx = $derived(startIndex * ROW_HEIGHT)
 
   /*
-    Compensate scrollTop when the parent slides the window. Forward slide
-    (drop from front, append to back) shifts every remaining commit `N` rows
-    upward in the new array — we subtract `N * ROW_HEIGHT` from scrollTop so
-    the user's visible row stays anchored. Slide-backward is symmetric.
+    Keep the viewport where the user left it as the parent moves the window.
 
-    Reading `windowStartOffset` inside the effect makes it the dependency;
-    we hold the previous value in $state so the diff is observable across
-    runs without infinite-looping.
+    Two different moves arrive on the same props, and treating them alike is
+    what made a HEAD move scroll the list to its bottom:
+
+    - A *slide* (drop from one end, append to the other) shifts every
+      remaining commit `N` rows within the array. We subtract
+      `N * ROW_HEIGHT` from scrollTop so the user's visible row stays
+      anchored. Slide-backward is symmetric.
+    - A *replacement* — a fresh page 1 after HEAD moved, or a different
+      repository — is not a shift of the same rows, so there is nothing to
+      compensate. `resetSeq` marks it. Row 0 is now the new HEAD, which is
+      exactly what the user should be looking at, so we go to the top.
+      Compensating instead sent scrollTop *down* by the whole old offset,
+      landing at the end of the fresh page and firing another page load.
+
+    Reading the props inside the effect makes them the dependencies; the
+    previous values live in $state so the diff is observable across runs
+    without infinite-looping.
   */
   let lastWindowStart = $state<number | null>(null)
+  let lastResetSeq = $state<number | null>(null)
   $effect(() => {
     const offset = windowStartOffset
+    const seq = resetSeq
     if (lastWindowStart === null) {
       lastWindowStart = offset
+      lastResetSeq = seq
+      return
+    }
+    if (seq !== lastResetSeq) {
+      lastResetSeq = seq
+      lastWindowStart = offset
+      if (scrollContainer) {
+        scrollContainer.scrollTop = 0
+        scrollTop = 0
+      }
       return
     }
     const delta = offset - lastWindowStart
@@ -273,7 +331,7 @@
   {/if}
   <div class="virtual-scroll" style="height: {commits.length * ROW_HEIGHT}px">
     <div class="visible-items" style="transform: translateY({offsetPx}px)">
-      {#each visibleCommits as commit, i (commit.sha)}
+      {#each visibleCommits as commit (commit.sha)}
         {@const tags = commit.tags}
         {@const isUnpushed = unpushedShas.has(commit.sha)}
         <div
@@ -281,7 +339,7 @@
           class:selected={commit.sha === selectedSha}
           title={formatDateFull(commit.author_date)}
           onclick={() => onSelect(commit)}
-          oncontextmenu={(e) => openContextMenu(e, commit, startIndex + i)}
+          oncontextmenu={(e) => openContextMenu(e, commit)}
           onkeydown={(e) => handleRowKeyDown(e, commit)}
           role="button"
           tabindex="0"

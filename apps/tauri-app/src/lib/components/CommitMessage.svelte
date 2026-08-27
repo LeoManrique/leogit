@@ -32,6 +32,14 @@
   // user confirms or cancels. The modal lists the embedded entries within.
   let pendingFiles = $state<FileEntry[]>([])
   const pendingEmbedded = $derived(pendingFiles.filter((f) => f.embedded))
+
+  // "A commit is under way" for every lockout. The embedded-repo confirmation
+  // is a *pause* inside the commit, not a state before it: `isCommitting` is
+  // still false while the dialog waits, and its Confirm calls `performCommit`
+  // directly — past `canSubmit`. Without folding the pending state in here, the
+  // composer stays live behind the dialog and Generate can still be started,
+  // landing its result on a composer the confirmed commit has just cleared.
+  const isCommitInProgress = $derived(isCommitting || pendingFiles.length > 0)
   // Outer repo name (repoPath basename) for the warning copy.
   const outerRepoName = $derived(
     $appState.repoPath ? basename($appState.repoPath) : 'this repository',
@@ -70,7 +78,14 @@
   // Relaxed submit gate when amending: git allows --amend with no staged files
   // (message-only edit). Outside amend mode, canCommit requires file selection.
   // Uses effectiveSummary so a one-file commit can submit with a blank input.
-  const canSubmit = $derived(effectiveSummary.length > 0 && (isAmending || $canCommit))
+  //
+  // Locked while generating, in both directions (Generate is already disabled
+  // while committing): otherwise a commit can land mid-request and the late AI
+  // result writes a message describing already-committed changes into the
+  // composer the commit just cleared.
+  const canSubmit = $derived(
+    effectiveSummary.length > 0 && !isGenerating && (isAmending || $canCommit),
+  )
 
   // When entering amend mode, pre-fill the composer from the target commit.
   // The backend pre-parses `co_authors` / `body_without_coauthors` off the
@@ -245,10 +260,12 @@
     const meta = e.ctrlKey || e.metaKey
     if (meta && e.key === 'g') {
       e.preventDefault()
-      if (!isGenerating) handleGenerate()
+      // Both directions, like the buttons: a keyboard route past the lockout
+      // is still a way to have a late AI result overwrite a cleared composer.
+      if (!isGenerating && !isCommitInProgress) handleGenerate()
     } else if (meta && e.key === 'Enter') {
       e.preventDefault()
-      if (canSubmit && !isCommitting) handleCommit()
+      if (canSubmit && !isCommitInProgress) handleCommit()
     }
   }
 </script>
@@ -263,7 +280,7 @@
         type="button"
         class="stop-amending-link"
         onclick={() => onStopAmending?.()}
-        disabled={isCommitting}
+        disabled={isCommitInProgress}
       >
         Stop amending
       </button>
@@ -278,7 +295,7 @@
       placeholder={summaryPlaceholder}
       bind:value={summary}
       maxlength="200"
-      disabled={isGenerating || isCommitting}
+      disabled={isGenerating || isCommitInProgress}
       onwheel={handleSummaryWheel}
       onkeydown={handleKeyDown}
     />
@@ -291,7 +308,7 @@
       class="description-input"
       placeholder="Description"
       bind:value={description}
-      disabled={isGenerating || isCommitting}
+      disabled={isGenerating || isCommitInProgress}
       onkeydown={handleKeyDown}
     ></textarea>
   </div>
@@ -306,7 +323,7 @@
         class="provider-select"
         value={provider}
         onchange={(e) => setProvider(e.currentTarget.value as 'claude' | 'ollama')}
-        disabled={isGenerating || isCommitting}
+        disabled={isGenerating || isCommitInProgress}
       >
         <option value="claude">Claude</option>
         <option value="ollama">Ollama</option>
@@ -314,7 +331,7 @@
       <button
         class="action-button"
         onclick={handleGenerate}
-        disabled={isGenerating || isCommitting || $repoState.selectedFiles.size === 0}
+        disabled={isGenerating || isCommitInProgress || $repoState.selectedFiles.size === 0}
         title="Generate (Ctrl+G)"
       >
         {isGenerating ? 'Generating…' : 'Generate'}
@@ -324,7 +341,7 @@
     <button
       class="commit-button"
       onclick={handleCommit}
-      disabled={!canSubmit || isCommitting}
+      disabled={!canSubmit || isCommitInProgress}
       title={isAmending ? 'Amend commit (Ctrl+Enter)' : 'Commit (Ctrl+Enter)'}
       aria-label={isAmending ? 'Amend commit' : 'Commit'}
     >

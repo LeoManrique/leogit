@@ -21,9 +21,11 @@
     type FileEntry,
     type CommitInfo,
     type LaunchTarget,
+    type ParsedDiff,
   } from '$lib/api/commands'
   import * as fileActions from '$lib/services/fileActions'
   import type { FileContextActions } from '$lib/services/fileActions'
+  import { isFromTerminal } from '$lib/utils/keyboard'
 
   import Header from '$lib/components/Header.svelte'
   import TabBar from '$lib/components/TabBar.svelte'
@@ -220,13 +222,46 @@
     })
   }
 
+  /*
+    Whether a parsed diff actually has something to put on screen.
+
+    "Did it parse?" is not the same question. `parse_diff` returns null only for
+    genuinely empty input — which is the *whitespace-only edit under
+    hide-whitespace* case. A mode change or a pure rename produce a real
+    `diff --git` header with **zero hunks**, so they parse fine and would render
+    the file header over an empty body: a blank pane with no explanation, which
+    is the same defect one layer along. Both go to the "No Textual Changes"
+    state instead. Binary diffs are renderable — the viewer has its own state
+    for them.
+  */
+  function hasRenderableDiff(diff: ParsedDiff | null): boolean {
+    if (!diff) return false
+    const fileDiff = diff.file_diff
+    return fileDiff.is_binary || fileDiff.hunks.some((h) => h.lines.length > 0)
+  }
+
   // A submodule that is dirty inside but whose recorded commit hasn't moved
   // can't be staged from the parent repo (`git add` is a no-op), so it's never
   // eligible for commit selection. Every writer to `selectedFiles` skips these
   // so the user can't include one and hit "staging produced no changes".
   const isCommittable = (f: FileEntry) => !f.submodule_dirty
 
-  async function refreshStatus(opts: { silent?: boolean } = {}): Promise<void> {
+  // Consecutive *background* refresh failures. One is usually a transient index
+  // lock mid-write and stays invisible; a streak means the repository is
+  // genuinely unreadable (deleted, unmounted, permissions), which the user has
+  // to be told about — otherwise the pane keeps rendering its last good
+  // snapshot forever. Same threshold as the native client's
+  // `quietFailureStreak`, and the same ownership: only the app's own timers
+  // and resyncs move it. A refresh that follows a *user action* (commit,
+  // discard, ignore, checkout) is silent for a different reason — the action
+  // already reported its own outcome — and must not feed this, or three
+  // index.lock races in a row would accuse a healthy repo of having vanished.
+  let quietFailureStreak = 0
+  const QUIET_FAILURE_THRESHOLD = 3
+
+  async function refreshStatus(
+    opts: { silent?: boolean; background?: boolean } = {},
+  ): Promise<void> {
     const repoPath = $appState.repoPath
     if (!repoPath) return
     try {
@@ -250,6 +285,7 @@
           s.activeFile !== null && !presentPaths.has(s.activeFile.path)
         return {
           ...s,
+          statusLoaded: true,
           status: {
             branch: status.branch,
             upstream: status.upstream,
@@ -269,8 +305,13 @@
           activeFileDiff: activeFileGone ? null : s.activeFileDiff,
           isDiffLoading: activeFileGone ? false : s.isDiffLoading,
           error: opts.silent ? s.error : undefined,
+          // Any successful read proves the repository is back, so the banner
+          // goes whoever asked for the read. Only the background path *sets*
+          // it, so no user-facing error can be lost with it.
+          pollError: undefined,
         }
       })
+      quietFailureStreak = 0
       // Keep the picker's badge for the active repo live off the same counts
       // the 2s poll already computed — no extra fetch needed for the open
       // repo. `dirty` comes straight from the file list the Changes tab
@@ -284,6 +325,15 @@
     } catch (error) {
       if (!opts.silent) {
         repoState.update((s) => ({ ...s, error: String(error) }))
+        return
+      }
+      if (!opts.background) return // a user action's own follow-up: it reported already
+      // Swallow the blip, surface the streak. The banner is non-blocking on
+      // purpose — a background tick must never seize the window the way an
+      // action's failure modal does.
+      quietFailureStreak += 1
+      if (quietFailureStreak >= QUIET_FAILURE_THRESHOLD) {
+        repoState.update((s) => ({ ...s, pollError: String(error) }))
       }
     }
   }
@@ -309,6 +359,7 @@
           hasMore: commits.length === PAGE_SIZE,
           loaded: true,
           windowStartOffset: 0,
+          resetSeq: s.log.resetSeq + 1,
         },
       }))
     } catch (error) {
@@ -322,6 +373,8 @@
   // into the past (commits[0].sha changed for the same offset), reset to
   // the first page so the new HEAD is visible — a small visual jump is
   // accurate, while silently keeping the old window would mislead the user.
+  // The reset bumps `resetSeq`: the list must scroll to the new HEAD, not
+  // compensate for a slide that never happened.
   async function refreshLog(): Promise<void> {
     const repoPath = $appState.repoPath
     if (!repoPath) return
@@ -344,6 +397,7 @@
             hasMore: fresh.length === PAGE_SIZE,
             loaded: true,
             windowStartOffset: 0,
+            resetSeq: s.log.resetSeq + 1,
           },
         }))
         return
@@ -351,6 +405,7 @@
       repoState.update((s) => ({
         ...s,
         log: {
+          ...s.log,
           commits,
           hasMore: commits.length === count,
           loaded: true,
@@ -403,6 +458,7 @@
         return {
           ...s,
           log: {
+            ...s.log,
             commits: combined.slice(drop),
             hasMore: fetched.length === PAGE_SIZE,
             loaded: true,
@@ -437,6 +493,7 @@
         return {
           ...s,
           log: {
+            ...s.log,
             commits: overflow > 0 ? combined.slice(0, combined.length - overflow) : combined,
             hasMore: s.log.hasMore || overflow > 0,
             loaded: true,
@@ -654,6 +711,19 @@
     const repoPath = $appState.repoPath
     if (!repoPath) return
     if (!shouldAttemptBackground()) return
+    // A repo with no remote has nothing to fetch, and `get_remote` answers
+    // `"origin"` for one anyway — so without this gate every tick ran a doomed
+    // `git fetch origin`, two of them opened the breaker, and the open breaker
+    // then suppressed *all* background fetches app-wide (tier badges, refocus
+    // sweeps, the update check) for as long as that repo stayed open. The tier
+    // path already gates on the same flag (`repoSync.syncRepo`).
+    //
+    // Only skip when we *know* there is no remote. `hasRemote` defaults to
+    // false, and a repo switch resets it, so between the switch and the first
+    // status load an unqualified read would decide "no remote" about a repo
+    // nobody has looked at — silently dropping a legitimate refocus fetch.
+    const current = get(repoState)
+    if (current.statusLoaded && !current.status.hasRemote) return
     let remote: string
     try {
       remote = await gitApi.getRemote(repoPath)
@@ -671,7 +741,7 @@
 
   async function performAutoFetch(): Promise<void> {
     await fetchActiveRemote()
-    await refreshStatus({ silent: true })
+    await refreshStatus({ silent: true, background: true })
   }
 
   // In-flight guard for the 2 s poll: a cycle that outlives the interval (repo
@@ -689,7 +759,7 @@
       if ($activeNetworkOp || statusPollInFlight) return
       statusPollInFlight = true
       try {
-        await refreshStatus({ silent: true })
+        await refreshStatus({ silent: true, background: true })
         await pollHeadSha()
       } finally {
         statusPollInFlight = false
@@ -721,7 +791,7 @@
       // Coming back to the app: fetch the active repo so a remote that moved
       // while we were away surfaces on the Pull button, then refresh local state.
       await fetchActiveRemote()
-      await refreshStatus({ silent: true })
+      await refreshStatus({ silent: true, background: true })
       pollHeadSha()
       reloadActiveDiff()
       // Also refresh the top recents tier so their picker badges aren't stale.
@@ -790,7 +860,13 @@
       // redundantly reload the log, then refresh status (detached state) and the
       // log (now rooted at this commit), mirroring handleCommitted.
       lastHeadSha = commit.sha
-      await Promise.all([refreshStatus({ silent: true }), refreshLog()])
+      // Branches too: HEAD is now detached, so the picker's current-branch
+      // marker and every branch's ahead/behind are stale.
+      await Promise.all([
+        refreshStatus({ silent: true }),
+        refreshLog(),
+        refreshBranches(),
+      ])
     } catch (error) {
       repoState.update((s) => ({ ...s, error: String(error) }))
     } finally {
@@ -824,6 +900,9 @@
         activeTab: 'changes',
       }))
       await handleCommitted()
+      // The branch just lost a commit — its ahead count and the row's
+      // metadata in the picker moved with it.
+      await refreshBranches()
     } catch (error) {
       repoState.update((s) => ({ ...s, error: String(error) }))
     }
@@ -963,6 +1042,10 @@
     }
     showRepos = false
     lastHeadSha = null
+    // The streak describes one repository's readability; carrying it across a
+    // switch would let two failures on the old repo plus one on the new raise
+    // the new one's banner. (`resetRepoState` clears `pollError` itself.)
+    quietFailureStreak = 0
     resetRepoState()
     appState.update((s) => ({ ...s, repoPath: repo }))
     await patchReposState({ last_opened_repo: repo })
@@ -1124,6 +1207,18 @@
     const t = e.target as HTMLElement | null
     const inField = t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement
     const meta = e.ctrlKey || e.metaKey
+
+    // The terminal owns its keys. The panel's own toggle is the single
+    // exception — xterm hands it back to us via `attachCustomKeyEventHandler`,
+    // and it has to be handled *before* the `inField` bail below, because
+    // xterm's input sink is a <textarea>. See `utils/keyboard.ts`.
+    if (isFromTerminal(e)) {
+      if (meta && e.key === '`') {
+        e.preventDefault()
+        toggleTerminalMinimize()
+      }
+      return
+    }
 
     if (e.key === 'Escape') {
       // Escape never dismisses a clone in flight — hiding the dialog wouldn't
@@ -1305,7 +1400,9 @@
           selectedSha={$repoState.activeCommit?.sha || null}
           unpushedShas={$repoState.status.unpushedShas}
           hasResolvedUpstream={$repoState.status.upstream !== ''}
+          headSha={$repoState.status.headSha}
           windowStartOffset={$repoState.log.windowStartOffset}
+          resetSeq={$repoState.log.resetSeq}
           loaded={$repoState.log.loaded}
           onSelect={loadCommitFiles}
           onLoadMore={loadMoreCommits}
@@ -1337,7 +1434,29 @@
       onOpenBranches={() => (showBranches = true)}
       onOpenSettings={() => (showSettings = true)}
       onOpenHelp={() => (showHelp = true)}
+      onRefresh={refreshStatus}
     />
+
+    <!--
+      Background failures never take the window. The poll owns this strip: it
+      appears after a streak of failed ticks (the repo went away) and clears
+      itself the moment a tick succeeds, so the last good snapshot stays
+      readable behind it instead of being hidden by a modal the user has to
+      dismiss on every tick. User-initiated failures still go to ErrorModal.
+    -->
+    {#if $repoState.pollError}
+      <div class="poll-banner" role="status">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M8 2.5 14.5 13.5h-13z" />
+          <line x1="8" y1="6.5" x2="8" y2="9.5" />
+          <circle cx="8" cy="11.6" r="0.6" fill="currentColor" stroke="none" />
+        </svg>
+        <span class="poll-banner-text">
+          Can't read this repository — it may have been moved, deleted, or unmounted.
+        </span>
+        <span class="poll-banner-detail">{$repoState.pollError}</span>
+      </div>
+    {/if}
 
     <div class="content-area">
       {#if $repoState.activeTab === 'changes'}
@@ -1352,9 +1471,9 @@
               repository.
             </p>
           </div>
-        {:else if $repoState.activeFileDiff}
+        {:else if hasRenderableDiff($repoState.activeFileDiff)}
           <DiffViewer
-            diff={$repoState.activeFileDiff}
+            diff={$repoState.activeFileDiff!}
             selection={null}
             blobSource={{ kind: 'workingTree', repoPath: $appState.repoPath }}
             showSelection={false}
@@ -1362,6 +1481,24 @@
             sideBySide={$config?.side_by_side_diff ?? false}
             tabSize={$config?.tab_size ?? 4}
           />
+        {:else if $repoState.activeFile}
+          <!--
+            A file IS selected but there is nothing to render: a mode change, a
+            rename with no edits, or a whitespace-only edit under
+            hide-whitespace (see `hasRenderableDiff`). Falling through to the
+            no-selection copy below told the user to select the file they had
+            already selected. Stays blank while the fetch is in flight so a
+            sub-threshold load doesn't flash this state on its way to the diff.
+          -->
+          <div class="diff-empty">
+            {#if !$repoState.isDiffLoading}
+              <p>No Textual Changes</p>
+              <p class="muted">
+                The file changed without changing any lines — a mode change or rename, for
+                example.
+              </p>
+            {/if}
+          </div>
         {:else}
           <div class="diff-empty">
             {#if $repoState.status.files.length === 0}
@@ -1402,9 +1539,9 @@
           <div class="commit-diff-pane">
             {#if $repoState.isCommitDiffLoadingSlow}
               <div class="diff-empty">Loading diff…</div>
-            {:else if $repoState.activeCommitFileDiff}
+            {:else if hasRenderableDiff($repoState.activeCommitFileDiff)}
               <DiffViewer
-                diff={$repoState.activeCommitFileDiff}
+                diff={$repoState.activeCommitFileDiff!}
                 selection={null}
                 blobSource={$repoState.activeCommit
                   ? {
@@ -1418,6 +1555,18 @@
                 sideBySide={$config?.side_by_side_diff ?? false}
                 tabSize={$config?.tab_size ?? 4}
               />
+            {:else if $repoState.activeCommitFile}
+              <!-- Same split as the changes pane above: selected, but nothing
+                   textual to render. -->
+              <div class="diff-empty">
+                {#if !$repoState.isCommitDiffLoading}
+                  <p>No Textual Changes</p>
+                  <p class="muted">
+                    The file changed without changing any lines — a mode change or rename,
+                    for example.
+                  </p>
+                {/if}
+              </div>
             {:else}
               <div class="diff-empty">
                 <p>Select a file to view its diff</p>
@@ -1712,6 +1861,42 @@
     min-height: 0;
   }
 
+  /* Poll-failure strip: one line under the header, above the content, so the
+     data behind it stays visible. Deliberately not a toast and not a modal —
+     the condition persists, so it must be able to sit there. */
+  .poll-banner {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-shrink: 0;
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border-inactive);
+    background: color-mix(in srgb, var(--status-yellow) 12%, transparent);
+    color: var(--text-primary);
+    font-size: 12px;
+  }
+
+  .poll-banner svg {
+    flex-shrink: 0;
+    align-self: center;
+    color: var(--status-yellow);
+  }
+
+  .poll-banner-text {
+    flex-shrink: 0;
+  }
+
+  .poll-banner-detail {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    user-select: text;
+  }
+
   .commit-body {
     flex: 1;
     display: grid;
@@ -1771,6 +1956,11 @@
   .diff-empty .muted {
     color: var(--text-faint);
     font-size: 12px;
+    /* A pane-wide single line reads as a banner; wrap the explanatory ones to
+       a column under their title. */
+    max-width: 420px;
+    text-align: center;
+    line-height: 1.5;
   }
 
   /* Submodule whose inner working tree is dirty but pointer hasn't moved: the

@@ -150,13 +150,7 @@ struct ContentView: View {
             terminalStore.closeSession()
             await directoryStore.noteOpened(repoPath)
             await branchStore.load(repoPath: repoPath)
-            // One warm-up fetch so ahead/behind reflect the remote shortly
-            // after opening — the Tauri client runs the same immediate fetch
-            // at startup even with auto-fetch off. Silent: failures (offline,
-            // no remote) show nothing, and status reloads only if it worked.
-            if await syncStore.silentFetch(repoPath: repoPath) {
-                await store.refresh()
-            }
+            await warmUpFetch(repoPath: repoPath)
         }
         .task(id: repoPath) { await statusPollLoop() }
         .task(id: repoPath) { await autoFetchLoop(repoPath: repoPath) }
@@ -421,6 +415,38 @@ struct ContentView: View {
         }
     }
 
+    /// One fetch on opening a repository, so ahead/behind reflect the remote
+    /// within moments instead of waiting out an auto-fetch interval — the
+    /// immediate startup fetch the Tauri client also runs, and the reason it
+    /// happens even with auto-fetch off.
+    ///
+    /// Gated exactly like every other automatic fetch, which it was not
+    /// before: skipped while offline or inside the breaker's backoff window,
+    /// and skipped for a repository with no remote, whose fetch could only
+    /// ever fail — `get_remote` answers `"origin"` for a remote-less repo, so
+    /// the attempt is not merely useless but actively poisons the breaker for
+    /// every other repo. Its outcome feeds the breaker, which is the contract
+    /// for a real network attempt (the Tauri client's on-switch sync already
+    /// reported its result; this one used to throw it away).
+    ///
+    /// Waits for the open to settle first: `.task(id: repoPath)` is started by
+    /// `repoPath` being published, which happens before status exists, and a
+    /// gate that reads `nil` is a gate that doesn't run.
+    @MainActor
+    private func warmUpFetch(repoPath: String) async {
+        await store.awaitLoadSettled()
+        guard store.repoPath == repoPath,
+            store.status?.hasRemote == true,
+            directoryStore.shouldAttemptBackground
+        else { return }
+        // `nil` = no fetch ran, which tells the breaker nothing (see
+        // `silentFetch`). Status reloads only when one ran and reached the
+        // remote — nothing can have moved otherwise.
+        guard let reached = await syncStore.silentFetch(repoPath: repoPath) else { return }
+        directoryStore.breaker.record(success: reached)
+        if reached { await store.refresh() }
+    }
+
     /// Auto-fetch for the open repository, driven by `auto_fetch` and
     /// `fetch_interval_ms` read from the shared `AppConfigStore` each tick —
     /// every Settings save reloads that store in-process, so a change in the
@@ -456,8 +482,9 @@ struct ContentView: View {
                 store.status?.hasRemote == true,
                 directoryStore.shouldAttemptBackground
             else { continue }
-            let reached = await syncStore.silentFetch(repoPath: repoPath)
-            directoryStore.breaker.record(success: reached)
+            if let reached = await syncStore.silentFetch(repoPath: repoPath) {
+                directoryStore.breaker.record(success: reached)
+            }
             await store.refreshQuietly()
         }
     }
@@ -481,8 +508,9 @@ struct ContentView: View {
             store.status?.hasRemote == true,
             directoryStore.shouldAttemptBackground
         {
-            let reached = await syncStore.silentFetch(repoPath: repoPath)
-            directoryStore.breaker.record(success: reached)
+            if let reached = await syncStore.silentFetch(repoPath: repoPath) {
+                directoryStore.breaker.record(success: reached)
+            }
         }
         await store.refreshQuietly(forceDiffReload: true)
         await directoryStore.refocusSweep(
@@ -503,8 +531,9 @@ struct ContentView: View {
         directoryStore.breaker.reset()
         guard let repoPath = store.repoPath else { return }
         if schedulingPolicy.canAutoFetch, store.status?.hasRemote == true {
-            let reached = await syncStore.silentFetch(repoPath: repoPath)
-            directoryStore.breaker.record(success: reached)
+            if let reached = await syncStore.silentFetch(repoPath: repoPath) {
+                directoryStore.breaker.record(success: reached)
+            }
             await store.refreshQuietly()
         }
         await directoryStore.refocusSweep(activePath: repoPath, policy: schedulingPolicy)

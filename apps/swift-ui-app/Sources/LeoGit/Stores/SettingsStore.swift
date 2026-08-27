@@ -66,6 +66,22 @@ final class SettingsStore {
 
     private var pendingSave: Task<Void, Never>?
 
+    /// What this window's fields amounted to at the last load or save — the
+    /// *normalized* form, not the raw file. `flushPendingSave()` overlays the
+    /// current fields onto it to answer "has a field changed since then?",
+    /// which is how closing the window can commit a text field that never
+    /// scheduled a save without rewriting the file on every visit. Storing the
+    /// raw file instead would answer a different question — "is the file
+    /// already normalized?" — and a config written by the other client rarely
+    /// is, so an open-and-close with no edit would rewrite it.
+    private var lastPersisted: Config?
+
+    /// Ordinal of the most recently scheduled debounce, so a completed one can
+    /// clear `pendingSave` without clearing a newer one that replaced it. Left
+    /// set, `pendingSave` would stay non-nil for the rest of the session and
+    /// make every window close save unconditionally.
+    private var saveGeneration = 0
+
     /// The picker's first row: what "Automatic" resolves to on this machine.
     var automaticShellLabel: String {
         shells.first.map { "Automatic (\($0.label))" } ?? "Automatic"
@@ -98,26 +114,53 @@ final class SettingsStore {
         aiModel = config.aiModel ?? ""
         ollamaURL = config.ollamaServerUrl
         isLoaded = true
+        // After `isLoaded`, so `applying(to:)` describes fields that are live.
+        lastPersisted = applying(to: config)
     }
 
     /// Coalesce rapid control changes (stepper clicks, toggles) into one
     /// write shortly after the last of them.
     func scheduleSave() {
         guard isLoaded else { return }
+        saveGeneration += 1
+        let generation = saveGeneration
         pendingSave?.cancel()
         pendingSave = Task { [weak self] in
             try? await Task.sleep(for: Self.saveDebounce)
             guard !Task.isCancelled else { return }
             await self?.save()
+            self?.retireScheduledSave(generation)
         }
     }
 
-    /// Write any edit that is still waiting on the debounce — the window
-    /// closing must not swallow the last change.
+    /// A debounce that ran to completion is no longer pending — unless another
+    /// has replaced it since, which the generation check is what detects.
+    private func retireScheduledSave(_ generation: Int) {
+        guard generation == saveGeneration else { return }
+        pendingSave = nil
+    }
+
+    /// Write anything the window is closing on top of.
+    ///
+    /// Two cases, and only the first used to be handled: a debounced save
+    /// still counting down, and — the one that lost work — a text field the
+    /// user typed into and never left. Text fields commit on focus change or
+    /// Return, and ⌘W is neither, so the typed model, Ollama URL, or scan
+    /// paths were dropped with no feedback in the one surface whose whole
+    /// premise is "you never press Save". Overlaying the fields onto
+    /// `lastPersisted` — the normalized form of what they held at the last
+    /// load or save — keeps that from turning into a write on every
+    /// open-and-close: unchanged fields reproduce it exactly.
     func flushPendingSave() {
-        guard let pendingSave else { return }
-        pendingSave.cancel()
-        self.pendingSave = nil
+        if let pendingSave {
+            pendingSave.cancel()
+            self.pendingSave = nil
+            Task { await save() }
+            return
+        }
+        guard isLoaded, let baseline = lastPersisted, applying(to: baseline) != baseline else {
+            return
+        }
         Task { await save() }
     }
 
@@ -129,7 +172,9 @@ final class SettingsStore {
         guard isLoaded else { return }
         do {
             let fresh = try await GitBridge.appConfig()
-            try await GitBridge.saveAppConfig(applying(to: fresh))
+            let written = applying(to: fresh)
+            try await GitBridge.saveAppConfig(written)
+            lastPersisted = written
             errorMessage = nil
             await configStore?.reload()
         } catch {

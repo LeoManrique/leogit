@@ -279,7 +279,21 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    already carries it at no cost and the rule mandates no second command. Auto-fetch
    (`fetch`/`repo_sync_status`) every **30s** when `auto_fetch` is on. **Pause all
    polling** while a network op is in flight; resync on refocus. What happens while the
-   window is hidden or blurred is platform policy — §8.
+   window is hidden or blurred is platform policy — §8. Automatic fetches are additionally
+   gated on `RepoStatus.has_remote`: `get_remote` answers `"origin"` for a repo with no
+   remote (§ *Notable invariants*), so an ungated tick spawns a doomed `git fetch` whose
+   failures then open the connectivity breaker against every *other* repo. The gate skips
+   only when the answer is **known** — a status not yet loaded is not a repo without a
+   remote — and only a fetch that actually ran reports to the breaker: a slot conflict or a
+   failed local `git remote` says nothing about the network.
+   A failed **background** refresh is swallowed — a repository mid-write is momentarily
+   unreadable — but **three consecutive failures raise a non-blocking banner** owned by
+   those refreshes: the last good snapshot stays on screen behind it, any successful read
+   clears it, and it is never a modal, which a recurring condition would re-raise every
+   tick. The streak counts the app's own timers and resyncs *only*. A refresh that follows a
+   user action is silent for a different reason — the action reported its own outcome — so
+   three `index.lock` races in a row must not accuse a healthy repository of having
+   vanished. The streak is also per repository: a switch resets it.
 2. **Network-op mutual exclusion** — push/pull/publish are mutually exclusive; only
    one runs at a time, with a shared progress slot fed by `git-progress`.
 3. **Seamless diff loads** — loading a file/commit diff must **guard stale responses**
@@ -289,6 +303,13 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    GitHub Desktop's `SeamlessDiffSwitcher`. The native client additionally skips publishing
    a result equal to what's shown, so scroll and tokens survive; a permitted refinement,
    not a divergence (the observable rule — no flash under the threshold — is shared).
+   A diff with **nothing to render** is a state of its own, and the pane must say so rather
+   than fall through to the nothing-is-selected copy — the user did select a file. "Did it
+   parse?" is the wrong test: `parse_diff` returns an absence only for empty input (the
+   whitespace-only edit under `hide_whitespace`), while a mode change or a pure rename
+   parse fine into a header with **zero hunks**, which renders as a blank pane. Both belong
+   in the same explicit state. (The reason enum that would let the pane name *which* is
+   tracked in the parity plan as DF-7.)
 4. **File selection semantics** — maintain selection as `selectedFiles` **plus**
    `userDeselected` so the 2s poll does not re-check files the user just unchecked. The
    list is keyboard-navigable: arrows move the active row and load its diff. Staging is
@@ -327,7 +348,21 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    resolving at all, in which case nothing can prove it was pushed either. Discarding a
    never-committed file moves it to the OS trash rather than deleting it, and the
    confirmation must say so.
-11. **Relative dates** — commit timestamps arrive as ISO-8601 strings
+11. **Embedded-terminal key ownership** — while the terminal holds keyboard focus the shell
+   owns every key, with exactly one exception: the chord that toggles the panel, which stays
+   reachable from *inside* the panel. Nothing else the app binds may fire from there —
+   `Ctrl+P` is readline's previous-history, `Ctrl+R` its reverse search, `Escape` vim's
+   normal mode. The collision is Tauri-shaped, because its chords are `Ctrl`-or-`Cmd` and
+   the shell's modifier is `Ctrl` too: `xterm`'s `attachCustomKeyEventHandler` releases the
+   toggle and swallows the rest, and the window-level handlers re-check each event's origin
+   (`utils/keyboard.ts`) since xterm's input sink is a `<textarea>` and would otherwise pass
+   for a text field. The **native** client has no collision to resolve — its chords are ⌘,
+   the shell's are ⌃ — and AppKit key equivalents precede the first responder, so the
+   toggle already works from inside SwiftTerm. The Tauri client accepts either modifier, so
+   it swallows both; making its modifier follow the platform (⌘ on macOS, `Ctrl` elsewhere)
+   would narrow that to the keys the shell actually wants, and is filed in ROADMAP with the
+   chords it affects.
+12. **Relative dates** — commit timestamps arrive as ISO-8601 strings
    (`author_date`/`committer_date`, e.g. `2026-08-12T14:03:11+0200`; the core is
    deliberately chrono-free) and each frontend renders them as relative ("5 minutes
    ago"), recomputed on every refresh. Whether an idle list also re-ticks between
@@ -348,8 +383,8 @@ as `ParsedDiff.html`/`highlight_diff` spans for the Svelte `{@html}` renderer.
   (the exact HTML it gets today, unchanged) or built in Svelte from the structured layer.
 - **SwiftUI**: maps `TokenClass` → colour/traits (the mirror of `css_class`) into an
   `AttributedString`.
-- **Open decision** (plan §7.1): where the HTML collapse lives for Tauri — the wire is
-  structured either way.
+- **Open decision** (parity plan, DF-3): where the HTML collapse lives for Tauri — the wire
+  is structured either way.
 
 ## 8. Platform presentation mapping (intentional divergences)
 
@@ -373,8 +408,8 @@ every deliberate difference here.
 | Open-diff freshness | stale until reselect — the poll never reloads the open diff (adopting `stat_stamp` the same way would fix it; ROADMAP) | reloads within a poll tick: `stat_stamp` makes the status comparison see content edits, `workingTreeEpoch` re-keys the load, the equality skip absorbs no-ops |
 | Background cadence while unfocused/hidden (§6.1) | no explicit pause and no visibility term: the status poll is a flat 2 s `setInterval` and auto-fetch a flat `fetch_interval_ms` one, so the hidden-window cadence is whatever the host WebView's timer throttling makes it. `document.hidden` is read only to *trigger* the on-activation resync | the active repo never stops, and the cadence is explicit: status poll 2 s frontmost / 10 s visible-unfocused / 30 s hidden, auto-fetch interval ×3 while hidden, only the multi-repo sweeps pausing when inactive (`BackgroundSchedulingPolicy`), with an App Nap assertion held while a repo is open so the timers are not coalesced away |
 | File-list selection & keyboard (§6.4) | shift-click extends a multi-row selection (a separate anchor for the checkbox column, Finder/Gmail semantics), Space toggles the focused row's checkbox and bulk-toggles a multi-selection, Home/End jump to first/last | single-selection `List`: arrow keys move the active row, and there is no range selection, Space toggle, or Home/End |
-| History paging (§6.8) | 50-commit pages into a bidirectional **sliding window** capped at 500: scrolling past either end drops from the far end and `windowStartOffset` tracks the absolute index of row 0, with `scrollTop` compensated so the visible row stays pinned | 100-commit pages **appended** without dropping, de-duplicated by sha against what is already loaded; only a *refresh* is capped, at the same 500 |
-| Relative-date ticking (§6.11) | a 10 s tick re-renders the visible rows, skipped while the History pane is hidden or the window is backgrounded, so an open list never goes stale | formatted once per refresh and not re-ticked; the 2 s poll is what moves the labels on |
+| History paging (§6.8) | 50-commit pages into a bidirectional **sliding window** capped at 500: scrolling past either end drops from the far end and `windowStartOffset` tracks the absolute index of row 0, with `scrollTop` compensated so the visible row stays pinned. A HEAD move *replaces* the window with a fresh page 1 instead of sliding it, which is a distinct signal (`log.resetSeq`) precisely so it is not compensated — the list scrolls to the new HEAD | 100-commit pages **appended** without dropping, de-duplicated by sha against what is already loaded; only a *refresh* is capped, at the same 500 |
+| Relative-date ticking (§6.12) | a 10 s tick re-renders the visible rows, skipped while the History pane is hidden or the window is backgrounded, so an open list never goes stale | formatted once per refresh and not re-ticked; the 2 s poll is what moves the labels on |
 | Side-by-side diff (`side_by_side_diff`) | split layout toggle, honoured by `DiffViewer` | not implemented — unified only; a layout feature awaiting its own design pass (ROADMAP), the config field crosses saves untouched |
 
 ## 9. Non-goals / intentionally absent

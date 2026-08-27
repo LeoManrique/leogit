@@ -128,7 +128,8 @@
   function linePrefix(line: DiffLine): string {
     if (line.line_type === 'Add') return '+'
     if (line.line_type === 'Delete') return '-'
-    if (line.line_type === 'NoNewline') return '\\'
+    // No prefix for `\ No newline at end of file`: core keeps that marker's
+    // own leading backslash in `content`, so adding one renders it twice.
     if (line.line_type === 'Hunk') return '@'
     return ' '
   }

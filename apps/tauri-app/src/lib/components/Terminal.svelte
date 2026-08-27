@@ -101,6 +101,15 @@
     fitAddon = new FitAddon()
     term.loadAddon(fitAddon)
     term.loadAddon(new WebLinksAddon())
+
+    // Everything the shell could want goes to the shell — Ctrl+P is
+    // readline's previous-history, Escape is vim's normal mode. The panel's
+    // own toggle is the single exception: returning false leaves the event
+    // unhandled here so it reaches the window listener that owns it. The app's
+    // global handlers make the same cut from their side (`utils/keyboard.ts`),
+    // so each of these keys has exactly one owner at any moment.
+    term.attachCustomKeyEventHandler((e) => !((e.ctrlKey || e.metaKey) && e.key === '`'))
+
     term.open(container)
 
     // Defer fit() until the container has its real size.
