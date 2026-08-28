@@ -1,29 +1,40 @@
 <script lang="ts">
-  import type { FileEntry } from '$lib/api/commands'
   import { autofocus } from '$lib/actions/autofocus'
 
   interface Props {
-    /** Embedded-repo entries included in this commit. */
-    repos: FileEntry[]
-    /** Name of the outer repo the gitlink lands in (for the warning copy). */
-    outerRepo: string
-    isCommitting: boolean
-    onConfirm: () => void
+    /** The branch whose commits are being brought in. */
+    source: string
+    /** The branch they land on — always the checked-out one. */
+    target: string
+    /**
+     * How many commits the merge would bring in, or null while the count is
+     * still being read. Null renders no line at all rather than a "0" that
+     * would then have to be taken back.
+     */
+    commitCount: number | null
+    isMerging: boolean
+    onMerge: () => void
+    onSquashMerge: () => void
     onCancel: () => void
   }
 
-  let { repos, outerRepo, isCommitting, onConfirm, onCancel }: Props = $props()
+  let { source, target, commitCount, isMerging, onMerge, onSquashMerge, onCancel }: Props = $props()
 
-  const many = $derived(repos.length > 1)
-
-  // Every dismissal is the same decision, so they answer to one guard: the
-  // commit this dialog is a pause inside cannot be called off once it starts,
-  // and a backdrop click that closed the dialog anyway left the composer live
-  // over a commit still running underneath it.
-  const canCancel = $derived(!isCommitting)
+  /*
+    Nothing to bring in. GitHub Desktop says so and disables its primary rather
+    than offering a merge that would be a no-op; the native client used to
+    print "Brings in 0 commits." beside a live Merge button, which invites a
+    click that does nothing and then reports success.
+  */
+  const upToDate = $derived(commitCount === 0)
 
   function handleKeyDown(e: KeyboardEvent) {
-    if (e.key === 'Escape' && canCancel) onCancel()
+    if (e.key === 'Escape' && !isMerging) {
+      // Answered here rather than by the window handler, which would close the
+      // branch popover underneath instead of this dialog.
+      e.stopPropagation()
+      onCancel()
+    }
   }
 </script>
 
@@ -31,38 +42,41 @@
   class="overlay"
   role="presentation"
   onclick={(e) => {
-    if (e.target === e.currentTarget && canCancel) onCancel()
+    if (e.target === e.currentTarget && !isMerging) onCancel()
   }}
   onkeydown={handleKeyDown}
 >
-  <!-- Focused on mount so Escape reaches the handler above: it listens on
-       this overlay, and without focus inside, the key is raised somewhere
-       else entirely and the dialog cannot be dismissed by keyboard. -->
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1" use:autofocus>
     <div class="modal-header">
-      <h2>Commit nested {many ? 'repositories' : 'repository'} as a link?</h2>
+      <h2>Merge Branch</h2>
     </div>
     <div class="modal-body">
-      <ul class="repo-list">
-        {#each repos as repo (repo.path)}
-          <li><code>{repo.display_name}</code></li>
-        {/each}
-      </ul>
       <p>
-        {many ? 'These folders are their own Git repositories' : 'This folder is its own Git repository'}.
-        {many ? 'They’ll' : 'It’ll'} be committed as a
-        <strong>link</strong> to the current commit — the {many ? 'folders’' : 'folder’s'} files
-        won’t be copied into <code>{outerRepo}</code>.
+        Merge <code>{source}</code> into <code>{target}</code>.
       </p>
+      {#if upToDate}
+        <p class="muted">
+          <code>{target}</code> already contains everything on <code>{source}</code>. There is
+          nothing to merge.
+        </p>
+      {:else if commitCount !== null}
+        <p class="muted">
+          Brings in {commitCount}
+          {commitCount === 1 ? 'commit' : 'commits'}.
+        </p>
+      {/if}
       <p class="muted">
-        Anyone cloning <code>{outerRepo}</code> won’t get {many ? 'those files' : 'those files'} unless
-        {many ? 'each is' : 'it’s'} set up as a submodule.
+        <strong>Squash &amp; Merge</strong> replaces them with a single commit on
+        <code>{target}</code>.
       </p>
     </div>
     <div class="modal-footer">
-      <button class="btn-secondary" onclick={onCancel} disabled={!canCancel}>Cancel</button>
-      <button class="btn-primary" onclick={onConfirm} disabled={isCommitting}>
-        {isCommitting ? 'Committing…' : 'Commit as link'}
+      <button class="btn-secondary" onclick={onCancel} disabled={isMerging}>Cancel</button>
+      <button class="btn-secondary" onclick={onSquashMerge} disabled={isMerging || upToDate}>
+        Squash &amp; Merge
+      </button>
+      <button class="btn-primary" onclick={onMerge} disabled={isMerging || upToDate}>
+        {isMerging ? 'Merging…' : 'Merge'}
       </button>
     </div>
   </div>
@@ -89,6 +103,10 @@
     flex-direction: column;
     box-shadow: var(--shadow-popover);
     overflow: hidden;
+  }
+
+  .modal:focus {
+    outline: none;
   }
 
   .modal-header {
@@ -121,29 +139,17 @@
     color: var(--text-secondary);
   }
 
-  .modal-body strong {
-    font-weight: 600;
-  }
-
-  .repo-list {
-    margin: 0;
-    padding-left: 18px;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .repo-list li {
-    font-size: 13px;
-    color: var(--text-primary);
-  }
-
-  .modal-body code,
-  .repo-list code {
+  .modal-body code {
     font-family: var(--font-mono);
     font-size: 12px;
+    font-weight: 500;
     color: var(--text-primary);
     background: transparent;
+  }
+
+  .modal-body strong {
+    font-weight: 600;
+    color: var(--text-primary);
   }
 
   .modal-footer {
@@ -173,8 +179,8 @@
 
   .btn-primary {
     background: var(--border-active);
-    color: #ffffff;
     border-color: var(--border-active);
+    color: #ffffff;
   }
 
   .btn-primary:hover:not(:disabled) {
@@ -186,9 +192,5 @@
   .btn-primary:disabled {
     opacity: 0.5;
     cursor: not-allowed;
-  }
-  /* Focused on mount for Escape; the ring would be chrome nobody asked for. */
-  .modal:focus {
-    outline: none;
   }
 </style>

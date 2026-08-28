@@ -69,7 +69,10 @@ struct BranchMenu: View {
             Section {
                 Button("New Branch…") { isCreating = true }
 
-                if !isDetached && !mergeCandidates.isEmpty {
+                // Hidden mid-merge: git refuses a second merge over an
+                // unresolved one, so offering the submenu there is an
+                // invitation to a refusal. Abort takes its place below.
+                if !isDetached && !isMerging && !mergeCandidates.isEmpty {
                     Menu("Merge into “\(currentBranch)”…") {
                         ForEach(mergeCandidates) { branch in
                             Button(branch.name) {
@@ -301,6 +304,21 @@ private struct MergeSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var commitCount: Int32?
 
+    /// Nothing to bring in. GitHub Desktop says so and takes the primary away
+    /// rather than offering a merge that would be a no-op — where this sheet
+    /// used to print "Brings in 0 commits." beside a live Merge button, which
+    /// invites a click that does nothing and then reports success.
+    private var isUpToDate: Bool { commitCount == 0 }
+
+    /// The count line, or nil while the count is still being read — a separate
+    /// property because a nested ternary inside a `Text` interpolation is what
+    /// sends SwiftUI's type-checker into a crawl.
+    private var previewText: String? {
+        guard let commitCount else { return nil }
+        if isUpToDate { return "“\(target)” is already up to date with “\(source)”." }
+        return commitCount == 1 ? "Brings in 1 commit." : "Brings in \(commitCount) commits."
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Merge Branch")
@@ -308,8 +326,8 @@ private struct MergeSheet: View {
 
             Text("Merge \(Text(source).fontWeight(.semibold)) into \(Text(target).fontWeight(.semibold)).")
 
-            if let commitCount {
-                Text(commitCount == 1 ? "Brings in 1 commit." : "Brings in \(commitCount) commits.")
+            if let previewText {
+                Text(previewText)
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -323,11 +341,11 @@ private struct MergeSheet: View {
                 Button("Cancel", role: .cancel) { dismiss() }
                     .keyboardShortcut(.cancelAction)
                 Button("Squash & Merge") { run(squash: true) }
-                    .disabled(store.isBusy)
+                    .disabled(store.isBusy || isUpToDate)
                 Button("Merge") { run(squash: false) }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(store.isBusy)
+                    .disabled(store.isBusy || isUpToDate)
             }
         }
         .padding(20)

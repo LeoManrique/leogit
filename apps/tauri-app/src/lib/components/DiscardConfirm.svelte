@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { DiscardPlan, FileEntry } from '$lib/api/commands'
+  import { autofocus } from '$lib/actions/autofocus'
 
   interface Props {
     files: FileEntry[]
@@ -59,7 +60,10 @@
   }}
   onkeydown={handleKeyDown}
 >
-  <div class="modal" role="dialog" aria-modal="true" tabindex="-1">
+  <!-- Focused on mount so Escape reaches the handler above: it listens on
+       this overlay, and without focus inside, the key is raised somewhere
+       else entirely and the dialog cannot be dismissed by keyboard. -->
+  <div class="modal" role="dialog" aria-modal="true" tabindex="-1" use:autofocus>
     <div class="modal-header">
       <h2>Discard changes</h2>
     </div>
@@ -185,5 +189,9 @@
   .btn-danger:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+  /* Focused on mount for Escape; the ring would be chrome nobody asked for. */
+  .modal:focus {
+    outline: none;
   }
 </style>

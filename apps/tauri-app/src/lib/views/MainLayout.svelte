@@ -33,6 +33,7 @@
     type DiscardPlan,
     type EmptyDiffReason,
     type LaunchTarget,
+    type MergeResult,
     type ParsedDiff,
   } from '$lib/api/commands'
   import * as fileActions from '$lib/services/fileActions'
@@ -44,6 +45,8 @@
   import FileList from '$lib/components/FileList.svelte'
   import DiscardConfirm from '$lib/components/DiscardConfirm.svelte'
   import CheckoutCommitConfirm from '$lib/components/CheckoutCommitConfirm.svelte'
+  import ConfirmDialog from '$lib/components/ConfirmDialog.svelte'
+  import MergeBranchDialog from '$lib/components/MergeBranchDialog.svelte'
   import CommitMessage from '$lib/components/CommitMessage.svelte'
   import CommitList from '$lib/components/CommitList.svelte'
   import DiffViewer from '$lib/components/DiffViewer.svelte'
@@ -53,7 +56,6 @@
   import BranchDropdown from '$lib/views/BranchDropdown.svelte'
   import RepoDropdown from '$lib/views/RepoDropdown.svelte'
   import CloneOverlay from '$lib/views/CloneOverlay.svelte'
-  import MergeOverlay from '$lib/views/MergeOverlay.svelte'
   import SettingsOverlay from '$lib/views/SettingsOverlay.svelte'
   import HelpOverlay from '$lib/views/HelpOverlay.svelte'
   import ErrorModal from '$lib/components/ErrorModal.svelte'
@@ -75,8 +77,6 @@
   let showBranches = $state(false)
   let showSettings = $state(false)
   let showHelp = $state(false)
-  let showMerge = $state(false)
-  let mergeTarget = $state<string>('')
 
   // The mounted composer, so the window-level key handler can reach ⌘↩ / ⌘G
   // without the fields owning them (CommitMessage explains why).
@@ -1168,26 +1168,6 @@
   let discardPlan = $state<DiscardPlan | null>(null)
   let isDiscarding = $state(false)
 
-  /**
-   * Anything on top of the repo view — the overlays, the confirmations, the
-   * error modal. What the app's own chords check before firing: the question a
-   * dialog is asking is the only one on screen, and answering it with a ⌘↩ that
-   * means "commit" would answer something else entirely. One list, declared
-   * where the last of its inputs is; SH-4 turns it into a real topmost-closing
-   * stack, and until then a new overlay joins here or joins nothing.
-   */
-  const modalOpen = $derived(
-    showRepos ||
-      showClone ||
-      showBranches ||
-      showSettings ||
-      showHelp ||
-      showMerge ||
-      discardTarget !== null ||
-      checkoutTarget !== null ||
-      $repoState.error !== undefined,
-  )
-
   // Run a side-effect-only file action (copy / reveal / open). These hand the
   // file to another program and change nothing here, so a failure is reported
   // and stepped over: taking the window because Finder wouldn't open is a
@@ -1350,79 +1330,249 @@
     void rediscoverRepos()
   }
 
-  async function handleSwitchBranch(branch: string) {
+  // ---- Branches & merge ----------------------------------------------------
+
+  /**
+   * The branch operation in flight, or null.
+   *
+   * One at a time. Two checkouts issued by a double-click contend on
+   * `index.lock`, and until now nothing here said a slow one was still running.
+   * Every handler below refuses to start a second, and **a refusal is never
+   * reported as a success**: each returns without dismissing the surface that
+   * asked, so no dialog closes as though the work had been done.
+   */
+  type BranchOp = 'switch' | 'create' | 'delete' | 'merge' | 'abort'
+  let branchOp = $state<BranchOp | null>(null)
+
+  /** Source branch of the pending merge dialog; null when it is closed. */
+  let mergeSource = $state<string | null>(null)
+  /** How many commits that merge would bring in — null until the count lands. */
+  let mergeCommitCount = $state<number | null>(null)
+  /** Branch pending a delete confirmation; null when it is closed. */
+  let deleteTarget = $state<string | null>(null)
+  let showAbortMerge = $state(false)
+
+  /**
+   * Open the branch popover, re-reading the list on the way.
+   *
+   * The list used to be reloaded at five call sites, none of them this one, so
+   * a branch created in the embedded terminal could stay invisible for the
+   * whole session — the status poll only notices the ones that move HEAD. One
+   * `for-each-ref` at the moment of intent is what the native menu does.
+   */
+  function openBranches(): void {
+    showBranches = true
+    void refreshBranches()
+  }
+
+  /**
+   * Post-op reload for anything the branch menu does that moves HEAD — a
+   * switch, a create-and-switch, a merge, an abort. Status, history and the
+   * branch list together.
+   *
+   * These handlers used to call `refreshStatus()` and then `handleCommitted()`,
+   * which reads status a second time and throws the first read away.
+   */
+  async function reloadAfterBranchChange(): Promise<void> {
+    // Amend targets HEAD, and HEAD just moved — quite possibly onto a branch
+    // where the commit being amended doesn't exist at all.
+    repoState.update((s) => ({ ...s, commitToAmend: null }))
+    await Promise.all([reloadAfterHeadMove({ silent: true }), refreshBranches()])
+  }
+
+  async function handleSwitchBranch(branch: string): Promise<void> {
     const repoPath = $appState.repoPath
-    if (!repoPath) return
+    if (!repoPath || branchOp) return
+    // Checking out the branch you are already on spends a checkout and a full
+    // refresh chain to arrive exactly where you started.
+    if (branch === $repoState.status.branch) return
+    branchOp = 'switch'
     try {
       await gitApi.switchBranch(repoPath, branch)
       showBranches = false
-      await refreshStatus()
-      await refreshBranches()
-      await handleCommitted()
+      await reloadAfterBranchChange()
     } catch (error) {
-      reportActionError(error)
+      // A branch change is FRONTEND §6.13's own example of a failure the user
+      // is waiting on: the popover closes and the modal says why it didn't
+      // happen, with the same attempt one click away.
+      showBranches = false
+      reportActionError(error, () => void handleSwitchBranch(branch))
+    } finally {
+      branchOp = null
     }
   }
 
-  async function handleCreateBranch(name: string) {
+  /**
+   * Create a branch and land on it. Resolves to the failure text rather than
+   * raising a modal: the dropdown's form keeps the typed name and states the
+   * refusal under the field, because the field is where the fix is
+   * (FRONTEND §6.13). It used to clear the name *before* the outcome and put
+   * the error in a modal over a closed dropdown — so a rejected name had to be
+   * retyped from memory.
+   */
+  async function handleCreateBranch(name: string): Promise<string | undefined> {
     const repoPath = $appState.repoPath
-    if (!repoPath) return
+    if (!repoPath) return 'No repository is open.'
+    if (branchOp) return 'Another branch operation is still running.'
+    branchOp = 'create'
     try {
       await gitApi.createBranch(repoPath, name, '')
       await gitApi.switchBranch(repoPath, name)
       showBranches = false
-      await refreshStatus()
-      await refreshBranches()
-      await handleCommitted()
+      await reloadAfterBranchChange()
+      return undefined
     } catch (error) {
-      reportActionError(error)
+      return String(error)
+    } finally {
+      branchOp = null
     }
   }
 
-  async function handleDeleteBranch(name: string) {
+  function requestDeleteBranch(name: string): void {
+    showBranches = false
+    deleteTarget = name
+  }
+
+  async function deleteBranch(name: string): Promise<void> {
     const repoPath = $appState.repoPath
-    if (!repoPath) return
+    if (!repoPath || branchOp) return
+    branchOp = 'delete'
     try {
       await gitApi.deleteBranch(repoPath, name)
+      // HEAD cannot move: git refuses to delete the branch you are on, and the
+      // dropdown never offers it. Only the list changed.
       await refreshBranches()
+      deleteTarget = null
     } catch (error) {
-      reportActionError(error)
+      deleteTarget = null
+      reportActionError(error, () => void deleteBranch(name))
+    } finally {
+      branchOp = null
     }
   }
 
-  async function handleMerge() {
+  /**
+   * Open the merge dialog for `source` → the checked-out branch, and start
+   * reading how many commits it would bring in.
+   *
+   * `count_commits_to_merge` counts what its argument holds that HEAD does not
+   * — the commits this merge brings in. Its parameter is named `targetBranch`,
+   * which reads backwards here: the *source* is what it wants.
+   */
+  function requestMerge(source: string): void {
+    showBranches = false
+    mergeSource = source
+    mergeCommitCount = null
     const repoPath = $appState.repoPath
-    if (!repoPath || !mergeTarget) return
+    if (!repoPath) return
+    gitApi
+      .countCommitsToMerge(repoPath, source)
+      .then((count) => {
+        // Ignore an answer about a dialog the user already dismissed.
+        if (mergeSource === source) mergeCommitCount = count
+      })
+      .catch(() => {})
+  }
+
+  /**
+   * What to say about a merge git refused. `error_message` carries git's own
+   * output, which already names the conflicted paths; the conflict list is the
+   * fallback for a refusal that printed nothing useful.
+   */
+  function mergeFailureText(result: MergeResult, source: string): string {
+    if (result.error_message) return result.error_message
+    if (result.conflicts.length > 0) {
+      const n = result.conflicts.length
+      return `Merging ${source} left ${n} conflicted ${n === 1 ? 'file' : 'files'}:\n${result.conflicts.join('\n')}`
+    }
+    return `Could not merge ${source}.`
+  }
+
+  /**
+   * Run the merge the dialog is showing. `squash` stages the result instead of
+   * committing it, so it takes a second call with git's generated message —
+   * the same two-step the native client runs.
+   *
+   * A refusal closes the dialog and takes the modal rather than staying inline:
+   * unlike a rejected publish name, a conflicted merge is not fixed by pressing
+   * the button again. It has already changed the repository, and the work
+   * continues in the Changes tab, where the conflicted files are waiting.
+   */
+  async function runMerge(squash: boolean): Promise<void> {
+    const repoPath = $appState.repoPath
+    const source = mergeSource
+    if (!repoPath || !source || branchOp) return
+    branchOp = 'merge'
     try {
-      const result = await gitApi.mergeBranch(repoPath, mergeTarget)
-      if (!result.success && result.error_message) {
-        repoState.update((s) => ({ ...s, error: result.error_message }))
-      }
-      showMerge = false
-      await refreshStatus()
-      await handleCommitted()
+      const result = squash
+        ? await gitApi.mergeSquash(repoPath, source)
+        : await gitApi.mergeBranch(repoPath, source)
+      if (result.success && squash) await gitApi.commitSquashMerge(repoPath)
+      mergeSource = null
+      // Either outcome moved the working tree — a clean merge advanced HEAD, a
+      // conflicted one left MERGE_HEAD and conflicted files behind — so the
+      // reload happens before the failure is reported.
+      await reloadAfterBranchChange()
+      if (!result.success) reportActionError(mergeFailureText(result, source))
     } catch (error) {
+      mergeSource = null
+      await reloadAfterBranchChange()
       reportActionError(error)
+    } finally {
+      branchOp = null
     }
   }
 
-  async function handleSquashMerge() {
+  function requestAbortMerge(): void {
+    showBranches = false
+    showAbortMerge = true
+  }
+
+  /**
+   * Abort the merge in progress. Until now this client had no route to one at
+   * all: a merge started in the embedded terminal showed `MERGING` in the
+   * header with no way out of it that wasn't the terminal again.
+   */
+  async function abortMerge(): Promise<void> {
     const repoPath = $appState.repoPath
-    if (!repoPath || !mergeTarget) return
+    if (!repoPath || branchOp) return
+    branchOp = 'abort'
     try {
-      const result = await gitApi.mergeSquash(repoPath, mergeTarget)
-      if (result.success) {
-        await gitApi.commitSquashMerge(repoPath)
-      } else if (result.error_message) {
-        repoState.update((s) => ({ ...s, error: result.error_message }))
-      }
-      showMerge = false
-      await refreshStatus()
-      await handleCommitted()
+      await gitApi.mergeAbort(repoPath)
+      showAbortMerge = false
+      await reloadAfterBranchChange()
     } catch (error) {
-      reportActionError(error)
+      showAbortMerge = false
+      // A failed abort may still have unwound part of the merge, so reload
+      // before saying so.
+      await reloadAfterBranchChange()
+      reportActionError(error, () => void abortMerge())
+    } finally {
+      branchOp = null
     }
   }
+
+  /**
+   * Anything on top of the repo view — the overlays, the confirmations, the
+   * error modal. What the app's own chords check before firing: the question a
+   * dialog is asking is the only one on screen, and answering it with a ⌘↩ that
+   * means "commit" would answer something else entirely. One list, declared
+   * where the last of its inputs is; SH-4 turns it into a real topmost-closing
+   * stack, and until then a new overlay joins here or joins nothing.
+   */
+  const modalOpen = $derived(
+    showRepos ||
+      showClone ||
+      showBranches ||
+      showSettings ||
+      showHelp ||
+      mergeSource !== null ||
+      deleteTarget !== null ||
+      showAbortMerge ||
+      discardTarget !== null ||
+      checkoutTarget !== null ||
+      $repoState.error !== undefined,
+  )
 
   // Retry closes the modal first: the second attempt reports its own outcome,
   // and leaving the first failure on screen while it runs would make a success
@@ -1496,12 +1646,15 @@
       // Escape never dismisses a clone in flight — hiding the dialog wouldn't
       // cancel the clone, just orphan its progress bar and eventual error.
       const cloneDismissable = showClone && !(cloneOverlay?.isBusy() ?? false)
-      if (showRepos || cloneDismissable || showBranches || showSettings || showHelp || showMerge) {
+      // The branch dialogs answer Escape themselves and stop it here: they sit
+      // *on top of* this list, and the popover they came from is already
+      // closed, so letting this run would dismiss the wrong thing.
+      if (showRepos || cloneDismissable || showBranches || showSettings || showHelp) {
         e.preventDefault()
         // Escape closes Settings the same way its own close button does — a
         // scan-path edit must re-walk however the dialog was dismissed.
         if (showSettings) closeSettings()
-        showRepos = showBranches = showHelp = showMerge = false
+        showRepos = showBranches = showHelp = false
         if (cloneDismissable) showClone = false
         return
       }
@@ -1538,7 +1691,8 @@
       toggleTerminalMinimize()
     } else if (meta && e.key === 'b') {
       e.preventDefault()
-      showBranches = !showBranches
+      if (showBranches) showBranches = false
+      else openBranches()
     } else if (e.key === '?' && !meta) {
       e.preventDefault()
       showHelp = !showHelp
@@ -1737,7 +1891,7 @@
   <div class="main-content">
     <Header
       onOpenRepos={openRepos}
-      onOpenBranches={() => (showBranches = true)}
+      onOpenBranches={openBranches}
       onOpenSettings={() => (showSettings = true)}
       onOpenHelp={() => (showHelp = true)}
       onTransferFinished={reloadAfterHeadMove}
@@ -2058,22 +2212,72 @@
         <BranchDropdown
           branches={$repoState.branches}
           currentBranch={$repoState.status.branch}
+          detached={$repoState.status.detached}
+          merging={$repoState.status.isMerging}
+          busy={branchOp !== null}
           onSwitch={handleSwitchBranch}
           onCreate={handleCreateBranch}
-          onDelete={handleDeleteBranch}
+          onRequestMerge={requestMerge}
+          onRequestDelete={requestDeleteBranch}
+          onRequestAbortMerge={requestAbortMerge}
         />
       </div>
     </div>
   {/if}
 
-  {#if showMerge}
-    <MergeOverlay
-      sourceBranch={mergeTarget}
-      targetBranch={$repoState.status.branch}
-      onMerge={handleMerge}
-      onSquashMerge={handleSquashMerge}
-      onAbort={() => (showMerge = false)}
+  {#if mergeSource}
+    <MergeBranchDialog
+      source={mergeSource}
+      target={$repoState.status.branch}
+      commitCount={mergeCommitCount}
+      isMerging={branchOp === 'merge'}
+      onMerge={() => void runMerge(false)}
+      onSquashMerge={() => void runMerge(true)}
+      onCancel={() => {
+        if (branchOp !== 'merge') mergeSource = null
+      }}
     />
+  {/if}
+
+  {#if deleteTarget}
+    {@const branchName = deleteTarget}
+    <ConfirmDialog
+      title="Delete branch?"
+      confirmLabel="Delete"
+      busyLabel="Deleting…"
+      isBusy={branchOp === 'delete'}
+      destructive
+      onConfirm={() => void deleteBranch(branchName)}
+      onCancel={() => {
+        if (branchOp !== 'delete') deleteTarget = null
+      }}
+    >
+      {#snippet body()}
+        <p>Are you sure you want to delete <code>{branchName}</code>?</p>
+        <p class="muted">Unmerged commits are lost.</p>
+      {/snippet}
+    </ConfirmDialog>
+  {/if}
+
+  {#if showAbortMerge}
+    <ConfirmDialog
+      title="Abort merge?"
+      confirmLabel="Abort merge"
+      busyLabel="Aborting…"
+      isBusy={branchOp === 'abort'}
+      destructive
+      onConfirm={() => void abortMerge()}
+      onCancel={() => {
+        if (branchOp !== 'abort') showAbortMerge = false
+      }}
+    >
+      {#snippet body()}
+        <p>Abort the merge in progress?</p>
+        <p class="muted">
+          Conflict resolutions are discarded and the working tree returns to its pre-merge state.
+        </p>
+      {/snippet}
+    </ConfirmDialog>
   {/if}
 
   <SettingsOverlay isOpen={showSettings} onClose={closeSettings} />

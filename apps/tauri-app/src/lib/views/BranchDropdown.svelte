@@ -1,163 +1,384 @@
 <script lang="ts">
   import type { BranchInfo } from '$lib/api/commands'
   import { autofocus } from '$lib/actions/autofocus'
+  import { nextActiveIndex, scrollIntoViewWhenActive } from '$lib/actions/listNavigation'
+  import ContextMenu, { type ContextMenuItem } from '$lib/components/ContextMenu.svelte'
 
   interface Props {
     branches: BranchInfo[]
     currentBranch: string
+    /** HEAD is on a commit, not a branch: there is no target to merge into. */
+    detached: boolean
+    /** A merge is in progress — the only branch action that makes sense is
+     *  aborting it. */
+    merging: boolean
+    /** A branch operation is in flight; every action here locks until it ends. */
+    busy: boolean
     onSwitch: (branch: string) => void
-    onCreate: (name: string) => void
-    onDelete: (name: string) => void
+    /**
+     * Create and switch. Resolves to core's failure text, or undefined on
+     * success: the form keeps the typed name and states the failure under the
+     * field, because the field is where the fix is (FRONTEND §6.13).
+     */
+    onCreate: (name: string) => Promise<string | undefined>
+    /** Open the merge dialog for `source` → the current branch. */
+    onRequestMerge: (source: string) => void
+    /** Open the delete confirmation for a local branch. */
+    onRequestDelete: (name: string) => void
+    /** Open the abort-merge confirmation. */
+    onRequestAbortMerge: () => void
   }
 
-  let { branches = [], currentBranch = '', onSwitch, onCreate, onDelete }: Props = $props()
+  let {
+    branches = [],
+    currentBranch = '',
+    detached = false,
+    merging = false,
+    busy = false,
+    onSwitch,
+    onCreate,
+    onRequestMerge,
+    onRequestDelete,
+    onRequestAbortMerge,
+  }: Props = $props()
 
-  type Mode = 'browse' | 'create' | 'delete'
+  /*
+    The popover is the branch *menu*, not just a switcher — the same four
+    actions the native client's menu carries. Two of them need a branch as an
+    argument, and rather than inventing a second list for each, they put this
+    one into a picking mode: the header says which question is being asked and
+    the rows answer it. That is what the native submenus are, and it means the
+    keyboard cursor, the filter and the row rendering are written once.
+  */
+  type Mode = 'browse' | 'create' | 'merge' | 'delete'
 
   let mode = $state<Mode>('browse')
+  const isPicking = $derived(mode === 'merge' || mode === 'delete')
+
+  let filter = $state('')
   let newBranchName = $state('')
-  let deleteBranchName = $state<string | null>(null)
-
-  function handleSwitch(branch: string) {
-    onSwitch(branch)
-    mode = 'browse'
-  }
-
-  function handleCreateClick() {
-    mode = 'create'
-    newBranchName = ''
-  }
-
-  function handleCreateSubmit() {
-    if (newBranchName.trim()) {
-      onCreate(newBranchName.trim())
-      newBranchName = ''
-      mode = 'browse'
-    }
-  }
-
-  function handleDeleteClick(branchName: string) {
-    deleteBranchName = branchName
-    mode = 'delete'
-  }
-
-  function handleDeleteConfirm() {
-    if (deleteBranchName) {
-      onDelete(deleteBranchName)
-      deleteBranchName = null
-      mode = 'browse'
-    }
-  }
-
-  function handleCancel() {
-    mode = 'browse'
-    newBranchName = ''
-    deleteBranchName = null
-  }
-
-  function handleKeyDown(e: KeyboardEvent) {
-    if (e.key === 'Enter') {
-      if (mode === 'create') {
-        handleCreateSubmit()
-      }
-    } else if (e.key === 'Escape') {
-      handleCancel()
-    }
-  }
+  /** A failed create, stated under the field with the name still in it. */
+  let createError = $state<string | undefined>(undefined)
+  let rowMenu = $state<{ branch: BranchInfo; x: number; y: number } | null>(null)
 
   const localBranches = $derived(branches.filter((b) => !b.is_remote))
-  const remoteBranches = $derived(branches.filter((b) => b.is_remote))
+
+  /** Anything but the branch you are on can be merged into it, remotes included. */
+  const mergeCandidates = $derived(branches.filter((b) => b.name !== currentBranch))
+  /** Only local, non-current branches are deletable. */
+  const deleteCandidates = $derived(localBranches.filter((b) => b.name !== currentBranch))
+
+  const canMerge = $derived(!detached && !merging && mergeCandidates.length > 0)
+  const canDelete = $derived(deleteCandidates.length > 0)
+
+  const mergeHelp = $derived(
+    detached
+      ? 'Detached HEAD — check out a branch before merging into it'
+      : merging
+        ? 'Finish or abort the merge in progress first'
+        : mergeCandidates.length === 0
+          ? 'There is no other branch to merge from'
+          : `Merge another branch into ${currentBranch}`,
+  )
+
+  /*
+    Rows for the mode we are in, locals first so one flat index can carry the
+    keyboard cursor across both sections. Deliberately a plain case-insensitive
+    substring rather than core's repo matcher: that one is built for paths and
+    scan roots, and a branch name is short enough that a contiguous match is
+    the predictable answer.
+  */
+  const candidates = $derived(
+    mode === 'merge' ? mergeCandidates : mode === 'delete' ? deleteCandidates : branches,
+  )
+
+  const filtered = $derived.by(() => {
+    const q = filter.trim().toLowerCase()
+    const rows = q ? candidates.filter((b) => b.name.toLowerCase().includes(q)) : candidates
+    return [...rows].sort((a, b) => Number(a.is_remote) - Number(b.is_remote))
+  })
+
+  /** Where the "Remote Branches" heading goes; -1 when there are none. */
+  const firstRemoteIndex = $derived(filtered.findIndex((b) => b.is_remote))
+
+  // Keyboard cursor over the filtered rows, reset to the top match on every
+  // keystroke and on every mode change — the same rule the repo pickers use, so
+  // Return always acts on the row a query just put first.
+  let activeIndex = $state(0)
+  $effect(() => {
+    filter
+    mode
+    activeIndex = 0
+  })
+
+  function activate(branch: BranchInfo) {
+    if (busy) return
+    if (mode === 'merge') {
+      onRequestMerge(branch.name)
+    } else if (mode === 'delete') {
+      onRequestDelete(branch.name)
+    } else if (branch.name !== currentBranch) {
+      // The current branch is not a target: checking out the branch you are
+      // already on spends a checkout plus a full refresh chain to arrive
+      // exactly where you started.
+      onSwitch(branch.name)
+    }
+  }
+
+  function startPicking(next: 'merge' | 'delete') {
+    if (busy) return
+    filter = ''
+    mode = next
+  }
+
+  function backToBrowse() {
+    filter = ''
+    createError = undefined
+    mode = 'browse'
+  }
+
+  async function submitCreate() {
+    const name = newBranchName.trim()
+    if (!name || busy) return
+    createError = undefined
+    const failure = await onCreate(name)
+    // A rejected name — already taken, or not a legal ref — is corrected right
+    // here. Clearing the field before the outcome was how a typo cost the whole
+    // name and dropped the user back on a closed dropdown with a modal over it.
+    if (failure) {
+      createError = failure
+      return
+    }
+    newBranchName = ''
+    backToBrowse()
+  }
+
+  function handleListKeyDown(e: KeyboardEvent) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      activeIndex = nextActiveIndex(activeIndex, filtered.length, 1)
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      activeIndex = nextActiveIndex(activeIndex, filtered.length, -1)
+    } else if (e.key === 'Enter') {
+      e.preventDefault()
+      const branch = filtered[activeIndex]
+      if (branch) activate(branch)
+    } else if (e.key === 'Escape' && isPicking) {
+      // Escape backs out of the mode rather than closing the popover: the
+      // window handler would take the whole thing, which is one step too many
+      // when the user only meant to leave the sub-question.
+      e.preventDefault()
+      e.stopPropagation()
+      backToBrowse()
+    }
+  }
+
+  function handleCreateKeyDown(e: KeyboardEvent) {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      void submitCreate()
+    } else if (e.key === 'Escape') {
+      e.preventDefault()
+      e.stopPropagation()
+      backToBrowse()
+    }
+  }
+
+  /*
+    The row's own actions, for the pointer. The list already reaches them by
+    keyboard through the footer's picking modes; this is the mouse's short path
+    to the same two, and the natural home for a rename when that lands. It
+    replaces the hover-only ✕, which no keyboard user could see and which put
+    the one destructive action on the row's most casual gesture.
+  */
+  function openRowMenu(e: MouseEvent, branch: BranchInfo) {
+    // Suppressed in every mode, opened only in the one that has actions to
+    // offer — otherwise a right-click in a picking mode falls through to the
+    // webview's own menu, which knows nothing about branches.
+    e.preventDefault()
+    if (mode !== 'browse' || busy) return
+    rowMenu = { branch, x: e.clientX, y: e.clientY }
+  }
+
+  // Destructive first behind a divider, then the repository-changing pair —
+  // STYLE.md's ordering, so the item that can lose work never sits next to the
+  // one people click most. Items that don't apply to this row are disabled
+  // rather than dropped, so the menu keeps one shape.
+  const rowMenuItems = $derived.by<ContextMenuItem[]>(() => {
+    const branch = rowMenu?.branch
+    if (!branch) return []
+    const isCurrent = branch.name === currentBranch
+    return [
+      {
+        label: 'Delete…',
+        action: () => onRequestDelete(branch.name),
+        enabled: !branch.is_remote && !isCurrent,
+        destructive: true,
+      },
+      { separator: true, label: '', action: () => {} },
+      {
+        label: 'Switch to Branch',
+        action: () => onSwitch(branch.name),
+        enabled: !isCurrent,
+      },
+      {
+        label: `Merge into “${currentBranch}”…`,
+        action: () => onRequestMerge(branch.name),
+        enabled: canMerge && !isCurrent,
+      },
+    ]
+  })
 </script>
 
 <div class="branch-dropdown">
-  {#if mode === 'browse'}
-    <div class="branch-list">
-      <div class="section">
-        <h3 class="section-title">Local Branches</h3>
-        <div class="branches">
-          {#each localBranches as branch}
-            <div class="branch-item-wrapper">
-              <button
-                class="branch-item"
-                class:current={branch.name === currentBranch}
-                onclick={() => handleSwitch(branch.name)}
-              >
-                {#if branch.name === currentBranch}
-                  <span class="current-dot" aria-label="Current branch"></span>
-                {:else}
-                  <span class="current-dot-spacer" aria-hidden="true"></span>
-                {/if}
-                <span class="branch-name">{branch.name}</span>
-              </button>
-              {#if branch.name !== currentBranch}
-                <button class="delete-btn" onclick={() => handleDeleteClick(branch.name)} aria-label="Delete branch" title="Delete">
-                  <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
-                    <line x1="4" y1="4" x2="12" y2="12" />
-                    <line x1="12" y1="4" x2="4" y2="12" />
-                  </svg>
-                </button>
-              {/if}
-            </div>
-          {/each}
-        </div>
-      </div>
-
-      {#if remoteBranches.length > 0}
-        <div class="section">
-          <h3 class="section-title">Remote Branches</h3>
-          <div class="branches">
-            {#each remoteBranches as branch}
-              <button
-                class="branch-item"
-                class:remote={true}
-                onclick={() => handleSwitch(branch.name)}
-              >
-                <span class="current-dot-spacer" aria-hidden="true"></span>
-                <span class="branch-name">{branch.name}</span>
-              </button>
-            {/each}
-          </div>
-        </div>
-      {/if}
-
-      <div class="section-footer">
-        <button class="create-btn" onclick={handleCreateClick}>New branch…</button>
-      </div>
-    </div>
-  {:else if mode === 'create'}
+  {#if mode === 'create'}
     <div class="create-form">
       <h3>Create New Branch</h3>
       <input
         type="text"
-        class="branch-input"
+        class="text-input"
         placeholder="Branch name"
         bind:value={newBranchName}
-        onkeydown={handleKeyDown}
+        onkeydown={handleCreateKeyDown}
+        disabled={busy}
         use:autofocus
       />
+      {#if createError}
+        <p class="error">{createError}</p>
+      {/if}
       <div class="form-buttons">
-        <button class="btn-primary" onclick={handleCreateSubmit}>Create</button>
-        <button class="btn-secondary" onclick={handleCancel}>Cancel</button>
+        <button class="btn-secondary" onclick={backToBrowse} disabled={busy}>Cancel</button>
+        <button
+          class="btn-primary"
+          onclick={submitCreate}
+          disabled={busy || newBranchName.trim() === ''}
+        >
+          {busy ? 'Creating…' : 'Create branch'}
+        </button>
       </div>
     </div>
-  {:else if mode === 'delete'}
-    <div class="delete-confirm">
-      <h3>Delete Branch?</h3>
-      <p>Are you sure you want to delete <code>{deleteBranchName}</code>?</p>
-      <div class="form-buttons">
-        <button class="btn-danger" onclick={handleDeleteConfirm}>Delete</button>
-        <button class="btn-secondary" onclick={handleCancel}>Cancel</button>
+  {:else}
+    {#if isPicking}
+      <div class="pick-header">
+        <button class="back-btn" onclick={backToBrowse} aria-label="Back to branches">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="10,3 5,8 10,13" />
+          </svg>
+        </button>
+        <span class="pick-title">
+          {#if mode === 'merge'}Merge into “{currentBranch}” — pick a branch{:else}Delete which
+            branch?{/if}
+        </span>
       </div>
+    {/if}
+
+    <!-- Keyed on the mode so entering or leaving a picking mode remounts the
+         field and `use:autofocus` puts the caret back: the footer button that
+         switched modes was holding focus, and the footer is gone the moment it
+         is pressed — leaving the arrow keys with nothing listening. -->
+    {#key mode}
+      <div class="filter-row">
+        <input
+          type="text"
+          class="text-input"
+          placeholder="Filter branches…"
+          bind:value={filter}
+          onkeydown={handleListKeyDown}
+          use:autofocus
+        />
+      </div>
+    {/key}
+
+    <div class="branch-list">
+      {#if filtered.length === 0}
+        <p class="empty">
+          {#if filter.trim()}No branch matches “{filter.trim()}”.{:else}No branches here.{/if}
+        </p>
+      {:else}
+        {#each filtered as branch, i (branch.name)}
+          {#if i === 0 && !branch.is_remote}
+            <h3 class="section-title">Local Branches</h3>
+          {/if}
+          {#if i === firstRemoteIndex}
+            <h3 class="section-title">Remote Branches</h3>
+          {/if}
+          <button
+            class="branch-item"
+            class:current={branch.name === currentBranch}
+            class:remote={branch.is_remote}
+            class:active={i === activeIndex}
+            class:destructive={mode === 'delete'}
+            use:scrollIntoViewWhenActive={i === activeIndex}
+            onclick={() => activate(branch)}
+            oncontextmenu={(e) => openRowMenu(e, branch)}
+            disabled={busy}
+          >
+            {#if branch.name === currentBranch}
+              <span class="current-dot" aria-label="Current branch"></span>
+            {:else}
+              <span class="current-dot-spacer" aria-hidden="true"></span>
+            {/if}
+            <span class="branch-name">{branch.name}</span>
+          </button>
+        {/each}
+      {/if}
     </div>
+
+    {#if mode === 'browse'}
+      <!--
+        The branch menu's actions, in the order the native menu carries them.
+        Merge and Delete need a branch, so they hand the list above the
+        question instead of opening a second one. Abort appears only while a
+        merge is in progress: it is the one action that has no meaning outside
+        that state, and a permanently greyed row would be noise in every other
+        repository.
+      -->
+      <div class="footer">
+        <button class="footer-btn" onclick={() => (mode = 'create')} disabled={busy}>
+          New branch…
+        </button>
+        <button
+          class="footer-btn"
+          onclick={() => startPicking('merge')}
+          disabled={busy || !canMerge}
+          title={mergeHelp}
+        >
+          Merge into “{currentBranch || 'this branch'}”…
+        </button>
+        {#if merging}
+          <button class="footer-btn destructive" onclick={onRequestAbortMerge} disabled={busy}>
+            Abort merge…
+          </button>
+        {/if}
+        <button
+          class="footer-btn"
+          onclick={() => startPicking('delete')}
+          disabled={busy || !canDelete}
+          title={canDelete ? 'Delete a local branch' : 'There is no other local branch to delete'}
+        >
+          Delete branch…
+        </button>
+      </div>
+    {/if}
   {/if}
 </div>
+
+{#if rowMenu}
+  <ContextMenu
+    x={rowMenu.x}
+    y={rowMenu.y}
+    items={rowMenuItems}
+    onClose={() => (rowMenu = null)}
+  />
+{/if}
 
 <style>
   .branch-dropdown {
     background: var(--bg-elevated);
     border: 1px solid var(--border-inactive);
     border-radius: 10px;
-    min-width: 280px;
+    width: 300px;
     max-height: 420px;
     display: flex;
     flex-direction: column;
@@ -165,42 +386,100 @@
     overflow: hidden;
   }
 
-  .branch-list {
+  /* Which question the list is answering, when it is not the default one. */
+  .pick-header {
     display: flex;
-    flex-direction: column;
-    overflow-y: auto;
-  }
-
-  .section {
-    padding: 6px 4px;
-  }
-
-  .section:not(:last-child) {
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px 6px 6px;
     border-bottom: 1px solid var(--border-inactive);
   }
 
+  .back-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    flex: 0 0 auto;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition:
+      background 100ms ease,
+      color 100ms ease;
+  }
+
+  .back-btn:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .pick-title {
+    flex: 1;
+    min-width: 0;
+    font-size: 12px;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .filter-row {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border-inactive);
+  }
+
+  .text-input {
+    width: 100%;
+    padding: 4px 8px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 13px;
+  }
+
+  .text-input:focus {
+    outline: none;
+    border-color: var(--border-active);
+    box-shadow: 0 0 0 2px var(--cursor-bg);
+  }
+
+  .text-input:disabled {
+    opacity: 0.6;
+  }
+
+  .branch-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+  }
+
   .section-title {
-    padding: 4px 12px 6px;
+    padding: 6px 10px 4px;
     font-size: 11px;
     font-weight: 500;
     color: var(--text-muted);
     margin: 0;
   }
 
-  .branches {
-    display: flex;
-    flex-direction: column;
-  }
-
-  .branch-item-wrapper {
-    display: flex;
-    align-items: center;
-    gap: 0;
-    padding: 0 4px;
+  .empty {
+    margin: 0;
+    padding: 14px 12px;
+    font-size: 12px;
+    color: var(--text-muted);
+    text-align: center;
   }
 
   .branch-item {
-    flex: 1;
     display: flex;
     align-items: center;
     gap: 6px;
@@ -210,13 +489,14 @@
     border: none;
     color: var(--text-primary);
     cursor: pointer;
+    font-family: inherit;
     font-size: 13px;
     text-align: left;
     border-radius: 6px;
     transition: background 100ms ease;
   }
 
-  .branch-item:hover {
+  .branch-item:hover:not(:disabled) {
     background: var(--surface-hover);
   }
 
@@ -230,6 +510,23 @@
 
   .branch-item.remote {
     color: var(--text-muted);
+  }
+
+  /* Keyboard cursor: a ring rather than a fill, so it composes with the current
+     row's background. Same treatment as the repo pickers. */
+  .branch-item.active {
+    box-shadow: inset 0 0 0 1.5px var(--border-active);
+  }
+
+  /* While picking what to delete, the rows are what the destructive action
+     lands on, and they say so. */
+  .branch-item.destructive {
+    color: var(--status-red);
+  }
+
+  .branch-item:disabled {
+    cursor: default;
+    opacity: 0.6;
   }
 
   .branch-name {
@@ -252,98 +549,77 @@
     flex-shrink: 0;
   }
 
-  .delete-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 22px;
-    height: 22px;
-    padding: 0;
-    margin-right: 4px;
-    background: transparent;
-    border: none;
-    color: var(--text-muted);
-    border-radius: 4px;
-    cursor: pointer;
-    transition: background 100ms ease, color 100ms ease;
-    opacity: 0;
-  }
-
-  .branch-item-wrapper:hover .delete-btn {
-    opacity: 1;
-  }
-
-  .delete-btn:hover {
-    background: var(--surface-hover);
-    color: var(--status-red);
-  }
-
-  .section-footer {
-    padding: 6px 8px 8px;
+  /* Actions sit outside the scrolling list, so they survive an empty one — the
+     state where "create a branch" is most likely to be what you wanted. */
+  .footer {
+    display: flex;
+    flex-direction: column;
+    padding: 4px;
     border-top: 1px solid var(--border-inactive);
   }
 
-  .create-btn {
+  .footer-btn {
     width: 100%;
-    padding: 4px 10px;
+    padding: 0 10px;
+    height: 24px;
+    display: flex;
+    align-items: center;
     background: transparent;
     border: none;
-    color: var(--text-secondary);
     border-radius: 6px;
+    color: var(--text-secondary);
     cursor: pointer;
+    font-family: inherit;
     font-size: 13px;
     text-align: left;
-    transition: background 100ms ease, color 100ms ease;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition:
+      background 100ms ease,
+      color 100ms ease;
   }
 
-  .create-btn:hover {
+  .footer-btn:hover:not(:disabled) {
     background: var(--surface-hover);
     color: var(--text-primary);
   }
 
-  .create-form,
-  .delete-confirm {
+  .footer-btn.destructive {
+    color: var(--status-red);
+  }
+
+  .footer-btn:disabled {
+    color: var(--text-faint);
+    cursor: default;
+  }
+
+  .create-form {
     padding: 14px 16px;
     display: flex;
     flex-direction: column;
     gap: 10px;
   }
 
-  .create-form h3,
-  .delete-confirm h3 {
+  .create-form h3 {
     margin: 0;
     font-size: 13px;
     font-weight: 600;
     color: var(--text-primary);
   }
 
-  .delete-confirm p {
+  /* git's own refusal — a name already taken, a name it won't accept — kept
+     selectable beside the field that has to change. */
+  .create-form .error {
     margin: 0;
-    color: var(--text-secondary);
-    font-size: 13px;
-  }
-
-  .delete-confirm code {
-    background: transparent;
-    color: var(--text-primary);
     font-family: var(--font-mono);
-    font-size: 12px;
-    font-weight: 500;
-  }
-
-  .branch-input {
-    padding: 4px 8px;
-    background: var(--bg-primary);
-    border: 1px solid var(--border-strong);
-    border-radius: 6px;
-    color: var(--text-primary);
-    font-size: 13px;
-  }
-
-  .branch-input:focus {
-    outline: none;
-    border-color: var(--border-active);
-    box-shadow: 0 0 0 2px var(--cursor-bg);
+    font-size: 11px;
+    color: var(--status-red);
+    white-space: pre-wrap;
+    word-break: break-word;
+    user-select: text;
+    max-height: 96px;
+    overflow-y: auto;
   }
 
   .form-buttons {
@@ -353,15 +629,17 @@
   }
 
   .btn-primary,
-  .btn-secondary,
-  .btn-danger {
+  .btn-secondary {
     padding: 3px 14px;
     border: 1px solid var(--border-strong);
     border-radius: 6px;
     cursor: pointer;
+    font-family: inherit;
     font-size: 12px;
     font-weight: 500;
-    transition: background 120ms ease, border-color 120ms ease;
+    transition:
+      background 120ms ease,
+      border-color 120ms ease;
   }
 
   .btn-primary {
@@ -370,7 +648,7 @@
     border-color: var(--border-active);
   }
 
-  .btn-primary:hover {
+  .btn-primary:hover:not(:disabled) {
     background: var(--accent-secondary);
     border-color: var(--accent-secondary);
   }
@@ -380,16 +658,13 @@
     color: var(--text-primary);
   }
 
-  .btn-secondary:hover {
+  .btn-secondary:hover:not(:disabled) {
     background: var(--surface-hover);
   }
 
-  .btn-danger {
-    background: var(--bg-elevated);
-    color: var(--status-red);
-  }
-
-  .btn-danger:hover {
-    background: var(--surface-hover);
+  .btn-primary:disabled,
+  .btn-secondary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 </style>

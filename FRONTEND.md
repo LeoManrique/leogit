@@ -544,6 +544,31 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    and a refused force-push lease are both fixed and re-submitted right there — so
    stacking a second window over it costs two dismissals to change one character,
    and leaves the dialog underneath still holding the input that failed.
+14. **Branch actions are one menu, re-read at the moment of intent.** Switch, create,
+   merge (regular or squash), abort and delete live together behind the branch control
+   in both clients, and `list_branches` runs on **every** open: the status poll notices
+   only branches that move HEAD, so a branch created in the embedded terminal would
+   otherwise stay invisible for the whole session. **One operation at a time** — two
+   checkouts issued by a double-click contend on `index.lock` — and a start refused for
+   that reason is never reported as a success, which is the trap in answering "nothing
+   went wrong" to "nothing ran". Switching to the branch already checked out is a no-op
+   both clients guard rather than a checkout plus a full refresh chain; a **remote** row
+   becomes a local tracking branch rather than a detached HEAD, decided in
+   `switch_branch` so neither client carries a rule about it.
+   **A merge previews its size** through `count_commits_to_merge` — which counts what
+   its argument holds that HEAD does not, despite the parameter being named
+   `targetBranch` — and a preview of **zero reads *already up to date* and disables both
+   merge buttons**, rather than offering a merge that does nothing and then reports
+   success. Squash is two calls, `merge_squash` then `commit_squash_merge`, so the
+   message is git's. A refused merge belongs to §6.13's **first** class, not its dialog
+   refinement: it has already changed the repository, and pressing the same button again
+   cannot resolve a conflict — the work continues in the changes list, where the
+   conflicted files are. **Abort is offered only while `RepoStatus.merging`**, the one
+   action with no meaning outside that state, and it is what makes a merge begun in a
+   terminal escapable from the app. Every branch action that moves HEAD reloads status,
+   history *and* the branch list, and drops amend mode with them: the commit the
+   composer was amending is no longer HEAD, and may not be on this branch at all.
+   How the menu is *shaped* is presentation (§8).
 
 ## 7. Diff rendering contract
 
@@ -602,6 +627,7 @@ every deliberate difference here.
 | Side-by-side diff (`side_by_side_diff`) | split layout toggle, honoured by `DiffViewer` | not implemented — unified only; a layout feature awaiting its own design pass (ROADMAP), the config field crosses saves untouched |
 | Pending-count placement (§6.2) | `↓N` / `↑N` capsules on the sync button's trailing edge, each with its own arrow | plain `↑N ↓N` text in its own toolbar item left of the button: macOS renders a toolbar control's label as text and icon only, so no custom view can ride the face, and no system API badges a toolbar item |
 | Transfer progress surface | inside the control that started it — a fill wiping across the sync button, sweeping where git reports no percentage | a full-width strip under the toolbar with a real indeterminate state, plus git's line verbatim |
+| Branch-menu shape (§6.14) | a popover: filter input, keyboard cursor over the rows, the four actions as a footer, and the two that need a branch narrowing the same list under a header that states the question | a stock `Menu`: an inline `Picker` for locals, a plain-button section for remotes, and the same four actions with `Merge into “…”` and `Delete Branch` as submenus. AppKit supplies the scrolling, type-select and cursor the popover hand-rolls |
 
 Neither repo switcher offers a per-folder open action, deliberately and in both
 clients: a repo list is exactly what `scan_paths` covers, so a local repository

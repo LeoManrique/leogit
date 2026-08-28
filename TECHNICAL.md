@@ -67,7 +67,7 @@ leogit/
 │   │   │       ├── utils/path.ts    # basename for OS paths (either separator)
 │   │   │       ├── stores/          # appState, repoState, config (Svelte writables)
 │   │   │       ├── components/      # Header, TabBar, FileList, CommitList, DiffViewer, …
-│   │   │       └── views/           # MainLayout, RepoPicker, CloneOverlay, MergeOverlay, …
+│   │   │       └── views/           # MainLayout, RepoPicker, CloneOverlay, BranchDropdown, …
 │   │   ├── src-tauri/
 │   │   │   ├── src/
 │   │   │   │   ├── main.rs          # PATH fix + single-instance + invoke_handler registry
@@ -195,11 +195,12 @@ Branches and merge cross 1:1 as well (`list_branches`, `create_branch`, `switch_
 `delete_branch`; `merge_branch`, `merge_squash`, `commit_squash_merge`, `merge_abort`,
 `count_commits_to_merge`), with two flat mirrors (`BranchInfo`, `MergeResult`)
 and none of the `EventSink` machinery — every branch/merge function in core is a plain
-synchronous `Result<T, String>`. The multi-call sequences are the Tauri handlers' own:
+synchronous `Result<T, String>`. The multi-call sequences belong to the clients:
 "New Branch" is `create_branch` then `switch_branch`, squash is `merge_squash` then
 `commit_squash_merge` on success, and a *failed merge is data, not an error* —
 `MergeResult { success: false }` with git's text and the conflicted paths, never a thrown
-`GitError`. `rename_branch` and `delete_remote_branch` exist in core but stay unexported —
+`GitError`, which is why each client decides for itself whether a refusal is a modal or a
+line under a field. `rename_branch` and `delete_remote_branch` exist in core but stay unexported —
 no client has UI for them yet, and the bridge doesn't carry dead surface.
 
 Sync (`get_remote`, `fetch`, `pull`, `push`) is the first flow to cross **async** and the
@@ -776,14 +777,15 @@ The frontend never touches Tauri's raw `invoke` API directly; every backend call
 
 | Namespace | Commands | Backend file |
 |---|---|---|
-| `configApi` | `loadConfig`, `saveConfig`, `loadState`, `patchState`, `recordRecentRepo` | `core/src/config.rs` |
-| `gitApi` | `getStatus`, `getHeadSha`, `getDiff`, `getDiffWhitespaceIgnored`, `getCommitDiff`, `getSelectedDiff`, `getLog`, `getCommitFiles`, `listBranches`, `createBranch`, `switchBranch`, `deleteBranch`, `deleteRemoteBranch`, `renameBranch`, `commit`, `hasStagedChanges`, `discardFiles`, `appendToGitignore`, `ignorePaths`, `formatCommitMessage`, `repoSyncStatus`, `fetch`, `pull`, `push`, `getAheadBehind`, `getRemote`, `mergeBranch`, `mergeSquash`, `commitSquashMerge`, `mergeAbort`, `isMerging`, `countCommitsToMerge`, `discoverRepos`, `isGitRepo`, `initRepo`, `getRepoName`, `cloneRepo`, `getLastCommitTimestamp` | `core/src/git.rs` |
-| `diffApi` | `parseDiff`, `generatePatch`, `generateInversePatch` | `core/src/diff.rs` |
+| `configApi` | `loadConfig`, `patchConfig`, `configBounds`, `loadState`, `patchState`, `recordRecentRepo` | `core/src/config.rs` |
+| `gitApi` | `getStatus`, `fileStatusStyles`, `getHeadSha`, `getSelectedDiff`, `getLog`, `getCommitDetail`, `listBranches`, `createBranch`, `switchBranch`, `checkoutCommit`, `deleteBranch`, `deleteRemoteBranch`, `renameBranch`, `commit`, `undoLastCommit`, `hasStagedChanges`, `classifyDiscard`, `discardFiles`, `appendToGitignore`, `ignorePaths`, `formatCommitMessage`, `repoSyncStatus`, `fetch`, `pull`, `push`, `getAheadBehind`, `getRemote`, `getRepoIdentifier`, `mergeBranch`, `mergeSquash`, `commitSquashMerge`, `mergeAbort`, `countCommitsToMerge`, `effectiveScanPaths`, `isGitRepo`, `initRepo`, `getRepoName`, `cloneRepo` | `core/src/git.rs` |
+| `reposApi` | `knownRepos`, `filterRepos`, `deriveCloneTarget`, `cloneTargetPath` | `core/src/repos.rs` |
+| `diffApi` | `getParsedDiff`, `getParsedCommitDiff`, `copyDiffText`, `generatePatch`, `generateInversePatch` | `core/src/diff.rs` |
 | `highlightApi` | `highlightDiff` | `core/src/highlight.rs` |
 | `updateApi` | `checkForUpdate` | `core/src/update.rs` |
 | `osApi` | `revealPath`, `openPath`, `openUrl` | `core/src/os.rs` |
-| `ghApi` | `checkAuth`, `repoList`, `clone` | `core/src/gh.rs` |
-| `aiApi` | `generateCommitMessage`, `checkProviderStatus`, `providerStatusFromFailure` | `core/src/ai.rs` |
+| `ghApi` | `checkAuth`, `repoList`, `clone`, `publishRepo` | `core/src/gh.rs` |
+| `aiApi` | `loadAiConfig`, `generateCommitMessage`, `checkProviderStatus`, `providerStatusFromFailure` | `core/src/ai.rs` |
 | `appApi` | `takePendingLaunchTarget` | `core/src/launch.rs` |
 | `terminalApi` | `listShells`, `ptyInfo`, `start`, `write`, `resize`, `close` | `core/src/terminal.rs`, `core/src/shell.rs` |
 

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { autofocus } from '$lib/actions/autofocus'
+
   interface Props {
     title?: string
     message: string
@@ -21,7 +23,10 @@
   }}
   onkeydown={handleKeyDown}
 >
-  <div class="modal" role="dialog" aria-modal="true" tabindex="-1">
+  <!-- Focused on mount so Escape reaches the handler above: it listens on
+       this overlay, and without focus inside, the key is raised somewhere
+       else entirely and the dialog cannot be dismissed by keyboard. -->
+  <div class="modal" role="dialog" aria-modal="true" tabindex="-1" use:autofocus>
     <div class="modal-header">
       <h2>{title}</h2>
       <button class="close-btn" onclick={onDismiss} aria-label="Close">
@@ -154,5 +159,9 @@
   .btn-primary:hover {
     background: var(--accent-secondary);
     border-color: var(--accent-secondary);
+  }
+  /* Focused on mount for Escape; the ring would be chrome nobody asked for. */
+  .modal:focus {
+    outline: none;
   }
 </style>
