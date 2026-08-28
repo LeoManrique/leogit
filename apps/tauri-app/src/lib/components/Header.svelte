@@ -477,10 +477,11 @@
 <header class="header">
   <div class="left">
     {#if hasRepo}
-    <!-- Locked mid-transfer. There is one global network slot, so switching
-         away would leave the old repo's push running with nothing reporting it
-         while the new repo's polling sits gated for invisible reasons — the
-         header would read "Pushing…" over a repo that isn't pushing. -->
+    <!-- Opens the list even mid-transfer. Switching itself is what a transfer
+         holds back, and the dropdown's own rows carry that — disabling the
+         chip took the whole surface away with it, including Clone, which
+         claims no network slot and contends with nothing a transfer is
+         doing. -->
     <button
       class="chip-button"
       onclick={() => { hideChipTooltip(); onOpenRepos?.() }}
@@ -488,8 +489,6 @@
       onmouseleave={hideChipTooltip}
       onfocus={showChipTooltip}
       onblur={hideChipTooltip}
-      disabled={$activeNetworkOp !== null}
-      title={$activeNetworkOp ? 'Finishing the current transfer — switching repositories is unavailable' : undefined}
       aria-label="Switch repository"
     >
       <svg class="chip-icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

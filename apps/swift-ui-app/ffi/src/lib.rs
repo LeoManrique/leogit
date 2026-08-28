@@ -57,7 +57,7 @@ pub use leogit_core::exclusions::Exclusion;
 pub use leogit_core::gh::GhRepo;
 pub use leogit_core::git::{
     BranchInfo, CommitDetail, CommitInfo, CommitStats, DiscardPlan, FileEntry, FileStatus,
-    FileStatusStyle, LogOptions, MergeResult, RepoStatus, RepoSync, SyncProposal,
+    FileStatusStyle, LogOptions, MergeResult, RepoIdentifier, RepoStatus, RepoSync, SyncProposal,
 };
 pub use leogit_core::highlight::{BlobSource, Token, TokenClass};
 pub use leogit_core::repos::{CloneTarget, RepoRow};
@@ -1416,11 +1416,19 @@ pub struct ReposState {
 /// Mirrors [`leogit_core::config::ReposStatePatch`]. `None` leaves a field
 /// as it is on disk; `recent_repos` is deliberately absent from the patch —
 /// the MRU list's only writer is [`record_recent_repo`].
+///
+/// Every field defaults to "leave it alone", like [`ConfigPatch`]: a writer
+/// names the one field it owns and cannot silently carry the others'
+/// stale values along with it.
 #[uniffi::remote(Record)]
 pub struct ReposStatePatch {
+    #[uniffi(default = None)]
     pub last_opened_repo: Option<String>,
+    #[uniffi(default = None)]
     pub last_clone_dir: Option<String>,
+    #[uniffi(default = None)]
     pub repo_sort_mode: Option<String>,
+    #[uniffi(default = None)]
     pub clone_sort_mode: Option<String>,
 }
 
@@ -1436,6 +1444,15 @@ pub struct RepoSync {
     pub has_remote: bool,
     pub fetched: bool,
     pub dirty: bool,
+}
+
+/// Mirrors [`leogit_core::git::RepoIdentifier`] — the `owner`/`name` pair
+/// parsed out of a repository's remote URL, which is what a picker row is
+/// labelled and searched by when the repository has one.
+#[uniffi::remote(Record)]
+pub struct RepoIdentifier {
+    pub owner: String,
+    pub name: String,
 }
 
 /// The shared configuration file, read fresh — the native client re-reads it
@@ -1594,6 +1611,20 @@ pub fn clone_target_path(parent: String, repo_name: String) -> Option<String> {
 #[must_use]
 pub fn effective_scan_paths(scan_paths: Vec<String>) -> Vec<String> {
     git::effective_scan_paths(scan_paths)
+}
+
+/// The `owner`/`name` a repository's remote URL parses to, or `None` when it
+/// has no remote or the URL names no such pair — which is the picker's cue to
+/// keep labelling that row with its folder name.
+///
+/// Async over `spawn_blocking` because it is one or two `git config` reads:
+/// individually quick, but a picker asks for a row per repository and a
+/// cooperative thread is too scarce to spend on any of them.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn repo_identifier(repo_path: String) -> Option<RepoIdentifier> {
+    tokio::task::spawn_blocking(move || git::get_repo_identifier(repo_path))
+        .await
+        .unwrap_or(None)
 }
 
 /// Per-repo badge summary, optionally refreshing the remote-tracking refs

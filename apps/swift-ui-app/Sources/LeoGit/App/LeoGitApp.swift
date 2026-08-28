@@ -92,4 +92,9 @@ extension Notification.Name {
     /// the proposed action, so its sheet, alert, and busy handling stay on
     /// the same path a button click takes.
     static let leogitSyncActionRequested = Notification.Name("leogitSyncActionRequested")
+
+    /// Posted when a Settings save changes `scan_paths` or `scan_depth` — what
+    /// discovery walks. The main window re-walks; the Settings scene is a
+    /// separate scene and cannot reach `RepoDirectoryStore` directly.
+    static let leogitScanPathsChanged = Notification.Name("leogitScanPathsChanged")
 }

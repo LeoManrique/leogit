@@ -435,21 +435,80 @@ value and not just a notification like ⌘R: a notification can fire an action b
 label it, and the menu item's title has to track repository state or it lies about what
 ⌘P does.
 
-`RepoDirectoryStore.refreshDirectory` owns the switcher's row list and is deliberately not
-lazy: a `.task` on the repository screen primes it when that screen appears, so the walk
-overlaps opening the repo instead of starting when the popover first opens (which left the
-first open showing only the active repo until the scan landed, and looking correct only on
-a second open). It is unkeyed — the walk spans every repo, so it belongs to the screen's
-lifetime rather than a repo's, and the popover still re-runs it on open so freshly cloned
-repos appear. One pass publishes twice: the shared MRU first (a small JSON read, and the
-repos the user actually cycles between), then the walk's result, with the previous walk's
-output retained so republishing can't momentarily drop discovered rows. Concurrent callers
-(prime and popover, or the tier scheduler bootstrapping an empty MRU) await the single
-in-flight `Task` rather than walking the tree twice, and the persisted MRU is unioned with
-the local one on adoption, so a refresh racing `noteOpened`'s not-yet-landed write cannot
-drop the repo that was just opened. `isRefreshing` lets the popover say "Looking for
-repositories…" instead of the diagnosable "no repositories found" empty state, which is
-only correct once a pass has actually finished.
+`RepoDirectoryStore.refreshDirectory` owns the row list both native pickers render, and is
+deliberately not lazy: a `.task` on the repository screen primes it when that screen
+appears, so the walk overlaps opening the repo instead of starting when the popover first
+opens (which left the first open showing only the active repo until the scan landed, and
+looking correct only on a second open). It is unkeyed — the walk spans every repo, so it
+belongs to the screen's lifetime rather than a repo's, and the popover still re-runs it on
+open so freshly cloned repos appear. One pass publishes twice: the shared MRU first (a
+small JSON read, and the repos the user actually cycles between), then the walk's result,
+with the previous walk's output retained so republishing can't momentarily drop discovered
+rows. Concurrent callers (prime and popover, or the tier scheduler bootstrapping an empty
+MRU) await the single in-flight `Task` rather than walking the tree twice, and the
+persisted MRU is unioned with the local one on adoption, so a refresh racing `noteOpened`'s
+not-yet-landed write cannot drop the repo that was just opened. `isRefreshing` and
+`hasSearched` together decide what an empty list means: "no repositories found" is news
+only once a pass has actually finished, and before the first one is even *started* —
+which includes the whole of launch resolution, while the picker is already on screen —
+the honest answer is that nothing has looked yet. (`isRefreshing` alone is false then,
+so the screen greeted every launch by telling the user their scan paths were wrong.)
+A walk that *fails*
+sets `discoveryError`, which the list renders as one inline row with a Retry above whatever
+the last successful pass found — the rows are still openable, so an error screen in their
+place would take the repositories away along with the bad news. The same pass hydrates the
+persisted sort mode, once per launch: the toggle's write is a background task, so
+re-reading the file on a later walk could put the old value back over a choice the user had
+just made.
+
+**Discovery re-runs where the setting changes, not where a window closes.** A Settings
+save whose patch moves `scan_paths` or `scan_depth` posts `leogitScanPathsChanged`, which
+the root view answers with a walk — a notification because Settings is its own scene and
+cannot reach `RepoDirectoryStore` directly, and on the *root* rather than the repository
+screen because the picker is the surface that sends the user to that setting and must not
+still be saying "No repositories found" when they come back from changing it. The
+switcher's own re-walk on open covers the repository screen; the picker has no switcher to
+re-open, which is exactly why the hook cannot hang off a dialog dismissal.
+
+**The two native pickers are one view.** `RepoPickerList` is the Welcome screen's body and
+the toolbar popover's content, parameterized only by what genuinely differs — how tall the
+rows may run, whether a repository is already open, and whether a transfer is holding
+switching back. Row *labels* come from `RepoIdentifierStore`, a process-lifetime cache of
+each repository's `owner`/`name` parsed from its remote. The cache is three-valued on
+purpose: a missing key is "not looked up", a stored `nil` is "looked up, no parseable
+remote" (the row keeps its folder name and is never asked again), and collapsing those two
+would re-spawn a `git config` per remote-less repository on every rebuild. Lookups drain
+four at a time; the list asks for every row rather than the visible ones because the labels
+are *searchable*, so a query has to reach a repository the user has never scrolled to, and
+the pool is what keeps that affordable. `nil` stored through `updateValue`, not a subscript
+assignment — assigning `nil` through the subscript of an optional-valued dictionary removes
+the key, which would turn every "no remote" answer back into "not looked up" and re-queue
+it forever.
+
+The keyboard cursor is an index the *filter field* moves, via `onKeyPress` on the field
+itself, rather than a `List(selection:)`: a list only moves a cursor when it is first
+responder, and taking focus from the field would end the typing that produced the rows.
+`ListNavigation.nextIndex` is the index arithmetic (wrapping, with a negative index meaning
+"before the first row"), matching the Tauri client's `nextActiveIndex` so an arrow key
+answers identically in both. Scrolling uses `ScrollViewProxy.scrollTo(_:anchor: nil)`, which
+moves the least amount that reveals the row — the native form of `block: 'nearest'`, so an
+already-visible cursor never jumps the list under a mouse user.
+
+A transfer disables the *rows*, not the control that opens them: switching is what would
+reset the sync UI out from under a running operation, while browsing and cloning claim no
+network slot. In both clients the blocked rows are dimmed and inert rather than `disabled`,
+because a disabled control takes no pointer events — the tooltip explaining why the row
+can't be picked is the only reason it is still on screen rather than hidden.
+
+**Launch resolution** (`ContentView.resolveLaunchRepo`, once per launch) takes
+`last_opened_repo` first and does *not* wait on discovery: the two clients hand the working
+repository to each other through the shared state file and `open` validates the path
+itself, so queueing the common launch behind a filesystem crawl would only delay it. Only
+when there is nothing to restore does the walk run — for the list Welcome shows, and for
+the count behind the auto-open rule: exactly one discovered repository opens itself, since
+there is no choice to present. That rule is confined to launch, so a later scan-path edit
+that happens to narrow the list to one cannot pull the user out of the picker they are
+standing in.
 
 **Repo search** is one rule in one place: `core::repos::match_repo`, with the batch
 `filter_repos` both hosts actually call. It replaces two hand-written implementations that
@@ -658,16 +717,32 @@ pair joins it: `gh_repo_list` (a `GhRepo` mirror; async over `spawn_blocking` li
 indeterminate bar; the Tauri dialog shows no bar at all in that case, only its `Cloning…`
 button state, because its bar is gated on a `git-progress` event a gh clone never emits). The destination contract is core's
 `prepare_clone_target`, shared by both paths: the caller passes the *full* target path,
-core expands `~`, refuses an existing path, and creates the parent — deriving the folder
-name from the URL/`owner-name` is the UI's job, so `CloneStore` ports the Tauri dialog's
-`repoNameFromUrl`/`normalizeUrl` rules verbatim (strip trailing slashes and `.git`, last
-`/`- or `:`-segment; `owner/name` expands to `https://github.com/owner/name`). The sheet
-(reachable from Welcome and the repo switcher's footer) seeds its destination from the
-shared `last_clone_dir` → first scan path → `~/Dev`, persists the parent folder back on
-success, shares the GitHub tab's `clone_sort_mode` with the Tauri dialog through
-`repos-state.json`, and disables every exit while cloning — there is no cancel; a
-dismissed sheet would orphan the clone. Success hands the fresh path to `RepoStore.open`,
-so the normal `.task(id:)` chain records it as recent and runs the warm-up fetch. The
+core expands `~`, refuses an existing path, and creates the parent. What the folder is
+*called* is `core::repos::derive_clone_target` / `clone_target_path`, which both dialogs
+call, so the destination preview and the Clone button's enable condition are the same
+answer and cannot disagree about whether the app is about to succeed. The sheet (reachable
+from either picker's footer) seeds its destination from the shared `last_clone_dir` → first
+scan path → `~/Dev`, persists the parent folder back on success, shares the GitHub tab's
+`clone_sort_mode` with the Tauri dialog through `repos-state.json`, and disables every exit
+while cloning — there is no cancel; a dismissed sheet would orphan the clone. Success hands
+the fresh path to `RepoStore.open`, so the normal `.task(id:)` chain records it as recent
+and runs the warm-up fetch.
+
+`CloneStore` is owned by `ContentView`, not by the sheet: the GitHub list is a
+once-per-run cache, and a store created with each presentation re-ran the 20 s `gh` query
+every time it opened. `reopen()` is therefore what each presentation resets — the URL,
+the filter, the selection and the error — while the tab, the list and the sort mode
+survive, because which tab you clone from is a preference and re-fetching an unchanged list
+is exactly what the cache exists to avoid. A repository created since launch is reached by
+the Refresh button beside the filter; `hasLoadedList` is set only on success, so a failed
+load retries on the next open rather than reopening onto a stale error with no list behind
+it. `visibleRepos` is recomputed when the filter, the sort mode or the list changes rather
+than per layout pass, and it filters *before* it sorts — the query is what shrinks the
+list, so ordering rows it is about to discard is work thrown away, 200 rows at a time, per
+keystroke. Both name orders go through `NameCollation`, which is case- **and**
+diacritic-blind (the Tauri lists' `sensitivity: 'base'`), with an explicit tiebreak after
+it: Swift's sort is not stable, so two same-second pushes would otherwise swap places
+between passes. The
 Settings scene (`Settings { }` in `LeoGitApp`, which is what binds ⌘, and the app-menu
 item) exposes only fields with native consumers — auto-fetch cadence, the Diff section
 (hide whitespace, syntax highlighting, tab size 1–16), scan paths/depth, the terminal
@@ -1320,7 +1395,8 @@ The frontend builds warning-free (`pnpm check` and `vite build` both report 0 a1
 - **Autocorrect is disabled once, at the root.** `<html>` in [index.html](apps/tauri-app/index.html) carries `autocorrect="off" autocapitalize="off" spellcheck="false"`. All three are inheritable HTML attributes, so every descendant input/textarea/contenteditable inherits them — no field opts out individually, and WebKit's macOS autocorrect pills, inline predictions, and spell squiggles stay off app-wide. Only add these attributes to a specific field if it needs to *re-enable* the behavior.
 - **The app hands a fix to its own terminal rather than running it.** `Terminal.svelte` exports `runCommand`, which writes `<command>\r` to the PTY and queues when the shell is still starting — so a caller need not know whether the panel is warm, since it may have been created by the very click calling it (`MainLayout.runInTerminal` starts and expands the panel, `await tick()`s for the mount, then hands the command over). The queue is flushed *after* the output listener is registered, or the command would run with its echo dropped into D-4's window and the user would see a bare prompt. This exists because the one command worth offering — `claude auth login` — opens a browser and then blocks on stdin for a pasted code: driving that ourselves would mean rebuilding a terminal beside the one we ship, and asking for an auth code in app chrome is a habit worth not teaching. Core supplies the command string (`ProviderStatus.fix_command`), the client supplies the shell, and the button spells the command out because the app is about to type into the user's shell.
 - **A shortcut is either window-level or it doesn't exist.** Svelte treats `<div>` and `<form>` as non-interactive and warns on listeners attached to them, so a chord has only two homes: one interactive field, or a `window` `keydown` listener bound in `onMount`. The field is a trap for anything the user might want *before* clicking in — the composer's Cmd+Enter / Cmd+G lived there and were unreachable until you were already typing — so the window is the default and the composer's container stays a plain `role="form"` landmark. `MainLayout`'s single handler owns them all (Cmd+R, Cmd+L, Cmd+B, Escape, the terminal toggle, and now the composer's two), reaching the composer through `bind:this` and two exported functions that gate exactly as its buttons do. Ordering inside that handler is load-bearing: terminal-origin events return first (`utils/keyboard.ts`), then Escape, then the composer's chords — which sit deliberately *above* the "a field has focus, leave it alone" bail, since they are for the fields — and everything else below it. Cmd+P is the exception, still in [Header](apps/tauri-app/src/lib/components/Header.svelte) with the transfer state it acts on.
-- **Searchable repo lists share one keyboard-nav helper** (and, for the two that search repo *paths*, one match rule — see *Repo search* above). The startup picker ([RepoPicker](apps/tauri-app/src/lib/views/RepoPicker.svelte)), header switcher ([RepoDropdown](apps/tauri-app/src/lib/views/RepoDropdown.svelte)), and Clone dialog ([CloneOverlay](apps/tauri-app/src/lib/views/CloneOverlay.svelte)) all let you type-then-arrow: ↑/↓ move a keyboard cursor (`activeIndex`, reset to the top match whenever the query changes) and Enter picks the highlighted row (opens it, or in Clone sets the clone target). The two reusable pieces live in [listNavigation.ts](apps/tauri-app/src/lib/actions/listNavigation.ts) — `nextActiveIndex()` (wrapping index math) and the `scrollIntoViewWhenActive` action (`block: 'nearest'`, so already-visible rows never jump). The active row shows a `--border-active` inset ring, distinct from hover/selected fills. MainLayout's global `keydown` never interferes because it early-returns when focus is in a field and only handles Escape + meta-combos.
+- **Searchable repo lists share one keyboard-nav helper** (and, for the two that search repo *paths*, one match rule — see *Repo search* above). The startup picker ([RepoPicker](apps/tauri-app/src/lib/views/RepoPicker.svelte)), header switcher ([RepoDropdown](apps/tauri-app/src/lib/views/RepoDropdown.svelte)), and Clone dialog ([CloneOverlay](apps/tauri-app/src/lib/views/CloneOverlay.svelte)) all let you type-then-arrow: ↑/↓ move a keyboard cursor (`activeIndex`, reset to the top match whenever the query changes) and Enter picks the highlighted row (opens it, or in Clone sets the clone target). The two reusable pieces live in [listNavigation.ts](apps/tauri-app/src/lib/actions/listNavigation.ts) — `nextActiveIndex()` (wrapping index math) and the `scrollIntoViewWhenActive` action (`block: 'nearest'`, so already-visible rows never jump). The active row shows a `--border-active` inset ring, distinct from hover/selected fills. MainLayout's global `keydown` never interferes because it early-returns when focus is in a field and only handles Escape + meta-combos. The native side keeps the same two pieces under the same names — `ListNavigation.nextIndex` and `scrollTo(_:anchor: nil)` — so an arrow key answers identically in both clients.
+- **Both repo pickers read one set of label rules.** `repoLabel` / `repoFullLabel` / `repoSearchLabels` / `collidingRepoLabels` live in [repoIdentifiers.ts](apps/tauri-app/src/lib/stores/repoIdentifiers.ts), beside the cache they read, and the native `RepoIdentifierStore` carries the same four. They are what keeps a row's *displayed* label and its *searched* labels the same set: a row is found by what it shows, including the owner-qualified form, and the `owner/` prefix appears only where another row shares the name and an identifier exists to disambiguate with.
 - **The Clone dialog list is one tab stop, not one-per-row.** Its repo rows are `role="option" tabindex="-1"` inside a `role="listbox" tabindex="0"` container, so Tab flows filter input → sort button → list → Local path → Browse → Cancel/Clone (rows are reached by arrows, not Tab). The filter input is a `role="combobox"` with `aria-controls`/`aria-activedescendant` pointing at the listbox and its active option, and `handleListKeyDown` is shared by the input and the listbox so arrows/Enter work from either.
 
 ## Notable invariants

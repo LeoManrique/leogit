@@ -179,11 +179,23 @@ final class SettingsStore {
     private func save() async {
         guard isLoaded else { return }
         let patch = currentPatch
+        let walkChanged =
+            patch.scanPaths != lastPersisted?.scanPaths
+            || patch.scanDepth != lastPersisted?.scanDepth
         do {
             try await GitBridge.patchAppConfig(patch)
             lastPersisted = patch
             errorMessage = nil
             await configStore?.reload()
+            // Discovery hangs off the setting that changes what it walks, not
+            // off this window closing: the repo list is the thing a scan-path
+            // edit is *for*, and the screen most likely to be showing it — the
+            // picker, with its "Choose folders to search" action — has no
+            // switcher to re-open and would otherwise sit on "No repositories
+            // found" until the app was restarted.
+            if walkChanged {
+                NotificationCenter.default.post(name: .leogitScanPathsChanged, object: nil)
+            }
         } catch {
             errorMessage = error.displayMessage
         }

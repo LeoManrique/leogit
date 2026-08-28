@@ -30,25 +30,55 @@ enum GitHubListPhase: Equatable {
 /// field holds the PARENT folder, and core receives the full target path.
 /// There is no cancel — once started, a clone runs to completion or to
 /// core's 600 s timeout, and the sheet must stay up to show the outcome.
+///
+/// The store **outlives the sheet** (`ContentView` owns it), which is what
+/// makes the GitHub list a once-per-run cache rather than a ~20 s dead zone on
+/// every open. `reopen()` is therefore where per-open state is cleared, and
+/// what it deliberately does *not* clear is the list, the sort mode, and the
+/// chosen tab: which tab you clone from is a preference, and re-fetching an
+/// unchanged list is the cost the cache exists to avoid. The Refresh button is
+/// how a repository created since launch is reached.
 @MainActor
 @Observable
 final class CloneStore {
-    var source: CloneSource = .github
+    var source: CloneSource = .github {
+        didSet {
+            guard source != oldValue else { return }
+            // A URL-tab failure has nothing to say about the GitHub tab.
+            // Leaving it up reported the last URL clone's error over a list
+            // the user had just switched to.
+            errorMessage = nil
+        }
+    }
+
     var url = ""
 
     /// Parent folder the clone lands in. Seeded from the shared
     /// `last_clone_dir` → first scan path → `~/Dev`, like the Tauri dialog.
     var destinationDir = ""
 
-    var filter = ""
+    var filter = "" {
+        didSet {
+            guard filter != oldValue else { return }
+            recomputeVisibleRepos()
+        }
+    }
+
     var selectedRepoID: String?
 
     private(set) var githubRepos: [GhRepo] = []
+
+    /// The rows on screen: `githubRepos` narrowed by `filter` and ordered by
+    /// `sortMode`. Recomputed when one of those three changes rather than on
+    /// every body evaluation — the list runs to 200 rows and the alternative
+    /// re-sorted all of them per keystroke *per layout pass*.
+    private(set) var visibleRepos: [GhRepo] = []
+
     private(set) var listPhase: GitHubListPhase = .loading
 
-    /// `"recent"` (last push, newest first) or `"name"` — shared with the
-    /// Tauri dialog through `repos-state.json`.
-    private(set) var sortMode = "recent"
+    /// Last-push order (newest first) or A-Z — shared with the Tauri dialog
+    /// through `repos-state.json`.
+    private(set) var sortMode: SortMode = .recent
 
     private(set) var isCloning = false
 
@@ -61,7 +91,22 @@ final class CloneStore {
 
     private(set) var errorMessage: String?
 
-    private var hasPrepared = false
+    /// Whether the shared state file has been read for this process — the
+    /// destination seed and the sort mode.
+    private var hasReadSharedState = false
+
+    /// Whether the GitHub list has been fetched **successfully**. A failed
+    /// load clears it, so the next open retries rather than reopening onto a
+    /// stale error — including a Refresh that failed after a load that had
+    /// worked, which would otherwise leave the cache flagged as loaded and the
+    /// error standing until the app was restarted.
+    private var hasLoadedList = false
+
+    /// A load already in flight. `reopen()` is not cancellation-aware and the
+    /// query it starts runs for seconds, so closing and reopening the sheet
+    /// would otherwise start a second `gh repo list` — and each completion
+    /// would race the others to assign the list.
+    private var isLoadingList = false
 
     /// What the URL tab is about to clone, as core reads it — `nil` when the
     /// field holds nothing cloneable, which is also what disables the button.
@@ -102,60 +147,90 @@ final class CloneStore {
         !isCloning && !targetPath.isEmpty
     }
 
-    /// The GitHub rows after the sort toggle and the filter — filtering on
-    /// `owner/name`, like the Tauri dialog.
-    var visibleRepos: [GhRepo] {
-        let sorted =
-            sortMode == "name"
-            ? githubRepos.sorted {
-                $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
-            }
-            // ISO-8601 timestamps order lexically, newest first.
-            : githubRepos.sorted { $0.pushedAt > $1.pushedAt }
-        let query = filter.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !query.isEmpty else { return sorted }
-        return sorted.filter { $0.nameWithOwner.lowercased().contains(query) }
-    }
+    /// Everything a fresh open should start clean, run each time the sheet is
+    /// presented. Carrying inputs across opens meant reopening onto a stale
+    /// selection with Clone already lit — one Return away from cloning a
+    /// repository the user had not looked at.
+    ///
+    /// Also the first load's trigger, because a first open has no cached list.
+    func reopen() async {
+        url = ""
+        filter = ""
+        selectedRepoID = nil
+        errorMessage = nil
 
-    /// Seed the destination and sort mode from shared state, then load the
-    /// GitHub list. Once per sheet.
-    func prepare() async {
-        guard !hasPrepared else { return }
-        hasPrepared = true
-
-        let state = try? await GitBridge.reposState()
-        if let mode = state?.cloneSortMode, mode == "recent" || mode == "name" {
-            sortMode = mode
-        }
-        if let dir = state?.lastCloneDir, !dir.isEmpty {
-            destinationDir = dir
-        } else if let first = (try? await GitBridge.appConfig())?.scanPaths.first {
-            destinationDir = first
-        } else {
-            destinationDir = "~/Dev"
+        if !hasReadSharedState {
+            hasReadSharedState = true
+            let state = try? await GitBridge.reposState()
+            sortMode = SortMode(persisted: state?.cloneSortMode) ?? .recent
+            destinationDir = await defaultDestination(lastCloneDir: state?.lastCloneDir)
         }
 
-        await loadGitHubList()
+        if !hasLoadedList, !isLoadingList {
+            await loadGitHubList()
+        }
     }
 
-    /// (Re)load the gh repository list — the initial load and the Retry
-    /// button share this.
+    /// Where a clone lands unless the user says otherwise: wherever the last
+    /// one went, then the first scan path, then `~/Dev`.
+    private func defaultDestination(lastCloneDir: String?) async -> String {
+        if let lastCloneDir, !lastCloneDir.isEmpty { return lastCloneDir }
+        if let first = (try? await GitBridge.appConfig())?.scanPaths.first { return first }
+        return "~/Dev"
+    }
+
+    /// (Re)load the gh repository list — the first open, the Retry button and
+    /// the Refresh button all share this.
     func loadGitHubList() async {
+        guard !isLoadingList else { return }
+        isLoadingList = true
+        defer { isLoadingList = false }
+
         listPhase = .loading
         do {
             githubRepos = try await GitBridge.githubRepositories(limit: 200)
+            hasLoadedList = true
             listPhase = .loaded
+            recomputeVisibleRepos()
         } catch {
+            // The cached rows stay: they are still the last true answer, and
+            // a failed refresh is a reason to say so, not to forget them.
+            hasLoadedList = false
             listPhase = .failed(error.displayMessage)
         }
     }
 
-    /// Flip recent ↔ name and persist the choice for both clients.
+    /// Flip recent ⇄ A-Z and persist the choice for both clients.
     /// Best-effort persistence: the toggle itself must never fail.
     func toggleSortMode() {
-        sortMode = sortMode == "recent" ? "name" : "recent"
-        let mode = sortMode
+        sortMode = sortMode == .recent ? .name : .recent
+        recomputeVisibleRepos()
+        let mode = sortMode.rawValue
         Task { try? await GitBridge.setCloneSortMode(mode) }
+    }
+
+    /// Filter first, then sort: the query is what shrinks the list, so
+    /// ordering the rows it is about to discard is work thrown away.
+    private func recomputeVisibleRepos() {
+        let query = filter.trimmingCharacters(in: .whitespaces)
+        let matched =
+            query.isEmpty
+            ? githubRepos
+            : githubRepos.filter { $0.nameWithOwner.localizedCaseInsensitiveContains(query) }
+
+        visibleRepos = matched.sorted { lhs, rhs in
+            // ISO-8601 timestamps order lexically, newest first.
+            if sortMode == .recent, lhs.pushedAt != rhs.pushedAt {
+                return lhs.pushedAt > rhs.pushedAt
+            }
+            switch NameCollation.compare(lhs.name, rhs.name) {
+            case .orderedAscending: return true
+            case .orderedDescending: return false
+            // Swift's sort is not stable, so equal keys need a tiebreak of
+            // their own or two same-second pushes swap places between passes.
+            case .orderedSame: return lhs.nameWithOwner < rhs.nameWithOwner
+            }
+        }
     }
 
     /// Run the clone; returns the fresh repository's path on success, `nil`
@@ -216,5 +291,4 @@ final class CloneStore {
             }
         }
     }
-
 }

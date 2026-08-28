@@ -44,9 +44,35 @@ final class RepoDirectoryStore {
     /// names them so "no repositories" is diagnosable.
     private(set) var scanFolders: [String] = []
 
-    /// True while a directory refresh is running, so the switcher can say
-    /// "still looking" instead of "found nothing" during the first walk.
+    /// True while a directory refresh is running, so a list can say "still
+    /// looking" instead of "found nothing" during the first walk.
     private(set) var isRefreshing = false
+
+    /// Whether any pass has finished, successfully or not.
+    ///
+    /// `isRefreshing` alone cannot answer "is an empty list news?": before the
+    /// first pass is even *started* it is false, and a list rendering then —
+    /// which the Welcome screen does, while launch resolution is still deciding
+    /// what to open — would greet every launch with "No repositories found" and
+    /// an invitation to go fix the scan paths. Nothing has looked yet, and that
+    /// is what the list should say.
+    private(set) var hasSearched = false
+
+    /// Why the last walk failed, if it did. Rendered as one inline row above
+    /// the list with a Retry — not a phase swap: the rows a previous walk
+    /// found are still openable, and replacing them with an error screen
+    /// would take away the repositories along with the bad news.
+    private(set) var discoveryError: String?
+
+    /// Row order — hydrated from the shared state file on the first walk and
+    /// written back by the picker's toggle.
+    private(set) var sortMode: SortMode = .recent
+
+    /// The persisted mode is adopted once per launch, not on every walk: the
+    /// toggle writes the file in the background, so re-reading it on the next
+    /// refresh could put the old value back over a choice the user had just
+    /// made. The Tauri store hydrates once for the same reason.
+    private var hasHydratedSortMode = false
 
     /// Shared by everything that fetches in the background: the tier loop
     /// here and the active repo's auto-fetch loop both consult and feed it.
@@ -75,8 +101,9 @@ final class RepoDirectoryStore {
     private var lastFullSweep = Date.distantPast
     private var lastRefocusSweep = Date.distantPast
 
-    /// Row label: the folder's basename, like the Tauri picker's fallback
-    /// label (GitHub owner/name lookups are not ported).
+    /// A repository's folder name — the picker's row label wherever no
+    /// remote names a better one, and what `RepoIdentifierStore` falls back
+    /// to for a repo with no parseable remote.
     nonisolated static func displayName(of path: String) -> String {
         URL(fileURLWithPath: path).lastPathComponent
     }
@@ -106,23 +133,48 @@ final class RepoDirectoryStore {
     /// list when it finishes.
     private func loadDirectory() async {
         isRefreshing = true
-        defer { isRefreshing = false }
+        defer {
+            isRefreshing = false
+            // Set on every exit, failures included: a walk that could not read
+            // a scan folder has still looked, and the row it leaves behind is
+            // what explains the empty list.
+            hasSearched = true
+        }
 
         if let state = try? await GitBridge.reposState() {
             adoptRecents(state.recentRepos ?? [])
             publishRepos()
+            if !hasHydratedSortMode {
+                hasHydratedSortMode = true
+                sortMode = SortMode(persisted: state.repoSortMode) ?? .recent
+            }
         }
 
         let config = try? await GitBridge.appConfig()
         let scanPaths = config?.scanPaths ?? []
         scanFolders = await GitBridge.scanFolders(for: scanPaths)
-        if let found = try? await GitBridge.knownRepositories(
-            scanPaths: scanPaths,
-            depth: config?.scanDepth ?? 3
-        ) {
-            discovered = found
+        do {
+            discovered = try await GitBridge.knownRepositories(
+                scanPaths: scanPaths,
+                depth: config?.scanDepth ?? 3
+            )
+            discoveryError = nil
             publishRepos()
+        } catch {
+            // The MRU rows published above stay: a walk that couldn't read
+            // one scan folder says nothing about the repositories already on
+            // screen, and the row this sets is what offers a retry.
+            discoveryError = error.displayMessage
         }
+    }
+
+    /// Flip recent ⇄ A-Z and persist the choice for both clients.
+    /// Best-effort persistence: the toggle itself must never fail.
+    func toggleSortMode() {
+        sortMode = sortMode == .recent ? .name : .recent
+        hasHydratedSortMode = true
+        let mode = sortMode.rawValue
+        Task { try? await GitBridge.setRepoSortMode(mode) }
     }
 
     /// Rebuild the row list.
@@ -193,12 +245,19 @@ final class RepoDirectoryStore {
     func sweepVisible(activePath: String?, policy: BackgroundSchedulingPolicy) async {
         guard policy.canRunRepoSweeps else { return }
         let full = Date.now.timeIntervalSince(lastFullSweep) >= Self.sweepThrottle
-        if full {
-            lastFullSweep = .now
-        }
         for path in repos where path != activePath {
+            // The caller keys this on the row list, so a walk publishing new
+            // rows replaces the pass rather than racing it.
+            if Task.isCancelled { return }
             guard full || syncByPath[path] == nil else { continue }
             await sync(path, fetching: false)
+        }
+        // Charged only by a pass that actually finished. Stamping it on entry
+        // let the interim MRU-only publish spend the whole window, after which
+        // the pass over the *complete* list would only fill rows that had no
+        // summary at all — leaving every other badge stale for another 30 s.
+        if full && !Task.isCancelled {
+            lastFullSweep = .now
         }
     }
 

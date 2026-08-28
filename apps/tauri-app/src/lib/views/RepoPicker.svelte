@@ -2,9 +2,17 @@
   import { autofocus } from '$lib/actions/autofocus'
   import { nextActiveIndex, scrollIntoViewWhenActive } from '$lib/actions/listNavigation'
   import { reposApi } from '$lib/api/commands'
-  import { basename } from '$lib/utils/path'
+  import {
+    collidingRepoLabels,
+    ensureRepoIdentifiers,
+    repoIdentifiers,
+    repoLabel,
+    repoSearchLabels,
+  } from '$lib/stores/repoIdentifiers'
   import { discoveringRepos } from '$lib/services/repoDiscovery'
   import RepoListEmptyState from '$lib/components/RepoListEmptyState.svelte'
+  import RepoSortToggle from '$lib/components/RepoSortToggle.svelte'
+  import { recentRepos, repoSortMode } from '$lib/stores/reposState'
 
   interface Props {
     repos: string[]
@@ -25,6 +33,37 @@
 
   let searchInput = $state('')
 
+  // The same row labels the switcher shows: the two pickers are one surface.
+  // Rendering raw paths here and names there was a drift with a real cost —
+  // typing the `owner/name` the *other* list displays found nothing in this
+  // one, because a row is searched by the labels it shows.
+  $effect(() => {
+    ensureRepoIdentifiers(repos)
+  })
+
+  // Computed over the whole list, not the filtered one, so a row's owner
+  // prefix doesn't appear and disappear as the user types.
+  const collidingLabels = $derived(collidingRepoLabels(repos, $repoIdentifiers))
+
+  // The switcher's order, honouring the same persisted toggle: the two lists
+  // are one surface, and ranking one by recency while the other showed raw
+  // discovery order made a sort chosen in either place look ignored. There is
+  // no active repo here — that is the whole premise of this screen — so the
+  // switcher's active-first term simply has nothing to pin.
+  const sortedRepos = $derived.by(() => {
+    const ids = $repoIdentifiers
+    const mru = $recentRepos
+    const byName = (a: string, b: string) =>
+      repoLabel(a, ids).localeCompare(repoLabel(b, ids), undefined, { sensitivity: 'base' })
+    const rank = (path: string) => {
+      const index = mru.indexOf(path)
+      return index === -1 ? Number.MAX_SAFE_INTEGER : index
+    }
+    return $repoSortMode === 'name'
+      ? [...repos].sort(byName)
+      : [...repos].sort((a, b) => rank(a) - rank(b) || byName(a, b))
+  })
+
   /*
     Rows to show, best match first. Core ranks them — one crossing per
     keystroke, not one per row — and keeps the input order within a tier, so
@@ -38,7 +77,8 @@
 
   $effect(() => {
     const query = searchInput
-    const rows = repos
+    const rows = sortedRepos
+    const ids = $repoIdentifiers
     const folders = scannedPaths
     if (!query.trim()) {
       filteredRepos = rows
@@ -48,7 +88,7 @@
     reposApi
       .filterRepos(
         query,
-        rows.map((path) => ({ path, names: [basename(path)] })),
+        rows.map((path) => ({ path, names: repoSearchLabels(path, ids) })),
         folders
       )
       .then((matched) => {
@@ -104,6 +144,7 @@
         onkeydown={handleKeyDown}
         use:autofocus
       />
+      <RepoSortToggle />
     </div>
 
     <div class="repos-list">
@@ -116,13 +157,19 @@
         />
       {:else}
         {#each filteredRepos as repo, i (repo)}
+          {@const id = $repoIdentifiers.get(repo)}
+          {@const label = repoLabel(repo, $repoIdentifiers)}
+          {@const prefix = collidingLabels.has(label) && id ? `${id.owner}/` : ''}
           <button
             class="repo-item"
             class:active={i === activeIndex}
             use:scrollIntoViewWhenActive={i === activeIndex}
             onclick={() => handleSelect(repo)}
+            title={repo}
           >
-            <span class="repo-path">{repo}</span>
+            <span class="repo-name">
+              {#if prefix}<span class="repo-owner">{prefix}</span>{/if}{label}
+            </span>
           </button>
         {/each}
       {/if}
@@ -177,12 +224,16 @@
   }
 
   .search-section {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     padding: 10px 12px;
     border-bottom: 1px solid var(--border-inactive);
   }
 
   .search-input {
-    width: 100%;
+    flex: 1;
+    min-width: 0;
     padding: 4px 8px;
     font-size: 13px;
     border-radius: 6px;
@@ -254,9 +305,17 @@
     box-shadow: inset 0 0 0 1.5px var(--border-active);
   }
 
-  .repo-path {
+  .repo-name {
     color: var(--text-primary);
     font-size: 13px;
-    word-break: break-all;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* The owner reads as context for the name, not as part of it. The full path
+     is one hover away on the row's title. */
+  .repo-owner {
+    color: var(--text-muted);
   }
 </style>

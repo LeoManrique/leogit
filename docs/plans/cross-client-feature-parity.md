@@ -1,6 +1,6 @@
 # Plan — Cross-client feature parity (SwiftUI ⇄ Tauri)
 
-> Status: **in progress — WS-A…WS-E shipped 2026-08-27, WS-F through WS-J 2026-08-28; WS-K is next (and needs a Linux machine — see §6's sequencing note).**
+> Status: **in progress — WS-A…WS-E shipped 2026-08-27, WS-F through WS-J and WS-L 2026-08-28. WS-M is next; WS-K is unblocked but needs a Linux machine (§6's sequencing note), so it is taken whenever that machine is available.**
 > The remaining work was re-cut into seventeen smaller workstreams (C…S) on
 > 2026-08-27 after WS-B proved too large to review as one piece — see §6.
 > Accepted 2026-08-27 with every open decision resolved. Per-workstream state
@@ -83,7 +83,7 @@ in code. "Make the current features work well" starts here (workstream A).
 
 ### 3.1 Defects — fixed
 
-Eighteen of the twenty are closed: twelve in WS-A, D-5 / D-7 / D-17's
+Seventeen of the twenty are closed: twelve in WS-A, D-5 / D-7 / D-17's
 structural half with their hoists in WS-B, D-6 in WS-C, D-20 in WS-E and D-4 in
 WS-I. Kept as a register (IDs are referenced from §4) and trimmed to what each
 fix *is*, since the code now carries the reasoning.
@@ -152,16 +152,16 @@ and matched, not that it was skipped.
 
 ### 4.1 Repo management (RM)
 
-- **RM-1 · No-repo state.** Native Welcome is a dead end (logo + two buttons, no
-  discovery run); Tauri shows a searchable ranked picker. **Tauri right.**
-  Reuse the switcher's list as the Welcome body and start discovery from
-  Welcome. Adopt Tauri's "exactly one discovered repo → auto-open" rule
-  (deliberately *not* after a Settings edit). Keep native's no-back-to-welcome
-  model — both clients agree repos switch in place. **The same change removes
-  Welcome's `Open Repository…` / ⌘O** (RM-2): it exists only because there is
-  no list here yet, and until the list replaces it, it is the sole way into a
-  repository on a machine with no `last_opened_repo`. Neither half ships
-  without the other. → WS-L
+- **RM-1 · No-repo state.** ✅ *WS-L.* Native Welcome is the switcher's own list
+  under the app's name — one view (`RepoPickerList`) in both places, so the pair
+  cannot drift a third time. Launch resolves as Tauri's does: the recorded repo,
+  else a sole discovered one opened by itself, else the picker; the auto-open is
+  confined to launch, so a later scan-path edit cannot pull the user out of the
+  picker they are standing in. The restore runs *before* the walk — it validates
+  its own path and does not need the list, so the common launch no longer queues
+  behind a filesystem crawl. `Open Repository…`, ⌘O and the `.fileImporter`
+  behind them went with the same change (RM-2). Native's no-back-to-welcome
+  model is unchanged.
 - **RM-2 · Open a repo outside the scan paths.** **Decided: neither client gets
   a per-folder open action**, GitHub Desktop's File ▸ Add Local Repository ⌘O
   notwithstanding. A repo list is *what the scan paths cover*, so a local
@@ -170,17 +170,9 @@ and matched, not that it was skipped.
   one symptom and invites the list to disagree with its own configuration. The
   empty state's "Choose folders to search" CTA is the sanctioned route, and a
   repo genuinely outside every scan path still arrives by clone or
-  `leogit <dir>` and then keeps its row via RM-3's MRU union. ✅ *WS-C*: neither
-  switcher offers one — the Tauri client never had it, and native's footer
-  action is gone, leaving both footers `Clone Repository…` alone.
-
-  **One entry point survives, and only because it is load-bearing.** Native's
-  Welcome screen has no discovery list at all (RM-1), no toolbar, and no
-  `leogit <dir>` (SH-1) — so its `Open Repository…` / ⌘O is not a second way
-  into a list, it is the *only* way in on a machine with no
-  `last_opened_repo`. **It goes as part of RM-1, in the same change that makes
-  Welcome the discovery picker** — removing it before that strands a fresh
-  install on a clone-only screen. → WS-L
+  `leogit <dir>` and then keeps its row via RM-3's MRU union. ✅ *WS-C* for the
+  switchers, ✅ *WS-L* for Welcome's last entry point — load-bearing only until
+  the list arrived, and gone in the change that brought it.
 - **RM-3 · Row-list membership.** Native unions discovery with the
   existence-checked MRU, so an Open-Other repo keeps its row across launches;
   Tauri's list is discovery-only — clones, CLI opens, and Open-Other rows all
@@ -203,9 +195,11 @@ and matched, not that it was skipped.
   fetched). ✅ *WS-C* for the Tauri half: the dropdown ranks active → MRU index
   → name-ordered tail, native's rank function in TS, and `repoActivity` +
   `get_last_commit_timestamp` are deleted with their last consumer — which is
-  also half of E-5. The persisted clock↔A-Z toggle stays; **native still
-  ignores it** (a Tauri-set "alphabetical" silently does nothing there), which
-  is the shared-state hazard left. → WS-L
+  also half of E-5. ✅ *WS-L* for the persisted clock↔A-Z toggle, which native
+  had been ignoring — a Tauri-set "alphabetical" silently did nothing there.
+  Hydrated once per launch in both clients, because the toggle's write is
+  asynchronous and a later read could put the old value back over a choice the
+  user had just made.
 - **RM-5 · Row labels + search input set.** Tauri labels rows with the GitHub
   `owner/name` (colliding basenames get a muted `owner/` prefix — GitHub
   Desktop's rule) and searches over those names; native shows bare basenames
@@ -217,12 +211,28 @@ and matched, not that it was skipped.
   gained the `$HOME` path-root and native gained case- and
   separator-normalized prefix matching (its raw `hasPrefix` silently made the
   whole absolute path searchable whenever a scan folder's case differed).
-  Native still searches one label — porting identifiers to it lazily (visible
-  rows only) and bounding Tauri's fan-out (E-5) is what's left. → WS-L
-- **RM-6 · Switcher keyboard cursor.** Native: Return opens the first match,
-  nothing else (confirmed; ROADMAP tracks it). Tauri: full ↑/↓ cursor with
-  scroll-into-view across all three of its pickers. **Tauri right**; native
-  gets it via `List(selection:)` in the popover. → WS-L
+  ✅ *WS-L* for the labels: `RepoIdentifierStore` is the native
+  `repoIdentifiers.ts`, and the four label rules (row label, owner-qualified
+  label, the searchable pair, the collision set) live in one place per client —
+  which also closed the Tauri startup picker's own drift, since it was rendering
+  raw paths and searching only basenames beside a dropdown that showed
+  `owner/name`. The bound on Tauri's fan-out shipped with E-5 in WS-J.
+
+  **The plan's "visible rows only" was not taken, and should not be.** Labels
+  are *searchable*, so a query has to reach a repository the user has never
+  scrolled to; fetching per visible row would have made the filter silently
+  depend on how far the list had been scrolled. E-5's worker pool is the bound
+  the phrase was reaching for, and it already exists — so the list asks for
+  every row and pays four subprocesses at a time.
+- **RM-6 · Switcher keyboard cursor.** ✅ *WS-L.* ↑/↓ over the rows with
+  scroll-into-view, Return on the cursor's row, and the cursor snapping back to
+  the top match on every keystroke — Tauri's behaviour, with
+  `ListNavigation.nextIndex` as `nextActiveIndex` written for Swift so an arrow
+  key cannot answer differently. **Not** `List(selection:)`, which this entry
+  had proposed: a list moves a cursor only while *it* is first responder, and
+  these lists keep focus in the filter field — taking it away would end the
+  typing that produced the rows. The cursor is read from the field instead, via
+  `onKeyPress`.
 - **RM-7 · Empty/loading states.** Native's switcher distinguishes
   looking/none-found(+searched folders)/no-matches; Tauri's dropdown said
   "No repositories" for everything, with the rich state only in the startup
@@ -232,22 +242,28 @@ and matched, not that it was skipped.
   you want lives somewhere discovery was never pointed at. (The "looking" state
   is unreachable in the dropdown by construction: the open repo is always
   listed there. It is live in the picker, the phase that can have none.)
-  Native still has no CTA at all. → WS-L
+  ✅ *WS-L* for native: `RepoListEmptyState` answers the same three, with the
+  same strings and the same CTA in both dead ends.
 - **RM-8 · Switching mid-transfer.** **Native right** given the single global
   slot (GitHub Desktop allows it, but scopes state per repo — out of reach
-  without per-repo op state). ✅ *WS-C*: the Tauri switcher chip disables on
-  `activeNetworkOp`, with a title saying why. Switching away used to leave the
-  old repo's transfer running while the new repo's header read "Pushing…" with
-  no progress, and gated the new repo's polling for invisible reasons.
-  ✅ *WS-F* for the other half: ⌘R is held back during a transfer too (SH-3).
+  without per-repo op state). ✅ *WS-C* for Tauri, ✅ *WS-F* for the other half
+  (⌘R is held back during a transfer too — SH-3), and ✅ *WS-L* for **where** the
+  hold lives: the repository *rows*, in both clients, not the control that opens
+  the list. Switching away would leave the old repo's transfer running while the
+  new repo's header read "Pushing…" with no progress, and gate the new repo's
+  polling for invisible reasons — none of which browsing or cloning does. See
+  CL-1.
 - **RM-9 · Discovery freshness.** **Native right.** ✅ *WS-C* for Tauri:
   `services/repoDiscovery.ts` re-walks on dropdown open and on Settings close
   in *both* phases (button, Escape and ⌘, all route through one handler), with
   a single in-flight pass shared rather than duplicated and the open repo
   re-added if a walk racing the fire-and-forget MRU write would drop its row.
   The main view used to need a restart for a scan-path edit or a terminal
-  clone. One native refinement left: run the walk concurrently with the badge
-  sweep instead of before it. → WS-L
+  clone. ✅ *WS-L* for the native refinement: the walk and the badge sweep are
+  two independent `.task`s, and the sweep is keyed on the row list so it re-runs
+  when the walk publishes new rows — running it *behind* the walk delayed every
+  badge by the slower half and then swept only what the list happened to hold
+  when the popover opened.
 - **RM-10 · On-switch breaker feed.** ✅ *WS-A.* The native warm-up fetch now
   reports its outcome to the breaker like every other real attempt, in the
   extracted `ContentView.warmUpFetch` alongside D-18's gating.
@@ -756,24 +772,35 @@ and matched, not that it was skipped.
 
 - **CL-1 · Reachability.** ✅ *WS-C* for Tauri: `Clone Repository…` is in the
   footer of the startup picker as well as the switcher, so the first-run user
-  most likely to want it can finally reach it. Native is reachable from Welcome
-  and the switcher, but its entry sits under the switcher's transfer-disable —
-  cloning a different repo contends with nothing, since clone deliberately
-  claims no slot in either client. → WS-L
+  most likely to want it can finally reach it. ✅ *WS-L* for the transfer gate,
+  **on both clients**: it disabled the control that opens the list, which took
+  Clone away with it, and cloning contends with nothing since clone deliberately
+  claims no slot in either client. The hold moved onto the rows, which is what
+  RM-8 actually decided — the list opens, Clone works, only the switch is held.
+  The blocked rows are dimmed and inert rather than `disabled`, because a
+  disabled control takes no pointer events and the tooltip saying *why* would
+  never appear.
 - **CL-2 · List caching.** GitHub Desktop's shape — cache **plus** an
   always-visible refresh button — adopted on both. ✅ *WS-C* for Tauri: the
   once-per-run cache keeps its per-open speed and gains a Refresh button beside
   the filter, so a repo created since launch is no longer unreachable until
-  restart; the filter already stayed live during loads. Native still refetches
-  on every sheet open (a 20 s dead zone each time, filter disabled throughout).
-  → WS-L
+  restart; the filter already stayed live during loads. ✅ *WS-L* for native:
+  `CloneStore` moved to `ContentView`, so it outlives the sheet and the list is
+  the same once-per-run cache, with the same Refresh beside the filter.
+  `hasLoadedList` is set only on success, so a failed load retries on the next
+  open rather than reopening onto a stale error with no list behind it.
 - **CL-3 · Keyboard.** ✅ *WS-C* for Tauri: Return clones from anywhere in the
   dialog when Clone is enabled — the `defaultAction` the native sheet has and
   this one, having no `<form>`, never did. In the gh list, Return on a row the
   cursor hasn't picked yet selects it and the *next* Return clones: one press
   would clone before the derived destination path had ever been on screen.
-  Native's GitHub tab is still mouse-only (no autofocus, no cursor, no
-  Enter-to-select — FRONTEND §6.9's first-row-acts-on-Return applies). → WS-L
+  ✅ *WS-L* for native, reaching the same rule by a different route: the field a
+  tab lands on takes the caret, and ↑/↓ from the filter move the *selection*
+  rather than a separate cursor — so the *Clones into…* preview follows the
+  arrow keys and one Return is enough, because the path has already been seen.
+  The rule both satisfy is "no clone starts before the user has seen where it
+  lands"; the keystroke counts differ, and §9 records that. Flipping Tauri to
+  match is the two-line change WS-C's entry already flagged.
 - **CL-4 · URL/name derivation has drifted** (the "ported verbatim" pair):
   `.git`-on-shorthand handled differently, whitespace trimmed only natively
   (an untrimmed Tauri path creates literal `" …"` directories and persists the
@@ -805,12 +832,11 @@ and matched, not that it was skipped.
   a stale selection with Clone already lit), and a name tiebreak on the
   recency sort. Its per-tab error state needed nothing — `selectTab` already
   clears the clone error and a gh-list failure is its own state inside the
-  list. Native still owes: the same empty-state split, the per-tab error state
-  (a URL-tab failure currently shows over the GitHub tab), tab-vs-input reset
-  (it resets everything), diacritic-insensitive collation with a stable
-  tiebreak (Swift's sort isn't stable and equal names can flicker), and
-  filter-then-sort + memoize (it sorts 200 rows per keystroke per body pass).
-  → WS-L
+  list. ✅ *WS-L* for all five native halves: the empty-state split, the per-tab
+  error clear, the *tab kept / inputs cleared* reset (`reopen()`, which also
+  keeps the list and the sort mode — the cache is the point), `NameCollation`
+  for a case- and diacritic-blind order with an explicit tiebreak after it, and
+  filter-then-sort recomputed on its three inputs rather than per body pass.
 - **CL-8 · `check_auth`.** Tauri spawns `gh auth status` on every launch to
   write a field with **zero readers** (the PR feature that consumed it was
   retired); the FFI deliberately doesn't export it and gh's own error text
@@ -1058,10 +1084,12 @@ and matched, not that it was skipped.
   Native loses the commit-list scroll position on tab round trips (Tauri keeps
   both panes mounted — its trade); close it with a `ScrollViewReader` restore
   to the hoisted selection instead of keeping subtrees alive. → WS-Q
-- **SH-8 · Pre-main phases.** Tauri's loading/error-with-Retry phases are
-  right; native will need a scan-failure surface on Welcome once RM-1 lands
-  (inline row + Retry, not a phase swap). Native's deliberate silence about a
-  missing restored repo stays. → WS-L
+- **SH-8 · Pre-main phases.** ✅ *WS-L.* A failed walk sets
+  `RepoDirectoryStore.discoveryError`, which both native lists render as one
+  inline row with a Retry above whatever the last successful pass found —
+  deliberately not a phase swap: those rows still open, and an error screen in
+  their place would take the repositories away along with the bad news. Native's
+  deliberate silence about a missing restored repo stays.
 
 ## 5. Core-hoist catalogue
 
@@ -1117,8 +1145,11 @@ rather than keeping it beside the field.
 Deliberately **not** hoisted: sort collation (locale into a chrono-free core —
 no), relative-date formatting (platform), scheduling policy (host lifecycle),
 tab-expansion (single consumer), disambiguation labels (small, but H-6-adjacent
-if it ever grows), and the per-status *colour* (H-13 hoists the glyph and the
-name; the tint resolves against each host's own palette).
+if it ever grows), keyboard-cursor index arithmetic (four lines, and a crossing
+per arrow key would be absurd — the two copies are named the same and carry the
+same doc, which is the cheaper guard here), and the per-status *colour* (H-13
+hoists the glyph and the name; the tint resolves against each host's own
+palette).
 
 ## 6. Workstreams
 
@@ -1194,18 +1225,17 @@ is mostly adoption of already-proven native behavior.
    **Still live.**
    - **A repo list is exactly what the scan paths cover** (RM-2). A workstream
      that finds a repository unreachable reaches for discovery or the scan-path
-     setting, never a second way in. The one exception is native Welcome's
-     `Open Repository…`, which **WS-L must delete in the same change that gives
-     Welcome the discovery list** (RM-1). `resolve_repo_root` is FFI-only; the
-     Tauri launch restore uses `is_git_repo`, the cheap existence check it wants.
+     setting, never a second way in. There is no longer an exception in either
+     client. `resolve_repo_root` is FFI-only; the Tauri launch restore uses
+     `is_git_repo`, the cheap existence check it wants.
    - **Discovery re-walks where the setting changes, not where the dialog
      closes.** WS-H removed both hosts' `closeSettings` handlers and hung the
      walk off the `scan_paths` / `scan_depth` patch instead, which is why the
      rule survived a dialog rewrite: a hook on dismissal is a hook someone can
      route around.
-   - **`RepoListEmptyState.svelte` is the shared empty state for both repo
-     lists.** WS-L ports the same three answers natively; change the strings
-     there, not in a copy.
+   - **`RepoListEmptyState` is the shared empty state for both repo lists, in
+     both clients** — same three answers, same strings. Change them in the two
+     components, never in a copy.
    - **The `<fieldset disabled>` freeze is the pattern for uncancellable
      dialogs** (STYLE.md). Reset `min-inline-size: 0` or it refuses to shrink and
      widens the dialog; keep progress and errors outside it.
@@ -1424,9 +1454,10 @@ is mostly adoption of already-proven native behavior.
      list. Excluding a future surface from that count is done explicitly — not
      registering also takes away its Escape.
    - **Both hosts' `closeSettings` are gone**; the discovery walk hangs off the
-     `scan_paths` / `scan_depth` patch inside the overlay. **If WS-L gives
-     Welcome a discovery list, it needs no Settings-close hook** — the setting
-     already announces itself.
+     `scan_paths` / `scan_depth` patch, which is what let WS-L give native
+     Welcome a live list without inventing a dismissal hook — the setting
+     announces itself, and native carries the announcement across scenes as
+     `leogitScanPathsChanged`.
    - **`git::get_repo_name` is a registered Tauri command with no caller.** The
      window title uses the client's own `basename()` (CH-12's rule: don't cross
      the IPC boundary for path arithmetic already in hand). One for WS-S's
@@ -1646,23 +1677,102 @@ is mostly adoption of already-proven native behavior.
     tier's deadline forward instead of firing a fan-out into a hidden window.
     If the observer's transport ends up wanting a per-subscription channel
     rather than a broadcast, WS-I's entry above is the shape.
-12. **WS-L — Native welcome, switcher & clone (M).** The native block starts
-    where the user does. RM-1 (Welcome is a dead end today — reuse the
-    switcher's list as its body, run discovery from it, adopt the
-    exactly-one-discovered-repo auto-open rule, and **delete Welcome's
-    `Open Repository…` / ⌘O with the `.fileImporter` behind it** — RM-2's last
-    entry point, which only exists because there is no list here yet and must
-    not outlive the list arriving, or precede it), RM-5's native half (GitHub
-    identifiers on the rows, the half WS-B's shared search rule doesn't supply
-    — port them lazily, visible rows only), RM-6 (↑/↓ cursor via
-    `List(selection:)`), RM-7's native half (the "Choose folders to search"
-    CTA), SH-8 (the scan-failure surface RM-1 creates the need for — an inline
-    row + Retry, not a phase swap), and the native halves of CL-1 (clone
-    shouldn't sit under the transfer-disable — it claims no slot), CL-2 (cache
-    + refresh instead of a 20 s dead zone per open), CL-3 (the GitHub tab is
-    mouse-only) and CL-7. **RM-1 comes before SH-1** deliberately: SH-1 claims
-    its launch target inside the Welcome task, so rebuilding Welcome first
-    means touching it once.
+12. **WS-L — Native welcome, switcher & clone (M).** ✅ *Shipped 2026-08-28.*
+    RM-1 (Welcome is the switcher's own list, with launch resolution and the
+    sole-repo auto-open — and `Open Repository…` / ⌘O deleted with the
+    `.fileImporter` behind them, RM-2's last entry point), RM-4's native half
+    (the persisted clock ⇄ A-Z toggle), RM-5's native half (remote-derived row
+    labels, both of them searchable), RM-6 (the ↑/↓ cursor), RM-7's native half
+    (the three empty states and the *Choose folders to search* action), RM-9's
+    native refinement (walk and badge sweep run concurrently), SH-8 (the
+    scan-failure row), and the native halves of CL-1, CL-2, CL-3 and CL-7. Three
+    items landed on **both** clients: CL-1's transfer gate moved from the control
+    that opens the list onto the rows; RM-5's label rules were hoisted beside the
+    identifier cache in each client, which closed the Tauri startup picker's own
+    drift (raw paths, basename-only search) beside a dropdown showing
+    `owner/name`; and RM-4's toggle became a shared component both Tauri pickers
+    use, so a sort chosen in either list is honoured in both. Per-item state is
+    in §4.1, §4.8 and §4.11. New native files: `Screens/RepoPickerList.swift`,
+    `Design/RepoListEmptyState.swift`, `Stores/RepoIdentifierStore.swift`,
+    `Stores/SortMode.swift`, `Services/ListNavigation.swift`,
+    `Services/NameCollation.swift`; the FFI gained `repo_identifier` and a
+    `RepoIdentifier` mirror (62 → 63 exports). Gates: `pnpm check` 0/0 over 153
+    files, prettier clean, `pnpm tauri build` bundled, zero-warning
+    `just mac-build`, 178 core + 24 bridge + 2 host tests, clippy-pedantic 165
+    core with `leogit` / `leogit-ffi` at zero.
+
+    Findings for WS-M and the native block after it:
+    - **A screen that renders before anything has looked will claim there is
+      nothing to find.** The empty state was deciding between "looking" and
+      "found nothing" from `isRefreshing`, which is false *before* the first
+      pass starts as well as after the last one ends — so every launch showed
+      "No repositories found — choose folders to search" for the whole of
+      launch resolution, on machines whose repositories the app was about to
+      list. The fix is a separate `hasSearched`, set on every exit from the
+      walk including the failing ones. **The general shape: a boolean that means
+      "in progress" cannot also answer "has this ever run", and an empty state
+      built on the first one accuses the user's configuration during startup.**
+      Any native surface WS-M adds before a repository is open inherits this
+      screen and this hazard.
+    - **A call to action has to have somewhere to come back to.** The empty
+      state's *Choose folders to search* opens Settings, and native had nothing
+      that re-walked when `scan_paths` changed — so following the advice fixed
+      the setting and left the same screen saying the same thing until the app
+      was restarted. It now posts `leogitScanPathsChanged` from the patch, and
+      the *root* view answers it, not the repository screen: the picker is the
+      surface offering the advice and the one with no switcher to re-open.
+      WS-R rewrites that Settings store field-wise (D-5 at form scale) and must
+      keep the hook on the patch — WS-H's rule about hanging discovery off the
+      setting rather than off a dismissal, in the client that had no dismissal
+      hook to begin with.
+    - **A native picker's cursor cannot be `List(selection:)`.** These lists
+      keep focus in the filter field so typing continues to narrow them, and a
+      SwiftUI `List` only moves a cursor while *it* is first responder. The
+      cursor is read from the field with `onKeyPress` and held as a **path**
+      rather than an index, because the row set changes underneath it — a walk
+      publishes, the sort flips, a query narrows — and an index then points at
+      whatever moved into that slot. A cursor whose row is gone falls back to
+      the first row.
+    - **A SwiftUI `body` is not a memoization boundary.** The first build
+      ranked, disambiguated and (with a query typed) crossed into core *per body
+      pass*, while the identifier store published once per repository — so fifty
+      repositories meant fifty rankings and fifty FFI crossings for one list
+      appearing. The rows are `@State` now, rebuilt from an `Equatable` `Inputs`
+      struct naming exactly what they are a function of, with the label
+      dictionary built once per rebuild. `CloneStore.visibleRepos` is the same
+      pattern for the same reason. **Anything a native view derives from a
+      streaming store wants this shape.**
+    - **A cache flag that is only ever set is not a cache flag.** The clone
+      list's `hasLoadedList` was set on success and never cleared, so a Refresh
+      that failed after a successful load left the cache flagged as loaded, the
+      rows emptied and the error standing until restart. It clears on failure
+      now, and the failure keeps the cached rows — they are still the last true
+      answer. `loadGitHubList` also needed an in-flight guard, because
+      `reopen()` is not cancellation-aware: closing and reopening the sheet
+      during the first twenty-second query started a second one.
+    - **Re-check after every long `await` in a launch path.** The auto-open rule
+      runs after a filesystem crawl that can take seconds, in which the user may
+      have cloned or picked something — and a `.task` being cancelled does not
+      stop the continuation. `store.open` has no same-path guard either, so even
+      the harmless-looking case re-ran a full open. SH-1's launch-target claim
+      lands in the same task and needs the same discipline.
+    - **A `disabled` control cannot explain itself.** Neither `.disabled(…)` nor
+      the DOM's `disabled` attribute delivers pointer events, so a tooltip on a
+      blocked row never appears — which is the entire reason the row is on
+      screen rather than hidden. Both clients dim and refuse instead
+      (`aria-disabled` on the web). The same applies to any future "you can't do
+      this right now" affordance.
+    - **`sweepVisible`'s throttle is charged by a pass that finishes.** One walk
+      publishes rows twice (MRU, then the walk), and the sweep is keyed on the
+      row list — so stamping the 30 s window on *entry* let the interim
+      MRU-only pass spend it, after which the pass over the complete list only
+      filled rows that had no summary at all. The loop is cancellation-aware
+      and stamps at the end.
+    - **Still pointing the wrong way, for WS-S.** A *re-walk* that fails is an
+      inline row with a Retry natively and a `console.error` in Tauri, whose
+      pickers then show "No repositories found" for a walk that never ran.
+      Tauri's launch-time `phase: 'error'` covers only the first walk. Small,
+      and the native shape is the one to port.
 13. **WS-M — Native launch, menus & updater (M).** SH-1, the largest native
     contract gap: export `resolve_launch_target` /
     `set`+`take_pending_launch_target` / `init_repo` / `is_git_repo`, claim the
@@ -1784,10 +1894,10 @@ plan finished.
 
 One sequencing note that is not free to reorder: **WS-K needs a Linux machine
 rather than a predecessor** — WS-J, the workstream it waited on, has shipped, so
-schedule it when that machine is available and run WS-L…WS-S in the meantime
-rather than blocking the native block behind it. (The other such entry was H-3,
-the last core hoist and the one Tauri-block item that also touched native code;
-it shipped with WS-F.)
+schedule it when that machine is available and run the native block in the
+meantime rather than blocking behind it. WS-L was taken on that basis. (The
+other such entry was H-3, the last core hoist and the one Tauri-block item that
+also touched native code; it shipped with WS-F.)
 
 ## 7. Standing decisions
 
@@ -1818,7 +1928,7 @@ other decision lives inline with the item it governs, marked **Decided** in §4.
 Per workstream, matching the previous plan's bar:
 
 - Zero-warning `xcodebuild` via `just mac-build`; `pnpm check` (svelte-check)
-  0/0; `cargo test --workspace` green (**178 core + 24 bridge + 2 host** — up
+  0/0 over 153 files; `cargo test --workspace` green (**178 core + 24 bridge + 2 host** — up
   from the 120 + 24 this plan started at; the last ten are WS-J's `exclusions`
   module, and the host's two are WS-I's, pinning the terminal channel's JSON
   because the TypeScript that reads it is hand-written);
@@ -1851,9 +1961,16 @@ written as each chunk lands, no duplication between documents:
 - **TECHNICAL.md** — new mechanics paragraphs only for genuinely new machinery
   (the core hoists, the Tauri channel transport, the native launch path), plus
   the claims WS-S lists as their areas land.
-- **DESIGN.md** — flow 1 stops being Tauri-scoped once WS-L and WS-M land; the
-  per-flow
-  client hedges retire as parity closes them.
+- **DESIGN.md** — flow 1 is shared from step 2 on since WS-L; what is left
+  Tauri-only there is how a launch can be *told* which repository to open
+  (`leogit <dir>`, the second-instance forward, the *Create a repository here?*
+  prompt), which retires with WS-M. The per-flow client hedges retire as parity
+  closes them. One difference flow 10 now records rather than hides: Return in
+  the clone list is two presses in Tauri (its cursor and its selection are
+  separate, so the first press makes the destination visible) and one natively
+  (arrowing *is* selecting, so the preview already follows the cursor). Both
+  satisfy the rule — no clone starts before the user has seen where it lands —
+  and flipping Tauri to one press is the two-line change WS-C flagged.
 - **STYLE.md** — the status-letter row settled on `U` + the purple token with
   H-13 (done); WS-C added the *Repo pickers* section (the two lists are one
   component family, with the shared footer and empty state) and the
@@ -1873,9 +1990,9 @@ written as each chunk lands, no duplication between documents:
   there for `Tab`.
 - **ROADMAP.md** — items close as their workstreams land; the deferrals this
   plan makes (per-line staging, diff virtualization, branch rename +
-  delete-on-remote) are already filed there. WS-B added one: GitHub identifiers
-  in the native repo switcher's rows, the half of RM-5 the shared search rule
-  doesn't supply.
+  delete-on-remote) are already filed there. WS-L closed the two WS-B and the
+  pre-plan work had left open (GitHub identifiers and a keyboard cursor in the
+  native switcher).
 - **README.md** — the branch bullet now describes one menu on both clients, the
   merge scoping gone with WS-G.
 

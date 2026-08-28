@@ -1,7 +1,6 @@
 import AppKit
 import SwiftTerm
 import SwiftUI
-import UniformTypeIdentifiers
 
 /// Which list the main pane is showing.
 enum RepoTab: String, CaseIterable, Identifiable {
@@ -25,9 +24,24 @@ enum RepoTab: String, CaseIterable, Identifiable {
 struct ContentView: View {
     @Environment(RepoStore.self) private var store
     @Environment(AppConfigStore.self) private var appConfig
+
+    /// The picker rows' "no repositories found — choose folders" action.
+    @Environment(\.openSettings) private var openSettings
+
     @State private var branchStore = BranchStore()
     @State private var directoryStore = RepoDirectoryStore()
     @State private var terminalStore = TerminalStore()
+
+    /// Repo labels, looked up once per path and kept for the process's
+    /// lifetime. Owned here rather than by either picker: both show the same
+    /// rows, and a cache per surface would spawn the same lookups twice.
+    @State private var identifierStore = RepoIdentifierStore()
+
+    /// The Clone sheet's state, held outside the sheet so its GitHub list
+    /// survives a close and reopen. A store created with the sheet re-ran
+    /// `gh repo list` on every open — a ~20 s dead zone each time, for a list
+    /// that had not changed.
+    @State private var cloneStore = CloneStore()
 
     /// "May background work run right now?" — the policy every loop below
     /// consults by predicate name; its doc comment carries the table.
@@ -40,7 +54,6 @@ struct ContentView: View {
     /// is started from the *History* tab, so it has to survive the switch
     /// that puts the composer on screen.
     @State private var commitStore = CommitStore()
-    @State private var isChoosingFolder = false
     @State private var isCloneSheetPresented = false
     @State private var tab: RepoTab = .changes
 
@@ -51,10 +64,10 @@ struct ContentView: View {
     @State private var selectedPath: String?
     @State private var selectedSha: String?
 
-    /// One attempt per launch: reopen the repo recorded in the shared state
-    /// file. A flag rather than derived state so a failed restore leaves
-    /// Welcome up instead of retrying forever.
-    @State private var hasRestoredLastRepo = false
+    /// One attempt per launch at picking the repository to open by itself.
+    /// A flag rather than derived state so a launch that resolves to nothing
+    /// leaves Welcome up instead of retrying forever.
+    @State private var hasResolvedLaunchRepo = false
 
     /// Dedupes the activate resync — activation notifications can burst.
     @State private var isResyncing = false
@@ -76,10 +89,13 @@ struct ContentView: View {
             } else {
                 WelcomeView(
                     coreVersion: store.coreVersionText,
-                    onOpen: { isChoosingFolder = true },
-                    onClone: { isCloneSheetPresented = true }
+                    directory: directoryStore,
+                    identifiers: identifierStore,
+                    onSelect: switchRepo,
+                    onClone: { isCloneSheetPresented = true },
+                    onChooseFolders: { openSettings() }
                 )
-                .task { await restoreLastRepo() }
+                .task { await resolveLaunchRepo() }
             }
         }
         .frame(minWidth: 720, minHeight: 460)
@@ -91,20 +107,18 @@ struct ContentView: View {
         .onChange(of: store.repoPath, initial: true) { _, path in
             schedulingPolicy.isRepoOpen = path != nil
         }
-        .fileImporter(
-            isPresented: $isChoosingFolder,
-            allowedContentTypes: [.folder]
-        ) { result in
-            guard case let .success(url) = result else { return }
-            Task { await store.open(at: url) }
+        // Attached to the root rather than the repository screen: the picker
+        // is the surface that sends the user to the scan-path setting, so it
+        // is the one that must not still be saying "No repositories found"
+        // when they come back from changing it.
+        .onReceive(NotificationCenter.default.publisher(for: .leogitScanPathsChanged)) { _ in
+            Task { await directoryStore.refreshDirectory() }
         }
-        .fileDialogMessage("Choose a folder inside a Git repository")
-        .fileDialogConfirmationLabel("Open Repository")
         .sheet(isPresented: $isCloneSheetPresented) {
             // A successful clone opens the fresh repo directly — the
             // `.task(id: repoPath)` chain then records it as recent and
             // runs the warm-up fetch like any other open.
-            CloneSheet { repoPath in
+            CloneSheet(store: cloneStore) { repoPath in
                 Task { await store.open(at: URL(fileURLWithPath: repoPath, isDirectory: true)) }
             }
         }
@@ -209,13 +223,21 @@ struct ContentView: View {
                 RepoSwitcher(
                     activePath: repoPath,
                     directory: directoryStore,
+                    identifiers: identifierStore,
                     policy: schedulingPolicy,
+                    // Switching mid-transfer would reset the sync UI out from
+                    // under the running operation — held back like Refresh.
+                    // The chip itself stays live: the hold belongs to the
+                    // switch, and disabling the whole control also took away
+                    // Clone, which claims no network slot and contends with
+                    // nothing a transfer is doing.
+                    switchBlockedReason: syncStore.activeOperation != nil
+                        ? "Finishing the current transfer — switching repositories is unavailable"
+                        : nil,
                     onSelect: switchRepo,
-                    onClone: { isCloneSheetPresented = true }
+                    onClone: { isCloneSheetPresented = true },
+                    onChooseFolders: { openSettings() }
                 )
-                // Switching mid-transfer would reset the sync UI out from
-                // under the running operation — held back like Refresh.
-                .disabled(syncStore.activeOperation != nil)
             }
 
             ToolbarItem {
@@ -620,20 +642,46 @@ struct ContentView: View {
 
     // MARK: Repo switching
 
-    /// Reopen the repo recorded in the shared state file, once per launch —
-    /// the restore both clients perform, so they hand the working repo to
-    /// each other. Best-effort: a moved or deleted path just leaves Welcome.
+    /// Which repository the app opens by itself, once per launch — the
+    /// resolution both clients perform, in the same order.
+    ///
+    /// The recorded repo comes first and does not wait on discovery: the two
+    /// clients hand the working repository to each other through the shared
+    /// state file, and `open` validates the path itself, so making the restore
+    /// queue behind a filesystem crawl would only delay the common launch.
+    /// Discovery runs when there is nothing to restore — for the list this
+    /// screen shows, and for the count the rule below reads.
+    ///
+    /// Best-effort throughout: a moved or deleted path just leaves Welcome up
+    /// with the list.
     @MainActor
-    private func restoreLastRepo() async {
-        guard !hasRestoredLastRepo else { return }
-        hasRestoredLastRepo = true
-        guard let last = (try? await GitBridge.reposState())?.lastOpenedRepo else { return }
-        await store.open(at: URL(fileURLWithPath: last, isDirectory: true))
-        if store.repoPath == nil {
+    private func resolveLaunchRepo() async {
+        guard !hasResolvedLaunchRepo else { return }
+        hasResolvedLaunchRepo = true
+
+        if let last = (try? await GitBridge.reposState())?.lastOpenedRepo {
+            await store.open(at: URL(fileURLWithPath: last, isDirectory: true))
+            if store.repoPath != nil { return }
             // A failed restore is not the user's error; don't greet them
             // with a banner about a repo they may have deleted on purpose.
             store.errorMessage = nil
         }
+
+        await directoryStore.refreshDirectory()
+
+        // The walk is a filesystem crawl and can take seconds, in which the
+        // user may have cloned or picked something — so this re-asks whether a
+        // repository is open rather than trusting the answer it started with.
+        guard store.repoPath == nil else { return }
+
+        // One repository and nothing to restore: there is no choice to
+        // present, so don't make the user click it. Deliberately confined to
+        // launch — a later scan-path edit that happens to narrow the list to
+        // one must not yank the user out of the picker they are standing in.
+        guard directoryStore.repos.count == 1, let only = directoryStore.repos.first else {
+            return
+        }
+        await store.open(at: URL(fileURLWithPath: only, isDirectory: true))
     }
 
     /// Switch straight to another repository — no detour through Welcome.

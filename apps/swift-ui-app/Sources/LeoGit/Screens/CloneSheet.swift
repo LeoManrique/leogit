@@ -8,14 +8,29 @@ import SwiftUI
 /// There is no cancel once a clone starts — dismissing the sheet wouldn't
 /// stop the clone, just orphan its progress and eventual error — so every
 /// exit is disabled while `isCloning`, exactly like the Tauri dialog.
+///
+/// The store is passed in rather than owned here: it caches the GitHub list
+/// for the process, and a store created with the sheet would re-fetch that
+/// list on every open. `reopen()` is what makes each presentation start clean.
 struct CloneSheet: View {
+    @Bindable var store: CloneStore
+
     /// Called with the fresh repository's path after a successful clone;
     /// the caller opens it.
     let onCloned: (String) -> Void
 
     @Environment(\.dismiss) private var dismiss
-    @State private var store = CloneStore()
     @State private var isChoosingDestination = false
+
+    /// Which field takes the caret. Re-asserted on tab switch, so arriving on
+    /// a tab means being able to type into it — the GitHub tab's filter is
+    /// also where the list's arrow keys are read.
+    @FocusState private var focusedField: Field?
+
+    private enum Field: Hashable {
+        case filter
+        case url
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -55,12 +70,7 @@ struct CloneSheet: View {
                     .keyboardShortcut(.cancelAction)
                     .disabled(store.isCloning)
                 Button(store.isCloning ? "Cloning…" : "Clone") {
-                    Task {
-                        if let repoPath = await store.clone() {
-                            onCloned(repoPath)
-                            dismiss()
-                        }
-                    }
+                    Task { await performClone() }
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
@@ -70,7 +80,10 @@ struct CloneSheet: View {
         .padding(16)
         .frame(width: 480)
         .interactiveDismissDisabled(store.isCloning)
-        .task { await store.prepare() }
+        .task { await store.reopen() }
+        .onChange(of: store.source, initial: true) { _, source in
+            focusedField = source == .github ? .filter : .url
+        }
         .fileImporter(
             isPresented: $isChoosingDestination,
             allowedContentTypes: [.folder]
@@ -88,6 +101,12 @@ struct CloneSheet: View {
         .fileDialogConfirmationLabel("Choose")
     }
 
+    private func performClone() async {
+        guard let repoPath = await store.clone() else { return }
+        onCloned(repoPath)
+        dismiss()
+    }
+
     // MARK: GitHub tab
 
     @ViewBuilder
@@ -95,22 +114,44 @@ struct CloneSheet: View {
         HStack(spacing: 8) {
             TextField("Filter repositories", text: $store.filter)
                 .textFieldStyle(.roundedBorder)
+                .focused($focusedField, equals: .filter)
+                // The list is below the filter and the caret stays here, so
+                // the arrows have to be read here too. Selecting as the cursor
+                // moves is deliberate: the destination preview is derived from
+                // the selection, so arrowing shows where each row would land
+                // and Return can act on the row without a second press.
+                .onKeyPress(keys: [.upArrow, .downArrow]) { press in
+                    moveSelection(by: press.key == .downArrow ? 1 : -1)
+                    return .handled
+                }
+
             Button {
                 store.toggleSortMode()
             } label: {
-                Image(systemName: store.sortMode == "recent" ? "clock" : "textformat.abc")
+                Image(systemName: store.sortMode == .recent ? "clock" : "textformat.abc")
             }
             .help(
-                store.sortMode == "recent"
+                store.sortMode == .recent
                     ? "Sorted by recently modified" : "Sorted alphabetically"
             )
+
+            // The list is a once-per-run cache, so this is the only way to see
+            // a repository created since launch — always offered, not just
+            // after a failure.
+            Button {
+                Task { await store.loadGitHubList() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .help("Refresh the list from GitHub")
+            .disabled(store.listPhase == .loading)
         }
-        .disabled(store.isCloning || store.listPhase != .loaded)
+        .disabled(store.isCloning)
 
         Group {
             switch store.listPhase {
             case .loading:
-                ProgressView("Loading repositories…")
+                ProgressView("Loading your repositories…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .failed(let message):
                 VStack(spacing: 8) {
@@ -124,10 +165,15 @@ struct CloneSheet: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .loaded where store.visibleRepos.isEmpty:
-                Text(store.githubRepos.isEmpty ? "No repositories found." : "No matches")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // Two different problems: an account with nothing in it, and a
+                // query that matched none of what is there.
+                Text(
+                    store.githubRepos.isEmpty
+                        ? "No repositories found." : "No matching repositories."
+                )
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .loaded:
                 List(store.visibleRepos, selection: $store.selectedRepoID) { repo in
                     HStack(spacing: 8) {
@@ -153,6 +199,16 @@ struct CloneSheet: View {
         .frame(height: 240)
     }
 
+    /// Move the selection one row, wrapping — with nothing selected, Down
+    /// starts at the top and Up at the bottom.
+    private func moveSelection(by delta: Int) {
+        let rows = store.visibleRepos
+        let current = rows.firstIndex { $0.nameWithOwner == store.selectedRepoID } ?? -1
+        let next = ListNavigation.nextIndex(after: current, count: rows.count, delta: delta)
+        guard next >= 0 else { return }
+        store.selectedRepoID = rows[next].nameWithOwner
+    }
+
     // MARK: URL tab
 
     @ViewBuilder
@@ -166,6 +222,7 @@ struct CloneSheet: View {
             .textFieldStyle(.roundedBorder)
             .labelsHidden()
             .autocorrectionDisabled()
+            .focused($focusedField, equals: .url)
             .disabled(store.isCloning)
         }
         .labeledContentStyle(.vertical)

@@ -396,28 +396,21 @@ enum GitBridge {
     /// pre-fills it.
     @concurrent
     static func setLastCloneDir(_ dir: String) async throws {
-        _ = try patchState(
-            patch: ReposStatePatch(
-                lastOpenedRepo: nil,
-                lastCloneDir: dir,
-                repoSortMode: nil,
-                cloneSortMode: nil
-            )
-        )
+        _ = try patchState(patch: ReposStatePatch(lastCloneDir: dir))
     }
 
     /// Persist the GitHub tab's sort toggle (`"recent"` | `"name"`) — the
     /// same state the Tauri dialog's toggle round-trips.
     @concurrent
     static func setCloneSortMode(_ mode: String) async throws {
-        _ = try patchState(
-            patch: ReposStatePatch(
-                lastOpenedRepo: nil,
-                lastCloneDir: nil,
-                repoSortMode: nil,
-                cloneSortMode: mode
-            )
-        )
+        _ = try patchState(patch: ReposStatePatch(cloneSortMode: mode))
+    }
+
+    /// Persist the repo picker's sort toggle (`"recent"` | `"name"`) — the
+    /// switcher's clock ⇄ A-Z choice, shared with the Tauri dropdown.
+    @concurrent
+    static func setRepoSortMode(_ mode: String) async throws {
+        _ = try patchState(patch: ReposStatePatch(repoSortMode: mode))
     }
 
     // MARK: - Settings
@@ -529,14 +522,7 @@ enum GitBridge {
     /// either client; the state file is shared with the Tauri app.
     @concurrent
     static func setLastOpened(repoPath: String) async throws {
-        _ = try patchState(
-            patch: ReposStatePatch(
-                lastOpenedRepo: repoPath,
-                lastCloneDir: nil,
-                repoSortMode: nil,
-                cloneSortMode: nil
-            )
-        )
+        _ = try patchState(patch: ReposStatePatch(lastOpenedRepo: repoPath))
     }
 
     /// Move `repoPath` to the front of the most-recently-used list (core
@@ -555,6 +541,14 @@ enum GitBridge {
     @concurrent
     static func knownRepositories(scanPaths: [String], depth: UInt32) async throws -> [String] {
         try await knownRepos(scanPaths: scanPaths, maxDepth: depth)
+    }
+
+    /// The `owner/name` a repository's remote URL parses to, or `nil` when it
+    /// has no remote or the URL names no such pair — the picker keeps
+    /// labelling that row with its folder name.
+    @concurrent
+    static func identifier(of repoPath: String) async -> RepoIdentifier? {
+        await repoIdentifier(repoPath: repoPath)
     }
 
     // MARK: - Pure rules

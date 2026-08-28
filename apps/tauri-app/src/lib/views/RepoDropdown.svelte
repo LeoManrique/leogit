@@ -1,18 +1,25 @@
 <script lang="ts">
-  import { ensureRepoIdentifiers, repoIdentifiers } from '$lib/stores/repoIdentifiers'
+  import {
+    collidingRepoLabels,
+    ensureRepoIdentifiers,
+    repoFullLabel,
+    repoIdentifiers,
+    repoLabel,
+    repoSearchLabels,
+  } from '$lib/stores/repoIdentifiers'
   import { repoSync } from '$lib/stores/repoSync'
   import { repoSyncScheduler } from '$lib/services/repoSyncScheduler'
   import { discoveringRepos } from '$lib/services/repoDiscovery'
-  import { recentRepos, repoSortMode, setRepoSortMode } from '$lib/stores/reposState'
-  import type { RepoIdentifier } from '$lib/api/commands'
+  import { recentRepos, repoSortMode } from '$lib/stores/reposState'
+  import { activeNetworkOp } from '$lib/stores/networkOps'
   import RepoTooltip from '$lib/components/RepoTooltip.svelte'
   import RepoListEmptyState from '$lib/components/RepoListEmptyState.svelte'
+  import RepoSortToggle from '$lib/components/RepoSortToggle.svelte'
   import { scanFolders } from '$lib/stores/config'
   import { reposApi } from '$lib/api/commands'
   import { autofocus } from '$lib/actions/autofocus'
   import { dismissOnEscape } from '$lib/actions/overlayStack'
   import { nextActiveIndex, scrollIntoViewWhenActive } from '$lib/actions/listNavigation'
-  import { basename } from '$lib/utils/path'
 
   interface Props {
     repos: string[]
@@ -37,11 +44,6 @@
   }: Props = $props()
 
   let filter = $state('')
-  // Sort mode lives in the persisted store so toggling sticks across opens and
-  // restarts. Mirrors the Clone dialog's clock / A→Z button.
-  function toggleSort() {
-    setRepoSortMode($repoSortMode === 'recent' ? 'name' : 'recent')
-  }
 
   // Where the floating tooltip should render (clientX/Y), and which repo it
   // belongs to. We anchor below the hovered row, slightly to the right of
@@ -61,16 +63,6 @@
     void repoSyncScheduler.syncVisibleRepos(repos)
   })
 
-  /** GitHub repo name when known, else folder basename. The primary row label. */
-  function primaryLabel(path: string, id: RepoIdentifier | null | undefined): string {
-    return id?.name ?? basename(path)
-  }
-
-  /** Full identifier when known, else basename. Used by the hover tooltip. */
-  function fullLabel(path: string, id: RepoIdentifier | null | undefined): string {
-    return id ? `${id.owner}/${id.name}` : basename(path)
-  }
-
   /*
     Row order: the open repo, then most-recently-*used* first, then a
     name-ordered tail of everything never opened in this app.
@@ -87,7 +79,7 @@
     const ids = $repoIdentifiers
     const mru = $recentRepos
     const byName = (a: string, b: string) =>
-      primaryLabel(a, ids.get(a)).localeCompare(primaryLabel(b, ids.get(b)), undefined, {
+      repoLabel(a, ids).localeCompare(repoLabel(b, ids), undefined, {
         sensitivity: 'base',
       })
     // Anything the MRU has never seen shares the last rank, so the name order
@@ -123,10 +115,7 @@
     reposApi
       .filterRepos(
         q,
-        list.map((path) => {
-          const id = ids.get(path)
-          return { path, names: [primaryLabel(path, id), fullLabel(path, id)] }
-        }),
+        list.map((path) => ({ path, names: repoSearchLabels(path, ids) })),
         folders
       )
       .then((matched) => {
@@ -140,24 +129,24 @@
     }
   })
 
-  // Map primary label → count, so rows that collide get an `owner/` prefix
-  // (matches GH Desktop's needsDisambiguation behavior).
-  const labelCounts = $derived.by(() => {
-    const ids = $repoIdentifiers
-    const counts = new Map<string, number>()
-    for (const p of sortedRepos) {
-      const label = primaryLabel(p, ids.get(p))
-      counts.set(label, (counts.get(label) ?? 0) + 1)
-    }
-    return counts
-  })
+  // Computed over the whole list, not the filtered one, so a row's owner
+  // prefix doesn't appear and disappear as the user types.
+  const collidingLabels = $derived(collidingRepoLabels(sortedRepos, $repoIdentifiers))
 
-  function needsDisambiguation(label: string): boolean {
-    return (labelCounts.get(label) ?? 0) > 1
-  }
+  // There is one global network slot, so switching away mid-transfer would
+  // leave the old repo's push running with nothing reporting it while the new
+  // repo's polling sat gated for invisible reasons — the header would read
+  // "Pushing…" over a repo that isn't pushing. The hold belongs to the rows,
+  // not to the chip that opens this list: browsing and cloning contend with
+  // nothing, and cloning claims no slot in either client.
+  const switchBlockedReason = $derived(
+    $activeNetworkOp
+      ? 'Finishing the current transfer — switching repositories is unavailable'
+      : undefined,
+  )
 
   function handleSelect(repo: string) {
-    if (repo === currentRepo) return
+    if (repo === currentRepo || switchBlockedReason) return
     onSelect(repo)
   }
 
@@ -185,6 +174,9 @@
   }
 
   function showTooltip(e: Event, repo: string) {
+    // A held-back row already carries its explanation in `title`; the hover
+    // card would sit on top of it saying something else.
+    if (switchBlockedReason) return
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
     // Anchor just below the row, offset right so the tooltip doesn't sit
     // directly on top of the label.
@@ -215,33 +207,7 @@
       onkeydown={handleKeyDown}
       use:autofocus
     />
-    <!-- Sort toggle — same clock / A→Z control as the Clone dialog. The glyph
-         itself is the state label; recency here is when you last opened the
-         repo, which is the question a switcher is actually asked. -->
-    <button
-      class="icon-btn"
-      onclick={toggleSort}
-      title={$repoSortMode === 'recent' ? 'Sorted by recently opened' : 'Sorted alphabetically'}
-      aria-label={$repoSortMode === 'recent' ? 'Sorted by recently opened' : 'Sorted alphabetically'}
-    >
-      {#if $repoSortMode === 'recent'}
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <circle cx="4.25" cy="8" r="4" />
-          <path d="M4.25 5.5V8l1.5 0.9" />
-          <path d="M12.5 3.5v8" />
-          <path d="M10.5 9.5 12.5 11.5 14.5 9.5" />
-        </svg>
-      {:else}
-        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
-          <text x="0.5" y="6.6" font-size="6.5" font-weight="700" fill="currentColor" font-family="-apple-system, system-ui, sans-serif">A</text>
-          <text x="0.5" y="14.8" font-size="6.5" font-weight="700" fill="currentColor" font-family="-apple-system, system-ui, sans-serif">Z</text>
-          <g fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12.5 3.5v8" />
-            <path d="M10.5 9.5 12.5 11.5 14.5 9.5" />
-          </g>
-        </svg>
-      {/if}
-    </button>
+    <RepoSortToggle />
   </div>
 
   <div class="repo-list">
@@ -255,8 +221,8 @@
     {:else}
       {#each filteredRepos as repo, i (repo)}
         {@const id = $repoIdentifiers.get(repo)}
-        {@const label = primaryLabel(repo, id)}
-        {@const prefix = needsDisambiguation(label) && id ? `${id.owner}/` : ''}
+        {@const label = repoLabel(repo, $repoIdentifiers)}
+        {@const prefix = collidingLabels.has(label) && id ? `${id.owner}/` : ''}
         {@const isCurrent = repo === currentRepo}
         {@const sync = $repoSync.get(repo)}
         <button
@@ -269,6 +235,9 @@
           onmouseleave={hideTooltip}
           onfocus={(e) => showTooltip(e, repo)}
           onblur={hideTooltip}
+          class:blocked={switchBlockedReason !== undefined}
+          aria-disabled={switchBlockedReason !== undefined}
+          title={switchBlockedReason}
         >
           <span class="repo-name">
             {#if prefix}<span class="repo-owner">{prefix}</span>{/if}{label}
@@ -318,7 +287,7 @@
 {#if hoverTooltip}
   {@const id = $repoIdentifiers.get(hoverTooltip.repo)}
   <RepoTooltip
-    title={fullLabel(hoverTooltip.repo, id)}
+    title={repoFullLabel(hoverTooltip.repo, $repoIdentifiers)}
     path={hoverTooltip.repo}
     x={hoverTooltip.x}
     y={hoverTooltip.y}
@@ -365,28 +334,6 @@
 
   /* Icon-only filter-row button (the sort toggle); its tooltip comes from the
      button's title. */
-  .icon-btn {
-    flex: 0 0 auto;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    background: transparent;
-    color: var(--text-muted);
-    border: 1px solid var(--border-strong);
-    border-radius: 6px;
-    cursor: pointer;
-    transition:
-      color 100ms ease,
-      background 100ms ease;
-  }
-
-  .icon-btn:hover {
-    color: var(--text-primary);
-    background: var(--surface-hover);
-  }
 
   .repo-list {
     flex: 1;
@@ -454,6 +401,19 @@
      composes with the .current row's background and reads as "focused". */
   .repo-item.active {
     box-shadow: inset 0 0 0 1.5px var(--border-active);
+  }
+
+  /* Held back by a transfer. `aria-disabled` rather than the `disabled`
+     attribute, deliberately: a disabled button fires no pointer events, so
+     the title explaining *why* the row can't be picked would never appear —
+     which is the whole reason the row is dimmed rather than hidden. */
+  .repo-item.blocked {
+    cursor: default;
+    opacity: 0.55;
+  }
+
+  .repo-item.blocked:hover {
+    background: transparent;
   }
 
   .repo-name {

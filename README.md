@@ -78,9 +78,10 @@ publish of a remote-less repo to GitHub, plus auto-fetch, status polling, and re
 on app re-activation) → history → an embedded terminal (SwiftTerm, ⌃` to toggle, fed by
 the same core PTY as the Tauri client, staying open with the exit code when the shell
 dies) → cloning (your GitHub repos via `gh` or any URL, with live progress) —
-with a toolbar repo switcher (discovered + recent repos, dirty / pull / push indicators
-per row) that restores the last opened repo at launch, and a native Settings window (⌘,)
-editing the same shared config. Every Tauri flow is now ported. Building it also needs Xcode's Metal Toolchain component
+with a repo picker — the same searchable list in the toolbar switcher and on the screen
+shown before a repository opens, rows named by their remote with dirty / pull / push
+indicators — that restores the last opened repo at launch, and a native Settings window
+(⌘,) editing the same shared config. Every Tauri flow is now ported. Building it also needs Xcode's Metal Toolchain component
 (`xcodebuild -downloadComponent MetalToolchain`, once) for SwiftTerm's shaders.
 
 The pre-monorepo design is preserved on the `legacy/classic-design` branch (== tag `v0.1.32`);

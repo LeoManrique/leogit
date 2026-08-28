@@ -37,17 +37,18 @@ static-linking or a local daemon (that decision is open; see the plan).
 - Today's surface: **4 events, ~45 DTOs**, and a command catalogue (§3) each host exposes
   **to the extent it consumes it**. The Tauri host registers **73** `#[tauri::command]`s,
   each with a wrapper in `apps/tauri-app/src/lib/api/commands.ts`; the UniFFI bridge
-  exports **62** functions. The two sets are deliberately not identical, and a command
+  exports **63** functions. The two sets are deliberately not identical, and a command
   reaching one host does not oblige the other — what is required is that the difference be
   recorded, here or in §8, never left silent.
   - No native export: `check_auth`, `check_for_update`, `delete_remote_branch`,
-    `generate_patch`, `generate_inverse_patch`, `get_ahead_behind`,
-    `get_repo_identifier`, `get_repo_name`,
+    `generate_patch`, `generate_inverse_patch`, `get_ahead_behind`, `get_repo_name`,
     `has_staged_changes`, `highlight_diff`, `init_repo`, `is_git_repo`, `open_url`,
     `rename_branch`, `take_pending_launch_target`, `terminal_pty_info`. Three of those the
     native client reaches under another name (`repo_display_name` for `get_repo_name`,
     `resolve_repo_root` for `is_git_repo`, the structured `tokenize_diff` for the
-    HTML-shaped `highlight_diff`); `take_pending_launch_target` and `init_repo` serve the
+    HTML-shaped `highlight_diff`), as does `get_repo_identifier` — exported as
+    `repo_identifier`, async so the picker's per-row `git config` reads never
+    hold a Swift cooperative thread; `take_pending_launch_target` and `init_repo` serve the
     launch path, which is Tauri-only (§8); and the rest the bridge omits because it
     carries no surface a client does not call.
   - No Tauri command: `core_version`, `fix_path_env`, `repo_display_name`,
@@ -550,17 +551,41 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    selected on arrival, and re-seat when a refetch drops the selected sha — which is what
    an amend or an undo does to it. A right-click selects the row it opens on, so the menu
    and the detail pane can never describe two different commits.
-9. **Repo search** — the filter over a repository list is **loose on names, strict on
-   paths**: the query may appear as a scattered subsequence in a repo's name(s), but a
-   path must contain it contiguously and only below the deepest root it sits under —
-   a scan folder, or the home directory (every row shares the folders above, so
-   matching them matches everything). Results are ranked — exact name, prefix,
-   substring, initials, subsequence, path — and each list's own sort order only breaks
-   ties, because the first row is what Return or the keyboard cursor acts on. **One
-   implementation, in core** (`filter_repos`), because two hand-written ones had
-   already drifted on the very set of labels they searched. A frontend supplies the
-   rows and every label it displays for each — a basename, and where it is known the
-   GitHub `owner/name` — and gets them back narrowed.
+9. **Repo pickers** — each client shows the repository list in two places (the screen
+   shown while nothing is open, and the header/toolbar switcher), and **they are one
+   surface**: same rows, same labels, same three empty states, same footer. Only the
+   room they have differs.
+   - **Which repository opens by itself, at launch**: the recorded `last_opened_repo`
+     if it is still a repository, else — when discovery found **exactly one** — that
+     one, else the picker. The auto-open belongs to launch alone: a later scan-path
+     edit that happens to narrow the list to one must not pull the user out of the
+     picker they are standing in.
+   - **Rows** are labelled by the remote's repository name where one is parseable, the
+     folder's name otherwise, with a muted `owner/` prefix on the rows whose label
+     another row shares — a repository with no remote has no owner to disambiguate
+     with, so it keeps its bare name.
+   - **Order**: the open repository first, then either most-recently-opened or A-Z,
+     from a toggle persisted in `repos-state.json` as `repo_sort_mode`. Recency **of
+     use**, not of last commit — a switcher answers "where was I".
+   - **Keyboard**: the filter field keeps focus, ↑/↓ move a cursor over the rows
+     (wrapping, scrolling the least amount that reveals the row), and Return opens the
+     cursor's row. A new query snaps the cursor back to the top match.
+   - **Emptiness says which one it is** — still looking, nothing found anywhere (with
+     the folders that were searched), or nothing matched the filter. The last two both
+     carry *Choose folders to search*, because "none matched" is what you see when the
+     repository you want lives somewhere discovery was never pointed at. A failed walk
+     is one inline row with a Retry above the rows a previous walk found, never a
+     screen that replaces them.
+   - **Search** is **loose on names, strict on paths**: the query may appear as a
+     scattered subsequence in a repo's name(s), but a path must contain it contiguously
+     and only below the deepest root it sits under — a scan folder, or the home
+     directory (every row shares the folders above, so matching them matches
+     everything). Results are ranked — exact name, prefix, substring, initials,
+     subsequence, path — and each list's own sort order only breaks ties, because the
+     first row is what Return or the keyboard cursor acts on. **One implementation, in
+     core** (`filter_repos`), because two hand-written ones had already drifted on the
+     very set of labels they searched. A frontend supplies the rows and every label it
+     displays for each, and gets them back narrowed.
 10. **Row context actions** — right-clicking a changed file offers discard (always
    confirmed), ignore-this-file / ignore-this-extension, copy absolute + relative
    path, and reveal / open-with-default (both disabled when the file is deleted, since
@@ -744,10 +769,10 @@ every deliberate difference here.
 |---|---|---|
 | Window chrome | Tauri window | native `WindowGroup` / AppKit |
 | Theme | CSS tokens in `app.css`, dark/light via `data-theme`, driven by the `theme` config field | `Color` assets, system appearance — the `theme` field is never read (permanent exemption: a stored theme is a web-only concept) |
-| Opening a repository from disk | the one `plugin-dialog.open` call chooses a *clone destination*; repositories otherwise arrive from discovery, a clone, or `leogit <dir>` | a `.fileImporter` on Welcome (⌘O) only — Welcome has no discovery list yet, so this is the sole way in without a `last_opened_repo`; it retires with that list |
+| Opening a repository from disk | the one `plugin-dialog.open` call chooses a *clone destination*; repositories otherwise arrive from discovery, a clone, or `leogit <dir>` | the same: the one `.fileImporter` chooses a clone destination, and repositories arrive from discovery or a clone |
 | Home dir | `@tauri-apps/api/path`'s `homeDir` | `FileManager` |
 | Reveal / open / open-url | core `os::*` commands (unchanged) | core `os::*` commands (unchanged) |
-| Launch target / second instance | the whole contract: `leogit <dir>` resolves through `core::launch`, a cold start claims it with `take_pending_launch_target`, and a second invocation focuses the window and forwards an `open-repo` event via `plugin-single-instance` | not implemented — no app delegate, no `onOpenURL`, no `CFBundleURLTypes`/`CFBundleDocumentTypes`, and neither launch command is exported to the bridge. The native client restores `last_opened_repo` at launch and otherwise waits on Welcome |
+| Launch target / second instance | the whole contract: `leogit <dir>` resolves through `core::launch`, a cold start claims it with `take_pending_launch_target`, and a second invocation focuses the window and forwards an `open-repo` event via `plugin-single-instance` | not implemented — no app delegate, no `onOpenURL`, no `CFBundleURLTypes`/`CFBundleDocumentTypes`, and neither launch command is exported to the bridge. The rest of the launch resolution below is shared |
 | Diff rendering | HTML spans (`{@html}`) | structured runs → `AttributedString` |
 | Terminal widget | `xterm.js` | SwiftTerm (PTY backend reused) |
 | Virtualized lists | hand-rolled windowing | native `List`/`LazyVStack`/`Table` |
@@ -755,7 +780,6 @@ every deliberate difference here.
 | Window frame persistence | `tauri-plugin-window-state` saves size and position on exit and restores them at launch; the `tauri.conf.json` size is the first-run default | AppKit frame autosave on the `WindowGroup`, with `.defaultSize` as the first-run default |
 | Settings surface (§6.15) | a modal overlay inside the one window, with a header ✕ and a footer **Close** — there is nothing to save, so the button only dismisses | the stock SwiftUI `Settings` scene, a separate window with ⌘, and the standard title-bar close and no content buttons at all; a text field also commits on `.onDisappear` |
 | Settings field coverage (§6.15) | every `Config` field the app reads has a control | no control for `theme` (a permanent exemption, above), `side_by_side_diff` (awaiting the layout, above), or the two AI timeouts — so a timeout set in the Tauri client bounds native's requests but cannot be changed there. Closing the timeout gap is the parity plan's WS-R |
-| Repo-search labels (§6.9) | rows carry the GitHub `owner/name` when it is known, and both it and the basename are searchable | basename only — GitHub identifiers are not fetched natively yet (ROADMAP) |
 | Context-menu scope (§6.10) | multi-row selection, so discard also acts on a whole selection | single-selection lists, so every item acts on the right-clicked row |
 | Background-cadence enforcement (§6.1) | the ladder is a self-scheduling `setTimeout` chain, so a WebView free to throttle a backgrounded document can only make the hidden rung *slower* than 30 s; the wake-up resync is what guarantees a current screen | an App Nap assertion is held while a repo is open, so the same ladder's timers are not coalesced away, and the hidden rung is exactly 30 s (`AppNapSuppressor`) |
 | File-list selection & keyboard (§6.4) | shift-click extends a multi-row selection (a separate anchor for the checkbox column, Finder/Gmail semantics), Space toggles the focused row's checkbox and bulk-toggles a multi-selection, Home/End jump to first/last | single-selection `List`: arrow keys move the active row, and there is no range selection, Space toggle, or Home/End |
@@ -765,12 +789,12 @@ every deliberate difference here.
 | Transfer progress surface | inside the control that started it — a fill wiping across the sync button, sweeping where git reports no percentage | a full-width strip under the toolbar with a real indeterminate state, plus git's line verbatim |
 | Branch-menu shape (§6.14) | a popover: filter input, keyboard cursor over the rows, the four actions as a footer, and the two that need a branch narrowing the same list under a header that states the question | a stock `Menu`: an inline `Picker` for locals, a plain-button section for remotes, and the same four actions with `Merge into “…”` and `Delete Branch` as submenus. AppKit supplies the scrolling, type-select and cursor the popover hand-rolls |
 
-Neither repo switcher offers a per-folder open action, deliberately and in both
-clients: a repo list is exactly what `scan_paths` covers, so a local repository
-missing from it means the paths are wrong — a Settings edit, which both empty
-states link to and which still holds next launch, where a one-off open would be
-forgotten. That is why the row above is a Welcome-only entry, and why it retires
-with the Welcome screen's own list.
+Neither client offers a per-folder open action anywhere, deliberately: a repo
+list is exactly what `scan_paths` covers, so a local repository missing from it
+means the paths are wrong — a Settings edit, which every empty state links to
+and which still holds next launch, where a one-off open would be forgotten. A
+repository genuinely outside every scan path still arrives by clone or
+`leogit <dir>` and then keeps its row through the shared MRU.
 
 ## 9. Non-goals / intentionally absent
 

@@ -7,7 +7,11 @@
   import { basename } from '$lib/utils/path'
   import { loadFileStatusStyles, refreshConfig, scanFolders } from '$lib/stores/config'
   import { ghApi, gitApi, configApi, appApi, reposApi, type LaunchTarget } from '$lib/api/commands'
-  import { patchReposState, recordRecentRepo } from '$lib/stores/reposState'
+  import {
+    hydrateReposState,
+    patchReposState,
+    recordRecentRepo,
+  } from '$lib/stores/reposState'
   import { resolveCloneDefaultDir, rememberCloneDir } from '$lib/services/cloneFlow'
   import { updateChecker } from '$lib/services/updateChecker'
   import { dismissTopOverlay } from '$lib/actions/overlayStack'
@@ -129,6 +133,10 @@
       // union with the persisted MRU, which is what keeps a clone, a CLI open
       // or an Open-Other repo listed across restarts.
       const cfg = await refreshConfig()
+      // Before the picker can render: it carries the sort toggle, and a list
+      // that comes up in the default order and then reshuffles once the main
+      // view hydrates is a list that ignored the user's choice.
+      await hydrateReposState()
       // The status glyph table, once. Awaited here so no changed-file row ever
       // paints before it lands.
       await loadFileStatusStyles()
