@@ -13,8 +13,10 @@
   const shortcuts = [
     { key: 'Ctrl/Cmd + Enter', description: 'Commit selected files' },
     { key: 'Ctrl/Cmd + G', description: 'Generate commit message with AI' },
-    { key: 'Ctrl/Cmd + P', description: 'Push (or publish) to remote' },
-    { key: 'Ctrl/Cmd + R', description: 'Refresh status' },
+    // Named after what the button says rather than after one of its states:
+    // the chord runs whatever the sync ladder proposes.
+    { key: 'Ctrl/Cmd + P', description: 'Run the sync action (fetch / pull / push / publish)' },
+    { key: 'Ctrl/Cmd + R', description: 'Reload status, history and branches' },
     { key: 'Ctrl/Cmd + L', description: 'Toggle Changes / History tab' },
     { key: 'Ctrl/Cmd + B', description: 'Open branch picker' },
     { key: 'Ctrl/Cmd + ,', description: 'Open settings' },

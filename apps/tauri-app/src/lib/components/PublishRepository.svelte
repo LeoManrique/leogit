@@ -5,11 +5,18 @@
   interface Props {
     defaultName: string
     isPublishing: boolean
+    /**
+     * `gh`'s own failure text, stated here with every field intact. The common
+     * one is a name already taken, whose fix is a character in the field behind
+     * the dialog — a modal stacked over it made that two dismissals and a
+     * retype, and the dialog underneath was still holding the same doomed name.
+     */
+    error?: string
     onPublish: (name: string, description: string, isPrivate: boolean) => void
     onCancel: () => void
   }
 
-  let { defaultName, isPublishing, onPublish, onCancel }: Props = $props()
+  let { defaultName, isPublishing, error, onPublish, onCancel }: Props = $props()
 
   // Seed the editable name from the prop once at mount (the dialog is re-created
   // each time it opens). `untrack` documents that the one-time read is intended.
@@ -72,6 +79,21 @@
         <input type="checkbox" bind:checked={isPrivate} disabled={isPublishing} />
         <span>Keep this code private</span>
       </label>
+      <p class="hint">
+        Publishes to github.com under your <code>gh</code> account — use
+        <code>owner/name</code> to target an organization.
+      </p>
+      {#if isPublishing}
+        <!-- `gh repo create` streams nothing parseable, so this is the honest
+             shape: motion that says work is happening, and no number it would
+             have to invent. -->
+        <div class="progress" role="status" aria-label="Publishing">
+          <div class="progress-fill"></div>
+        </div>
+      {/if}
+      {#if error}
+        <p class="error">{error}</p>
+      {/if}
     </div>
     <div class="modal-footer">
       <button class="btn-secondary" onclick={onCancel} disabled={isPublishing}>Cancel</button>
@@ -187,6 +209,56 @@
   .checkbox-row input {
     cursor: pointer;
     accent-color: var(--border-active);
+  }
+
+  .hint {
+    margin: 0;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  .hint code {
+    font-family: var(--font-mono);
+    font-size: 11px;
+  }
+
+  /* The Clone dialog's 4px bar, running indeterminate: same shape, no number. */
+  .progress {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--bg-secondary);
+    overflow: hidden;
+  }
+
+  .progress-fill {
+    height: 100%;
+    width: 40%;
+    border-radius: 2px;
+    background: var(--border-active);
+    animation: sweep 1.2s ease-in-out infinite;
+  }
+
+  @keyframes sweep {
+    from {
+      transform: translateX(-110%);
+    }
+    to {
+      transform: translateX(260%);
+    }
+  }
+
+  /* gh's own text: mono, selectable, wrapped — the failure usually names the
+     repository that already exists, which is worth copying. */
+  .error {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--status-red);
+    white-space: pre-wrap;
+    word-break: break-word;
+    user-select: text;
+    max-height: 120px;
+    overflow-y: auto;
   }
 
   .modal-footer {

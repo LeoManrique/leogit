@@ -241,6 +241,85 @@ pub struct RepoStatus {
     /// claiming a clean branch mid-merge. Filled from a filesystem probe (see
     /// [`git_dir`]), so it costs no subprocess on the status poll.
     pub merging: bool,
+    /// What the sync control should offer to do next, from the fields above.
+    ///
+    /// Carried on the status for the same reason [`RepoStatus::merging`] is:
+    /// every client renders it on every refresh, so asking for it separately
+    /// would be a crossing per tick for six comparisons — and a second route to
+    /// the same answer is how the two clients' ladders drifted apart in the
+    /// first place. Computed by [`sync_proposal`].
+    pub proposal: SyncProposal,
+}
+
+/// What the sync control should offer to do next.
+///
+/// One state at a time, picked by a strict precedence ladder over
+/// [`RepoStatus`] — GitHub Desktop's `PushPullButton` cascade, adapted. Pull
+/// outranks push, so a diverged branch proposes the step that has to happen
+/// first; the pending counts stay visible beside the control meanwhile.
+///
+/// It lives in core because four surfaces read it: each client's sync control
+/// and each client's keyboard/menu route to the same action. Written twice it
+/// would be four chances to disagree about what the repository needs next —
+/// and the clients *had* drifted, one deriving the ladder as three loose
+/// booleans that could all be true at once.
+///
+/// Titles, icons, and which states get a chevron stay per-platform: the two
+/// controls are shaped differently and that is presentation, not policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SyncProposal {
+    /// Nothing is known about the repository yet. A neutral, disabled Fetch —
+    /// so the control never flashes "Publish" at a repository whose first
+    /// status read simply hasn't landed.
+    Loading,
+    /// HEAD points at a commit rather than a branch: there is no branch to
+    /// push or pull, and the way out is the branch picker.
+    Detached,
+    /// No remote at all — create the GitHub repository and push in one shot.
+    PublishRepository,
+    /// A remote exists but this branch tracks nothing, so its first push has
+    /// to carry `--set-upstream`.
+    PublishBranch,
+    /// Behind the upstream. Pulling comes first, whatever else is pending.
+    Pull,
+    /// Ahead only.
+    Push,
+    /// In sync: the manual "check the remote", which touches no files.
+    Fetch,
+}
+
+/// Run the sync ladder over a repository status.
+///
+/// Total: every status maps to exactly one proposal, which is what makes the
+/// impossible combinations unrepresentable rather than merely unhandled —
+/// "publishable and behind" cannot both be live the way three independent
+/// booleans could.
+///
+/// A host that has no status *at all* yet answers [`SyncProposal::Loading`]
+/// itself; that is a fact about the host's own load, not about the repository.
+#[must_use]
+pub fn sync_proposal(status: &RepoStatus) -> SyncProposal {
+    // A detached HEAD reports an empty branch name too, so it has to be told
+    // apart from a status nobody has filled in before the emptiness test.
+    if status.branch.is_empty() && !status.detached {
+        return SyncProposal::Loading;
+    }
+    if status.detached {
+        // Deliberately ahead of the remote checks, where GitHub Desktop puts
+        // them the other way round: publishing would offer to push a branch
+        // that does not exist, and the honest state wins.
+        SyncProposal::Detached
+    } else if !status.has_remote {
+        SyncProposal::PublishRepository
+    } else if !status.has_upstream {
+        SyncProposal::PublishBranch
+    } else if status.behind > 0 {
+        SyncProposal::Pull
+    } else if status.ahead > 0 {
+        SyncProposal::Push
+    } else {
+        SyncProposal::Fetch
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -716,12 +795,33 @@ fn parse_unmerged_entry(seg: &str) -> Option<FileEntry> {
     })
 }
 
+/// Working-tree status, plus what the sync control should offer to do next.
+///
+/// Deliberately one call rather than a status read followed by a separate ask
+/// for the ladder: the proposal is a pure function of the fields below it, so a
+/// second crossing to run six comparisons would be a real cost on the host that
+/// pays for crossings — and `merging` already established that a value every
+/// refresh path needs belongs on the status it is derived from, where no path
+/// can forget to fetch it.
+///
+/// # Errors
+/// When `git status` fails — `repo_path` is no longer a repository, or git is
+/// missing from `PATH`.
+pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
+    let mut status = read_status(repo_path)?;
+    // Filled here, once, rather than at each of `read_status`'s three exits:
+    // an early return that forgot is exactly the bug class this field exists
+    // to remove.
+    status.proposal = sync_proposal(&status);
+    Ok(status)
+}
+
 // Every command in this file that spawns a process or touches the filesystem
 // is `#[tauri::command(async)]`: a plain `#[tauri::command]` runs inline on the
 // main thread, so a slow `git` spawn — or a disk saturated by a large push —
 // would freeze the whole window (see the longer note on `highlight_diff`).
 // Only pure in-memory commands (`format_commit_message`) stay sync.
-pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
+fn read_status(repo_path: String) -> Result<RepoStatus, String> {
     // Get raw bytes — DO NOT trim or convert until we've split on NUL.
     let bytes = run_git_raw(
         &repo_path,
@@ -746,6 +846,8 @@ pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
         detached: false,
         head_sha: String::new(),
         merging: is_merging_in(git_dir(&repo_path).as_deref()),
+        // Overwritten by `get_status` once every field it reads is filled.
+        proposal: SyncProposal::Loading,
     };
 
     // Configured remote, queried once and reused below (the no-upstream
@@ -4791,5 +4893,134 @@ mod tests {
         assert_eq!(FileStatus::Conflicted.letter(), "U");
         assert_eq!(FileStatus::Conflicted.label(), "Conflicted");
         assert_eq!(FileStatus::New.label(), "Added");
+    }
+
+    // -----------------------------------------------------------------------
+    // Sync ladder (H-3)
+    // -----------------------------------------------------------------------
+
+    /// A status with everything settled: on a branch, tracking a reachable
+    /// upstream, nothing pending. Each test perturbs the one field it is about.
+    fn synced_status() -> RepoStatus {
+        RepoStatus {
+            branch: "main".to_string(),
+            upstream: "origin/main".to_string(),
+            has_upstream: true,
+            ahead: 0,
+            behind: 0,
+            files: Vec::new(),
+            has_remote: true,
+            unpushed_shas: Vec::new(),
+            detached: false,
+            head_sha: "a".repeat(40),
+            merging: false,
+            proposal: SyncProposal::Fetch,
+        }
+    }
+
+    /// The ladder's precedence, top to bottom, each rung asserted against a
+    /// status that also satisfies every rung below it — which is the property
+    /// three independent booleans could not express.
+    #[test]
+    fn sync_ladder_follows_its_precedence() {
+        assert_eq!(sync_proposal(&synced_status()), SyncProposal::Fetch);
+
+        let ahead = RepoStatus {
+            ahead: 2,
+            ..synced_status()
+        };
+        assert_eq!(sync_proposal(&ahead), SyncProposal::Push);
+
+        // Diverged: pull outranks push, so the step that has to happen first
+        // is the one proposed.
+        let diverged = RepoStatus {
+            ahead: 2,
+            behind: 3,
+            ..synced_status()
+        };
+        assert_eq!(sync_proposal(&diverged), SyncProposal::Pull);
+
+        // An untracked branch outranks its own inferred counts: the first push
+        // must set the upstream before anything can be pulled into it.
+        let untracked = RepoStatus {
+            has_upstream: false,
+            upstream: String::new(),
+            ahead: 2,
+            behind: 3,
+            ..synced_status()
+        };
+        assert_eq!(sync_proposal(&untracked), SyncProposal::PublishBranch);
+
+        // No remote at all outranks the untracked branch, since there is
+        // nothing to set an upstream to.
+        let no_remote = RepoStatus {
+            has_remote: false,
+            has_upstream: false,
+            upstream: String::new(),
+            ..synced_status()
+        };
+        assert_eq!(sync_proposal(&no_remote), SyncProposal::PublishRepository);
+
+        // And a detached HEAD outranks every remote question, because there is
+        // no branch for any of them to be about.
+        let detached = RepoStatus {
+            detached: true,
+            branch: String::new(),
+            has_remote: false,
+            has_upstream: false,
+            upstream: String::new(),
+            ..synced_status()
+        };
+        assert_eq!(sync_proposal(&detached), SyncProposal::Detached);
+    }
+
+    /// The empty status a client holds before its first read must not look
+    /// like a repository with no remote, or the control flashes "Publish" at
+    /// every repo on the way in.
+    #[test]
+    fn sync_ladder_waits_for_a_real_status() {
+        let unloaded = RepoStatus {
+            branch: String::new(),
+            upstream: String::new(),
+            has_upstream: false,
+            has_remote: false,
+            head_sha: String::new(),
+            ..synced_status()
+        };
+        assert_eq!(sync_proposal(&unloaded), SyncProposal::Loading);
+    }
+
+    /// A freshly initialised repository — a real branch, no commits, no
+    /// remote — is a publish candidate, not an unloaded status.
+    #[test]
+    fn sync_ladder_offers_publish_for_an_unborn_repository() {
+        let unborn = RepoStatus {
+            has_remote: false,
+            has_upstream: false,
+            upstream: String::new(),
+            head_sha: String::new(),
+            ..synced_status()
+        };
+        assert_eq!(sync_proposal(&unborn), SyncProposal::PublishRepository);
+    }
+
+    /// The status carries the proposal, so no client has to re-derive it — and
+    /// no early return inside the status read may leave it at its placeholder.
+    #[test]
+    fn get_status_carries_the_proposal() {
+        let tmp = tempdir().expect("tempdir");
+        init_test_repo(tmp.path());
+        let repo_path = canonical(tmp.path());
+
+        // An unborn repository takes `read_status`'s early exit, which is the
+        // one most likely to skip a field filled at the end.
+        let unborn = get_status(repo_path.clone()).expect("status");
+        assert_eq!(unborn.proposal, SyncProposal::PublishRepository);
+
+        fs::write(tmp.path().join("a.txt"), "a\n").expect("write");
+        run_git(&repo_path, &["add", "a.txt"]).expect("add");
+        run_git(&repo_path, &["commit", "-m", "first"]).expect("commit");
+        let committed = get_status(repo_path).expect("status");
+        assert_eq!(committed.proposal, SyncProposal::PublishRepository);
     }
 }

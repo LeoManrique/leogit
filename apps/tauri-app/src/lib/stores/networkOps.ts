@@ -1,7 +1,15 @@
 import { writable } from 'svelte/store'
 
-/** Kind of user-initiated network operation. */
-export type NetworkOpKind = 'push' | 'pull' | 'publish'
+/**
+ * Kind of user-initiated network operation.
+ *
+ * `fetch` is here because the sync ladder made it reachable: it is the proposal
+ * for an in-sync branch and a menu item in every split state. The automatic
+ * fetch behind auto-fetch and the refocus resync deliberately claims no slot —
+ * it is not something the user is waiting on, and taking the slot would disable
+ * the whole action cluster on a timer.
+ */
+export type NetworkOpKind = 'fetch' | 'push' | 'pull' | 'publish'
 
 /**
  * The user-initiated network operation in flight, or null when idle.

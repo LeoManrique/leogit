@@ -8,8 +8,15 @@
     networkProgress,
     beginNetworkOp,
     endNetworkOp,
+    type NetworkOpKind,
   } from '$lib/stores/networkOps'
-  import { gitApi, ghApi, osApi, type GitProgressEvent } from '$lib/api/commands'
+  import {
+    gitApi,
+    ghApi,
+    osApi,
+    type GitProgressEvent,
+    type SyncProposal,
+  } from '$lib/api/commands'
   import { availableUpdate, updateDismissed } from '$lib/stores/update'
   import { ensureRepoIdentifiers, repoIdentifiers } from '$lib/stores/repoIdentifiers'
   import { basename } from '$lib/utils/path'
@@ -27,21 +34,30 @@
     onOpenSettings: () => void
     onOpenHelp: () => void
     /**
-     * The one refresh path. Owned by `MainLayout` because a status write is
-     * more than the fields `get_status` returns: it also carries `is_merging`,
-     * reconciles `userDeselected` against the files that still exist, drops a
-     * diff whose file is gone, and feeds the picker's badge for this repo.
-     * The header used to hand-roll its own write and forgot all four, which is
-     * how a stale `MERGING` badge outlived an abort.
+     * Reload after a transfer: status **and** the log, since a pull brings in
+     * commits History would otherwise show up to two seconds late.
+     *
+     * Owned by `MainLayout` because a status write is more than the fields
+     * `get_status` returns: it also carries `is_merging`, reconciles
+     * `userDeselected` against the files that still exist, drops a diff whose
+     * file is gone, and feeds the picker's badge for this repo. The header used
+     * to hand-roll its own write and forgot all four, which is how a stale
+     * `MERGING` badge outlived an abort.
      *
      * Optional like the other repo-scoped callbacks: everything that can reach
-     * it — the Refresh button and the post-transfer refreshes — is inside the
-     * `hasRepo` block, so the pre-main header never supplies one.
+     * it is inside the `hasRepo` block, so the pre-main header never supplies
+     * one.
      */
-    onRefresh?: () => Promise<void>
+    onTransferFinished?: () => Promise<void>
   }
 
-  let { onOpenRepos, onOpenBranches, onOpenSettings, onOpenHelp, onRefresh }: Props = $props()
+  let {
+    onOpenRepos,
+    onOpenBranches,
+    onOpenSettings,
+    onOpenHelp,
+    onTransferFinished,
+  }: Props = $props()
 
   /**
    * Whether a repository is open. The header also renders in the pre-main
@@ -97,59 +113,123 @@
     chipTooltip = null
   }
 
-  let isRefreshing = $state(false)
-  // Push/pull/publish in-flight state lives in the shared `activeNetworkOp`
-  // store — not local $state — so the 2 s status poll and auto-fetch can pause
-  // while a transfer runs. It also makes the ops mutually exclusive: every
-  // handler guards on the store, so Pull is inert while a Push is in flight.
-  const isPushing = $derived($activeNetworkOp === 'push')
-  const isPulling = $derived($activeNetworkOp === 'pull')
-  const isPublishing = $derived($activeNetworkOp === 'publish')
+  // Transfer state lives in the shared `activeNetworkOp` store — not local
+  // $state — so the 2 s status poll and auto-fetch can pause while one runs. It
+  // also makes the ops mutually exclusive: every handler guards on the store.
+  const isTransferring = $derived($activeNetworkOp !== null)
   // 0–1 fill for the in-button progress bar, GitHub-Desktop style.
   const transferFraction = $derived(($networkProgress?.percent ?? 0) / 100)
 
-  let pushMenu = $state<{ x: number; y: number } | null>(null)
+  let actionMenu = $state<{ x: number; y: number } | null>(null)
   let showForcePushConfirm = $state(false)
   let showPublish = $state(false)
-  // Cache the remote name so the confirm dialog can show it without re-querying.
-  let cachedRemote = $state('origin')
+  // Failures raised from inside a dialog stay in it, with the fields intact:
+  // a name collision or a stale lease is fixed and retried right there, and a
+  // modal stacked on top would cost two dismissals to change one character.
+  let publishError = $state<string | undefined>(undefined)
+  let forcePushError = $state<string | undefined>(undefined)
 
   const ahead = $derived($repoState.status.ahead)
   const behind = $derived($repoState.status.behind)
   const hasUpstream = $derived($repoState.status.hasUpstream)
   // Detached HEAD (after "Checkout commit"): the chip shows the short SHA instead
-  // of a branch name, and push/pull are suppressed since there's no branch to
-  // push. The user returns to a branch via the branch picker.
+  // of a branch name. The user returns to a branch via the branch picker.
   const detached = $derived($repoState.status.detached)
   const detachedShort = $derived($repoState.status.headSha.slice(0, 7))
-  // A loaded branch with no remote → publish instead of push. Gating on `branch`
-  // avoids briefly flashing "Publish" before the first status load resolves.
-  const noRemote = $derived(
-    !!$appState.repoPath && !!$repoState.status.branch && !$repoState.status.hasRemote,
+
+  /**
+   * The one action the repository needs next, decided by core's ladder rather
+   * than re-derived here. Three loose booleans used to answer this, and could
+   * disagree — which is how Push stayed enabled on a diverged branch for git to
+   * reject, and how the chevron came to offer only what the face already said.
+   */
+  const proposal = $derived($repoState.status.proposal)
+
+  /** The two informational states: the button names them and stays off. */
+  const isActionable = $derived(proposal !== 'Loading' && proposal !== 'Detached')
+
+  /**
+   * Which states earn a chevron — GitHub Desktop's rule and native's: only
+   * where the menu offers something the face doesn't. Publishing a repository
+   * has no secondary action, and in the Fetch state the menu's one item *is*
+   * the face.
+   */
+  const hasMenu = $derived(
+    proposal === 'PublishBranch' || proposal === 'Pull' || proposal === 'Push',
   )
-  // The repo has a remote but the current branch isn't tracking anything yet →
-  // "Publish branch" (push + set upstream), matching GitHub Desktop. Distinct
-  // from `noRemote` (no remote at all → publish the whole repo to GitHub). Once
-  // published the branch gains an upstream and this flips back to a plain Push.
-  const publishBranch = $derived(
-    !!$appState.repoPath &&
-      !!$repoState.status.branch &&
-      $repoState.status.hasRemote &&
-      !hasUpstream,
-  )
-  // Force-push is only meaningful when the branch has diverged from its upstream
+
+  // Force-push is only meaningful once the branch has diverged from its upstream
   // (commits on both sides). A plain ahead-only branch fast-forwards, so offering
-  // force push there is noise — hence the menu item only appears when diverged.
+  // it there is noise — and by the ladder this can only be true in the Pull
+  // state, which is exactly where GitHub Desktop puts the item.
   const hasDiverged = $derived(hasUpstream && ahead > 0 && behind > 0)
 
-  async function handleRefresh() {
-    if (isRefreshing) return
-    if (!$appState.repoPath) return
-    isRefreshing = true
+  const PROPOSAL_LABEL: Record<SyncProposal, string> = {
+    Loading: 'Fetch',
+    Detached: 'Push',
+    PublishRepository: 'Publish',
+    PublishBranch: 'Publish branch',
+    Pull: 'Pull',
+    Push: 'Push',
+    Fetch: 'Fetch',
+  }
+
+  const OP_LABEL: Record<NetworkOpKind, string> = {
+    fetch: 'Fetching…',
+    pull: 'Pulling…',
+    push: 'Pushing…',
+    publish: 'Publishing…',
+  }
+
+  const PROPOSAL_HELP: Record<SyncProposal, string> = {
+    Loading: 'Loading repository status',
+    Detached: 'Detached HEAD — check out a branch to push',
+    PublishRepository:
+      'Publish this repository to GitHub — creates the remote repo and pushes this branch (Ctrl+P)',
+    PublishBranch: 'Publish this branch to the remote and start tracking it (Ctrl+P)',
+    Pull: 'Pull from the remote (Ctrl+P)',
+    Push: 'Push to the remote (Ctrl+P)',
+    Fetch: 'Fetch from the remote — updates the counts without touching your files (Ctrl+P)',
+  }
+
+  const actionLabel = $derived(
+    $activeNetworkOp ? OP_LABEL[$activeNetworkOp] : PROPOSAL_LABEL[proposal],
+  )
+
+  const actionHelp = $derived.by(() => {
+    switch (proposal) {
+      case 'Pull':
+        return `Pull ${behind} commit${behind === 1 ? '' : 's'} from the remote (Ctrl+P)`
+      case 'Push':
+        return `Push ${ahead} commit${ahead === 1 ? '' : 's'} to the remote (Ctrl+P)`
+      default:
+        return PROPOSAL_HELP[proposal]
+    }
+  })
+
+  /** Where a force push would land. Named from git's own tracking configuration
+   *  rather than composed from `{remote}/{branch}`, which is wrong whenever the
+   *  upstream branch has a different name — and which cost a `git remote` per
+   *  repo open purely to have the string ready. */
+  const forcePushTarget = $derived($repoState.status.upstream || 'the remote branch')
+
+  async function handleFetch() {
+    if ($activeNetworkOp) return
+    const repoPath = $appState.repoPath
+    if (!repoPath) return
+    beginNetworkOp('fetch')
     try {
-      await onRefresh?.()
+      const remote = await gitApi.getRemote(repoPath)
+      if (!remote) throw new Error('This repository has no remote to fetch from.')
+      // The user asked for this one and is waiting on it, so it keeps the
+      // generous budget a real transfer needs; the fail-fast background budget
+      // belongs to the fetches nobody is watching.
+      await gitApi.fetch(repoPath, remote, false)
+      await onTransferFinished?.()
+    } catch (error) {
+      reportActionError(error, handleFetch)
     } finally {
-      isRefreshing = false
+      endNetworkOp()
     }
   }
 
@@ -162,7 +242,7 @@
       const remote = await gitApi.getRemote(repoPath)
       if (!remote) throw new Error('This repository has no remote to pull from.')
       await gitApi.pull(repoPath, remote)
-      await handleRefresh()
+      await onTransferFinished?.()
     } catch (error) {
       reportActionError(error, handlePull)
     } finally {
@@ -181,10 +261,12 @@
       // Unreachable through the UI — a repo with no remote is offered Publish,
       // not Push — but saying so beats git failing on a name we invented.
       if (!remote) throw new Error('This repository has no remote to push to.')
-      cachedRemote = remote
+      // Derived at click time from real tracking configuration, never
+      // synthesised: this is what makes a first push `--set-upstream`, and it
+      // is why Publish branch and Push are one handler.
       const setUpstream = !$repoState.status.hasUpstream
       await gitApi.push(repoPath, remote, branch, setUpstream, false)
-      await handleRefresh()
+      await onTransferFinished?.()
     } catch (error) {
       reportActionError(error, handlePush)
     } finally {
@@ -197,32 +279,49 @@
     const repoPath = $appState.repoPath
     const branch = $repoState.status.branch
     if (!repoPath || !branch) return
+    forcePushError = undefined
     beginNetworkOp('push')
     try {
       const remote = await gitApi.getRemote(repoPath)
       if (!remote) throw new Error('This repository has no remote to push to.')
-      cachedRemote = remote
       const setUpstream = !$repoState.status.hasUpstream
       // 5th arg = forceWithLease. We never use bare --force.
       await gitApi.push(repoPath, remote, branch, setUpstream, true)
-      await handleRefresh()
+      await onTransferFinished?.()
       showForcePushConfirm = false
     } catch (error) {
-      reportActionError(error, handleForcePush)
+      // Stays open with the reason inline: a refused lease is answered by
+      // fetching and pressing the same button again.
+      forcePushError = String(error)
     } finally {
       endNetworkOp()
     }
   }
 
-  // Main split-button click: publish the repo to GitHub when there's no remote
-  // yet, otherwise push. The "Publish branch" state (remote exists, branch has
-  // no upstream) routes through `handlePush`, which sets the upstream because
-  // `!hasUpstream` — so the same handler both publishes a branch and pushes.
-  function handlePushButton() {
-    if (noRemote) {
-      showPublish = true
-    } else {
-      handlePush()
+  /**
+   * Run whatever the ladder proposes. The single entry point for the button
+   * face and for Ctrl+P, so a state can never be reachable by one and not the
+   * other — the shape native's `perform()` already had.
+   */
+  function performProposal(): void {
+    if ($activeNetworkOp) return
+    switch (proposal) {
+      case 'Loading':
+      case 'Detached':
+        return
+      case 'PublishRepository':
+        publishError = undefined
+        showPublish = true
+        return
+      case 'PublishBranch':
+      case 'Push':
+        void handlePush()
+        return
+      case 'Pull':
+        void handlePull()
+        return
+      case 'Fetch':
+        void handleFetch()
     }
   }
 
@@ -230,24 +329,27 @@
     if ($activeNetworkOp) return
     const repoPath = $appState.repoPath
     if (!repoPath) return
+    publishError = undefined
     beginNetworkOp('publish')
     try {
       await ghApi.publishRepo(repoPath, name, description, isPrivate)
       showPublish = false
-      await handleRefresh()
+      await onTransferFinished?.()
     } catch (error) {
-      reportActionError(error)
+      // The dialog keeps the typed name and description: the common failure is
+      // a name already taken, and the fix is one character away.
+      publishError = String(error)
     } finally {
       endNetworkOp()
     }
   }
 
-  function openPushMenu(e: MouseEvent) {
+  function openActionMenu(e: MouseEvent) {
     e.preventDefault()
     e.stopPropagation()
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
     // Anchor the menu under the chevron, aligned to its right edge.
-    pushMenu = { x: rect.right - 200, y: rect.bottom + 4 }
+    actionMenu = { x: rect.right - 200, y: rect.bottom + 4 }
   }
 
   // Update chip (a newer release exists). The chip opens a small menu: copy
@@ -302,20 +404,6 @@
     ]
   })
 
-  // Cache the remote name passively so the confirm dialog has it ready.
-  // Skipped for a remote-less repo, where the lookup can only answer null and
-  // the dialog is unreachable anyway.
-  $effect(() => {
-    const repoPath = $appState.repoPath
-    if (!repoPath) return
-    gitApi
-      .getRemote(repoPath)
-      .then((r) => {
-        if (r) cachedRemote = r
-      })
-      .catch(() => {})
-  })
-
   // A repo switch mid-transfer must not carry the old repo's progress into the
   // new repo's header — the listener already drops foreign-path events, so
   // without this the last line/fill would just freeze there until the op ends.
@@ -324,18 +412,20 @@
     networkProgress.set(null)
   })
 
-  // Ctrl/Cmd+P triggers the primary split-button action — push, or publish when
-  // the branch has no remote yet — mirroring the button's own enabled state.
-  // Registered globally (not gated on focus) so it works while composing a
-  // commit, matching how desktop Git clients bind push. The one place it is
-  // *not* ours is the embedded terminal, where Ctrl+P is readline's
-  // previous-history and the shell owns the key (see `utils/keyboard.ts`).
+  // Ctrl/Cmd+P runs whatever the ladder proposes — Fetch, Pull, Push, Publish
+  // branch or Publish — so the chord and the button can never mean different
+  // things, and Pull finally has a keyboard route at all (it had none while the
+  // chord was hard-wired to push). Registered globally, not gated on focus, so
+  // it works while composing a commit, matching how desktop Git clients bind
+  // this. The one place it is *not* ours is the embedded terminal, where Ctrl+P
+  // is readline's previous-history and the shell owns the key
+  // (see `utils/keyboard.ts`).
   function handleGlobalKeyDown(e: KeyboardEvent) {
     if (isFromTerminal(e)) return
     const meta = e.ctrlKey || e.metaKey
     if (meta && (e.key === 'p' || e.key === 'P')) {
       e.preventDefault()
-      if (!isPushing && !isPublishing && $appState.repoPath) handlePushButton()
+      performProposal()
     }
   }
 
@@ -357,30 +447,31 @@
     }
   })
 
-  const pushMenuItems = $derived<ContextMenuItem[]>(
-    noRemote
-      ? [{ label: 'Publish to GitHub…', action: () => (showPublish = true), enabled: !isPushing }]
-      : publishBranch
-        ? [{ label: 'Publish branch', action: handlePush, enabled: !isPushing }]
-        : [
+  /**
+   * The chevron's contents, in the three states that have one. Fetch is always
+   * here — it is how the user reaches the remote without a working-tree-mutating
+   * pull, which this client had no route to at all — and force push joins it
+   * only once the branch has actually diverged.
+   *
+   * The menu no longer repeats the face: a chevron whose only item was the
+   * button's own action was a control that revealed nothing.
+   */
+  const actionMenuItems = $derived<ContextMenuItem[]>([
+    { label: 'Fetch', action: handleFetch, enabled: !isTransferring },
+    ...(hasDiverged
+      ? [
           {
-            label: 'Push',
-            action: handlePush,
-            enabled: !isPushing,
+            label: 'Force push (with lease)…',
+            action: () => {
+              forcePushError = undefined
+              showForcePushConfirm = true
+            },
+            enabled: !isTransferring,
+            destructive: true,
           },
-          // Only offered once the branch has actually diverged — see `hasDiverged`.
-          ...(hasDiverged
-            ? [
-                {
-                  label: 'Force push (with lease)…',
-                  action: () => (showForcePushConfirm = true),
-                  enabled: !isPushing,
-                  destructive: true,
-                },
-              ]
-            : []),
-        ],
-  )
+        ]
+      : []),
+  ])
 </script>
 
 <header class="header">
@@ -432,8 +523,8 @@
       </span>
     </button>
     <div class="status-info">
-      <!-- Ahead/behind counts live on the Pull/Push buttons, so the bar here
-           only confirms the in-sync state and never duplicates those numbers. -->
+      <!-- Ahead/behind counts ride the sync button, so the bar here carries
+           only the states that have no other home. -->
       {#if detached}
         <span class="detached" title="HEAD is not on any branch">DETACHED HEAD</span>
       {/if}
@@ -478,115 +569,101 @@
         <span>Update v{$availableUpdate.version}</span>
       </button>
     {/if}
-    <!-- Everything from here to Refresh acts on the open repository, so it all
-         drops away in the pre-main phases, leaving Settings and Help. -->
+    <!-- The one adaptive sync control, replacing the separate Pull, Push and
+         Refresh buttons: its face is whatever the repository needs next, and a
+         forced reload is ⌘R. Three controls were what made the wrong ones
+         reachable — a Push git would reject on a diverged branch, a chevron
+         that only repeated its own button, and no route to a plain fetch at
+         all. Everything here acts on the open repository, so it drops away in
+         the pre-main phases, leaving Settings and Help. -->
     {#if hasRepo}
-    <!-- Pull only makes sense once the branch tracks a remote. Before that the
-         primary button is "Publish branch" (or "Publish" with no remote), and a
-         Pull button would have nothing to pull from — so hide it, matching
-         GitHub Desktop, which shows only the publish affordance until then. -->
-    {#if hasUpstream}
-      <button
-        class="count-button"
-        class:in-progress={isPulling}
-        onclick={handlePull}
-        disabled={$activeNetworkOp !== null}
-        title={behind > 0 ? `Pull ${behind} commit${behind === 1 ? '' : 's'} from remote` : 'Pull from remote'}
-      >
-        {#if isPulling}
-          <div class="btn-progress" style:transform="scaleX({transferFraction})"></div>
-        {/if}
-        {#if isPulling}
-          <svg class="icon spinning" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
-            <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" />
-            <polyline points="13.5,2 13.5,5 10.5,5" />
-          </svg>
-        {:else}
-          <svg class="icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <line x1="8" y1="3" x2="8" y2="12" />
-            <polyline points="4,8 8,12 12,8" />
-          </svg>
-        {/if}
-        <span>{isPulling ? 'Pulling…' : 'Pull'}</span>
-        {#if behind > 0 && !isPulling}<span class="count-badge">{behind}</span>{/if}
-      </button>
-    {/if}
     <div class="split-button">
       <button
         class="count-button split-main"
-        class:in-progress={isPushing || isPublishing}
-        onclick={handlePushButton}
-        disabled={$activeNetworkOp !== null || detached}
-        title={detached
-          ? 'Detached HEAD — check out a branch to push'
-          : noRemote
-            ? 'Publish this repository to GitHub (Ctrl+P)'
-            : publishBranch
-              ? `Publish this branch to ${cachedRemote} (Ctrl+P)`
-              : ahead > 0
-                ? `Push ${ahead} commit${ahead === 1 ? '' : 's'} to remote (Ctrl+P)`
-                : 'Push to remote (Ctrl+P)'}
+        class:in-progress={isTransferring}
+        class:solo={!hasMenu}
+        onclick={performProposal}
+        disabled={!isActionable || isTransferring}
+        title={actionHelp}
       >
-        {#if isPushing}
-          <div class="btn-progress" style:transform="scaleX({transferFraction})"></div>
-        {/if}
-        {#if isPushing || isPublishing}
+        {#if isTransferring}
+          {#if $networkProgress}
+            <div class="btn-progress" style:transform="scaleX({transferFraction})"></div>
+          {:else}
+            <!-- Fetch and publish report no percentages, and a push reports none
+                 until git's first tick — a bar frozen at zero reads as stuck. -->
+            <div class="btn-progress indeterminate"></div>
+          {/if}
           <svg class="icon spinning" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
             <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" />
             <polyline points="13.5,2 13.5,5 10.5,5" />
           </svg>
-        {:else if noRemote}
+        {:else if proposal === 'PublishRepository'}
           <svg class="icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M4.5 11.5a2.5 2.5 0 0 1 0-5 3.2 3.2 0 0 1 6.1-1 2.4 2.4 0 0 1 .9 4.6" />
             <line x1="8" y1="7.5" x2="8" y2="13" />
             <polyline points="6,9.5 8,7.5 10,9.5" />
           </svg>
-        {:else if publishBranch}
+        {:else if proposal === 'PublishBranch'}
           <svg class="icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <line x1="8" y1="3" x2="8" y2="10.5" />
             <polyline points="5,6 8,3 11,6" />
             <path d="M3.5 13h9" />
           </svg>
-        {:else}
+        {:else if proposal === 'Pull'}
+          <svg class="icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="8" y1="3" x2="8" y2="12" />
+            <polyline points="4,8 8,12 12,8" />
+          </svg>
+        {:else if proposal === 'Push' || proposal === 'Detached'}
           <svg class="icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <line x1="8" y1="4" x2="8" y2="13" />
             <polyline points="4,8 8,4 12,8" />
           </svg>
+        {:else}
+          <svg class="icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" />
+            <polyline points="13.5,2 13.5,5 10.5,5" />
+          </svg>
         {/if}
-        <span>
-          {isPushing
-            ? 'Pushing…'
-            : isPublishing
-              ? 'Publishing…'
-              : noRemote
-                ? 'Publish'
-                : publishBranch
-                  ? 'Publish branch'
-                  : 'Push'}
-        </span>
-        {#if !noRemote && !publishBranch && ahead > 0 && !isPushing}<span class="count-badge">{ahead}</span>{/if}
+        <span>{actionLabel}</span>
+        <!-- Both pending counts ride the one button, GitHub-Desktop style: with
+             a single control the proposed action's number alone would hide the
+             other half of a diverged branch, and a bare figure beside a face
+             that says "Pull" can't say which direction it counts. -->
+        {#if !isTransferring && behind > 0}
+          <span class="count-badge" role="img" aria-label="{behind} commit{behind === 1 ? '' : 's'} to pull">
+            <svg width="8" height="8" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="8" y1="3" x2="8" y2="12" />
+              <polyline points="4,8 8,12 12,8" />
+            </svg>
+            {behind}
+          </span>
+        {/if}
+        {#if !isTransferring && ahead > 0}
+          <span class="count-badge" role="img" aria-label="{ahead} commit{ahead === 1 ? '' : 's'} to push">
+            <svg width="8" height="8" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="8" y1="4" x2="8" y2="13" />
+              <polyline points="4,8 8,4 12,8" />
+            </svg>
+            {ahead}
+          </span>
+        {/if}
       </button>
-      <button
-        class="split-chevron"
-        onclick={openPushMenu}
-        disabled={$activeNetworkOp !== null || detached}
-        aria-label="More push options"
-        title="More push options"
-      >
-        <svg width="9" height="9" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <polyline points="4,6 8,10 12,6" />
-        </svg>
-      </button>
+      {#if hasMenu}
+        <button
+          class="split-chevron"
+          onclick={openActionMenu}
+          disabled={isTransferring}
+          aria-label="More sync options"
+          title="More sync options"
+        >
+          <svg width="9" height="9" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="4,6 8,10 12,6" />
+          </svg>
+        </button>
+      {/if}
     </div>
-    <button class="icon-button" onclick={handleRefresh} disabled={isRefreshing} title="Refresh (Ctrl+R)" aria-label="Refresh">
-      <svg class="icon" class:spinning={isRefreshing} width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        
-      <g id="lock-rotation">
-        <path id="Ellipse 1115" stroke-linecap="round" d="M13.3261 8.5c-0.6772 2.8667 -3.2525 5 -6.3261 5C3.41015 13.5 0.5 10.5899 0.5 7 0.5 3.41015 3.41015 0.5 7 0.5c2.50772 0 4.6838 1.42011 5.7678 3.5" stroke-width="1"></path>
-        <path id="Vector" stroke-linecap="round" stroke-linejoin="round" d="M13.5 2v2.5H11" stroke-width="1"></path>
-      </g>
-      </svg>
-    </button>
     {/if}
     <button class="icon-button" onclick={onOpenSettings} title="Settings (Ctrl+,)" aria-label="Settings">
       <svg class="icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -626,20 +703,20 @@
   />
 {/if}
 
-{#if pushMenu !== null}
+{#if actionMenu !== null}
   <ContextMenu
-    x={pushMenu.x}
-    y={pushMenu.y}
-    items={pushMenuItems}
-    onClose={() => (pushMenu = null)}
+    x={actionMenu.x}
+    y={actionMenu.y}
+    items={actionMenuItems}
+    onClose={() => (actionMenu = null)}
   />
 {/if}
 
 {#if showForcePushConfirm}
   <ForcePushConfirm
-    branch={$repoState.status.branch}
-    remote={cachedRemote}
-    {isPushing}
+    upstream={forcePushTarget}
+    isPushing={$activeNetworkOp === 'push'}
+    error={forcePushError}
     onConfirm={handleForcePush}
     onCancel={() => (showForcePushConfirm = false)}
   />
@@ -648,7 +725,8 @@
 {#if showPublish}
   <PublishRepository
     defaultName={repoName}
-    {isPublishing}
+    isPublishing={$activeNetworkOp === 'publish'}
+    error={publishError}
     onPublish={handlePublish}
     onCancel={() => (showPublish = false)}
   />
@@ -787,8 +865,8 @@
   }
 
   /*
-    Pull / Push share the chips' elevated treatment so the whole bar reads as
-    one consistent button family rather than a mix of solid chips and ghost
+    The sync control shares the chips' elevated treatment so the whole bar reads
+    as one consistent button family rather than a mix of solid chips and ghost
     actions. The border stays static on hover (only the fill brightens) so the
     split-button seam never shifts colour mid-row.
   */
@@ -829,6 +907,27 @@
     pointer-events: none;
   }
 
+  /* Indeterminate: a partial fill sweeping across, for the operations git
+     never reports a percentage for (fetch, publish) and for the opening
+     moments of a push. The determinate bar is a scaleX of the full width, so
+     this one has to be sized instead of scaled. */
+  .btn-progress.indeterminate {
+    right: auto;
+    width: 45%;
+    transform: none;
+    transition: none;
+    animation: sweep 1.2s ease-in-out infinite;
+  }
+
+  @keyframes sweep {
+    from {
+      transform: translateX(-110%);
+    }
+    to {
+      transform: translateX(232%);
+    }
+  }
+
   /* Keep the label legible while the op runs — the fill + spinner already say
      "busy", so the usual disabled dimming would only gray out the progress. */
   .count-button.in-progress:disabled {
@@ -862,13 +961,19 @@
     }
   }
 
+  /* Two of these can sit side by side on a diverged branch, so each carries its
+     own direction arrow — with one adaptive button the face no longer says
+     which way a bare number counts. */
   .count-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
     font-size: 10px;
     font-weight: 600;
     color: var(--text-secondary);
     background: var(--bg-secondary);
     border-radius: 999px;
-    padding: 1px 6px;
+    padding: 1px 5px 1px 4px;
     font-variant-numeric: tabular-nums;
   }
 
@@ -904,6 +1009,15 @@
     border-bottom-right-radius: 0;
     border-right: none;
     padding-right: 8px;
+  }
+
+  /* The states with no secondary action carry no chevron, so the face is the
+     whole control again and gets its right edge back. */
+  .split-main.solo {
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+    border-right: 1px solid var(--border-strong);
+    padding-right: 10px;
   }
 
   .split-chevron {

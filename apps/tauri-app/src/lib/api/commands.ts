@@ -31,6 +31,19 @@ export interface FileEntry {
   stat_stamp?: string
 }
 
+/**
+ * What the sync control should offer to do next — one state at a time, chosen
+ * by core's precedence ladder over the status: detached → publish repository →
+ * publish branch → pull → push → fetch. Pull outranks push, so a diverged
+ * branch is never offered the push git would reject.
+ *
+ * Decided in core rather than here so this client and the native one can't
+ * drift; it arrives on `RepoStatus` because both render it on every refresh,
+ * and asking separately would be a crossing per tick to run six comparisons.
+ */
+export type SyncProposal =
+  'Loading' | 'Detached' | 'PublishRepository' | 'PublishBranch' | 'Pull' | 'Push' | 'Fetch'
+
 export interface RepoStatus {
   branch: string
   upstream: string
@@ -52,6 +65,8 @@ export interface RepoStatus {
    * forget, and core answers it from a file check that costs the poll nothing.
    */
   merging: boolean
+  /** The sync ladder's answer for this status — see {@link SyncProposal}. */
+  proposal: SyncProposal
 }
 
 /** One status's presentation strings — see `fileStatusStyles`. */

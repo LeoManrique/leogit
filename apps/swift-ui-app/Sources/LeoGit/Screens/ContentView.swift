@@ -337,7 +337,7 @@ struct ContentView: View {
     /// closure posts rather than acting — the sheet and alert the action may
     /// open belong to `SyncControls`.
     private var syncMenuCommand: SyncCommand {
-        let proposal = SyncProposal(status: store.status)
+        let proposal = store.status?.proposal ?? .loading
         return SyncCommand(
             title: proposal.title,
             isEnabled: proposal.isActionable && syncStore.activeOperation == nil

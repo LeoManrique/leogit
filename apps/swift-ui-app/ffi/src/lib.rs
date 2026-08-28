@@ -54,7 +54,7 @@ pub use leogit_core::events::TerminalExit;
 pub use leogit_core::gh::GhRepo;
 pub use leogit_core::git::{
     BranchInfo, CommitDetail, CommitInfo, CommitStats, DiscardPlan, FileEntry, FileStatus,
-    FileStatusStyle, LogOptions, MergeResult, RepoStatus, RepoSync,
+    FileStatusStyle, LogOptions, MergeResult, RepoStatus, RepoSync, SyncProposal,
 };
 pub use leogit_core::highlight::{BlobSource, Token, TokenClass};
 pub use leogit_core::repos::{CloneTarget, RepoRow};
@@ -129,6 +129,18 @@ pub struct FileEntry {
     pub stat_stamp: Option<String>,
 }
 
+/// Mirrors [`leogit_core::git::SyncProposal`].
+#[uniffi::remote(Enum)]
+pub enum SyncProposal {
+    Loading,
+    Detached,
+    PublishRepository,
+    PublishBranch,
+    Pull,
+    Push,
+    Fetch,
+}
+
 /// Mirrors [`leogit_core::git::RepoStatus`].
 #[uniffi::remote(Record)]
 pub struct RepoStatus {
@@ -143,6 +155,7 @@ pub struct RepoStatus {
     pub detached: bool,
     pub head_sha: String,
     pub merging: bool,
+    pub proposal: SyncProposal,
 }
 
 /// Mirrors [`leogit_core::git::CommitInfo`].

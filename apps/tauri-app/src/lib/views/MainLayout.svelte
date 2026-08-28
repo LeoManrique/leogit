@@ -380,6 +380,7 @@
             unpushedShas: new Set(status.unpushed_shas ?? []),
             detached: status.detached,
             headSha: status.head_sha,
+            proposal: status.proposal,
           },
           selectedFiles: nextSelected,
           userDeselected: nextDeselected,
@@ -973,16 +974,50 @@
     })
   })
 
-  async function handleCommitted(): Promise<void> {
-    // Defensive: clear amend mode if the composer somehow didn't.
-    repoState.update((s) => ({ ...s, commitToAmend: null }))
-    await Promise.all([refreshStatus({ silent: true }), refreshLog()])
+  /**
+   * Reload everything an operation against the remote can have changed: status
+   * (branch, counts, the file list) and the log together.
+   *
+   * Status alone was the old shape, and it left History up to two seconds
+   * behind a pull that had already brought commits in. Native reloads both
+   * after every network operation; this is the same rule, and it also covers
+   * the local operations that move HEAD.
+   *
+   * `lastHeadSha` is re-seeded from what just landed so the next poll tick
+   * doesn't read a moved HEAD and refetch the log a second time.
+   *
+   * `silent` belongs to the caller: an operation that already reported its own
+   * outcome (a commit) passes it, while one the user is still waiting to see
+   * finish (a transfer, ⌘R) doesn't, so a failed read reaches them.
+   */
+  async function reloadAfterHeadMove(opts: { silent?: boolean } = {}): Promise<void> {
+    await Promise.all([refreshStatus(opts), refreshLog()])
     const repoPath = $appState.repoPath
     if (repoPath) {
       try {
         lastHeadSha = await gitApi.getHeadSha(repoPath)
       } catch {}
     }
+  }
+
+  /**
+   * ⌘R — the forced reload, and the only route to one now that the sync ladder
+   * replaced the header's Refresh button. Status, history and the branch list
+   * together, which is what the native client's View ▸ Refresh already did;
+   * this client used to reload status alone.
+   *
+   * Held back while a transfer runs, for the reason the 2 s poll pauses: a
+   * `git status` racing a pull contends for the very lock files it is writing.
+   */
+  async function forceReload(): Promise<void> {
+    if (!$appState.repoPath || $activeNetworkOp) return
+    await Promise.all([reloadAfterHeadMove(), refreshBranches()])
+  }
+
+  async function handleCommitted(): Promise<void> {
+    // Defensive: clear amend mode if the composer somehow didn't.
+    repoState.update((s) => ({ ...s, commitToAmend: null }))
+    await reloadAfterHeadMove({ silent: true })
   }
 
   function handleStartAmending(commit: CommitInfo): void {
@@ -1485,6 +1520,17 @@
       return
     }
 
+    // ⌘R is the only route to a forced reload now that the sync ladder replaced
+    // the Refresh button, so it sits above the `inField` bail like the
+    // composer's own chords: a reload you have to leave the message box to ask
+    // for is one nobody reaches. Nothing in a text field wants Ctrl+R either —
+    // the one thing that does is the shell, and `isFromTerminal` returned above.
+    if (meta && e.key === 'r') {
+      e.preventDefault()
+      void forceReload()
+      return
+    }
+
     if (inField) return
 
     if (meta && e.key === '`') {
@@ -1500,9 +1546,6 @@
       e.preventDefault()
       if (showSettings) closeSettings()
       else showSettings = true
-    } else if (meta && e.key === 'r') {
-      e.preventDefault()
-      refreshStatus()
     } else if (meta && e.key === 'l') {
       e.preventDefault()
       repoState.update((s) => ({ ...s, activeTab: s.activeTab === 'changes' ? 'history' : 'changes' }))
@@ -1697,7 +1740,7 @@
       onOpenBranches={() => (showBranches = true)}
       onOpenSettings={() => (showSettings = true)}
       onOpenHelp={() => (showHelp = true)}
-      onRefresh={refreshStatus}
+      onTransferFinished={reloadAfterHeadMove}
     />
 
     <!--

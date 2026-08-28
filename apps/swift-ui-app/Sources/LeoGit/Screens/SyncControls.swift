@@ -42,7 +42,10 @@ struct SyncControls: View {
 
     private var isBusy: Bool { store.activeOperation != nil }
 
-    private var action: SyncProposal { SyncProposal(status: status) }
+    /// The ladder's answer, decided in core and carried on the status itself.
+    /// `nil` status means the first read hasn't landed — a fact about this
+    /// view's own load, which is why it is the one case decided here.
+    private var action: SyncProposal { status?.proposal ?? .loading }
 
     var body: some View {
         Group {
@@ -237,54 +240,14 @@ struct SyncControls: View {
     }
 }
 
-/// What the sync control proposes. One state at a time, decided by a strict
-/// precedence ladder over the repository status (GitHub Desktop's order,
-/// adapted). A standalone type because two views read the same ladder: the
-/// toolbar button renders it, and the repository screen republishes it to
-/// the menu bar as the ⌘P command — one implementation, so the button and
-/// the menu item can never disagree about the proposed action.
-enum SyncProposal {
-    /// Status not loaded yet: a neutral disabled Fetch, so the button never
-    /// flashes "Publish" before the first load resolves.
-    case loading
-    /// Detached HEAD — nothing can be pushed or pulled; disabled.
-    case detached
-    /// No remote at all: create the GitHub repo and push in one shot.
-    case publishRepository
-    /// A remote exists but the branch is untracked — the first push must
-    /// carry `--set-upstream`, and the button says what it will do.
-    case publishBranch
-    /// Behind the upstream: pulling comes first, whatever else is pending.
-    case pull
-    /// Ahead only: push.
-    case push
-    /// In sync: check the remote.
-    case fetch
-
-    init(status: RepoStatus?) {
-        // A detached HEAD has an empty branch name, so it passes its own way.
-        guard let status, !status.branch.isEmpty || status.detached else {
-            self = .loading
-            return
-        }
-        // Detached before the remote checks — GitHub Desktop orders these
-        // the other way round, but publishing would push a branch that does
-        // not exist, so the honest state wins.
-        if status.detached {
-            self = .detached
-        } else if !status.hasRemote {
-            self = .publishRepository
-        } else if !status.hasUpstream {
-            self = .publishBranch
-        } else if status.behind > 0 {
-            self = .pull
-        } else if status.ahead > 0 {
-            self = .push
-        } else {
-            self = .fetch
-        }
-    }
-
+/// The presentation half of core's `SyncProposal`, which is where the ladder
+/// itself lives — one implementation for both clients, carried on
+/// `RepoStatus.proposal` so the toolbar button, the ⌘P menu item and the Tauri
+/// header can never disagree about what the repository needs next.
+///
+/// Only the words stay here: the two controls are shaped differently, and which
+/// state earns a chevron is a macOS question rather than a policy one.
+extension SyncProposal {
     /// The state word: the button face's title when idle, and the menu
     /// item's title always (a disabled "Pull" mid-pull reads better in a
     /// menu than "Pulling…").

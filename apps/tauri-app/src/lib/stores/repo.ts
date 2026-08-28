@@ -6,6 +6,7 @@ import type {
   BranchInfo,
   DiffSelection,
   ParsedDiff,
+  SyncProposal,
 } from '$lib/api/commands'
 
 export type ActiveTab = 'changes' | 'history'
@@ -26,18 +27,24 @@ export interface RepoStatus {
   detached: boolean
   /** Full SHA of HEAD; empty only on an unborn branch. Labels the detached-HEAD state. */
   headSha: string
+  /**
+   * What the sync control offers to do next, decided by core's ladder over the
+   * fields above. The header switches on this instead of re-deriving it from
+   * three overlapping booleans, which is what used to let it offer a push git
+   * would reject on a diverged branch.
+   */
+  proposal: SyncProposal
 }
-
-/**
- * Whether `status` has ever been filled for the open repository, as opposed to
- * holding the defaults a repo switch resets it to. Anything that *skips* work
- * on a status field has to know the difference: `hasRemote` defaults to false,
- * and a gate reading that between the switch and the first load would decide
- * "no remote" about a repo it has not looked at yet.
- */
 
 export interface RepoState {
   status: RepoStatus
+  /**
+   * Whether `status` has ever been filled for the open repository, as opposed
+   * to holding the defaults a repo switch resets it to. Anything that *skips*
+   * work on a status field has to know the difference: `hasRemote` defaults to
+   * false, and a gate reading that between the switch and the first load would
+   * decide "no remote" about a repo it has not looked at yet.
+   */
   statusLoaded: boolean
   /**
    * The commit log, as an **append-only list rooted at HEAD**: `commits[0]` is
@@ -146,6 +153,10 @@ const defaultStatus: RepoStatus = {
   unpushedShas: new Set(),
   detached: false,
   headSha: '',
+  // Nothing has been read yet, which is exactly what core answers for an empty
+  // status — so the button shows a neutral disabled Fetch instead of flashing
+  // "Publish" at a repository nobody has looked at.
+  proposal: 'Loading',
 }
 
 const defaultState: RepoState = {

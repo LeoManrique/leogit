@@ -1,13 +1,23 @@
 <script lang="ts">
   interface Props {
-    branch: string
-    remote: string
+    /**
+     * Where the push would land, named from git's own tracking configuration
+     * (`RepoStatus.upstream`) rather than composed from the remote and the
+     * local branch name — those differ whenever the upstream branch is named
+     * something else, and the dialog would then promise to overwrite a branch
+     * git was never going to touch.
+     */
+    upstream: string
     isPushing: boolean
+    /** A refused push, stated here rather than in a modal over this dialog: a
+     *  stale lease is answered by fetching and pressing the same button again,
+     *  which is one dismissal away instead of two. */
+    error?: string
     onConfirm: () => void
     onCancel: () => void
   }
 
-  let { branch, remote, isPushing, onConfirm, onCancel }: Props = $props()
+  let { upstream, isPushing, error, onConfirm, onCancel }: Props = $props()
 
   function handleKeyDown(e: KeyboardEvent) {
     if (e.key === 'Escape' && !isPushing) onCancel()
@@ -28,13 +38,16 @@
     </div>
     <div class="modal-body">
       <p>
-        This will overwrite <code>{remote}/{branch}</code> with your local branch.
+        This will overwrite <code>{upstream}</code> with your local branch.
       </p>
       <p class="muted">
         <code>--force-with-lease</code> refuses the push if someone else has pushed since
         your last fetch, so it's safer than <code>--force</code>. It cannot be undone if it
         succeeds.
       </p>
+      {#if error}
+        <p class="error">{error}</p>
+      {/if}
     </div>
     <div class="modal-footer">
       <button class="btn-secondary" onclick={onCancel} disabled={isPushing}>Cancel</button>
@@ -103,6 +116,19 @@
     font-size: 12px;
     color: var(--text-primary);
     background: transparent;
+  }
+
+  /* Git's own rejection text, kept selectable and wrapped — it names the ref
+     that moved, which is the part worth copying into a fetch. */
+  .modal-body .error {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--status-red);
+    white-space: pre-wrap;
+    word-break: break-word;
+    user-select: text;
+    max-height: 120px;
+    overflow-y: auto;
   }
 
   .modal-footer {

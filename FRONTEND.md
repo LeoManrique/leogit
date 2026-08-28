@@ -289,11 +289,14 @@ codegen decision is open (plan §10.7).
   frontend's own table.
 - `DiffLine.line_type` — PascalCase: `'Context' | 'Add' | 'Delete' | 'Hunk' | 'NoNewline'`.
 - `BlobSource` — tagged union: `{kind:'workingTree', repoPath}` | `{kind:'commit', repoPath, sha}`.
+- `RepoStatus.proposal` — `SyncProposal`, PascalCase: `'Loading' | 'Detached' |
+  'PublishRepository' | 'PublishBranch' | 'Pull' | 'Push' | 'Fetch'`. Core's sync
+  ladder (§6.2); each client maps it to its own title, icon and chevron rule.
 
 ### 5.2 Structures by domain
 | Domain | Types (key fields) |
 |---|---|
-| Working tree / status | `FileEntry` (path, status, xy, display_name, display_dir, embedded, submodule_dirty, stat_stamp — an opaque mtime+size string so a status comparison sees content edits; compare, never parse); `RepoStatus` (branch, upstream, ahead, behind, files[], has_remote, unpushed_shas[], detached, head_sha, merging); `FileStatusStyle` (status, letter, label — the glyph table, fetched once; colour is per-platform); `DiscardPlan` (restore[], trash[]) |
+| Working tree / status | `FileEntry` (path, status, xy, display_name, display_dir, embedded, submodule_dirty, stat_stamp — an opaque mtime+size string so a status comparison sees content edits; compare, never parse); `RepoStatus` (branch, upstream, ahead, behind, files[], has_remote, unpushed_shas[], detached, head_sha, merging, proposal — the sync ladder's answer, carried here for the same reason `merging` is: every refresh path renders it, and a second route to it is how the two clients' ladders drifted); `FileStatusStyle` (status, letter, label — the glyph table, fetched once; colour is per-platform); `DiscardPlan` (restore[], trash[]) |
 | History | `CommitInfo` (sha, short_sha, summary, body, author, committer, parents[], trailers[], co_authors[], body_without_coauthors, tags[]); `CommitStats` (additions, deletions); `CommitDetail` (files[], stats) |
 | Branches / remote | `BranchInfo` (name, is_remote, is_current); `AheadBehind`; `RepoSync` (ahead, behind, has_remote, fetched, dirty); `RepoIdentifier` (owner, name); `MergeResult` (success, fast_forward, conflicts[], error_message?) |
 | Diff | `DiffLine` (content, line_type, line numbers, `intra_line_diff: IntraLineRange`, and `text?` — the raw patch line, present only on `Hunk` and `NoNewline` rows, which are the only ones that read it); `IntraLineRange`, `HunkHeader`, `Hunk`, `FileDiff` (old_path, new_path, file_header, hunks[], is_binary); `SbsPair`; `DiffOptions` (html, side_by_side, show_anyway); `ParsedDiff` (file_diff, html[], sbs_pairs[], additions, deletions, empty_reason?, size_guard?); `EmptyDiffReason` (`NoChanges`/`WhitespaceOnly`/`NoTextualChanges`); `DiffSizeGuard` (reason, bytes, longest_line); `Token` (start, end, class: `TokenClass`) / `TokenLine` — the structured highlight layer under the HTML (§7); `DiffSelection` |
@@ -349,8 +352,33 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    user action is silent for a different reason — the action reported its own outcome — so
    three `index.lock` races in a row must not accuse a healthy repository of having
    vanished. The streak is also per repository: a switch resets it.
-2. **Network-op mutual exclusion** — push/pull/publish are mutually exclusive; only
-   one runs at a time, with a shared progress slot fed by `git-progress`.
+2. **Network-op mutual exclusion** — fetch/push/pull/publish are mutually exclusive;
+   only one runs at a time, with a shared progress slot fed by `git-progress`. The
+   *automatic* fetches (the timer, the resyncs, the badge sweeps) deliberately claim
+   no slot: nobody is waiting on them, and taking it would disable the whole action
+   cluster on a timer.
+   **The sync surface is one adaptive control, and the ladder that drives it is
+   core's** (`sync_proposal`, carried on `RepoStatus.proposal`): detached → publish
+   repository → publish branch → pull → push → fetch, with a neutral disabled Fetch
+   until the first status read lands. It is a *total function of the status*, which
+   is the point — three independent booleans could all be true at once, and that is
+   how one client came to offer a push git would reject on a diverged branch. Pull
+   outranks push, so the state that needs doing first is the one proposed, and the
+   push is simply not reachable. Both clients render the same answer and bind the
+   same chord to it (⌘/Ctrl+P), so the button and the menu item can never disagree.
+   **Fetch is always reachable** — as the proposal when in sync, and from the
+   chevron in every state that has one — because it is the only way to ask the
+   remote a question without a pull moving the working tree. A chevron appears only
+   where it offers something the face does not; force-push-with-lease joins it only
+   on a genuinely diverged branch, behind a confirmation naming `status.upstream`
+   (composing `remote/branch` is wrong whenever the upstream branch is named
+   something else). **Neither client has a Refresh button**: the poll keeps the view
+   current, and ⌘/Ctrl+R forces a full local reload — status, history *and*
+   branches — held back while a transfer runs, since a `git status` racing a pull
+   contends for the lock files it is writing. Titles, icons, which states get a
+   chevron, and where the pending counts sit are presentation (§8).
+   **After any transfer both clients reload status *and* the log**: a pull brings in
+   commits, and reloading status alone left History up to a poll tick behind.
 3. **Seamless diff loads** — loading a file/commit diff must **guard stale responses**
    (drop results if the user moved on), keep the **previous diff on screen** while the
    replacement loads, and use a **150ms slow-load threshold** (`SLOW_DIFF_THRESHOLD_MS` /
@@ -510,6 +538,12 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    Finder", ended up seizing the window. Native still routes discard, checkout and undo
    failures to its strip where this rule puts them in the modal — the parity plan's WS-N
    and WS-Q close that.
+   **One refinement, in both clients: a failure raised from inside a dialog stays in
+   that dialog**, under its fields, with everything typed intact. The dialog is
+   already the retry surface the modal would be offering — a rejected publish name
+   and a refused force-push lease are both fixed and re-submitted right there — so
+   stacking a second window over it costs two dismissals to change one character,
+   and leaves the dialog underneath still holding the input that failed.
 
 ## 7. Diff rendering contract
 
@@ -566,6 +600,8 @@ every deliberate difference here.
 | File-list selection & keyboard (§6.4) | shift-click extends a multi-row selection (a separate anchor for the checkbox column, Finder/Gmail semantics), Space toggles the focused row's checkbox and bulk-toggles a multi-selection, Home/End jump to first/last | single-selection `List`: arrow keys move the active row, and there is no range selection, Space toggle, or Home/End |
 | Relative-date ticking (§6.12) | a 10 s tick re-renders the visible rows, skipped while the History pane is hidden or the window is backgrounded, so an open list never goes stale | formatted once per refresh and not re-ticked; the 2 s poll is what moves the labels on |
 | Side-by-side diff (`side_by_side_diff`) | split layout toggle, honoured by `DiffViewer` | not implemented — unified only; a layout feature awaiting its own design pass (ROADMAP), the config field crosses saves untouched |
+| Pending-count placement (§6.2) | `↓N` / `↑N` capsules on the sync button's trailing edge, each with its own arrow | plain `↑N ↓N` text in its own toolbar item left of the button: macOS renders a toolbar control's label as text and icon only, so no custom view can ride the face, and no system API badges a toolbar item |
+| Transfer progress surface | inside the control that started it — a fill wiping across the sync button, sweeping where git reports no percentage | a full-width strip under the toolbar with a real indeterminate state, plus git's line verbatim |
 
 Neither repo switcher offers a per-folder open action, deliberately and in both
 clients: a repo list is exactly what `scan_paths` covers, so a local repository
