@@ -5,12 +5,14 @@
   import {
     repoState,
     resetRepoState,
+    setActiveTab,
     reportActionError,
     reportNotice,
     dismissActionError,
     dismissNotice,
   } from '$lib/stores/repo'
   import { appState } from '$lib/stores/app'
+  import { dismissTopOverlay, overlayDepth } from '$lib/actions/overlayStack'
   import { config, refreshConfig } from '$lib/stores/config'
   import { hydrateReposState, patchReposState, recordRecentRepo } from '$lib/stores/reposState'
   import { setRepoSync } from '$lib/stores/repoSync'
@@ -29,6 +31,7 @@
     WEBVIEW_DIFF_OPTIONS,
     type FileEntry,
     type CommitInfo,
+    type Config,
     type DiffSizeGuard,
     type DiscardPlan,
     type EmptyDiffReason,
@@ -68,9 +71,6 @@
   let activeShellLabel = $state('')
   let showRepos = $state(false)
   let showClone = $state(false)
-  // Instance handle so the global Escape handler can ask whether a clone is
-  // in flight before dismissing the dialog.
-  let cloneOverlay = $state<{ isBusy: () => boolean } | null>(null)
   // Destination pre-filled into the Clone dialog: last-used folder, else the
   // first configured scan path, else ~/Dev (the backend expands the leading ~).
   let cloneDefaultDir = $state('~/Dev')
@@ -859,6 +859,16 @@
     }, 2000)
   }
 
+  /**
+   * How often the automatic fetch should run under this config, or 0 for never
+   * — the one place the two settings are read together, so arming the timer at
+   * launch, on a repo switch and on a settings change can't disagree about what
+   * "auto-fetch off" means.
+   */
+  function autoFetchIntervalMs(cfg: Config | null): number {
+    return cfg?.auto_fetch ? cfg.fetch_interval_ms || 30000 : 0
+  }
+
   function startAutoFetch(intervalMs: number): void {
     if (fetchInterval) clearInterval(fetchInterval)
     if (intervalMs <= 0) return
@@ -1264,9 +1274,7 @@
     repoSyncScheduler.syncOnSwitch(repo)
     try {
       await Promise.all([refreshStatus(), refreshBranches(), loadInitialLog()])
-      const cfg = $config
-      const intervalMs = cfg?.auto_fetch ? cfg.fetch_interval_ms || 30000 : 0
-      startAutoFetch(intervalMs)
+      startAutoFetch(autoFetchIntervalMs($config))
     } catch (error) {
       reportActionError(error)
     }
@@ -1316,17 +1324,6 @@
    */
   function openRepos() {
     showRepos = true
-    void rediscoverRepos()
-  }
-
-  /**
-   * Settings closed. The scan paths are what discovery walks, so re-walk — the
-   * main phase used to need a restart for a scan-path edit to mean anything,
-   * while the picker phase re-walked immediately: the same setting behaving two
-   * different ways depending on where you opened it from.
-   */
-  function closeSettings() {
-    showSettings = false
     void rediscoverRepos()
   }
 
@@ -1552,28 +1549,6 @@
     }
   }
 
-  /**
-   * Anything on top of the repo view — the overlays, the confirmations, the
-   * error modal. What the app's own chords check before firing: the question a
-   * dialog is asking is the only one on screen, and answering it with a ⌘↩ that
-   * means "commit" would answer something else entirely. One list, declared
-   * where the last of its inputs is; SH-4 turns it into a real topmost-closing
-   * stack, and until then a new overlay joins here or joins nothing.
-   */
-  const modalOpen = $derived(
-    showRepos ||
-      showClone ||
-      showBranches ||
-      showSettings ||
-      showHelp ||
-      mergeSource !== null ||
-      deleteTarget !== null ||
-      showAbortMerge ||
-      discardTarget !== null ||
-      checkoutTarget !== null ||
-      $repoState.error !== undefined,
-  )
-
   // Retry closes the modal first: the second attempt reports its own outcome,
   // and leaving the first failure on screen while it runs would make a success
   // look like nothing happened.
@@ -1642,22 +1617,13 @@
       return
     }
 
-    if (e.key === 'Escape') {
-      // Escape never dismisses a clone in flight — hiding the dialog wouldn't
-      // cancel the clone, just orphan its progress bar and eventual error.
-      const cloneDismissable = showClone && !(cloneOverlay?.isBusy() ?? false)
-      // The branch dialogs answer Escape themselves and stop it here: they sit
-      // *on top of* this list, and the popover they came from is already
-      // closed, so letting this run would dismiss the wrong thing.
-      if (showRepos || cloneDismissable || showBranches || showSettings || showHelp) {
-        e.preventDefault()
-        // Escape closes Settings the same way its own close button does — a
-        // scan-path edit must re-walk however the dialog was dismissed.
-        if (showSettings) closeSettings()
-        showRepos = showBranches = showHelp = false
-        if (cloneDismissable) showClone = false
-        return
-      }
+    // Escape belongs to whatever is frontmost, and each surface registers
+    // itself while it is on screen — so there is no list here to keep in step
+    // with the one in `App.svelte`, and dismissing a confirmation no longer
+    // takes the popover that raised it with it.
+    if (e.key === 'Escape' && dismissTopOverlay()) {
+      e.preventDefault()
+      return
     }
 
     // The composer's own chords, deliberately above the `inField` bail: they
@@ -1666,7 +1632,7 @@
     // thing on screen — an overlay is a different task than the commit
     // underneath it, and History isn't the composer at all.
     if (meta && (e.key === 'Enter' || e.key === 'g')) {
-      if (modalOpen || $repoState.activeTab !== 'changes') return
+      if ($overlayDepth > 0 || $repoState.activeTab !== 'changes') return
       e.preventDefault()
       if (e.key === 'g') composer?.requestGenerate()
       else composer?.requestCommit()
@@ -1698,11 +1664,17 @@
       showHelp = !showHelp
     } else if (meta && e.key === ',') {
       e.preventDefault()
-      if (showSettings) closeSettings()
-      else showSettings = true
+      showSettings = !showSettings
     } else if (meta && e.key === 'l') {
       e.preventDefault()
-      repoState.update((s) => ({ ...s, activeTab: s.activeTab === 'changes' ? 'history' : 'changes' }))
+      setActiveTab($repoState.activeTab === 'changes' ? 'history' : 'changes')
+    } else if (meta && (e.key === '1' || e.key === '2')) {
+      // Absolute, not a toggle: ⌘1 is always Changes and ⌘2 always History, so
+      // the chord you press doesn't depend on the tab you're already on. The
+      // native client binds the same pair in View, where the menu also carries
+      // them as the app's own documentation.
+      e.preventDefault()
+      setActiveTab(e.key === '1' ? 'changes' : 'history')
     }
   }
 
@@ -1717,9 +1689,7 @@
     if (repoPath) recordRecentRepo(repoPath)
     await Promise.all([refreshStatus(), refreshBranches(), loadInitialLog()])
     startStatusPolling()
-    const cfg = $config
-    const intervalMs = cfg?.auto_fetch ? cfg.fetch_interval_ms || 30000 : 0
-    startAutoFetch(intervalMs)
+    startAutoFetch(autoFetchIntervalMs($config))
     // Kick one immediate fetch of the open repo so the Pull "behind" badge
     // resolves within a second of launch instead of waiting up to a full
     // auto-fetch interval (and at all when auto-fetch is off). Non-blocking so
@@ -1732,6 +1702,31 @@
   $effect(() => {
     if ($repoState.activeTab === 'history' && !$repoState.log.loaded) {
       loadInitialLog()
+    }
+  })
+
+  /**
+   * Re-arm the automatic fetch whenever its two settings move.
+   *
+   * The timer used to be armed at launch and on a repo switch only, so turning
+   * auto-fetch off left it running until the app was restarted and a new
+   * interval never took effect at all — the one setting in the window that
+   * quietly ignored you. Watching the config rather than the Settings dialog
+   * also covers a change made in the native client, which arrives on the next
+   * window activation through `resyncOnActive`'s config re-read.
+   */
+  let lastFetchPolicy = $state<string | undefined>(undefined)
+  $effect(() => {
+    const cfg = $config
+    if (!cfg) return
+    const policy = `${cfg.auto_fetch}:${cfg.fetch_interval_ms}`
+    if (lastFetchPolicy === undefined) {
+      lastFetchPolicy = policy
+      return
+    }
+    if (policy !== lastFetchPolicy) {
+      lastFetchPolicy = policy
+      startAutoFetch(autoFetchIntervalMs(cfg))
     }
   })
 
@@ -2187,13 +2182,13 @@
           onSelect={handleSwitchRepo}
           onClone={openClone}
           onOpenSettings={() => { showRepos = false; showSettings = true }}
+          onClose={() => (showRepos = false)}
         />
       </div>
     </div>
   {/if}
 
   <CloneOverlay
-    bind:this={cloneOverlay}
     isOpen={showClone}
     defaultDir={cloneDefaultDir}
     onClose={() => (showClone = false)}
@@ -2220,6 +2215,7 @@
           onRequestMerge={requestMerge}
           onRequestDelete={requestDeleteBranch}
           onRequestAbortMerge={requestAbortMerge}
+          onClose={() => (showBranches = false)}
         />
       </div>
     </div>
@@ -2280,7 +2276,7 @@
     </ConfirmDialog>
   {/if}
 
-  <SettingsOverlay isOpen={showSettings} onClose={closeSettings} />
+  <SettingsOverlay isOpen={showSettings} onClose={() => (showSettings = false)} />
   <HelpOverlay isOpen={showHelp} onClose={() => (showHelp = false)} />
 
   {#if discardTarget}

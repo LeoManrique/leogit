@@ -1,5 +1,6 @@
 <script lang="ts">
   import { autofocus } from '$lib/actions/autofocus'
+  import { dismissOnEscape } from '$lib/actions/overlayStack'
 
   interface Props {
     /** The branch whose commits are being brought in. */
@@ -28,13 +29,8 @@
   */
   const upToDate = $derived(commitCount === 0)
 
-  function handleKeyDown(e: KeyboardEvent) {
-    if (e.key === 'Escape' && !isMerging) {
-      // Answered here rather than by the window handler, which would close the
-      // branch popover underneath instead of this dialog.
-      e.stopPropagation()
-      onCancel()
-    }
+  function escape(): void {
+    if (!isMerging) onCancel()
   }
 </script>
 
@@ -44,9 +40,15 @@
   onclick={(e) => {
     if (e.target === e.currentTarget && !isMerging) onCancel()
   }}
-  onkeydown={handleKeyDown}
 >
-  <div class="modal" role="dialog" aria-modal="true" tabindex="-1" use:autofocus>
+  <div
+    class="modal"
+    role="dialog"
+    aria-modal="true"
+    tabindex="-1"
+    use:autofocus
+    use:dismissOnEscape={escape}
+  >
     <div class="modal-header">
       <h2>Merge Branch</h2>
     </div>

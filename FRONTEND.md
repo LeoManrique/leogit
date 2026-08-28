@@ -569,6 +569,42 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    history *and* the branch list, and drops amend mode with them: the commit the
    composer was amending is no longer HEAD, and may not be on this branch at all.
    How the menu is *shaped* is presentation (§8).
+15. **Settings apply as they are changed.** There is no Save button in either client
+   and nothing to cancel: a discrete control (checkbox, picker) writes on the click, a
+   text or numeric field when it loses focus or takes a Return. Each write is a
+   `patch_config` naming **only the fields that control owns** — the two clients share
+   one config file, so a whole-object write posts it as it looked when the window
+   opened and silently reverts whatever the other client saved meanwhile (that is D-5,
+   and a patch listing every field the *form* holds is the same bug at form scale).
+   Core clamps and normalizes and hands the result back, which the form re-renders
+   from, so a value out of range corrects itself in front of the user rather than being
+   dropped — and a write that fails puts its control back, because with no pending Save
+   a control still showing the rejected value is claiming a setting that isn't on disk.
+   **Scan paths are the one field outside this**, behind an Edit ▸ Done cycle: they
+   decide which repositories exist as far as the app is concerned, and a half-typed line
+   is a different folder rather than a shorter one. Nothing is written until Done, so
+   leaving mid-edit by any route discards the draft; applying them re-walks discovery
+   there and then, where the change was made. Every setting the running app consumes
+   takes effect without a restart — the diff settings through the config the viewers
+   already read, `auto_fetch` and `fetch_interval_ms` by re-arming the timer when either
+   moves, including when the *other* client moved it.
+   Native's three remaining drifts, all owned by the parity plan's WS-R: its patch names
+   every field the window holds rather than the one that changed (D-5's lost update at
+   form scale — a `tab_size` written by the other client while the Settings window
+   stands open is reverted by the next unrelated toggle), its scan-path field is a plain
+   one, and a rejected write leaves its control showing the value that didn't land.
+   Fields the two clients don't both expose are listed in §8.
+16. **Escape dismisses the frontmost surface, and only that one.** A confirmation
+   raised from a popover closes itself and leaves the popover standing; a surface
+   running an operation that can't be called off — a clone mid-transfer, a commit past
+   its confirmation — takes the key and refuses it rather than letting it fall through
+   to whatever is underneath. A surface with a step inside it (the branch picker's
+   create form and its two picking modes) backs out of the step first. Which surface is
+   frontmost is answered by **when it appeared**, never by a list of flags: the Tauri
+   client registers each surface as it mounts (`actions/overlayStack.ts`), the native
+   client leans on AppKit's own responder order. The same registration answers "is
+   anything on top of the repository view", which the app's own chords check before
+   firing — a ⌘↩ that means *commit* must not answer a dialog asking about that commit.
 
 ## 7. Diff rendering contract
 
@@ -617,6 +653,9 @@ every deliberate difference here.
 | Terminal widget | `xterm.js` | SwiftTerm (PTY backend reused) |
 | Virtualized lists | hand-rolled windowing | native `List`/`LazyVStack`/`Table` |
 | Pane geometry persistence | `localStorage` (sidebar width, composer height, commit-files width) | `UserDefaults` (composer height, `commitComposerHeight`); sidebar and commit-files widths are per-session |
+| Window frame persistence | `tauri-plugin-window-state` saves size and position on exit and restores them at launch; the `tauri.conf.json` size is the first-run default | AppKit frame autosave on the `WindowGroup`, with `.defaultSize` as the first-run default |
+| Settings surface (§6.15) | a modal overlay inside the one window, with a header ✕ and a footer **Close** — there is nothing to save, so the button only dismisses | the stock SwiftUI `Settings` scene, a separate window with ⌘, and the standard title-bar close and no content buttons at all; a text field also commits on `.onDisappear` |
+| Settings field coverage (§6.15) | every `Config` field the app reads has a control | no control for `theme` (a permanent exemption, above), `side_by_side_diff` (awaiting the layout, above), or the two AI timeouts — so a timeout set in the Tauri client bounds native's requests but cannot be changed there. Closing the timeout gap is the parity plan's WS-R |
 | Repo-search labels (§6.9) | rows carry the GitHub `owner/name` when it is known, and both it and the basename are searchable | basename only — GitHub identifiers are not fetched natively yet (ROADMAP) |
 | Context-menu scope (§6.10) | multi-row selection, so discard also acts on a whole selection | single-selection lists, so every item acts on the right-clicked row |
 | Open-diff freshness | stale until reselect — the poll never reloads the open diff (adopting `stat_stamp` the same way would fix it; ROADMAP) | reloads within a poll tick: `stat_stamp` makes the status comparison see content edits, `workingTreeEpoch` re-keys the load, the equality skip absorbs no-ops |

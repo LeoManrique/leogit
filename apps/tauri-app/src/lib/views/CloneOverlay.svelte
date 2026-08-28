@@ -4,6 +4,7 @@
   import { ghApi, gitApi, reposApi, type GhRepo, type GitProgressEvent } from '$lib/api/commands'
   import { cloneSortMode, setCloneSortMode } from '$lib/stores/reposState'
   import { autofocus } from '$lib/actions/autofocus'
+  import { dismissOnEscape } from '$lib/actions/overlayStack'
   import { nextActiveIndex, scrollIntoViewWhenActive } from '$lib/actions/listNavigation'
   import { open } from '@tauri-apps/plugin-dialog'
   import { homeDir } from '@tauri-apps/api/path'
@@ -27,12 +28,6 @@
   let destDir = $state('')
   let isCloning = $state(false)
   let cloneError = $state('')
-
-  /** Whether a clone is in flight — MainLayout's global Escape handler asks
-      before dismissing the dialog, so progress/errors aren't orphaned. */
-  export function isBusy(): boolean {
-    return isCloning
-  }
 
   // Live `git clone --progress` output, streamed from the backend. Both tabs
   // produce it: `gh repo clone` forwards `--progress` to `git clone`, so the
@@ -251,8 +246,10 @@
     if (typeof picked === 'string') destDir = picked
   }
 
-  function handleOverlayKeyDown(e: KeyboardEvent) {
-    if (e.key === 'Escape' && !isCloning) onClose()
+  function escape(): void {
+    // A clone in flight takes Escape and refuses it: hiding the dialog would
+    // not cancel the clone, only orphan its progress bar and eventual error.
+    if (!isCloning) onClose()
   }
 
   async function handleClone() {
@@ -287,10 +284,16 @@
     onclick={(e) => {
       if (e.target === e.currentTarget && !isCloning) onClose()
     }}
-    onkeydown={handleOverlayKeyDown}
   >
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-    <div class="modal" role="dialog" aria-modal="true" tabindex="-1" onkeydown={handleModalKeyDown}>
+    <div
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      tabindex="-1"
+      onkeydown={handleModalKeyDown}
+      use:dismissOnEscape={escape}
+    >
       <div class="modal-header">
         <h2>Clone a repository</h2>
         <button class="close-btn" onclick={onClose} disabled={isCloning} aria-label="Close">

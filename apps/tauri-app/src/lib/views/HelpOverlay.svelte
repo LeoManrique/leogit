@@ -1,14 +1,12 @@
 <script lang="ts">
+  import { dismissOnEscape } from '$lib/actions/overlayStack'
+
   interface Props {
     isOpen: boolean
     onClose: () => void
   }
 
   let { isOpen, onClose }: Props = $props()
-
-  function handleOverlayKeyDown(e: KeyboardEvent) {
-    if (e.key === 'Escape') onClose()
-  }
 
   const shortcuts = [
     { key: 'Ctrl/Cmd + Enter', description: 'Commit selected files' },
@@ -17,12 +15,16 @@
     // the chord runs whatever the sync ladder proposes.
     { key: 'Ctrl/Cmd + P', description: 'Run the sync action (fetch / pull / push / publish)' },
     { key: 'Ctrl/Cmd + R', description: 'Reload status, history and branches' },
+    { key: 'Ctrl/Cmd + 1', description: 'Show Changes' },
+    { key: 'Ctrl/Cmd + 2', description: 'Show History' },
     { key: 'Ctrl/Cmd + L', description: 'Toggle Changes / History tab' },
-    { key: 'Ctrl/Cmd + B', description: 'Open branch picker' },
+    { key: 'Ctrl/Cmd + B', description: 'Open branch menu' },
     { key: 'Ctrl/Cmd + ,', description: 'Open settings' },
     { key: 'Ctrl/Cmd + `', description: 'Toggle terminal' },
     { key: '?', description: 'Open this help' },
-    { key: 'Escape', description: 'Close overlay' },
+    // Only the topmost: a confirmation raised from a popover closes itself and
+    // leaves the popover it came from standing.
+    { key: 'Escape', description: 'Close the frontmost dialog or menu' },
   ]
 </script>
 
@@ -33,9 +35,8 @@
     onclick={(e) => {
       if (e.target === e.currentTarget) onClose()
     }}
-    onkeydown={handleOverlayKeyDown}
   >
-    <div class="modal" role="dialog" aria-modal="true" tabindex="-1">
+    <div class="modal" role="dialog" aria-modal="true" tabindex="-1" use:dismissOnEscape={onClose}>
       <div class="modal-header">
         <h2>Keyboard Shortcuts</h2>
         <button class="close-btn" onclick={onClose} aria-label="Close">

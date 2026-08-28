@@ -191,9 +191,23 @@ const defaultState: RepoState = {
 
 export const repoState = writable<RepoState>(defaultState)
 
+/**
+ * Show a sidebar tab. The one writer, so the tab bar and the keyboard route
+ * can't drift on what switching tabs means, and re-selecting the visible tab
+ * publishes nothing rather than waking every subscriber.
+ */
+export function setActiveTab(tab: ActiveTab): void {
+  repoState.update((s) => (s.activeTab === tab ? s : { ...s, activeTab: tab }))
+}
+
 export function resetRepoState() {
   repoState.update((s) => ({
     ...defaultState,
+    // Which tab is showing is a view preference, not repository state: it
+    // belongs to the person, and it survives a switch in the native client
+    // too. Resetting it here was an accident of reusing `defaultState`, and it
+    // threw a user reading history back to Changes on every repo change.
+    activeTab: s.activeTab,
     selectedFiles: new Set(),
     userDeselected: new Set(),
     diffSelection: new Map(),

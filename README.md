@@ -11,7 +11,7 @@ A calm desktop Git client built with Tauri 2, Rust, and Svelte 5. Designed to ge
 - **Sync from one adaptive button** whose face is whatever the repository needs next — Publish, Publish branch, Pull, Push, Fetch — with both ahead-behind counts on it, live transfer progress (an in-button fill plus git's own `Writing objects… MiB/s` line in the header), Fetch and force-push-with-lease (only on a genuinely diverged branch) under its chevron, and the same ladder on ⌘P. Or **publish a remote-less repo to GitHub** in one click via the GitHub CLI.
 - **Embedded terminal** docked under the diff pane, running the user's `$SHELL` in the repo directory.
 - **Auto-fetch** + 2 s status polling so the UI stays in sync with anything the user does in another terminal.
-- **Light / dark themes**, persistent layout, and a TOML config in the platform config dir (`~/Library/Application Support/leogit/` on macOS, `~/.config/leogit/` on Linux).
+- **Light / dark themes**, a layout and window frame that reopen where you left them, and a TOML config in the platform config dir (`~/Library/Application Support/leogit/` on macOS, `~/.config/leogit/` on Linux) — edited from a Settings window in either client that applies each change as you make it, with no Save button and nothing to lose by closing.
 
 ## Requirements
 

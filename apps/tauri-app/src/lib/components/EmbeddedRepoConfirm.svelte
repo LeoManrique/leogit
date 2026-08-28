@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { FileEntry } from '$lib/api/commands'
   import { autofocus } from '$lib/actions/autofocus'
+  import { dismissOnEscape } from '$lib/actions/overlayStack'
 
   interface Props {
     /** Embedded-repo entries included in this commit. */
@@ -22,8 +23,8 @@
   // over a commit still running underneath it.
   const canCancel = $derived(!isCommitting)
 
-  function handleKeyDown(e: KeyboardEvent) {
-    if (e.key === 'Escape' && canCancel) onCancel()
+  function escape(): void {
+    if (canCancel) onCancel()
   }
 </script>
 
@@ -33,12 +34,16 @@
   onclick={(e) => {
     if (e.target === e.currentTarget && canCancel) onCancel()
   }}
-  onkeydown={handleKeyDown}
 >
-  <!-- Focused on mount so Escape reaches the handler above: it listens on
-       this overlay, and without focus inside, the key is raised somewhere
-       else entirely and the dialog cannot be dismissed by keyboard. -->
-  <div class="modal" role="dialog" aria-modal="true" tabindex="-1" use:autofocus>
+  <!-- Focused on mount so Tab starts inside the dialog rather than behind it. -->
+  <div
+    class="modal"
+    role="dialog"
+    aria-modal="true"
+    tabindex="-1"
+    use:autofocus
+    use:dismissOnEscape={escape}
+  >
     <div class="modal-header">
       <h2>Commit nested {many ? 'repositories' : 'repository'} as a link?</h2>
     </div>

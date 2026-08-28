@@ -1,5 +1,6 @@
 <script lang="ts">
   import { autofocus } from '$lib/actions/autofocus'
+  import { dismissOnEscape } from '$lib/actions/overlayStack'
 
   interface Props {
     title?: string
@@ -10,9 +11,6 @@
 
   let { title = 'Error', message, onDismiss, onRetry }: Props = $props()
 
-  function handleKeyDown(e: KeyboardEvent) {
-    if (e.key === 'Escape') onDismiss()
-  }
 </script>
 
 <div
@@ -21,12 +19,16 @@
   onclick={(e) => {
     if (e.target === e.currentTarget) onDismiss()
   }}
-  onkeydown={handleKeyDown}
 >
-  <!-- Focused on mount so Escape reaches the handler above: it listens on
-       this overlay, and without focus inside, the key is raised somewhere
-       else entirely and the dialog cannot be dismissed by keyboard. -->
-  <div class="modal" role="dialog" aria-modal="true" tabindex="-1" use:autofocus>
+  <!-- Focused on mount so Tab starts inside the dialog rather than behind it. -->
+  <div
+    class="modal"
+    role="dialog"
+    aria-modal="true"
+    tabindex="-1"
+    use:autofocus
+    use:dismissOnEscape={onDismiss}
+  >
     <div class="modal-header">
       <h2>{title}</h2>
       <button class="close-btn" onclick={onDismiss} aria-label="Close">

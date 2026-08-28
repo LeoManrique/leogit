@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte'
   import { autofocus } from '$lib/actions/autofocus'
+  import { dismissOnEscape } from '$lib/actions/overlayStack'
 
   interface Props {
     defaultName: string
@@ -31,9 +32,15 @@
     onPublish(name.trim(), description.trim(), isPrivate)
   }
 
+  // Enter submits from anywhere in the dialog; Escape belongs to the overlay
+  // stack, which is what decides that this dialog — and not the popover it may
+  // be standing on — is the one being dismissed.
   function handleKeyDown(e: KeyboardEvent) {
-    if (e.key === 'Escape' && !isPublishing) onCancel()
     if (e.key === 'Enter' && canPublish) submit()
+  }
+
+  function escape(): void {
+    if (!isPublishing) onCancel()
   }
 </script>
 
@@ -45,7 +52,7 @@
   }}
   onkeydown={handleKeyDown}
 >
-  <div class="modal" role="dialog" aria-modal="true" tabindex="-1">
+  <div class="modal" role="dialog" aria-modal="true" tabindex="-1" use:dismissOnEscape={escape}>
     <div class="modal-header">
       <h2>Publish repository</h2>
       <button class="close-btn" onclick={onCancel} disabled={isPublishing} aria-label="Close">

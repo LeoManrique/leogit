@@ -1,12 +1,38 @@
 <script lang="ts">
+  /**
+   * Settings — instant-apply, like the native window and like macOS settings
+   * generally.
+   *
+   * Every control patches its own field as it changes: discrete controls
+   * (checkboxes, pickers) on the click, text and numeric fields when they lose
+   * focus or take a Return, which is what an `<input>`'s `change` event already
+   * means. There is no Save button, so there is nothing to forget to press and
+   * nothing to cancel — the config on disk is what the form shows.
+   *
+   * Two things follow from that and are load-bearing:
+   * - **A patch names only the field that changed.** The whole-object write
+   *   this replaced posted the config as it looked when the dialog *opened*,
+   *   silently reverting whatever the other client had saved meanwhile. Core
+   *   clamps and normalizes, and hands the result back, so an out-of-range
+   *   entry corrects itself in front of the user instead of being dropped.
+   * - **A write that fails puts its control back.** With no Save button
+   *   pending, a control still showing the rejected value would be claiming a
+   *   setting that isn't on disk.
+   *
+   * Scan paths are the one field outside instant-apply, behind an Edit ▸ Done
+   * cycle: they decide which repositories exist as far as the app is concerned,
+   * and half a typed line is a different setting rather than a smaller one.
+   */
   import {
     configApi,
     terminalApi,
-    type Config,
     type ConfigBounds,
+    type ConfigPatch,
     type ShellOption,
   } from '$lib/api/commands'
-  import { refreshConfig } from '$lib/stores/config'
+  import { applyConfig, config as configStore, refreshConfig } from '$lib/stores/config'
+  import { rediscoverRepos } from '$lib/services/repoDiscovery'
+  import { dismissOnEscape } from '$lib/actions/overlayStack'
 
   interface Props {
     isOpen: boolean
@@ -15,34 +41,66 @@
 
   let { isOpen, onClose }: Props = $props()
 
-  let config = $state<Config | null>(null)
-  let isSaving = $state(false)
+  /**
+   * The one config in the client. Reading the shared store rather than keeping
+   * a second copy is what stops the form and the rest of the app from
+   * disagreeing — and it means a change made in the native client, which
+   * arrives on the next window activation, shows up here rather than being
+   * overwritten by a stale form.
+   */
+  const config = $derived($configStore)
+
   let error = $state('')
   /** Shells probed on this machine, best-first. Empty until loaded. */
   let shells = $state<ShellOption[]>([])
-  /** Bound to the picker; `''` is the "Automatic" sentinel the <select> needs
-   *  in place of `Config.terminal_shell`'s absent value. */
-  let shellChoice = $state('')
-
-  /** What "Automatic" resolves to, so the choice isn't a mystery. */
-  let autoShellLabel = $derived(shells[0]?.label ?? '')
 
   /**
    * Bounds for the numeric fields, read from core — the same declaration the
    * writer clamps against, rather than a third copy of these numbers in a
    * third unit. The `min`/`max` attributes on `<input type=number>` are
    * advisory only: typing 999 or clearing the field both pass straight
-   * through, and Svelte's numeric binding turns an emptied field into `null`.
-   * Core clamps and normalizes on write and hands back the corrected config,
-   * which is written straight back into the form so the correction is visible
-   * rather than silent.
+   * through. Core clamps on write and hands back the corrected config, which
+   * the form re-renders from, so the correction is visible rather than silent.
    */
   let bounds = $state<ConfigBounds | null>(null)
 
-  async function loadConfig() {
+  /** What "Automatic" resolves to, so the choice isn't a mystery. */
+  const autoShellLabel = $derived(shells[0]?.label ?? '')
+
+  /** A preference whose shell is no longer installed shows as Automatic,
+   *  matching what the backend would actually launch. */
+  const shellChoice = $derived(
+    shells.some((s) => s.id === config?.terminal_shell) ? (config?.terminal_shell ?? '') : '',
+  )
+
+  /**
+   * Seconds on screen, milliseconds on the wire — the native window's split,
+   * so neither client makes the user count zeroes in `1800000`. Floored at one
+   * second so a hand-edited sub-second value still renders as a number.
+   */
+  const fetchIntervalSeconds = $derived(Math.max(Math.floor((config?.fetch_interval_ms ?? 0) / 1000), 1))
+  const intervalBounds = $derived(
+    bounds
+      ? {
+          min: Math.floor(bounds.fetch_interval_ms.min / 1000),
+          max: Math.floor(bounds.fetch_interval_ms.max / 1000),
+        }
+      : null,
+  )
+
+  /** Scan paths, mid-edit. Nothing is written until Done, so leaving the
+   *  dialog — by any route — discards the draft. */
+  let pathsEditing = $state(false)
+  let pathsDraft = $state('')
+
+  async function loadSettings() {
+    pathsEditing = false
+    error = ''
     try {
       const [cfg, limits, available] = await Promise.all([
-        configApi.loadConfig(),
+        // Re-read on open rather than trusting the store: the other client may
+        // have written the file since this window last looked at it.
+        refreshConfig(),
         configApi.configBounds(),
         // Non-fatal: an empty list just leaves the picker with "Automatic".
         terminalApi.listShells().catch((e) => {
@@ -50,64 +108,89 @@
           return [] as ShellOption[]
         }),
       ])
-      config = cfg
       bounds = limits
       shells = available
-      // A preference whose shell is no longer installed shows as Automatic,
-      // matching what the backend would actually launch.
-      shellChoice = available.some((s) => s.id === cfg.terminal_shell)
-        ? (cfg.terminal_shell ?? '')
-        : ''
-      error = ''
+      if (!cfg) error = 'Could not read the configuration file.'
     } catch (e) {
       error = String(e)
     }
   }
 
-  async function handleSave() {
+  /**
+   * Writes in flight, chained. Two quick edits must land in the order they were
+   * made — `patch_config` is a read-modify-write, so overlapping calls would
+   * race on the file each of them just read.
+   */
+  let writes: Promise<void> = Promise.resolve()
+
+  /**
+   * Bumped to rebuild every control from the config on disk.
+   *
+   * The controls render from `config`, so they repaint whenever it changes —
+   * which covers most of what core's clamp does. The two cases it doesn't are
+   * both cases where the *DOM* holds a value the config never took: a rejected
+   * write, and an entry core clamped back to the value it already had (999
+   * typed into a field already at its maximum). Neither changes `config`, so
+   * nothing would repaint without this.
+   */
+  let formSeq = $state(0)
+
+  function patch(fields: ConfigPatch): void {
+    writes = writes.then(async () => {
+      const before = $configStore
+      try {
+        const updated = await configApi.patchConfig(fields)
+        await applyConfig(updated)
+        error = ''
+        if (before && JSON.stringify(before) === JSON.stringify(updated)) formSeq += 1
+        // The scan paths are what discovery walks and the depth is how far, so
+        // a change to either re-walks now: the setting takes effect where it
+        // was made, rather than on a later dialog dismissal.
+        if (fields.scan_paths !== undefined || fields.scan_depth !== undefined) {
+          void rediscoverRepos()
+        }
+      } catch (e) {
+        // Nothing landed, so the control must stop claiming it did.
+        error = String(e)
+        formSeq += 1
+      }
+    })
+  }
+
+  /**
+   * Commit a numeric field, or put it back.
+   *
+   * An emptied or unparseable `<input type=number>` reads as `NaN`, and a patch
+   * naming it would reach the backend as `null` and fail with a raw serde
+   * error. Snapping the control back to what is on disk says "that was not a
+   * number" without a sentence about it.
+   */
+  function commitNumber(
+    e: Event & { currentTarget: HTMLInputElement },
+    fallback: number,
+    apply: (value: number) => void,
+  ): void {
+    const value = e.currentTarget.valueAsNumber
+    if (Number.isNaN(value)) {
+      e.currentTarget.value = String(fallback)
+      return
+    }
+    apply(Math.round(value))
+  }
+
+  function togglePathsEdit(): void {
     if (!config) return
-    isSaving = true
-    error = ''
-    try {
-      // A patch naming exactly the fields this form owns. The whole-object
-      // write it replaces posted the config as it looked when the dialog
-      // *opened*, reverting whatever the other client had saved since — and
-      // an emptied numeric field reached the backend as `null` and failed
-      // with a raw serde error. Core clamps, normalizes and returns the
-      // result, which goes straight back into the form.
-      config = await configApi.patchConfig({
-        terminal_shell: shellChoice,
-        tab_size: config.tab_size ?? undefined,
-        fetch_interval_ms: config.fetch_interval_ms ?? undefined,
-        scan_depth: config.scan_depth ?? undefined,
-        theme: config.theme,
-        ai_provider: config.ai_provider,
-        auto_fetch: config.auto_fetch,
-        syntax_highlighting: config.syntax_highlighting,
-        scan_paths: config.scan_paths,
-        side_by_side_diff: config.side_by_side_diff,
-        hide_whitespace: config.hide_whitespace,
-        claude_model: config.claude.model ?? '',
-        claude_timeout_secs: config.claude.timeout_secs ?? undefined,
-        ollama_model: config.ollama.model ?? '',
-        ollama_server_url: config.ollama.server_url,
-        ollama_timeout_secs: config.ollama.timeout_secs ?? undefined,
-      })
-      await refreshConfig()
-      onClose()
-    } catch (e) {
-      error = String(e)
-    } finally {
-      isSaving = false
+    if (!pathsEditing) {
+      pathsDraft = config.scan_paths.join('\n')
+      pathsEditing = true
+      return
     }
-  }
-
-  function handleOverlayKeyDown(e: KeyboardEvent) {
-    if (e.key === 'Escape') onClose()
+    pathsEditing = false
+    patch({ scan_paths: pathsDraft.split('\n').map((s) => s.trim()).filter(Boolean) })
   }
 
   $effect(() => {
-    if (isOpen) loadConfig()
+    if (isOpen) loadSettings()
   })
 </script>
 
@@ -118,9 +201,8 @@
     onclick={(e) => {
       if (e.target === e.currentTarget) onClose()
     }}
-    onkeydown={handleOverlayKeyDown}
   >
-    <div class="modal" role="dialog" aria-modal="true" tabindex="-1">
+    <div class="modal" role="dialog" aria-modal="true" tabindex="-1" use:dismissOnEscape={onClose}>
       <div class="modal-header">
         <h2>Settings</h2>
         <button class="close-btn" onclick={onClose} aria-label="Close">
@@ -136,32 +218,78 @@
           <div class="error">{error}</div>
         {/if}
 
+        {#key formSeq}
         {#if config}
           <h3>Appearance</h3>
           <div class="setting-group">
             <label for="theme-select">Theme</label>
-            <select id="theme-select" bind:value={config.theme}>
+            <select
+              id="theme-select"
+              value={config.theme}
+              onchange={(e) => patch({ theme: e.currentTarget.value })}
+            >
               <option value="dark">Dark</option>
               <option value="light">Light</option>
             </select>
           </div>
 
+          <h3>Git</h3>
+          <div class="setting-group">
+            <label class="checkbox-label">
+              <input
+                type="checkbox"
+                checked={config.auto_fetch}
+                onchange={(e) => patch({ auto_fetch: e.currentTarget.checked })}
+              />
+              Automatically fetch from remotes
+            </label>
+          </div>
+          <div class="setting-group">
+            <label for="fetch-interval">Fetch interval (s)</label>
+            <input
+              id="fetch-interval"
+              type="number"
+              value={fetchIntervalSeconds}
+              min={intervalBounds?.min}
+              max={intervalBounds?.max}
+              step="5"
+              disabled={!config.auto_fetch}
+              onchange={(e) =>
+                commitNumber(e, fetchIntervalSeconds, (n) => patch({ fetch_interval_ms: n * 1000 }))}
+            />
+          </div>
+          <p class="section-footer">
+            Applies to the open repository within one interval — no restart needed.
+          </p>
+
           <h3>Diff</h3>
           <div class="setting-group">
             <label class="checkbox-label">
-              <input type="checkbox" bind:checked={config.side_by_side_diff} />
+              <input
+                type="checkbox"
+                checked={config.side_by_side_diff}
+                onchange={(e) => patch({ side_by_side_diff: e.currentTarget.checked })}
+              />
               Side-by-side diff view
             </label>
           </div>
           <div class="setting-group">
             <label class="checkbox-label">
-              <input type="checkbox" bind:checked={config.hide_whitespace} />
+              <input
+                type="checkbox"
+                checked={config.hide_whitespace}
+                onchange={(e) => patch({ hide_whitespace: e.currentTarget.checked })}
+              />
               Hide whitespace changes
             </label>
           </div>
           <div class="setting-group">
             <label class="checkbox-label">
-              <input type="checkbox" bind:checked={config.syntax_highlighting} />
+              <input
+                type="checkbox"
+                checked={config.syntax_highlighting}
+                onchange={(e) => patch({ syntax_highlighting: e.currentTarget.checked })}
+              />
               Syntax highlighting
             </label>
           </div>
@@ -170,49 +298,79 @@
             <input
               id="tab-size"
               type="number"
-              bind:value={config.tab_size}
+              value={config.tab_size}
               min={bounds?.tab_size.min}
               max={bounds?.tab_size.max}
+              onchange={(e) =>
+                commitNumber(e, config?.tab_size ?? 4, (n) => patch({ tab_size: n }))}
             />
           </div>
+          <p class="section-footer">Applies to the open diff immediately.</p>
+
+          <h3>Repository Discovery</h3>
+          <div class="setting-group">
+            <label for="scan-paths">Folders to scan</label>
+            <!-- Read-only until Edit, the macOS list-editor pattern: this is
+                 the one setting that decides which repositories the app can
+                 see at all, and a half-typed line is a different folder rather
+                 than a shorter one. Nothing is written until Done. -->
+            <textarea
+              id="scan-paths"
+              class="paths-input"
+              readonly={!pathsEditing}
+              value={pathsEditing ? pathsDraft : config.scan_paths.join('\n')}
+              oninput={(e) => (pathsDraft = e.currentTarget.value)}
+              rows="6"
+            ></textarea>
+            <div class="paths-actions">
+              <button class="btn-secondary" onclick={togglePathsEdit}>
+                {pathsEditing ? 'Done' : 'Edit'}
+              </button>
+            </div>
+          </div>
+          <div class="setting-group">
+            <label for="scan-depth">Scan depth</label>
+            <input
+              id="scan-depth"
+              type="number"
+              value={config.scan_depth}
+              min={bounds?.scan_depth.min}
+              max={bounds?.scan_depth.max}
+              onchange={(e) =>
+                commitNumber(e, config?.scan_depth ?? 3, (n) => patch({ scan_depth: n }))}
+            />
+          </div>
+          <p class="section-footer">
+            One folder per line (~ allowed). The repository switcher searches these for git
+            repositories.
+          </p>
 
           <h3>Terminal</h3>
           <div class="setting-group">
             <label for="terminal-shell">Shell</label>
-            <select id="terminal-shell" bind:value={shellChoice}>
+            <select
+              id="terminal-shell"
+              value={shellChoice}
+              onchange={(e) => patch({ terminal_shell: e.currentTarget.value })}
+            >
               <option value="">Automatic{autoShellLabel ? ` (${autoShellLabel})` : ''}</option>
               {#each shells as shell (shell.id)}
                 <option value={shell.id}>{shell.label}</option>
               {/each}
             </select>
-            <p class="setting-hint">
-              Only shells found on this machine are listed. Applies to new terminal sessions.
-            </p>
           </div>
+          <p class="section-footer">
+            Only shells found on this machine are listed. Applies to new terminal sessions.
+          </p>
 
-          <h3>Git</h3>
-          <div class="setting-group">
-            <label class="checkbox-label">
-              <input type="checkbox" bind:checked={config.auto_fetch} />
-              Auto fetch from remote
-            </label>
-          </div>
-          <div class="setting-group">
-            <label for="fetch-interval">Fetch interval (ms)</label>
-            <input
-              id="fetch-interval"
-              type="number"
-              bind:value={config.fetch_interval_ms}
-              min={bounds?.fetch_interval_ms.min}
-              max={bounds?.fetch_interval_ms.max}
-              step="1000"
-            />
-          </div>
-
-          <h3>AI</h3>
+          <h3>AI Commit Messages</h3>
           <div class="setting-group">
             <label for="provider-select">Provider</label>
-            <select id="provider-select" bind:value={config.ai_provider}>
+            <select
+              id="provider-select"
+              value={config.ai_provider}
+              onchange={(e) => patch({ ai_provider: e.currentTarget.value })}
+            >
               <option value="claude">Claude</option>
               <option value="ollama">Ollama</option>
             </select>
@@ -222,36 +380,48 @@
                it, so Generate failed with nothing on screen explaining why. -->
           {#if config.ai_provider === 'ollama'}
             <div class="setting-group">
-              <label for="ollama-model">Model (optional)</label>
+              <label for="ollama-model">Model</label>
               <input
                 id="ollama-model"
                 type="text"
-                bind:value={config.ollama.model}
+                value={config.ollama.model ?? ''}
                 placeholder="tavernari/git-commit-message:latest"
+                onchange={(e) => patch({ ollama_model: e.currentTarget.value })}
               />
             </div>
             <div class="setting-group">
               <label for="ollama-url">Ollama server URL</label>
-              <input id="ollama-url" type="text" bind:value={config.ollama.server_url} />
+              <input
+                id="ollama-url"
+                type="text"
+                value={config.ollama.server_url}
+                placeholder="http://localhost:11434"
+                onchange={(e) => patch({ ollama_server_url: e.currentTarget.value })}
+              />
             </div>
             <div class="setting-group">
               <label for="ollama-timeout">Ollama timeout (s)</label>
               <input
                 id="ollama-timeout"
                 type="number"
-                bind:value={config.ollama.timeout_secs}
+                value={config.ollama.timeout_secs}
                 min={bounds?.ai_timeout_secs.min}
                 max={bounds?.ai_timeout_secs.max}
+                onchange={(e) =>
+                  commitNumber(e, config?.ollama.timeout_secs ?? 120, (n) =>
+                    patch({ ollama_timeout_secs: n }),
+                  )}
               />
             </div>
           {:else}
             <div class="setting-group">
-              <label for="claude-model">Model (optional)</label>
+              <label for="claude-model">Model</label>
               <input
                 id="claude-model"
                 type="text"
-                bind:value={config.claude.model}
+                value={config.claude.model ?? ''}
                 placeholder="sonnet"
+                onchange={(e) => patch({ claude_model: e.currentTarget.value })}
               />
             </div>
             <div class="setting-group">
@@ -259,46 +429,26 @@
               <input
                 id="claude-timeout"
                 type="number"
-                bind:value={config.claude.timeout_secs}
+                value={config.claude.timeout_secs}
                 min={bounds?.ai_timeout_secs.min}
                 max={bounds?.ai_timeout_secs.max}
+                onchange={(e) =>
+                  commitNumber(e, config?.claude.timeout_secs ?? 120, (n) =>
+                    patch({ claude_timeout_secs: n }),
+                  )}
               />
             </div>
           {/if}
-
-          <h3>Repository discovery</h3>
-          <div class="setting-group">
-            <label for="scan-depth">Scan depth</label>
-            <input
-              id="scan-depth"
-              type="number"
-              bind:value={config.scan_depth}
-              min={bounds?.scan_depth.min}
-              max={bounds?.scan_depth.max}
-            />
-          </div>
-          <div class="setting-group">
-            <label for="scan-paths">Scan paths (one per line)</label>
-            <textarea
-              id="scan-paths"
-              class="paths-input"
-              value={config.scan_paths.join('\n')}
-              oninput={(e) => {
-                if (config) {
-                  config.scan_paths = (e.currentTarget.value || '').split('\n').map((s) => s.trim()).filter(Boolean)
-                }
-              }}
-              rows="6"
-            ></textarea>
-          </div>
+          <p class="section-footer">
+            Used by Generate in the commit composer. Each provider keeps its own model; leave it
+            empty for that provider's default.
+          </p>
         {/if}
+        {/key}
       </div>
 
       <div class="modal-footer">
-        <button class="btn-secondary" onclick={onClose}>Cancel</button>
-        <button class="btn-primary" onclick={handleSave} disabled={isSaving || !config}>
-          {isSaving ? 'Saving…' : 'Save'}
-        </button>
+        <button class="btn-secondary" onclick={onClose}>Close</button>
       </div>
     </div>
   </div>
@@ -393,14 +543,16 @@
     display: flex;
     align-items: center;
     gap: 12px;
-    /* Lets a full-width hint drop onto its own line under its control
+    /* Lets a full-width action row drop onto its own line under its control
        instead of competing with it for horizontal space. */
     flex-wrap: wrap;
   }
 
-  .setting-hint {
-    flex-basis: 100%;
-    margin: 2px 0 0;
+  /* What a whole section applies to, and when. Sits under the last control of
+     the section it describes — the scope of "immediately" is the section, not
+     any one checkbox in it. */
+  .section-footer {
+    margin: 6px 0 0 152px;
     font-size: 11px;
     line-height: 1.4;
     color: var(--text-muted);
@@ -443,6 +595,24 @@
     font-family: inherit;
   }
 
+  .setting-group input:disabled {
+    opacity: 0.5;
+  }
+
+  /* Numeric settings are plain fields — the spinner arrows are a second way to
+     change a value that already has a keyboard, and each click of one is
+     another write. */
+  .setting-group input[type='number'] {
+    appearance: textfield;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .setting-group input[type='number']::-webkit-outer-spin-button,
+  .setting-group input[type='number']::-webkit-inner-spin-button {
+    appearance: none;
+    margin: 0;
+  }
+
   .paths-input {
     flex: 1;
     padding: 6px 8px;
@@ -460,6 +630,18 @@
     min-height: 88px;
   }
 
+  .paths-input:read-only {
+    color: var(--text-secondary);
+    background: var(--bg-secondary);
+  }
+
+  .paths-actions {
+    flex-basis: 100%;
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 6px;
+  }
+
   .modal-footer {
     display: flex;
     justify-content: flex-end;
@@ -468,38 +650,18 @@
     border-top: 1px solid var(--border-inactive);
   }
 
-  .btn-secondary,
-  .btn-primary {
+  .btn-secondary {
     padding: 3px 14px;
     font-size: 12px;
     font-weight: 500;
     border-radius: 6px;
     border: 1px solid var(--border-strong);
     cursor: pointer;
-  }
-
-  .btn-secondary {
     background: var(--bg-elevated);
     color: var(--text-primary);
   }
 
   .btn-secondary:hover {
     background: var(--surface-hover);
-  }
-
-  .btn-primary {
-    background: var(--border-active);
-    color: #ffffff;
-    border-color: var(--border-active);
-  }
-
-  .btn-primary:hover:not(:disabled) {
-    background: var(--accent-secondary);
-    border-color: var(--accent-secondary);
-  }
-
-  .btn-primary:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
   }
 </style>

@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Snippet } from 'svelte'
   import { autofocus } from '$lib/actions/autofocus'
+  import { dismissOnEscape } from '$lib/actions/overlayStack'
 
   interface Props {
     title: string
@@ -38,13 +39,10 @@
     onCancel,
   }: Props = $props()
 
-  function handleKeyDown(e: KeyboardEvent) {
-    if (e.key === 'Escape' && !isBusy) {
-      // The window handler closes whichever overlay is open; this dialog sits
-      // on top of one, so it answers Escape first and keeps it.
-      e.stopPropagation()
-      onCancel()
-    }
+  // Escape is refused, not passed on, while the operation runs: the dialog is
+  // still the frontmost thing and hiding it wouldn't stop the work.
+  function escape(): void {
+    if (!isBusy) onCancel()
   }
 </script>
 
@@ -54,12 +52,16 @@
   onclick={(e) => {
     if (e.target === e.currentTarget && !isBusy && !destructive) onCancel()
   }}
-  onkeydown={handleKeyDown}
 >
-  <!-- Focused on mount so Escape has somewhere to be heard from: the handler
-       above only sees keys raised inside the dialog, and without this the
-       dialog opens with focus still on whatever launched it. -->
-  <div class="modal" role="dialog" aria-modal="true" tabindex="-1" use:autofocus>
+  <!-- Focused on mount so Tab starts inside the dialog rather than behind it. -->
+  <div
+    class="modal"
+    role="dialog"
+    aria-modal="true"
+    tabindex="-1"
+    use:autofocus
+    use:dismissOnEscape={escape}
+  >
     <div class="modal-header">
       <h2 class:destructive>{title}</h2>
     </div>

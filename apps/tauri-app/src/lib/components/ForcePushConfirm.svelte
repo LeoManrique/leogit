@@ -1,5 +1,6 @@
 <script lang="ts">
   import { autofocus } from '$lib/actions/autofocus'
+  import { dismissOnEscape } from '$lib/actions/overlayStack'
 
   interface Props {
     /**
@@ -21,8 +22,8 @@
 
   let { upstream, isPushing, error, onConfirm, onCancel }: Props = $props()
 
-  function handleKeyDown(e: KeyboardEvent) {
-    if (e.key === 'Escape' && !isPushing) onCancel()
+  function escape(): void {
+    if (!isPushing) onCancel()
   }
 </script>
 
@@ -32,12 +33,16 @@
   onclick={(e) => {
     if (e.target === e.currentTarget) onCancel()
   }}
-  onkeydown={handleKeyDown}
 >
-  <!-- Focused on mount so Escape reaches the handler above: it listens on
-       this overlay, and without focus inside, the key is raised somewhere
-       else entirely and the dialog cannot be dismissed by keyboard. -->
-  <div class="modal" role="dialog" aria-modal="true" tabindex="-1" use:autofocus>
+  <!-- Focused on mount so Tab starts inside the dialog rather than behind it. -->
+  <div
+    class="modal"
+    role="dialog"
+    aria-modal="true"
+    tabindex="-1"
+    use:autofocus
+    use:dismissOnEscape={escape}
+  >
     <div class="modal-header">
       <h2>Force push with lease</h2>
     </div>

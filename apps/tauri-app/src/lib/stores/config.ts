@@ -1,4 +1,4 @@
-import { writable } from 'svelte/store'
+import { get, writable } from 'svelte/store'
 import { configApi, gitApi, type Config, type FileEntry } from '$lib/api/commands'
 
 export const config = writable<Config | null>(null)
@@ -37,15 +37,39 @@ export async function loadFileStatusStyles(): Promise<void> {
  */
 export const scanFolders = writable<string[]>([])
 
+/**
+ * Publish a config the backend has just handed back: the shared store, the
+ * theme it names, and the scan folders it implies.
+ *
+ * `patch_config` returns the whole normalized config, so a settings control
+ * that just wrote one field already holds the new state and needs no second
+ * `load_config` round trip to publish it. Everything downstream reads `config`,
+ * which is why a diff setting changed here reaches the open diff without anyone
+ * telling it to.
+ *
+ * Resolving the scan folders is the one part that costs a command, so it only
+ * re-runs when the paths actually moved — a theme change doesn't move them.
+ */
+export async function applyConfig(cfg: Config): Promise<void> {
+  const previous = get(config)
+  config.set(cfg)
+  applyTheme(cfg.theme)
+  const paths = cfg.scan_paths ?? []
+  if (previous && sameStrings(previous.scan_paths ?? [], paths)) return
+  // Path arithmetic in core, so this is cheap — but a failure here must not
+  // fail the config load: search then matches whole paths and the empty
+  // state just can't say where it looked.
+  scanFolders.set(await gitApi.effectiveScanPaths(paths).catch(() => []))
+}
+
+function sameStrings(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((value, i) => value === b[i])
+}
+
 export async function refreshConfig(): Promise<Config | null> {
   try {
     const cfg = await configApi.loadConfig()
-    config.set(cfg)
-    applyTheme(cfg.theme)
-    // Path arithmetic in core, so this is cheap — but a failure here must not
-    // fail the config load: search then matches whole paths and the empty
-    // state just can't say where it looked.
-    scanFolders.set(await gitApi.effectiveScanPaths(cfg.scan_paths ?? []).catch(() => []))
+    await applyConfig(cfg)
     return cfg
   } catch (e) {
     console.error('config load failed', e)

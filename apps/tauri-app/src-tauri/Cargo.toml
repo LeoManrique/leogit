@@ -5,13 +5,14 @@ description = "Visual Git client built with Tauri and Svelte"
 authors = ["Leonardo Manrique"]
 edition = "2024"
 
-# The host is a thin presentation shell: it owns the window, the two Tauri
+# The host is a thin presentation shell: it owns the window, the three Tauri
 # plugins, and one `#[tauri::command]` shim per function. All logic lives in
 # `leogit-core`, which carries the git/diff/highlight/terminal/reqwest/… deps.
 [dependencies]
 tauri = { version = "2.11.2", features = [] }
 tauri-plugin-dialog = "2.7.1"
 tauri-plugin-single-instance = "2.4.2"
+tauri-plugin-window-state = "2.4.1"
 leogit-core = { path = "../../../core" }
 
 [build-dependencies]

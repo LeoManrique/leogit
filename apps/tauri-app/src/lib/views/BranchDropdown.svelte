@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { BranchInfo } from '$lib/api/commands'
   import { autofocus } from '$lib/actions/autofocus'
+  import { dismissOnEscape } from '$lib/actions/overlayStack'
   import { nextActiveIndex, scrollIntoViewWhenActive } from '$lib/actions/listNavigation'
   import ContextMenu, { type ContextMenuItem } from '$lib/components/ContextMenu.svelte'
 
@@ -27,6 +28,9 @@
     onRequestDelete: (name: string) => void
     /** Open the abort-merge confirmation. */
     onRequestAbortMerge: () => void
+    /** Dismiss the popover. Registered on the overlay stack, so Escape reaches
+     *  it wherever focus happens to be. */
+    onClose: () => void
   }
 
   let {
@@ -40,6 +44,7 @@
     onRequestMerge,
     onRequestDelete,
     onRequestAbortMerge,
+    onClose,
   }: Props = $props()
 
   /*
@@ -164,13 +169,6 @@
       e.preventDefault()
       const branch = filtered[activeIndex]
       if (branch) activate(branch)
-    } else if (e.key === 'Escape' && isPicking) {
-      // Escape backs out of the mode rather than closing the popover: the
-      // window handler would take the whole thing, which is one step too many
-      // when the user only meant to leave the sub-question.
-      e.preventDefault()
-      e.stopPropagation()
-      backToBrowse()
     }
   }
 
@@ -178,11 +176,18 @@
     if (e.key === 'Enter') {
       e.preventDefault()
       void submitCreate()
-    } else if (e.key === 'Escape') {
-      e.preventDefault()
-      e.stopPropagation()
-      backToBrowse()
     }
+  }
+
+  /**
+   * Escape leaves the sub-question before it leaves the popover: the create
+   * form and the two picking modes are steps *inside* this surface, and closing
+   * the whole thing is one step too many when the user only meant to back out
+   * of one. From browse there is nothing left to back out of, so it closes.
+   */
+  function escape(): void {
+    if (mode === 'browse') onClose()
+    else backToBrowse()
   }
 
   /*
@@ -231,7 +236,7 @@
   })
 </script>
 
-<div class="branch-dropdown">
+<div class="branch-dropdown" use:dismissOnEscape={escape}>
   {#if mode === 'create'}
     <div class="create-form">
       <h3>Create New Branch</h3>

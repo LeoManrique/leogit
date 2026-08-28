@@ -1,5 +1,6 @@
 <script lang="ts">
   import { autofocus } from '$lib/actions/autofocus'
+  import { dismissOnEscape } from '$lib/actions/overlayStack'
   import { basename } from '$lib/utils/path'
 
   interface Props {
@@ -18,8 +19,8 @@
 
   // Enter is left to the autofocused primary button's native activation, so it
   // can't fire the confirm twice.
-  function handleKeyDown(e: KeyboardEvent) {
-    if (e.key === 'Escape' && !isInitializing) onCancel()
+  function escape(): void {
+    if (!isInitializing) onCancel()
   }
 </script>
 
@@ -29,9 +30,8 @@
   onclick={(e) => {
     if (e.target === e.currentTarget && !isInitializing) onCancel()
   }}
-  onkeydown={handleKeyDown}
 >
-  <div class="modal" role="dialog" aria-modal="true" tabindex="-1">
+  <div class="modal" role="dialog" aria-modal="true" tabindex="-1" use:dismissOnEscape={escape}>
     <div class="modal-header">
       <h2>Create a repository here?</h2>
       <button class="close-btn" onclick={onCancel} disabled={isInitializing} aria-label="Close">

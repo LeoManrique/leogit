@@ -1,6 +1,6 @@
 # Plan — Cross-client feature parity (SwiftUI ⇄ Tauri)
 
-> Status: **in progress — WS-A…WS-E shipped 2026-08-27, WS-F and WS-G 2026-08-28; WS-H is next.**
+> Status: **in progress — WS-A…WS-E shipped 2026-08-27, WS-F, WS-G and WS-H 2026-08-28; WS-I is next.**
 > The remaining work was re-cut into seventeen smaller workstreams (C…S) on
 > 2026-08-27 after WS-B proved too large to review as one piece — see §6.
 > Accepted 2026-08-27 with every open decision resolved. Per-workstream state
@@ -104,7 +104,7 @@ since the code now carries the reasoning.
 | D-19 | Tauri | The `\ No newline at end of file` marker rendered its backslash twice. `linePrefix` no longer adds one — core keeps it in `content`. | — (WS-E took DF-8's minus sign; the two remaining alignments are native's, WS-P). |
 | D-20 | Both | **Slow-load threshold destroyed the state it claimed to keep.** ✅ *WS-E*: crossing it now dims the pane and overlays a spinner in both clients instead of replacing its contents — Tauri through a shared `SeamlessDiffPane` wrapper, native through `.opacity` + `.overlay` on `content` rather than a branch beside it. The native comment claiming scroll survived was false for exactly this reason: a branch gives SwiftUI a different view to build, so the `ScrollView` was destroyed and rebuilt at the top and the store's equality skip was preserving something nothing could see. | — |
 | D-5 | Tauri | **Config lost-update on a shared file.** A save posted the whole config as it looked when the dialog *opened*, so a native-side `tab_size` change was silently reverted. `patch_config` (H-10) is now the only writer: a surface names the fields it owns and cannot touch the rest, and core reads-edits-writes under a lock the file never had. | — |
-| D-6 | Tauri | **Config never re-read while running** — a native-side save reached a running Tauri window never, so theme, diff settings, auto-fetch and provider stayed at their launch values for the lifetime of the app. WS-C: `resyncOnActive` calls `refreshConfig` first, before the refreshes that consume it. D-5 stopped this client from *clobbering* the shared file; this is the other half — reading it. | BG-2's live re-arm of the fetch timer (a config read still doesn't restart the interval) → WS-J. |
+| D-6 | Tauri | **Config never re-read while running** — a native-side save reached a running Tauri window never, so theme, diff settings, auto-fetch and provider stayed at their launch values for the lifetime of the app. WS-C: `resyncOnActive` calls `refreshConfig` first, before the refreshes that consume it. D-5 stopped this client from *clobbering* the shared file; this is the other half — reading it. | — (WS-H: the read now re-arms the fetch timer too, so a cross-client `auto_fetch` change takes effect on that activation). |
 | D-7 | Both / core | **Empty-string AI config poisoned Generate in both clients.** `Some("")` is not `None`, so `--model ""` and a hostless Ollama URL sailed past every `unwrap_or`. `Config::normalized()` (H-10) treats blank-after-trim as absent on every read and every write, so an already-poisoned file heals on first load whichever client opens it. | — |
 
 ### 3.2 Defects still open
@@ -266,13 +266,14 @@ and matched, not that it was skipped.
   self-scheduling `setTimeout` chain (which also delivers BG-2/BG-3 for free).
   Steal GitHub Desktop's one improvement on both: a once-per-session random
   0–30 s skew so multiple windows don't fetch in sync. → WS-J
-- **BG-2 · Live re-arm of `auto_fetch` / `fetch_interval_ms`.** Native reads
-  the shared config store on every tick — the store reloads at launch, on each
-  save, and on activation, so a Settings change applies within one interval and
-  a Tauri-side edit arrives on the next activation — and it idles on a 30 s
-  re-check while disabled; Tauri's
-  interval is armed at init/switch only, and `startAutoFetch(0)` clears it
-  with nothing left to revive it (confirmed; ROADMAP tracks it as the auto-fetch re-arm item). → WS-J
+- **BG-2 · Live re-arm of `auto_fetch` / `fetch_interval_ms`.** ✅ *WS-H* for
+  the re-arm itself: an effect watching those two config fields calls
+  `startAutoFetch`, so a Settings change applies at once and a native-side edit
+  applies on the next activation (which re-reads the config). It was taken
+  there because ST-3 could not port native's "no restart needed" footer while
+  it was false. What remains for WS-J is the *shape* underneath — replacing the
+  flat `setInterval`s with the self-scheduling `setTimeout` chain BG-1 needs,
+  which is where native's idle 30 s re-check while disabled also belongs. → WS-J
 - **BG-3 · Connectivity signal.** Native `NWPathMonitor` is authoritative;
   Tauri's `navigator.onLine` is hard-wired `true` on WebKitGTK, silently
   disabling the offline gate, the recovery kick, and the update-check retry on
@@ -429,7 +430,9 @@ and matched, not that it was skipped.
   rename is a genuine gap in both clients (today you rename in the terminal),
   but building it is new feature work, which this plan excludes; leaving dead
   wrappers standing is how BR-1 stayed broken. Delete the Tauri wrappers now
-  (with `hasMergeConflicts` and the three other unconsumed derived stores);
+  (with `hasMergeConflicts`, the three other unconsumed derived stores, and
+  `get_repo_name`, which WS-H left unconsumed on purpose — the window title
+  takes the client's own `basename()`, like every other repo label here);
   ROADMAP carries rename + delete-on-remote as one build-on-both-clients
   feature, homed in BR-7's branch-row context menu and backed by the combined
   core `delete_branch(…, include_remote)`. Branch management still reaches a
@@ -813,42 +816,54 @@ and matched, not that it was skipped.
 
 ### 4.9 Settings, config, AI (ST)
 
-- **ST-1 · The field matrix.** All 15 `Config` fields audited (full matrix in
-  the research notes). Live-apply: native applies auto-fetch/interval within
-  one tick and diff settings immediately; Tauri now re-reads the shared file on
-  every window activation (D-6, ✅ *WS-C*), so a cross-client edit lands within
-  one focus — but still needs a restart or repo switch for the auto-fetch
-  *timer* to re-arm (BG-2).
-  ✅ *WS-B* for the dead fields: the AI timeout now travels on
-  `AiProviderConfig` and bounds both providers' requests — a control that
-  persisted a value nobody read was worse than no control, because the user
-  believed the timeout was set — and `ai_api_key`, mapped but read by neither
-  provider, is gone. → WS-H, WS-J
+- **ST-1 · The field matrix.** All 15 `Config` fields audited. ✅ *WS-B* for the
+  dead fields: the AI timeout now travels on `AiProviderConfig` and bounds both
+  providers' requests — a control that persisted a value nobody read was worse
+  than no control, because the user believed the timeout was set — and
+  `ai_api_key`, mapped but read by neither provider, is gone. ✅ *WS-C* for the
+  cross-client read (D-6). ✅ *WS-H* for live-apply: every field either
+  re-renders from the `config` store or, for `auto_fetch` /
+  `fetch_interval_ms`, re-arms the timer from an effect watching those two —
+  the one setting in the window that used to be ignored until a restart, and
+  the reason native's "no restart needed" footer could not be ported honestly
+  before. This is BG-2's *first* half, taken here because ST-3 could not ship a
+  true footer without it; the self-scheduling `setTimeout` chain that replaces
+  the flat intervals is untouched and stays WS-J's. **Still open, native:** no
+  control for the two AI timeouts, so they are Tauri-set and natively honoured
+  (now a FRONTEND §8 row). → WS-J, WS-R
 - **ST-2 · Save semantics** — ✅ *WS-B.* `patch_config` is the only writer, and
   it reads-edits-normalizes-writes under a lock the shared file never had, so
   a surface can only change the fields it names. `Config::normalized()` runs on
   both the read and the write, which is what heals an already-poisoned file on
   first load. Both clients' whole-object writes are deleted; so is
   `save_config`'s export.
-- **ST-3 · Surface model.** **Decided: the Tauri client moves to
-  instant-apply, matching native** — the simplest and least-code option: each
-  control patches its own field through H-10's `patch_config` as it changes,
-  the whole-object save (and D-5 with it) is deleted, Save/Cancel becomes a
-  single Close, Escape just closes. The half-typed-value risk Cancel used to
-  guard is covered instead by clamp-on-write (H-10 / ST-4) and parse-at-save
-  fields; scan paths, the one destructive text input, is the exception to
-  field-level instant-apply and locks behind ST-10's Edit ▸ Done cycle on
-  both clients. Native still adopts Tauri's load-failure
-  handling (don't render editable defaults that aren't the user's settings);
-  D-8's lost text edit is already fixed. Port native's per-section footers ("Applies to the open diff
-  immediately") to Tauri — honest only once BG-2 lands, which is a feature of
-  the suggestion. → WS-H, WS-R
+- **ST-3 · Surface model.** ✅ *WS-H* for the Tauri half. Each control patches
+  its own field through `patch_config` as it changes — discrete controls on the
+  click, text and numeric fields on `change`, which is already "blur or Return"
+  — the whole-object save is deleted, and the footer is a single **Close**.
+  What Save bought was a way to be wrong: it posted every field the form held,
+  so a `tab_size` written by the other client while the overlay stood open was
+  reverted by an unrelated toggle, and Cancel promised to undo edits that had
+  already reached the file. The half-typed-value risk it claimed to guard is
+  covered by clamp-on-write plus commit-on-change, and native's per-section
+  footers are ported verbatim in native's own section order. Two rules the
+  build added, both consequences of having no Save: a **failed** write puts its
+  control back (a control showing a rejected value with nothing pending is
+  claiming a setting that isn't on disk), and a clamp that lands on the value
+  already displayed re-seeds the form anyway — otherwise 999 typed into a field
+  already at its maximum stays on screen, which is the one case the
+  "corrections are visible" promise exists for. **Still open, native:** its
+  patch names every field the window holds rather than the one that changed
+  (D-5 at form scale — see §6's WS-H entry), and it should adopt Tauri's
+  load-failure handling rather than rendering editable defaults that aren't the
+  user's settings. D-8's lost text edit is already fixed. → WS-R
 - **ST-4 · Units and bounds.** ✅ *WS-B* for the bounds: `config_bounds()` is
   the one declaration, read by both forms and enforced by the one writer, so a
   control can no longer offer a value the writer then clamps away (native's
-  load-clamp floored to 1 s while its own control started at 5). Units are
-  unchanged and deliberate — native shows seconds, the wire stays
-  milliseconds. Still open: Tauri shows raw ms. → WS-H
+  load-clamp floored to 1 s while its own control started at 5). ✅ *WS-H* for
+  the units: the Tauri interval field reads in seconds like native's, with its
+  `min`/`max` divided from the same bounds, so milliseconds are now the config
+  file's business alone.
 - **ST-5 · `ai_provider` ownership.** Native has **two independent owners**
   (composer's CommitStore and SettingsStore) that never observe each other —
   with both windows open the pickers can disagree, and a Settings save of any
@@ -869,8 +884,11 @@ and matched, not that it was skipped.
   revert with it. WS-D found it already done and narrowed it: the rollback puts
   back the one field rather than the whole config snapshot, which would have
   reverted everything the store learned meanwhile — D-5's lost update, one layer
-  up. The Settings overlay's picker still has no revert, which ST-3 inherits.
-  → WS-H
+  up. ✅ *WS-H* for the Settings overlay: instant-apply made the revert a rule
+  rather than one picker's special case — any control whose write is refused is
+  re-seeded from the config on disk, the provider picker included. **Still open,
+  native:** a failed save there leaves the control showing the value that didn't
+  land, and clears only on the next successful write. → WS-R
 - **ST-8 · One model field, two providers.** Set `sonnet`, switch to Ollama,
   Generate fails — a shared design flaw; GitHub Desktop stores per-provider
   models. **Decided: split per provider, restructured cleanly** —
@@ -908,15 +926,14 @@ and matched, not that it was skipped.
   - **A fix shipped to one client is not shipped.** The whole first pass was
     Tauri-only while the parity plan's own subject is the two clients agreeing.
     Port in the same change, or the gap is what the user finds.
-- **ST-10 · Scan-path editor.** **Decided: locked by default on both
-  clients** — the field renders read-only with an **Edit** button beside it —
-  the macOS list-editor pattern — Edit enables it, the button becomes
-  **Done**, and Done parses, applies through `patch_config`, and locks the
-  field again. Nothing touches the config until Done, so closing or Escape
-  mid-edit simply discards the draft; no confirmation popup anywhere. Give
-  the native field `.monospaced()`; keep parse-at-save on both (Tauri's
-  parse-on-input transiently desyncs the textarea from the model).
-  → WS-H, WS-R
+- **ST-10 · Scan-path editor.** **Decided: locked by default on both clients** —
+  read-only field, **Edit** button beside it, which becomes **Done**; Done
+  parses, applies through `patch_config`, and locks again. Nothing touches the
+  config until Done, so leaving mid-edit discards the draft; no confirmation
+  anywhere. ✅ *WS-H* for the Tauri half, which also moved parsing to Done (the
+  old parse-on-input desynced the textarea from the model on every keystroke)
+  and made the applied edit re-walk discovery itself. **Still open, native:**
+  the plain field, plus `.monospaced()` on it. → WS-R
 
 ### 4.10 Terminal (TE)
 
@@ -999,42 +1016,48 @@ and matched, not that it was skipped.
   approach is right and structurally more robust (menu key equivalents beat
   the first responder — the exact class of Tauri's D-16). Extend it: File ▸
   Open/Clone (fill the emptied `newItem` group), View ▸ ⌘1/⌘2 tabs (GH
-  Desktop's absolute bindings beat Tauri's ⌘L toggle — add ⌘1/⌘2 to Tauri
-  too), a Branch menu with ⌘B (Tauri has ⌘B; native has none — bind via the
-  focused-scene-value pattern, not a toolbar shortcut, which never reaches
-  the scene), View ▸ Show/Hide Terminal (TE-7). With those, native needs no
-  `?` overlay — but today ⌘G/⌘↩/⌃`/⌘O exist only as button equivalents,
-  discoverable nowhere. Tauri on macOS should eventually get a real
-  `tauri::menu`; out of this plan's scope beyond recording it. → WS-H, WS-M
+  Desktop's absolute bindings beat Tauri's ⌘L toggle), a Branch menu with ⌘B
+  (Tauri has ⌘B; native has none — bind via the focused-scene-value pattern,
+  not a toolbar shortcut, which never reaches the scene), View ▸ Show/Hide
+  Terminal (TE-7). With those, native needs no `?` overlay — but today
+  ⌘G/⌘↩/⌃`/⌘O exist only as button equivalents, discoverable nowhere. ✅ *WS-H*
+  for the Tauri half: ⌘1/⌘2 select the two tabs absolutely, beside the ⌘L
+  toggle rather than replacing it — the toggle is the one people have, and an
+  absolute binding is what makes the pair worth learning. Tauri on macOS should
+  eventually get a real `tauri::menu`; out of this plan's scope beyond
+  recording it. → WS-M
 - **SH-3 · ⌘R.** ✅ *WS-F.* Tauri's is now native's: status + log + branches,
   guarded on `activeNetworkOp`, and reachable from a focused field — which it
   had to become, since SY-1 removed the Refresh button and left ⌘R as the only
   route to a forced reload.
-- **SH-4 · Escape.** Tauri's global stack is duplicated in two files (already
-  drifted) and closes *all* overlays at once; fold into one topmost-closing
-  stack. Native's per-surface AppKit handling is fine. ✅ *WS-G* for the half
-  that turned out to be silently broken: every Tauri confirmation handles Escape
-  on its own overlay element, and not one of them took focus when it mounted, so
-  the key was raised on whatever had launched the dialog and **no confirmation
-  in the client could be dismissed by keyboard**. Five of them autofocus their
-  container now (with the ring suppressed — it is a listening post, not a
-  control), and the branch dialogs `stopPropagation()` so the window handler
-  can't close the popover underneath instead. The fold itself is still open.
-  → WS-H
+- **SH-4 · Escape.** ✅ *WS-G* for the half that turned out to be silently
+  broken: every Tauri confirmation handled Escape on its own overlay element,
+  and not one of them took focus when it mounted, so **no confirmation in the
+  client could be dismissed by keyboard**. ✅ *WS-H* for the fold: the two
+  hand-written, already-drifted lists of overlay flags are gone, and each
+  surface registers its own dismissal on one LIFO
+  (`actions/overlayStack.ts`) for as long as it is mounted — registration order
+  *is* stacking order, so there is nothing to keep in step and nothing to
+  forget. The `stopPropagation()` workarounds WS-G added went with it, and the
+  context menu, which had neither a workaround nor a place in either list,
+  stopped closing itself *and* the popover underneath. Native's per-surface
+  AppKit handling is fine and was not touched. The same registration replaced
+  `modalOpen` — see §6's WS-H entry for what that list had been missing.
 - **SH-5 · Error model.** Split by class in both — the ruling and the Tauri half
   are in CH-11. Native's remaining half: its background banner still has no
   dismiss ✕, and the classes it puts in the banner that the rule puts in the
   modal. → WS-N, WS-Q
-- **SH-6 · Window.** Tauri: add `tauri-plugin-window-state` (opens 1280×800
-  every launch today; native gets restoration free) and set the window title
-  to the repo name (QUICK-WINS item; match native's value). Min-size
-  disagreement (720×460 vs 900×600) isn't worth converging. → WS-H
-- **SH-7 · Tab behavior.** Native preserves the active tab across repo
-  switches (a view preference — right); Tauri resets to Changes as an
-  accident of `defaultState` and remounts the history pane. Native loses the
-  commit-list scroll position on tab round trips (Tauri keeps both panes
-  mounted — its trade); close it with a `ScrollViewReader` restore to the
-  hoisted selection instead of keeping subtrees alive. → WS-H, WS-Q
+- **SH-6 · Window.** ✅ *WS-H.* `tauri-plugin-window-state` saves the frame on
+  exit and restores it at launch, so `tauri.conf.json`'s 1280×800 is the
+  first-run default rather than every launch; the title is the open repo's
+  folder name, native's own value, falling back to the product on the picker.
+  Min-size disagreement (720×460 vs 900×600) was left as it is.
+- **SH-7 · Tab behavior.** ✅ *WS-H* for the Tauri half: `resetRepoState` keeps
+  `activeTab`. Which tab is showing is a view preference, not repository state,
+  and resetting it was an accident of reusing `defaultState` for the reset.
+  Native loses the commit-list scroll position on tab round trips (Tauri keeps
+  both panes mounted — its trade); close it with a `ScrollViewReader` restore
+  to the hoisted selection instead of keeping subtrees alive. → WS-Q
 - **SH-8 · Pre-main phases.** Tauri's loading/error-with-Retry phases are
   right; native will need a scan-failure surface on Welcome once RM-1 lands
   (inline row + Retry, not a phase swap). Native's deliberate silence about a
@@ -1217,9 +1240,9 @@ is mostly adoption of already-proven native behavior.
      call site picks `reportActionError` or `reportNotice`; a third path is a sign
      the classification is being re-litigated at the site. (WS-F added the
      refinement: a failure raised *inside a dialog* stays there — FRONTEND §6.13.)
-   - **`modalOpen` in `MainLayout` is the one list of "something is on top".**
-     A new overlay joins it or joins nothing. SH-4 (WS-H) turns it into the real
-     topmost-closing stack and should fold Escape's own list into it.
+   - **"Is something on top?" was a hand-kept list of overlay flags, and a new
+     overlay joined it or joined nothing.** WS-H replaced it with the overlay
+     stack's own depth after finding four dialogs had never joined.
    - **A window-level chord that acts on a component reaches it by `bind:this`
      plus an exported function**, not by lifting the component's state — one
      gate, two entry points.
@@ -1325,14 +1348,13 @@ is mostly adoption of already-proven native behavior.
      the cursor and the row rendering were written once. Any future
      branch-argument action (rename) joins the same mechanism.
    - **A confirmation that cannot hear Escape is not a confirmation.** Every
-     Tauri dialog handles Escape on its own overlay element, and none of them
-     took focus on mount, so the key was raised on whatever launched the dialog:
-     **not one confirmation in the client had ever been keyboard-dismissable.**
-     `use:autofocus` on the modal container (ring suppressed) is the fix, applied
-     to all five. A dialog that opens *over* another surface must also
-     `stopPropagation()` on Escape, or the window handler closes the thing
-     underneath instead. **WS-H's SH-4 inherits a set of dialogs that now behave
-     consistently** — fold them into the stack, don't re-fix them.
+     Tauri dialog handled Escape on its own overlay element and none took focus
+     on mount, so the key was raised on whatever launched the dialog: **not one
+     confirmation in the client had ever been keyboard-dismissable.** Five got
+     `use:autofocus`; WS-H then moved the key itself off the elements entirely,
+     which is what a dialog listening for its own dismissal was always going to
+     cost. **A keyboard route nobody has exercised is not a keyboard route** —
+     look for the ones that exist only on paper.
    - **"Busy" must not be able to mean "done".** Native's `BranchStore.run`
      returns `nil` both for success and for "dropped because busy", and its
      callers read that as success — the bug WS-Q still owes. The Tauri guard was
@@ -1358,29 +1380,75 @@ is mostly adoption of already-proven native behavior.
      clients pass the branch being merged in. Left as-is rather than renamed
      mid-workstream — a core rename would touch the shim, the FFI, the Swift call
      site and FRONTEND §3.7 — but it is a live trap for the next reader.
-8. **WS-H — Tauri settings & window chrome (S/M).** ST-3 is the bulk: the move
-   to instant-apply, each control patching its own field through WS-B's
-   `patch_config`, Save/Cancel collapsing to Close. WS-B's `ConfigPatch`
-   defaults make that a small change per control rather than a redesign. With
-   it: ST-1's Tauri live-apply rows, ST-4's Tauri half (stop showing raw ms),
-   ST-10's Tauri half (the scan-path Edit ▸ Done lock — the one field that
-   stays out of instant-apply), and the window chrome that belongs nowhere
-   else: SH-2's Tauri half (⌘1/⌘2), SH-4 (fold two drifted Escape stacks into
-   one topmost-closing stack), SH-6 (`tauri-plugin-window-state` + the repo name
-   in the title), SH-7's Tauri half (preserve the active tab across switches).
+8. **WS-H — Tauri settings & window chrome (S/M).** ✅ *Shipped 2026-08-28.*
+   Settings became instant-apply: each control patches its own field through
+   `patch_config` (discrete controls on the click, text and numeric fields on
+   `change`, which already means blur-or-Return), the whole-object save is gone
+   and the footer is a single Close (ST-3). With it: the seconds-not-milliseconds
+   interval field (ST-4), the scan-path Edit ▸ Done lock, which also re-walks
+   discovery where the edit was made (ST-10), the revert-on-refused-write that
+   ST-7 had left to inherit, and the auto-fetch re-arm without which native's
+   ported "no restart needed" footer would have been a lie (ST-1 / BG-2's first
+   half). Around it: ⌘1/⌘2 (SH-2), the overlay-stack fold (SH-4), window frame
+   restoration and a repo-named title (SH-6), and the visible tab surviving a
+   repo switch (SH-7). Gates: `pnpm check` 0/0 over 147 files, prettier clean,
+   `pnpm tauri build` bundled, zero-warning `just mac-build`, 168 core + 24
+   bridge tests, clippy-pedantic 165 core with `leogit` / `leogit-ffi` at zero.
 
-   Three things WS-G leaves on the doorstep. **SH-4's silent half is already
-   closed**: every confirmation now takes focus on mount, so Escape reaches it at
-   all — fold the dialogs into the topmost-closing stack rather than re-fixing
-   them, and note that a dialog opening *over* an overlay must keep its
-   `stopPropagation()` or the stack will close the wrong thing. **`modalOpen`
-   grew three entries** (`mergeSource`, `deleteTarget`, `showAbortMerge`) and had
-   to move below the branch section to keep its "declared where the last of its
-   inputs is" rule — that ordering constraint is the first thing a stack rewrite
-   will hit. And **`ConfirmDialog.svelte` exists now**: a title, a body snippet,
-   the verb, the busy label and a destructive flag. Settings has no confirmation
-   to build, but anything WS-H adds that asks a yes/no question uses it rather
-   than a sixth hand-rolled modal.
+   Findings for whoever takes WS-I and beyond:
+   - **The native Settings window has D-5's lost update at form scale, and it is
+     WS-R's first item.** `SettingsStore.currentPatch` names the *same twelve
+     fields on every save*, filled from what `load()` read when the window
+     opened — so a `tab_size` the Tauri client writes while that window stands
+     open is reverted by the next unrelated toggle. `patch_config` cannot
+     protect against this; a field-wise writer only helps a caller that names
+     fields field-wise. The Tauri form now sends one field per write, which is
+     both the fix and the reference.
+   - **A Svelte `value={expr}` will not repaint a control whose expression did
+     not change**, even when the DOM has diverged from it. That is exactly the
+     clamp case — 999 typed into a field already at its maximum comes back as
+     the maximum, so nothing in the model moved and the control keeps showing
+     999 — and it is why the form carries a `{#key formSeq}` bumped on a refused
+     write and on a write whose result equalled what was already there. Any
+     surface that promises "the backend's correction is what you see" needs the
+     same escape hatch.
+   - **`modalOpen` had never been told about four dialogs.** The hand-kept list
+     WS-G warned about listed eleven flags and omitted `EmbeddedRepoConfirm`,
+     `ForcePushConfirm`, `PublishRepository` and `InitRepoConfirm` — so ⌘↩ fired
+     a commit straight through the embedded-repo confirmation *asking about that
+     commit*. It is now the overlay stack's depth, which cannot be forgotten
+     because it is not a list. If a future surface needs to be excluded from
+     that count, exclude it explicitly rather than by not registering: not
+     registering also takes away its Escape.
+   - **Escape was being handled twice for the context menu**, closing the menu
+     and the popover under it. Its own window listener answered the key *and*
+     let the host's handler run. Any component that keeps a window-level key
+     listener has to say which keys it is *not* claiming — the arrows stayed,
+     Escape moved to the stack.
+   - **Both hosts' `closeSettings` are gone**, and with them the divergence where
+     the picker phase re-walked discovery on close and the main phase re-walked
+     unconditionally. The walk now hangs off the `scan_paths` / `scan_depth`
+     patch inside the overlay. If WS-L gives Welcome a discovery list, it needs
+     no Settings-close hook — the setting already announces itself.
+   - **`git::get_repo_name` is a registered Tauri command with no caller.** The
+     window title uses the client's own `basename()`, as every other repo label
+     in the client does (CH-12's rule: don't cross the IPC boundary for path
+     arithmetic already in hand). Add it to WS-S's dead-wrapper sweep alongside
+     `rename_branch` and `delete_remote_branch`.
+   - **`capabilities/default.json` needed one new entry** (`core:window:allow-set-title`)
+     — `core:window:default` covers reads only. TECHNICAL's copy of that file
+     was also missing `dialog:allow-open`, which has been there since the clone
+     dialog landed; both are corrected. A pasted config block is the same
+     staleness hazard as WS-G's API table.
+   - **STYLE's *Forms (Settings)* section describes toggle switches and
+     segmented controls that only the native form has.** The Tauri form still
+     draws a checkbox and a `<select>`, deliberately: that is a visual migration
+     under ROADMAP's Primer→Apple item, not parity work, and doing it here would
+     have made a behavioural change unreviewable. The section now says which
+     bullets are the target and which are today.
+   - **`tauri-plugin-window-state` needs no capability and no JS package.** It is
+     registered in `main.rs` and never invoked; the frontend half of the crate
+     exists but nothing here uses it.
 9. **WS-I — Tauri terminal transport (M).** TE-2 and **D-4** together, because
    the race is a property of the transport: a frontend-created `Channel` passed
    into `start_terminal` mirrors the native seam and closes the two-round-trip
@@ -1393,6 +1461,14 @@ is mostly adoption of already-proven native behavior.
    or the chord becomes unreachable from inside the panel), TE-5's Tauri half
    (modifier-click + hover affordance + an OSC 52 write-only handler), TE-6
    (refocus after focus is stolen), TE-7's Tauri halves.
+
+   From WS-H: the window handlers now pass `Escape` to the overlay stack and do
+   nothing else with it, but **`isFromTerminal(e)` still returns before that** —
+   which is correct (§6.11 gives the shell every key but the toggle) and must
+   stay correct when TE-1 narrows the modifier. The shell owning `Escape` and a
+   dialog owning `Escape` never collide in practice, because a dialog takes
+   focus when it mounts; if TE-6's refocus ever runs while one is open, that
+   assumption is what breaks.
 10. **WS-J — Tauri background cadence (M).** The machinery underneath, and
     where the efficiency register concentrates. BG-1 (the visibility ladder +
     paused sweeps + GH Desktop's once-per-session 0–30 s skew), BG-2
@@ -1492,11 +1568,24 @@ is mostly adoption of already-proven native behavior.
     lifetime), SY-10 (selectable, monospaced transfer errors), BR-4's
     nil-return fix (callers read "dropped because busy" as success), BR-8 (give
     the `· merging` suffix WS-B's purple token), SH-5 and SH-7's native halves.
-18. **WS-R — Native settings & terminal (S/M).** ST-5 (route both provider
-    owners through `AppConfigStore` — with both windows open the pickers can
-    disagree today; grow it the `scanPaths` accessor three call sites bypass),
+18. **WS-R — Native settings & terminal (S/M).** **Lead with the field-wise
+    patch, which WS-H found and did not fix:** `SettingsStore.currentPatch`
+    (`SettingsStore.swift:196-215`) names the same twelve fields on every save,
+    filled from the load that ran when the window opened, so a field the Tauri
+    client writes while that window stands open is reverted by the next
+    unrelated toggle — D-5 at form scale, in the client that was supposed to be
+    the reference. Each control should patch what it owns, as the Tauri form now
+    does; the 300 ms debounce can stay, keyed per field. With it: a refused save
+    should re-seed its control from disk rather than leaving the value that
+    didn't land (ST-7), the two AI timeouts want controls (ST-1 — they are
+    honoured natively and settable only from the other client, a FRONTEND §8 row
+    until they land), ST-5 (route both provider owners through `AppConfigStore`
+    — with both windows open the pickers can disagree today; grow it the
+    `scanPaths` accessor three call sites bypass),
     ST-3's native half (don't render editable defaults that aren't the user's
-    settings), ST-9's native export, ST-10's native half (Edit ▸ Done +
+    settings — the form currently renders struct defaults behind
+    `"Could not read the configuration file."`, editable and silently inert),
+    ST-9's native export, ST-10's native half (Edit ▸ Done +
     `.monospaced()`), TE-3 + **D-9** (pin the inner frame so a collapsed panel
     stops reflowing the emulator to one row — WS-B already made the PTY side
     safe, so this is purely the frame — plus the missing 80 ms resize debounce,
@@ -1577,8 +1666,10 @@ Per workstream, matching the previous plan's bar:
   `cargo clippy --workspace --all-targets -- -W clippy::pedantic` at
   **165** or better, never worse (the plan opened at 184; WS-B took it to 170,
   WS-C to 166, WS-F to 165), with `leogit` and `leogit-ffi` at zero. A Tauri
-  workstream also runs `pnpm build` clean, so the bundle is proven rather than
-  only typechecked.
+  workstream also runs `pnpm tauri build` clean, so the bundle is proven rather
+  than only typechecked — and it is the only gate that would catch a missing
+  capability or an unresolvable plugin dependency, neither of which
+  `svelte-check` or `cargo check` can see.
 - Visual checks per workstream (ask for confirmation, no screenshots), on
   **both** clients whenever a change touches shared core or a ported
   behavior — the checklist comes from the workstream's inventory items.
@@ -1614,7 +1705,13 @@ written as each chunk lands, no duplication between documents:
   *Branch picker* around the action footer and the borrow-the-list picking mode,
   dropped its ahead/behind indicator (no data backs it — `BranchInfo` carries no
   counts, and computing them would be one subprocess per row), and added the
-  focus-on-mount and shared-`ConfirmDialog` rules under *Modals / dialogs*.
+  focus-on-mount and shared-`ConfirmDialog` rules under *Modals / dialogs*;
+  WS-H rewrote *Forms (Settings)* around instant-apply (no Save button, the
+  error line above the sections, the section footer, the Edit ▸ Done lock for a
+  destructive text field, units the user thinks in) and marked which of its two
+  control-shape bullets are the target rather than today, and replaced the
+  focus-on-mount rationale — `Escape` no longer needs focus, so autofocus is
+  there for `Tab`.
 - **ROADMAP.md** — items close as their workstreams land; the deferrals this
   plan makes (per-line staging, diff virtualization, branch rename +
   delete-on-remote) are already filed there. WS-B added one: GitHub identifiers

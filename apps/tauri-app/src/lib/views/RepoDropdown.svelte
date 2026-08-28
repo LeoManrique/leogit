@@ -10,6 +10,7 @@
   import { scanFolders } from '$lib/stores/config'
   import { reposApi } from '$lib/api/commands'
   import { autofocus } from '$lib/actions/autofocus'
+  import { dismissOnEscape } from '$lib/actions/overlayStack'
   import { nextActiveIndex, scrollIntoViewWhenActive } from '$lib/actions/listNavigation'
   import { basename } from '$lib/utils/path'
 
@@ -21,9 +22,19 @@
     /** Opens Settings, for the empty state's call to action — the scan paths
      *  are what discovery walks, so "found nothing" leads here. */
     onOpenSettings: () => void
+    /** Dismiss without choosing. The popover registers this on the overlay
+     *  stack, so Escape reaches it wherever focus happens to be. */
+    onClose: () => void
   }
 
-  let { repos = [], currentRepo = '', onSelect, onClone, onOpenSettings }: Props = $props()
+  let {
+    repos = [],
+    currentRepo = '',
+    onSelect,
+    onClone,
+    onOpenSettings,
+    onClose,
+  }: Props = $props()
 
   let filter = $state('')
   // Sort mode lives in the persisted store so toggling sticks across opens and
@@ -194,7 +205,7 @@
   }
 </script>
 
-<div class="repo-dropdown">
+<div class="repo-dropdown" use:dismissOnEscape={onClose}>
   <div class="filter-row">
     <input
       type="text"

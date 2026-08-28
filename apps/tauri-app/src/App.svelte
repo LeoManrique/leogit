@@ -2,13 +2,15 @@
   import { onMount } from 'svelte'
   import { get } from 'svelte/store'
   import { listen } from '@tauri-apps/api/event'
+  import { getCurrentWindow } from '@tauri-apps/api/window'
   import { appState } from '$lib/stores/app'
+  import { basename } from '$lib/utils/path'
   import { loadFileStatusStyles, refreshConfig, scanFolders } from '$lib/stores/config'
   import { ghApi, gitApi, configApi, appApi, reposApi, type LaunchTarget } from '$lib/api/commands'
   import { patchReposState, recordRecentRepo } from '$lib/stores/reposState'
-  import { rediscoverRepos } from '$lib/services/repoDiscovery'
   import { resolveCloneDefaultDir, rememberCloneDir } from '$lib/services/cloneFlow'
   import { updateChecker } from '$lib/services/updateChecker'
+  import { dismissTopOverlay } from '$lib/actions/overlayStack'
   import MainLayout from '$lib/views/MainLayout.svelte'
   import RepoPicker from '$lib/views/RepoPicker.svelte'
   import CloneOverlay from '$lib/views/CloneOverlay.svelte'
@@ -32,7 +34,6 @@
   // user who couldn't reach it.
   let showClone = $state(false)
   let cloneDefaultDir = $state('~/Dev')
-  let cloneOverlay = $state<{ isBusy: () => boolean } | null>(null)
 
   // `leogit <dir>` pointed at a folder that isn't a repository yet. The prompt
   // lives here rather than in MainLayout because it isn't scoped to the open
@@ -200,20 +201,18 @@
   }
 
   /**
-   * Re-walk after Settings closes so a scan-path change takes effect without a
-   * restart — otherwise the user fixes the setting and still faces "No
-   * repositories found", which is the same dead end one step later. Settings
-   * saved before closing and `refreshConfig` re-resolved the scan folders with
-   * it, so only the walk itself is left to redo.
-   *
-   * Deliberately stays on the picker even if exactly one repo now matches:
-   * auto-entering a repo the user never chose would be a surprising way for a
-   * settings dialog to end. Cold start still auto-enters; this isn't that.
+   * The window is named after the repository it is showing, which is what the
+   * native client's title bar has always said and what the window list, the
+   * Dock and ⌘` between two leogit windows have to read to tell them apart.
+   * The name is the folder's, matching core's `get_repo_name`; back on the
+   * picker there is nothing to name, so it falls back to the product.
    */
-  function closeSettings() {
-    showSettings = false
-    if (get(appState).phase === 'repo-picker') void rediscoverRepos()
-  }
+  $effect(() => {
+    const path = $appState.phase === 'main' ? $appState.repoPath : ''
+    void getCurrentWindow()
+      .setTitle(path ? basename(path) : 'leogit')
+      .catch((e) => console.warn('[window] title update failed', e))
+  })
 
   // Mirrors MainLayout's shortcuts so the two phases behave the same. Only
   // bound outside `main`, where MainLayout owns these keys — binding in both
@@ -223,20 +222,11 @@
     const target = e.target as HTMLElement | null
     const inField = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement
 
+    // The overlay stack, not a second list of flags: each surface registers its
+    // own dismissal, so the pre-main phases and the main view answer Escape
+    // through the same mechanism instead of two hand-kept copies that drifted.
     if (e.key === 'Escape') {
-      // Escape never dismisses a clone in flight — hiding the dialog wouldn't
-      // cancel the clone, just orphan its progress bar and eventual error.
-      // Same rule MainLayout applies; the dialog is the same component.
-      if (showClone && !(cloneOverlay?.isBusy() ?? false)) {
-        e.preventDefault()
-        showClone = false
-      } else if (showSettings) {
-        e.preventDefault()
-        closeSettings()
-      } else if (showHelp) {
-        e.preventDefault()
-        showHelp = false
-      }
+      if (dismissTopOverlay()) e.preventDefault()
     } else if (e.key === ',' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault()
       showSettings = true
@@ -287,13 +277,12 @@
   </div>
 
   <CloneOverlay
-    bind:this={cloneOverlay}
     isOpen={showClone}
     defaultDir={cloneDefaultDir}
     onClose={() => (showClone = false)}
     onCloned={handleCloned}
   />
-  <SettingsOverlay isOpen={showSettings} onClose={closeSettings} />
+  <SettingsOverlay isOpen={showSettings} onClose={() => (showSettings = false)} />
   <HelpOverlay isOpen={showHelp} onClose={() => (showHelp = false)} />
 {/if}
 

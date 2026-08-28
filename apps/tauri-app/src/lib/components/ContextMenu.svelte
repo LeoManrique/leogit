@@ -10,6 +10,7 @@
 
 <script lang="ts">
   import { onMount, tick } from 'svelte'
+  import { dismissOnEscape } from '$lib/actions/overlayStack'
 
   interface Props {
     x: number
@@ -78,12 +79,10 @@
       if (!menuEl) return
       if (!menuEl.contains(e.target as Node)) onClose()
     }
+    // Escape is the overlay stack's, not this listener's. Handling it here as
+    // well as there closed the menu *and* the popover it was opened over, which
+    // is the whole class of bug the stack exists to end.
     function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        onClose()
-        return
-      }
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault()
         if (focusable.length === 0) return
@@ -129,6 +128,7 @@
   style="left: {posX}px; top: {posY}px;"
   role="menu"
   tabindex="-1"
+  use:dismissOnEscape={onClose}
 >
   {#each items as item, i (i)}
     {#if item.separator}

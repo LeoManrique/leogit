@@ -1,19 +1,12 @@
 <script lang="ts">
-  import { repoState } from '$lib/stores/repo'
-
-  function switchTab(tab: 'changes' | 'history') {
-    repoState.update((state) => ({
-      ...state,
-      activeTab: tab,
-    }))
-  }
+  import { repoState, setActiveTab } from '$lib/stores/repo'
 </script>
 
 <div class="tab-bar">
   <button
     class="tab"
     class:active={$repoState.activeTab === 'changes'}
-    onclick={() => switchTab('changes')}
+    onclick={() => setActiveTab('changes')}
   >
     Changes
     {#if $repoState.status.files.length > 0}
@@ -23,7 +16,7 @@
   <button
     class="tab"
     class:active={$repoState.activeTab === 'history'}
-    onclick={() => switchTab('history')}
+    onclick={() => setActiveTab('history')}
   >
     History
   </button>

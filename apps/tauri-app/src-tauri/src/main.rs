@@ -26,6 +26,11 @@ fn main() {
         .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
             launch_glue::handle_second_instance(app, &argv, &cwd);
         }))
+        // Restores the window's size and position from the previous run and
+        // saves them on exit. The native client gets this from AppKit's frame
+        // autosave; without it every Tauri launch reopened at the 1280×800 the
+        // config declares, on whichever display the OS picked.
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             config::load_config,
