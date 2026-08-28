@@ -20,7 +20,8 @@
     { key: 'Ctrl/Cmd + L', description: 'Toggle Changes / History tab' },
     { key: 'Ctrl/Cmd + B', description: 'Open branch menu' },
     { key: 'Ctrl/Cmd + ,', description: 'Open settings' },
-    { key: 'Ctrl/Cmd + `', description: 'Toggle terminal' },
+    // Ctrl alone, unlike every other chord here: ⌘` is macOS's window cycling.
+    { key: 'Ctrl + `', description: 'Toggle terminal' },
     { key: '?', description: 'Open this help' },
     // Only the topmost: a confirmation raised from a popover closes itself and
     // leaves the popover it came from standing.

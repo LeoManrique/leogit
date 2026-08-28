@@ -5,18 +5,28 @@ description = "Visual Git client built with Tauri and Svelte"
 authors = ["Leonardo Manrique"]
 edition = "2024"
 
-# The host is a thin presentation shell: it owns the window, the three Tauri
+# The host is a thin presentation shell: it owns the window, the four Tauri
 # plugins, and one `#[tauri::command]` shim per function. All logic lives in
 # `leogit-core`, which carries the git/diff/highlight/terminal/reqwest/… deps.
+# `serde` is here only to derive the terminal channel's wire enum — a shape that
+# belongs to this host's IPC and would drag Tauri's transport into core.
 [dependencies]
 tauri = { version = "2.11.2", features = [] }
 tauri-plugin-dialog = "2.7.1"
 tauri-plugin-single-instance = "2.4.2"
 tauri-plugin-window-state = "2.4.1"
+tauri-plugin-clipboard-manager = "2.3.2"
 leogit-core = { path = "../../../core" }
+serde = { version = "1.0.228", features = ["derive"] }
 
 [build-dependencies]
 tauri-build = { version = "2.6.2", features = [] }
+
+# The terminal channel's wire shape is read by hand-written TypeScript, with no
+# generator between the two and nothing in `svelte-check` able to see the Rust
+# side. Pinning it needs a serializer.
+[dev-dependencies]
+serde_json = "1.0.149"
 
 [lib]
 name = "leogit_lib"

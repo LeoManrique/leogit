@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import { Channel, invoke } from '@tauri-apps/api/core'
 
 export interface FileEntry {
   path: string
@@ -587,14 +587,37 @@ export interface StartedTerminal {
   shell_label: string
 }
 
+/** How a session's child ended, as core reaped it. */
+export interface TerminalExit {
+  /** A child killed by a signal reports a fabricated `1`; read `signal`. */
+  exit_code: number
+  /** Name of the fatal signal, or null on a normal exit. */
+  signal: string | null
+}
+
+/**
+ * Everything one session sends up its channel. Nothing carries a pid because
+ * the channel *is* the session — which is the point, since output starts
+ * arriving before `start` has returned one.
+ */
+export type TerminalEvent =
+  { event: 'output'; data: string } | { event: 'closed'; exit: TerminalExit }
+
 export const terminalApi = {
   /** Shells launchable on this machine, best-first. Never empty. */
   listShells: () => invoke<ShellOption[]>('list_shells'),
   /** Describe the PTY backend; call before constructing the xterm instance. */
   ptyInfo: () => invoke<PtyInfo>('terminal_pty_info'),
-  /** Start a shell with cwd=repoPath. `shellId` absent = best available. */
-  start: (repoPath: string, shellId?: string) =>
-    invoke<StartedTerminal>('start_terminal', { repoPath, shellId: shellId ?? null }),
+  /**
+   * Start a shell with cwd=repoPath. `shellId` absent = best available.
+   *
+   * `onEvent` is required rather than optional: a session whose stream nobody
+   * is holding is a PTY writing into the void. Build the `Channel` with its
+   * handler already attached — a handler assigned after this promise resolves
+   * has missed everything the shell printed while it was starting.
+   */
+  start: (repoPath: string, shellId: string | undefined, onEvent: Channel<TerminalEvent>) =>
+    invoke<StartedTerminal>('start_terminal', { repoPath, shellId: shellId ?? null, onEvent }),
   write: (pid: number, data: string) => invoke<void>('write_terminal', { pid, data }),
   resize: (pid: number, cols: number, rows: number) =>
     invoke<void>('resize_terminal', { pid, cols, rows }),

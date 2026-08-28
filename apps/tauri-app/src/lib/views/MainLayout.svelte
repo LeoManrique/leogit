@@ -1609,8 +1609,13 @@
     // exception — xterm hands it back to us via `attachCustomKeyEventHandler`,
     // and it has to be handled *before* the `inField` bail below, because
     // xterm's input sink is a <textarea>. See `utils/keyboard.ts`.
+    //
+    // The toggle is `Ctrl` on every platform, VS Code's binding and the native
+    // client's: ⌘` belongs to macOS's window cycling. This test and the one
+    // xterm's own handler makes have to keep agreeing, or the chord stops
+    // working from inside the panel — the one place it is most wanted.
     if (isFromTerminal(e)) {
-      if (meta && e.key === '`') {
+      if (e.ctrlKey && e.key === '`') {
         e.preventDefault()
         toggleTerminalMinimize()
       }
@@ -1623,6 +1628,20 @@
     // takes the popover that raised it with it.
     if (e.key === 'Escape' && dismissTopOverlay()) {
       e.preventDefault()
+      return
+    }
+
+    // The panel toggle, also above the `inField` bail. `Ctrl` + `` ` `` is not
+    // something anyone types into a commit message, so a field holding focus is
+    // no reason to refuse it — and the terminal is exactly where you go *from*
+    // the composer, to run the thing you are about to describe. The native
+    // client binds it as a key equivalent, which fires ahead of the first
+    // responder and so was never gated on focus at all; VS Code draws the same
+    // line. This is the second of the two tests that own the chord (the first
+    // is a few lines up, for events raised inside the panel).
+    if (e.ctrlKey && e.key === '`') {
+      e.preventDefault()
+      toggleTerminalMinimize()
       return
     }
 
@@ -1652,10 +1671,7 @@
 
     if (inField) return
 
-    if (meta && e.key === '`') {
-      e.preventDefault()
-      toggleTerminalMinimize()
-    } else if (meta && e.key === 'b') {
+    if (meta && e.key === 'b') {
       e.preventDefault()
       if (showBranches) showBranches = false
       else openBranches()
@@ -2103,9 +2119,10 @@
               <polyline points="4,6 7,8 4,10" />
               <line x1="8.5" y1="11" x2="12" y2="11" />
             </svg>
-            {#if terminalSessionId > 0 && activeShellLabel}
-              <span class="shell-name">{activeShellLabel}</span>
-            {/if}
+            <!-- The strip is always here, so it always says what it is. Before
+                 a session exists there is no shell to name, and an unlabelled
+                 glyph left the panel's whole purpose to be guessed at. -->
+            <span class="shell-name">{activeShellLabel || 'Terminal'}</span>
           </button>
           <div class="terminal-controls">
             <button
@@ -2613,13 +2630,11 @@
     display: flex;
     flex-direction: column;
     flex-shrink: 0;
-    height: 280px;
     border-top: 1px solid var(--border-inactive);
     background: #000000;
   }
 
   .terminal-section.collapsed {
-    height: auto;
     background: var(--bg-secondary);
   }
 
@@ -2707,9 +2722,12 @@
     color: #ffffff;
   }
 
+  /* 280px is the *emulator*, not the dock — the same meaning the native client
+     gives the number, so both clients hand the shell the same number of rows.
+     Measuring the dock instead spent the header's 26px out of the grid and left
+     Tauri two rows short of native for the same setting. */
   .terminal-container {
-    flex: 1;
-    min-height: 0;
+    height: 280px;
     overflow: hidden;
     background: #000000;
   }

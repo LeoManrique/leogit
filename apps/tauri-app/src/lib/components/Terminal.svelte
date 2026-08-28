@@ -3,8 +3,10 @@
   import { Terminal } from '@xterm/xterm'
   import { FitAddon } from '@xterm/addon-fit'
   import { WebLinksAddon } from '@xterm/addon-web-links'
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-  import { terminalApi } from '$lib/api/commands'
+  import { Channel } from '@tauri-apps/api/core'
+  import { writeText } from '@tauri-apps/plugin-clipboard-manager'
+  import { osApi, terminalApi, type TerminalEvent } from '$lib/api/commands'
+  import { isMac } from '$lib/utils/platform'
   import '@xterm/xterm/css/xterm.css'
 
   let {
@@ -27,7 +29,6 @@
   let term: Terminal | null = null
   let fitAddon: FitAddon | null = null
   let pid: number | null = null
-  let unlisteners: UnlistenFn[] = []
   let resizeObserver: ResizeObserver | null = null
   let resizeTimer: ReturnType<typeof setTimeout> | null = null
   // Flips true once xterm is open so the focus effect never runs before `term`
@@ -36,8 +37,16 @@
   // Set once teardown starts so async setup steps bail instead of resurrecting
   // a PTY for a component that is already gone.
   let disposed = false
+  // The shell reported its exit. Since output and the close event now share one
+  // channel, "closed" can land *before* `start_terminal` has returned the pid —
+  // a shell that dies on a broken `.zshrc` does exactly that — and adopting a
+  // pid after the backend has already dropped the session would leave the panel
+  // holding a handle to nothing.
+  let sessionClosed = false
   // A command handed in before the shell was ready (see `runCommand`).
   let queuedCommand: string | null = null
+  // The "Follow link" affordance, created on first hover and reused after.
+  let linkHint: HTMLDivElement | null = null
 
   // A panel drag fires ResizeObserver every frame. Each fit() that changes the
   // grid pushes a ResizePseudoConsole down to the shell, and PSReadLine repaints
@@ -46,17 +55,25 @@
   // final size instead; Windows Terminal debounces for the same reason.
   const RESIZE_DEBOUNCE_MS = 80
 
+  // Which modifier turns a hover into a click-through. ⌘ on macOS because ⌃
+  // there is a right-click, `Ctrl` everywhere else — Terminal.app, iTerm and
+  // VS Code all draw the line in the same place, and SwiftTerm already does.
+  const LINK_MODIFIER = isMac() ? '⌘' : 'Ctrl'
+
   onMount(() => {
     void init()
+    window.addEventListener('focus', restoreCaret)
+    document.addEventListener('visibilitychange', restoreCaret)
 
     return () => {
       disposed = true
+      window.removeEventListener('focus', restoreCaret)
+      document.removeEventListener('visibilitychange', restoreCaret)
       if (resizeTimer !== null) clearTimeout(resizeTimer)
       resizeTimer = null
       resizeObserver?.disconnect()
       resizeObserver = null
-      unlisteners.forEach((fn) => fn())
-      unlisteners = []
+      hideLinkHint()
       if (pid !== null) {
         const closingPid = pid
         pid = null
@@ -102,7 +119,18 @@
 
     fitAddon = new FitAddon()
     term.loadAddon(fitAddon)
-    term.loadAddon(new WebLinksAddon())
+    // A URL needs the modifier before it opens, and says so on hover. Plain
+    // click belongs to the *selection* — dragging across a line that happens to
+    // contain a URL used to navigate away from it — which is why every terminal
+    // emulator asks for a modifier, and why the affordance is what answers the
+    // discoverability cost rather than dropping the modifier.
+    term.loadAddon(
+      new WebLinksAddon(openLink, {
+        hover: showLinkHint,
+        leave: hideLinkHint,
+      })
+    )
+    term.parser.registerOscHandler(52, handleClipboardRequest)
 
     // Everything the shell could want goes to the shell — Ctrl+P is
     // readline's previous-history, Escape is vim's normal mode. The panel's
@@ -110,7 +138,15 @@
     // unhandled here so it reaches the window listener that owns it. The app's
     // global handlers make the same cut from their side (`utils/keyboard.ts`),
     // so each of these keys has exactly one owner at any moment.
-    term.attachCustomKeyEventHandler((e) => !((e.ctrlKey || e.metaKey) && e.key === '`'))
+    //
+    // `Ctrl` only, matching the native client and VS Code: ⌘` is macOS's own
+    // window-cycling chord, so answering to it took a system gesture away from
+    // every user of a macOS build. The phase is checked because xterm runs this
+    // handler for keyup and keypress too, and releasing an event xterm had
+    // already begun processing is not the same as declining it.
+    term.attachCustomKeyEventHandler(
+      (e) => !(e.type === 'keydown' && e.ctrlKey && e.key === '`')
+    )
 
     term.open(container)
 
@@ -151,6 +187,117 @@
   })
 
   /**
+   * Put the caret back in the shell when the app becomes active again.
+   *
+   * The web platform does not restore it: coming back to the window leaves
+   * xterm painted as focused — its border lit, its cursor block drawn — while
+   * the hidden textarea behind it holds nothing, so keystrokes disappear until
+   * the user clicks. AppKit hands the native client its first responder back;
+   * this is the same behaviour by hand.
+   *
+   * The condition is read *now* rather than latched on the way out. A flag set
+   * from `focusin` is only ever cleared by another `focusin`, and clicking a
+   * plain div raises none — so the flag would strand `true` and the terminal
+   * would take the caret back from whatever the user had actually moved to.
+   */
+  function restoreCaret(): void {
+    if (!mounted || !expanded || document.hidden) return
+    if (container?.contains(document.activeElement)) term?.focus()
+  }
+
+  /** Whether this click carries the modifier that means "follow the link". */
+  function linkModifierHeld(e: MouseEvent): boolean {
+    return isMac() ? e.metaKey : e.ctrlKey
+  }
+
+  /** Hand a clicked URL to the OS browser, as the update chip's link does. */
+  function openLink(e: MouseEvent, uri: string): void {
+    if (!linkModifierHeld(e)) return
+    osApi.openUrl(uri).catch((error) => {
+      console.error('[terminal] could not open link:', error)
+    })
+  }
+
+  /**
+   * Name the gesture over the link the pointer is on.
+   *
+   * `xterm-hover` is xterm's marker class for an overlay of our own: its own
+   * mouse tracking stops at any element carrying it, so the tooltip can sit
+   * over the row it describes without the link flickering out from under it.
+   * The class carries no styling of its own — that is entirely ours.
+   */
+  function showLinkHint(e: MouseEvent, _uri: string): void {
+    const host = term?.element
+    if (!host) return
+    if (!linkHint) {
+      linkHint = document.createElement('div')
+      linkHint.className = 'xterm-hover terminal-link-hint'
+      linkHint.textContent = `Follow link (${LINK_MODIFIER} + click)`
+      host.appendChild(linkHint)
+    }
+    const box = host.getBoundingClientRect()
+    // Centred on the pointer, then pulled back inside the panel so a link near
+    // either edge still reads its own hint.
+    const half = linkHint.offsetWidth / 2
+    const limit = Math.max(box.width - half, half)
+    const top = e.clientY - box.top
+    linkHint.style.left = `${Math.min(Math.max(e.clientX - box.left, half), limit)}px`
+    linkHint.style.top = `${top}px`
+    // Above the pointer, except on the first row or two, where the panel's own
+    // overflow would clip it.
+    linkHint.classList.toggle('below', top < 28)
+  }
+
+  function hideLinkHint(): void {
+    linkHint?.remove()
+    linkHint = null
+  }
+
+  /**
+   * OSC 52 — the escape sequence a shell, `tmux` or `vim` uses to put its
+   * selection on the system clipboard, including from the far side of an SSH
+   * session where nothing else can reach it. SwiftTerm honours it already; this
+   * is the Tauri half.
+   *
+   * **Write-only, deliberately.** The sequence also defines a *read*, which
+   * types the clipboard back down the TTY — so anything that can print to the
+   * terminal could exfiltrate whatever the user last copied. Every emulator
+   * worth trusting refuses to answer it, and so does this: the request is
+   * swallowed (returning `true`) rather than declined, so no other handler
+   * answers it either.
+   *
+   * The write goes through the OS rather than `navigator.clipboard`, which
+   * WebKit refuses without a recent click — and a shell asking for the
+   * clipboard is not a click.
+   */
+  function handleClipboardRequest(payload: string): boolean {
+    // xterm has already stripped `52;`, so what arrives is `Pc;Pd`. Only the
+    // first separator is ours — the rest, if any, is the payload's problem.
+    const split = payload.indexOf(';')
+    if (split === -1) return true
+    const targets = payload.slice(0, split)
+    const encoded = payload.slice(split + 1).replace(/\s/g, '')
+    if (encoded === '?') return true
+    // `Pc` is a set of selections, empty meaning the spec's default. The system
+    // clipboard is the only one with anywhere to go here: X11's PRIMARY and the
+    // numbered cut buffers have no cross-platform analogue.
+    if (targets !== '' && !targets.includes('c') && !targets.includes('s')) return true
+    let text: string
+    try {
+      const bytes = Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0))
+      text = new TextDecoder().decode(bytes)
+    } catch {
+      // Per the spec anything that isn't base64 clears the selection. There is
+      // nothing to clear, so it is a no-op rather than a failure to report.
+      return true
+    }
+    writeText(text).catch((e) => {
+      console.warn('[terminal] clipboard write refused', e)
+    })
+    return true
+  }
+
+  /**
    * Type a command into this shell and run it, on behalf of somewhere else in
    * the app that knows the command but not the terminal (today: the composer's
    * "fix the AI provider" button).
@@ -167,44 +314,57 @@
     terminalApi.write(pid, `${command}\r`).catch(console.error)
   }
 
+  /**
+   * Handle one message from this session's stream.
+   *
+   * Registered on the channel *before* `start_terminal` is invoked, which is the
+   * whole reason the session has a channel: the reader thread starts emitting
+   * the moment the shell is spawned, and a subscription taken out afterwards
+   * would miss everything printed in between — a fast shell's first prompt, or
+   * the entire life of one that dies on a broken `.zshrc`.
+   */
+  function onSessionEvent(message: TerminalEvent): void {
+    if (message.event === 'output') {
+      term?.write(message.data)
+      return
+    }
+    // The shell exited on its own (`exit`, Ctrl+D, or a crash). Null the pid
+    // first so unmount cleanup skips close_terminal — the backend already
+    // dropped the session before sending this. A clean exit lets the parent tear
+    // the panel down; anything else keeps the dead terminal on screen with the
+    // reason, VS Code-style, so a shell that dies instantly no longer flashes
+    // its error away. The panel's own ✕ still closes it — unmount cleanup is a
+    // no-op once the pid is null.
+    sessionClosed = true
+    pid = null
+    const { exit_code, signal } = message.exit
+    if (exit_code === 0 && !signal) {
+      onExit?.()
+      return
+    }
+    const reason = signal ? `terminated by signal: ${signal}` : `exited with code ${exit_code}`
+    term?.writeln(`\r\n\x1b[31m[Process ${reason}]\x1b[0m`)
+  }
+
   async function initBackend() {
     if (!term) return
     try {
-      const started = await terminalApi.start(repoPath, shellId)
+      const started = await terminalApi.start(
+        repoPath,
+        shellId,
+        new Channel<TerminalEvent>(onSessionEvent)
+      )
       if (disposed) {
         // Unmounted while the shell was starting; don't leak the PTY.
         terminalApi.close(started.pid).catch(() => {})
         return
       }
-      pid = started.pid
       onShellResolved?.(started.shell_label)
-
-      const u1 = await listen<string>(`terminal-output-${pid}`, (e) => {
-        term?.write(e.payload)
-      })
-      // The shell exited on its own (`exit`, Ctrl+D, or a crash). Null the pid
-      // first so unmount cleanup skips close_terminal — the backend already
-      // dropped the session before emitting. A clean exit lets the parent tear
-      // the panel down as before; anything else keeps the dead terminal on
-      // screen with the reason, VS Code-style, so a shell that dies instantly
-      // (a broken .zshrc) no longer flashes its error away. The panel's own ✕
-      // still closes it — unmount cleanup is a no-op once the pid is null.
-      const u2 = await listen<{ exit_code: number; signal: string | null }>(
-        `terminal-closed-${pid}`,
-        (e) => {
-          pid = null
-          const { exit_code, signal } = e.payload
-          if (exit_code === 0 && !signal) {
-            onExit?.()
-          } else {
-            const reason = signal
-              ? `terminated by signal: ${signal}`
-              : `exited with code ${exit_code}`
-            term?.writeln(`\r\n\x1b[31m[Process ${reason}]\x1b[0m`)
-          }
-        }
-      )
-      unlisteners.push(u1, u2)
+      // The session may already be over — its close event can overtake this
+      // return. Taking the pid now would hand the panel a handle the backend
+      // has dropped, and its ✕ would then try to kill a session that is gone.
+      if (sessionClosed) return
+      pid = started.pid
 
       term.onData((data) => {
         if (pid !== null) {
@@ -220,14 +380,8 @@
 
       // Push the initial size down to the PTY in case xterm settled
       // before the backend session was ready.
-      if (pid !== null) {
-        terminalApi.resize(pid, term.cols, term.rows).catch(console.error)
-      }
+      terminalApi.resize(pid, term.cols, term.rows).catch(console.error)
 
-      // Deliberately after the output listener is registered: a command sent
-      // before it exists would run with its echo and its first lines dropped
-      // (the same window D-4 is about), so the user would see a bare prompt and
-      // assume nothing happened.
       if (queuedCommand !== null) {
         const command = queuedCommand
         queuedCommand = null
@@ -258,5 +412,27 @@
 
   :global(.xterm-viewport) {
     background-color: #000000 !important;
+  }
+
+  /* Built by hand into xterm's own element, so it can't be scoped by Svelte. */
+  :global(.terminal-link-hint) {
+    position: absolute;
+    z-index: 10;
+    transform: translate(-50%, calc(-100% - 8px));
+    padding: 3px 7px;
+    border-radius: 5px;
+    border: 1px solid var(--border-inactive);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-family: var(--font-ui);
+    font-size: 11px;
+    line-height: 1.4;
+    white-space: nowrap;
+    pointer-events: none;
+    box-shadow: 0 2px 8px rgb(0 0 0 / 35%);
+  }
+
+  :global(.terminal-link-hint.below) {
+    transform: translate(-50%, 18px);
   }
 </style>

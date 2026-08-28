@@ -10,12 +10,13 @@ Functional behavior lives in [DESIGN.md](DESIGN.md). Visual design language live
 | Native dialogs | `tauri-plugin-dialog` 2.7 + `@tauri-apps/plugin-dialog` | Folder picker for the Clone dialog's destination (`dialog:allow-open` capability) |
 | Single instance | `tauri-plugin-single-instance` 2.4 | Forwards a second `leogit <dir>` launch to the running window instead of duplicating it (see *Command-line repo opening*) |
 | Window frame | `tauri-plugin-window-state` 2.4 | Saves size and position on exit, restores them at launch; `tauri.conf.json`'s 1280×800 is the first-run default only. No frontend surface — the plugin is registered and never invoked |
+| Clipboard | `tauri-plugin-clipboard-manager` 2.3 + `@tauri-apps/plugin-clipboard-manager` | The terminal's OSC 52 writes only (`clipboard-manager:allow-write-text`). The app's own Copy actions stay on `navigator.clipboard`, which is fine for them: they are all raised by a click, and WebKit gates a programmatic write on exactly that — a shell asking for the clipboard has no click behind it |
 | Backend language | Rust 2024 | Async via tokio (`features = ["full"]`); logic in the framework-free `leogit-core` crate |
 | Frontend framework | Svelte 5 (runes) | `$state`, `$derived`, `$effect`, `$props` |
 | Frontend bundler | Vite 8 (rolldown) | `terser` for minified release builds; `@xterm/*` split into its own chunk (rolldown `codeSplitting` group) to keep every chunk under the 500 kB warning |
 | Type system | TypeScript 7 strict (native `tsc`) | `typescript` is npm-aliased to `@typescript/typescript6` — svelte-check/editors need the JS API until TS 7.1 ships the programmatic API. `$lib/*` alias points at `src/lib/*` |
 | Diff syntax | syntect 5.3 + two-face 0.5 (Rust) | Class-based output; theme colours live in `--syn-*` CSS variables |
-| Terminal UI (Tauri) | xterm.js 6 + FitAddon + WebLinksAddon | Black background, 12 px monospace |
+| Terminal UI (Tauri) | xterm.js 6 + FitAddon + WebLinksAddon | Black background, 12 px monospace; OSC 52 is hand-registered on `parser` (xterm ships no clipboard support) |
 | Terminal UI (native) | SwiftTerm 1.18 (SPM) | Same black 12 px monospace; fed by the core PTY over a UniFFI callback |
 | PTY | `portable-pty` 0.9 | Spawns user `$SHELL`, falls back to `/bin/zsh` / `cmd.exe` |
 | HTTP | `reqwest` 0.13 | Used only for Ollama |
@@ -65,7 +66,7 @@ leogit/
 │   │   │   └── lib/
 │   │   │       ├── api/commands.ts  # Typed wrappers over every Tauri command
 │   │   │       ├── actions/         # Svelte use: actions (autofocus, listNavigation, overlayStack)
-│   │   │       ├── utils/path.ts    # basename for OS paths (either separator)
+│   │   │       ├── utils/           # path (basename), keyboard (event origin), platform
 │   │   │       ├── stores/          # appState, repoState, config (Svelte writables)
 │   │   │       ├── components/      # Header, TabBar, FileList, CommitList, DiffViewer, …
 │   │   │       └── views/           # MainLayout, RepoPicker, CloneOverlay, BranchDropdown, …
@@ -73,7 +74,7 @@ leogit/
 │   │   │   ├── src/
 │   │   │   │   ├── main.rs          # PATH fix + plugins + invoke_handler registry
 │   │   │   │   ├── lib.rs           # Declares shims / event_sink / launch_glue
-│   │   │   │   ├── event_sink.rs    # TauriEventSink: CoreEvent → window emit
+│   │   │   │   ├── event_sink.rs    # ProgressSink (→ window emit) + TerminalChannelSink
 │   │   │   │   ├── launch_glue.rs   # Window-focusing half of `leogit <dir>`
 │   │   │   │   └── shims/           # One #[tauri::command] per core fn (config.rs, git.rs, …)
 │   │   │   ├── capabilities/default.json
@@ -114,9 +115,11 @@ data types the UI serializes. The Tauri host (`apps/tauri-app/src-tauri`) adds o
   `main.rs`, wrap it in `api/commands.ts`.
 - **`event_sink.rs`** — the streaming seam. Core can't reach for an `AppHandle`, so the four
   event-emitting operations (`git::{pull,push,clone_repo}`, `terminal::start_terminal`) take an
-  `Arc<dyn leogit_core::events::EventSink>` and hand it `CoreEvent`s. `TauriEventSink` maps each
-  one onto the exact window event the frontend already listens for — `git-progress`,
-  `terminal-output-{pid}`, `terminal-closed-{pid}` — so the extraction is invisible to Svelte.
+  `Arc<dyn leogit_core::events::EventSink>` and hand it `CoreEvent`s. There are **two** sinks
+  here, and each ignores the variants its operation cannot emit — the same split the UniFFI
+  bridge makes, for the same reason: `ProgressSink` broadcasts `git-progress` on the app-wide
+  event bus, while `TerminalChannelSink` writes one session's output and close into the
+  `tauri::ipc::Channel` the frontend handed to `start_terminal` (see *Terminal transport*).
 - **`launch_glue.rs`** — the window-focusing half of `leogit <dir>`; the pure argv→target
   resolution stays in `core/src/launch.rs`.
 
@@ -612,10 +615,10 @@ re-expanding does not restore the exact prompt. The Tauri client's collapse is
 `display: none` on the terminal container, which genuinely changes nothing: a hidden element
 reports no box, the debounced `fit()` is a no-op, and re-expanding paints what was there.
 Terminal focus (SwiftTerm's view as first responder) suppresses auto-fetch exactly like the
-field-editor check. The dock toggles on **⌃`** — VS Code's binding, and deliberately not the
-⌘` the Tauri handler also accepts through its cross-platform `ctrlKey || metaKey`, because on
-macOS that combination belongs to the system's window cycling. Focus is a *request*, not a
-call:
+field-editor check. Both docks toggle on **⌃`** — VS Code's binding, and deliberately not ⌘`,
+which macOS owns for cycling an app's windows — and both give the *emulator* 280 pt with the
+header strip on top of that, so the same setting hands the shell the same number of rows in
+either client. Focus is a *request*, not a call:
 the dock asks as the panel opens, which on the first expand is before AppKit has attached the
 emulator to a window, and `makeFirstResponder` on a windowless view is a silent no-op — so
 `TerminalController` holds the request and replays it from the host view's
@@ -1051,7 +1054,7 @@ Both providers run with the timeout from their own config section (120 s by defa
 1. Opens a PTY at 24×80 via `portable-pty`.
 2. Resolves the shell via `shell::resolve(shell_id)` — see *Shell discovery* below.
 3. Spawns it with cwd = repo path, adding only `TERM=xterm-256color`, `COLORTERM=truecolor`, and (Git Bash only) `CHERE_INVOKING=1`.
-4. Stores the session, then spawns **two** threads (see *Output coalescing and flow control* below): a reader that loops on `read()`, feeds bytes through a `Utf8Decoder` and hands them to a bounded channel, and an emitter that drains that channel into `terminal-output-<pid>` events. When the reader hits EOF it drops its end of the channel; the emitter flushes whatever is left, removes the session, **reaps the child with `child.wait()`** — safe to block there: post-EOF the child is already dead (or its status was cached by a kill's internal `try_wait`), and the session is out of the map so nothing else can want its mutex — and emits `terminal-closed-<pid>` carrying a `TerminalExit { exit_code, signal }` payload. Flushing before the close event is what keeps "session over" from arriving ahead of the text that preceded it — a dying shell's last words are exactly the ones worth keeping. Both clients key off the exit VS Code-style: a clean exit closes the panel; a non-zero code or a fatal signal keeps the dead terminal on screen with `[Process exited with code N]` rather than flashing it away. There is one delivery gap on the Tauri side: `Terminal.svelte` registers the output and closed listeners **two async IPC round trips after `start_terminal` returns**, and a Tauri event emitted with no listener attached is dropped rather than queued — so a shell that dies inside that window (a broken `.zshrc`) can lose both its error output and its exit notice, leaving the panel to close on nothing. The wait is also what stops each session leaving a zombie behind, which the old drop-without-wait teardown did.
+4. Stores the session, then spawns **two** threads (see *Output coalescing and flow control* below): a reader that loops on `read()`, feeds bytes through a `Utf8Decoder` and hands them to a bounded channel, and an emitter that drains that channel into the sink as `TerminalOutput`. When the reader hits EOF it drops its end of the channel; the emitter flushes whatever is left, removes the session, **reaps the child with `child.wait()`** — safe to block there: post-EOF the child is already dead (or its status was cached by a kill's internal `try_wait`), and the session is out of the map so nothing else can want its mutex — and emits `TerminalClosed` carrying a `TerminalExit { exit_code, signal }`. Flushing before the close event is what keeps "session over" from arriving ahead of the text that preceded it — a dying shell's last words are exactly the ones worth keeping. Both clients key off the exit VS Code-style: a clean exit closes the panel; a non-zero code or a fatal signal keeps the dead terminal on screen with `[Process exited with code N]` rather than flashing it away. The wait is also what stops each session leaving a zombie behind, which the old drop-without-wait teardown did.
 
 It returns `StartedTerminal { pid, shell_id, shell_label }` — the label is resolved backend-side because the stored preference may name an uninstalled shell, and the panel header shows what actually launched.
 
@@ -1066,14 +1069,61 @@ The reader thread does not emit; it `send`s to a `sync_channel` bounded at 64 ch
 - **Flow control.** A full queue blocks the reader, which stops draining the PTY, which fills its buffer, which makes the *shell* wait. Slowing a runaway `cat` down is the correct answer; the alternatives are an unbounded buffer that grows until something dies, or discarding output the user asked for.
 - **Coalescing, driven by back-pressure rather than a fixed window.** A delivery takes whatever is *already* queued behind its first chunk; if nothing is, it goes out immediately. So an echoed keystroke or a prompt costs no added latency, while a flood — where the queue is always backed up — arrives in a few dozen large deliveries instead of one per 4 KiB read (each of which was a JSON IPC message on one host and a main-actor hop on the other). Once gathering, a delivery stops at 256 KiB or 8 ms, whichever comes first. A fixed byte threshold would have been strictly worse: at 8 KiB against 4 KiB reads it can only ever halve the count, and it holds a small reply hostage waiting for company that never arrives.
 
+### Session transport (Tauri)
+
+A session's output does not go on the event bus. `start_terminal` takes a
+`tauri::ipc::Channel<TerminalEvent>` as an argument, and `TerminalChannelSink` writes
+the session's two message kinds into it — `{event:"output", data}` and
+`{event:"closed", exit}`, an internally-tagged serde enum the frontend reads as a
+discriminated union. Two tests in `event_sink.rs` pin that JSON, because it is
+hand-written TypeScript on the other side and nothing between the two languages
+would notice a rename.
+
+**The argument is the whole point.** A Tauri event emitted with no listener attached
+is dropped, not queued, and a `listen()` is itself an async round trip — so
+registering after `start_terminal` returned left a two-round-trip window in which
+the reader thread was already emitting. A fast-printing shell lost its first prompt;
+a shell that died instantly (the broken `.zshrc` case) could lose its error output
+*and* its exit notice, leaving the panel to close on nothing. A `Channel`'s id is
+minted in its JS constructor, before any IPC, so the handler exists before Rust can
+possibly hold the channel: the race isn't narrowed, it is unrepresentable. That also
+makes this seam the same shape as the bridge's — a listener handed to the spawn —
+rather than two different answers to one problem.
+
+Two consequences the frontend has to honour. **`closed` can overtake
+`start_terminal`'s own return**, since they travel as independent messages, so
+`Terminal.svelte` records that the session ended and refuses to adopt the pid
+afterwards — a handle the backend has already dropped would make the panel's ✕ kill
+a session that is gone. And the channel's ordering guarantee is the transport's, not
+the frontend's: Tauri stamps each send with a monotonic index and the JS side
+reassembles on it, which it needs because deliveries fork by size (a JSON payload
+under 8 KiB is eval'd directly; anything larger is fetched by a second async invoke).
+
+`start`, `resize` and `close` are `#[tauri::command(async)]`, so they run off the main
+thread — `close_terminal` alone can block ~250 ms in portable-pty's kill escalation.
+**`write_terminal` is deliberately still synchronous**: Tauri runs a sync command
+inline in the order its IPC messages arrive, and that arrival order *is* the
+keystroke-ordering guarantee. Spawning each write onto the async runtime would let
+two keystrokes race, which is the one thing a terminal may never do.
+
 ### Key ownership between the app and the shell (Tauri)
 
 Every key the app binds is `Ctrl`-or-`Cmd`, and on Windows and Linux `Ctrl` is also the shell's modifier — so inside the terminal a single keystroke had two owners. Two mechanisms, one rule (FRONTEND.md §6.11): **while the terminal has focus, the shell gets everything except the chord that toggles the panel.**
 
-- `Terminal.svelte` installs an `attachCustomKeyEventHandler` that returns `false` only for the toggle. Returning `false` means xterm neither handles the event nor calls `preventDefault`, so it bubbles to the window listener that owns it; returning `true` for everything else keeps `Ctrl+P`, `Ctrl+R` and `Escape` with readline and vim.
+- `Terminal.svelte` installs an `attachCustomKeyEventHandler` that returns `false` only for the toggle. Returning `false` means xterm neither handles the event nor calls `preventDefault`, so it bubbles to the window listener that owns it; returning `true` for everything else keeps `Ctrl+P`, `Ctrl+R` and `Escape` with readline and vim. The handler runs for `keyup` and `keypress` as well as `keydown`, so it matches on the phase too — releasing an event xterm had already begun processing is not the same as declining it.
 - The window-level handlers (`MainLayout.handleKeyDown`, `Header.handleGlobalKeyDown`) re-check the event's origin through `utils/keyboard.ts`'s `isFromTerminal`, which tests for an `.xterm` ancestor — the class xterm puts on the element it was opened into. An `instanceof HTMLTextAreaElement` test cannot do this job in either direction: xterm's input sink *is* a textarea, so the old `if (inField) return` swallowed the toggle exactly where it was most wanted, while the push shortcut, deliberately ungated, fired straight through it.
 
 `.xterm` rather than the dock's `.terminal-section` is deliberate: the dock header's buttons are ordinary app chrome and must keep the app's shortcuts.
+
+The toggle itself is **`Ctrl` only**, on every platform. It is the one chord in this client that does not also answer to `Cmd`: ⌘` is macOS's window cycling, and a Tauri build that answered to it took a system gesture away from the user. The narrowing has to be made in both places at once — the xterm handler and `MainLayout`'s — or the chord stops working from inside the panel.
+
+`MainLayout`'s test sits **above** the `if (inField) return` bail, with the composer's chords and `Ctrl/Cmd+R`. The bail exists to keep app shortcuts out of what someone is typing, and `Ctrl` + `` ` `` is not that; the native client never had the question, since a SwiftUI `keyboardShortcut` is a key equivalent and fires ahead of the first responder. So the handler's order is load-bearing in three steps: terminal origin first, then the chords that must work inside a field, then the bail, then everything else.
+
+### Pointer and clipboard (Tauri)
+
+`WebLinksAddon` takes our own activation handler, which returns unless the platform's modifier is held (⌘ on macOS, `Ctrl` elsewhere) and then hands the URL to `os::open_url` rather than `window.open`. The addon has no modifier option and no way to make its decorations conditional, so a gated link still underlines on a bare hover — which is why the affordance is not optional: `options.hover` builds a small "Follow link (⌘ + click)" tooltip inside `Terminal.element`, carrying xterm's own `xterm-hover` class so xterm's mouse tracking stops at it and the link cannot flicker out from under the pointer. The class has no styles of its own; it is purely that marker.
+
+OSC 52 is registered by hand — xterm implements idents 0/1/2/4/8/10/11/12/104/110/111/112 and nothing for the clipboard. `parser.registerOscHandler(52, …)` receives the payload with `52;` already stripped, so what arrives is `Pc;Pd`: a selection *set* (`c` clipboard, `s` select, `p` primary, digits for cut buffers; empty means the spec's default) and base64 data. **Only writes are honoured.** `Pd === "?"` is a read request, which would type the clipboard back down the TTY — an exfiltration route for anything that can print to the terminal — so it is swallowed with `true` rather than declined, which also stops a fallback handler answering it. The write goes through `tauri-plugin-clipboard-manager`, not `navigator.clipboard`: WebKit refuses a programmatic clipboard write without a recent user gesture, and a shell asking for the clipboard has none.
 
 ### Child environment — do not forward the parent env
 
@@ -1096,7 +1146,9 @@ PTY reads split wherever the 4 KiB buffer fills, so multi-byte characters routin
 
 `resolve` falls back to the best available shell when the stored id is unknown or uninstalled — the terminal opening with the wrong shell beats it not opening. `available()` is total and never empty, so neither function can panic.
 
-The frontend mounts `<Terminal>` keyed by `${repoPath}:${terminalSessionId}` so swapping repos or hitting "New session" forces a fresh component, which in turn dispatches a new `start_terminal`. The previous component's cleanup invokes `close_terminal` on its tracked pid. Changing the shell preference applies to new sessions, not running ones.
+The frontend mounts `<Terminal>` keyed by `${repoPath}:${terminalSessionId}` so swapping repos or hitting "New session" forces a fresh component, which in turn dispatches a new `start_terminal`. The previous component's cleanup invokes `close_terminal` on its tracked pid. Changing the shell preference applies to new sessions, not running ones — and the preference the next session reads is fresh, because the config store is re-read on window activation, so a shell chosen in the native client's Settings is already in hand.
+
+The component also puts the caret back when the app becomes active: WebKit leaves xterm *painted* as focused while the hidden textarea behind it holds nothing, so keystrokes vanish until the user clicks. The condition is read at that moment — `container.contains(document.activeElement)` — rather than latched on the way out. A flag set from `focusin` is only ever cleared by another `focusin`, and clicking a plain element raises none, so it would strand `true` and the shell would take the caret back from wherever the user had actually gone. AppKit does this for the native client on its own.
 
 `terminal_pty_info` reports `{backend, build_number}` and must be called *before* the xterm instance is constructed — xterm reads `windowsPty` when it builds its buffer, so setting it afterwards does nothing. Declaring ConPTY on a build ≥ 21376 is what enables reflow on resize; without it xterm assumes any line whose last cell is non-blank is wrapped, which is what smears a resized prompt. The `ResizeObserver` is debounced 80 ms because an undebounced panel drag pushes a `ResizePseudoConsole` per frame and PSReadLine repaints its whole edit buffer on each one.
 
@@ -1142,11 +1194,12 @@ Defined in [core/src/config.rs](core/src/config.rs).
   "core:window:default",
   "core:window:allow-set-title",
   "core:app:default",
-  "dialog:allow-open"
+  "dialog:allow-open",
+  "clipboard-manager:allow-write-text"
 ]
 ```
 
-No filesystem, shell, or HTTP plugins are exposed to the WebView. All side effects route through our explicit `#[tauri::command]` functions, which is a deliberate security boundary. The two entries beyond the default sets are each one capability, not a set: `allow-set-title` because the window is named after the open repository, and `dialog:allow-open` for the Clone dialog's destination picker — the folder chooser is the only native dialog the frontend raises.
+No filesystem, shell, or HTTP plugins are exposed to the WebView. All side effects route through our explicit `#[tauri::command]` functions, which is a deliberate security boundary. The three entries beyond the default sets are each one capability, not a set: `allow-set-title` because the window is named after the open repository, `dialog:allow-open` for the Clone dialog's destination picker — the folder chooser is the only native dialog the frontend raises — and `clipboard-manager:allow-write-text` for the terminal's OSC 52 writes. **Write, deliberately without read**: the sequence's read form is the one an untrusted shell could use to lift the clipboard, and a capability that isn't granted cannot be reached by mistake.
 
 ## Build / dev
 

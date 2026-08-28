@@ -1,5 +1,6 @@
 import { gitApi, osApi, type FileEntry } from '$lib/api/commands'
 import { absolutePath } from '$lib/utils/path'
+import { isMac, isWindows } from '$lib/utils/platform'
 
 // Stateless helpers behind the Changes-tab file context menu. The repo-state
 // mutations (discard, ignore) still go through MainLayout so they can confirm /
@@ -54,9 +55,8 @@ export function fileExtension(path: string): string | null {
 
 /** Platform-appropriate label for the "reveal in file manager" menu item. */
 export function revealLabel(): string {
-  const ua = navigator.userAgent
-  if (ua.includes('Mac')) return 'Reveal in Finder'
-  if (ua.includes('Win')) return 'Show in Explorer'
+  if (isMac()) return 'Reveal in Finder'
+  if (isWindows()) return 'Show in Explorer'
   return 'Show in File Manager'
 }
 

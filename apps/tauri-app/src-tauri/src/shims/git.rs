@@ -1,7 +1,7 @@
 // Thin `#[tauri::command]` delegations to `leogit_core::git`. Signatures,
 // errors, and semantics are documented on the core functions. The three network
 // commands (`pull` / `push` / `clone_repo`) stream `git --progress`, so they
-// hand core a `TauriEventSink`.
+// hand core a `ProgressSink`.
 #![allow(
     clippy::needless_pass_by_value,
     clippy::missing_errors_doc,
@@ -14,7 +14,7 @@ use leogit_core::git::{
 };
 use tauri::AppHandle;
 
-use crate::event_sink::TauriEventSink;
+use crate::event_sink::ProgressSink;
 
 // ── Status / inspection ────────────────────────────────────────────────────
 
@@ -156,7 +156,7 @@ pub async fn fetch(repo_path: String, remote: String, background: bool) -> Resul
 
 #[tauri::command]
 pub async fn pull(app: AppHandle, repo_path: String, remote: String) -> Result<(), String> {
-    git::pull(TauriEventSink::arc(app), repo_path, remote).await
+    git::pull(ProgressSink::arc(app), repo_path, remote).await
 }
 
 #[tauri::command]
@@ -169,7 +169,7 @@ pub async fn push(
     force_with_lease: bool,
 ) -> Result<(), String> {
     git::push(
-        TauriEventSink::arc(app),
+        ProgressSink::arc(app),
         repo_path,
         remote,
         branch,
@@ -229,7 +229,7 @@ pub async fn clone_repo(
     url: String,
     target_path: String,
 ) -> Result<String, String> {
-    git::clone_repo(TauriEventSink::arc(app), url, target_path).await
+    git::clone_repo(ProgressSink::arc(app), url, target_path).await
 }
 
 #[tauri::command(async)]

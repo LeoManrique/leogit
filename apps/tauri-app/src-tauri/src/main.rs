@@ -32,6 +32,11 @@ fn main() {
         // config declares, on whichever display the OS picked.
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
+        // The embedded terminal's OSC 52 handler: a shell asking for the
+        // clipboard is not a click, and WebKit refuses `navigator.clipboard`
+        // without a recent one. This writes from the native side, so a `vim`
+        // yank lands whenever it happens rather than only just after a keypress.
+        .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
             config::load_config,
             config::patch_config,

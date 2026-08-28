@@ -1,6 +1,6 @@
 # Plan — Cross-client feature parity (SwiftUI ⇄ Tauri)
 
-> Status: **in progress — WS-A…WS-E shipped 2026-08-27, WS-F, WS-G and WS-H 2026-08-28; WS-I is next.**
+> Status: **in progress — WS-A…WS-E shipped 2026-08-27, WS-F through WS-I 2026-08-28; WS-J is next.**
 > The remaining work was re-cut into seventeen smaller workstreams (C…S) on
 > 2026-08-27 after WS-B proved too large to review as one piece — see §6.
 > Accepted 2026-08-27 with every open decision resolved. Per-workstream state
@@ -83,22 +83,23 @@ in code. "Make the current features work well" starts here (workstream A).
 
 ### 3.1 Defects — fixed
 
-Seventeen of the twenty are closed: twelve in WS-A, D-5 / D-7 / D-17's
-structural half with their hoists in WS-B, D-6 in WS-C, and D-20 in WS-E. Kept
-as a register (IDs are referenced from §4) and trimmed to what each fix *is*,
-since the code now carries the reasoning.
+Eighteen of the twenty are closed: twelve in WS-A, D-5 / D-7 / D-17's
+structural half with their hoists in WS-B, D-6 in WS-C, D-20 in WS-E and D-4 in
+WS-I. Kept as a register (IDs are referenced from §4) and trimmed to what each
+fix *is*, since the code now carries the reasoning.
 
 | ID | Client | Fixed | Left over |
 |---|---|---|---|
 | D-1 | Tauri | **Destructive.** Amend/Undo/Checkout gated on the row's index into the *loaded window*, so past a slide Undo reset the real HEAD and seeded the composer from another commit. Now gated on `status.head_sha`, per FRONTEND §6.10. | — |
 | D-2 | Tauri | A remote-less repo's doomed `git fetch origin` opened the breaker against every other repo. `fetchActiveRemote` now gates on `status.hasRemote`, like the tier path already did — and on the new `statusLoaded`, since `hasRemote` defaults to false and an unqualified read would decide "no remote" about a repo nobody has looked at yet. Natively, `silentFetch` returns `Bool?` so a slot conflict or a local `git remote` failure stops being reported as a network failure. | — (WS-B: `get_remote` answers `Option`, so the guard is live rather than dead). |
 | D-3 | Tauri | Silent poll failures vanished forever. Three consecutive **background** failures now raise a non-blocking banner off `repoState.pollError` — native's shape and threshold, and its ownership: `refreshStatus` grew a `background` opt separate from `silent`, because four of the seven silent callers are user actions whose own `index.lock` races would otherwise accuse a healthy repo. Reset per repository in both clients. | BG-4's equality gate (the other half of that item). |
+| D-4 | Tauri | **Terminal listener-registration race.** Output and exit listeners were registered two async IPC round trips *after* `start_terminal` returned, while the reader thread was already emitting, and Tauri drops an event with no listener. The session's stream is now a `Channel` built with its handler attached and passed *into* `start_terminal`, mirroring the bridge — the id is minted client-side before any IPC, so the gap cannot exist. | — (the close message can now overtake `start_terminal`'s return, which the panel handles by refusing to adopt the pid afterwards). |
 | D-8 | Native | ⌘W with a text field still focused dropped the typed value. `flushPendingSave` now also writes an edit that never scheduled a save, guarded by a diff against `lastPersisted` — which holds the *normalized* form of the fields, not the raw file, or a config written by the other client would be rewritten on an open-and-close that changed nothing. A completed debounce also clears `pendingSave` now (generation-guarded), which it never did. | — |
 | D-10 | Tauri | A commit could land mid-Generate and have the late result overwrite the cleared composer. `canSubmit` gained `!isGenerating`, and the lockout runs off `isCommitInProgress` — `isCommitting` is still false while the embedded-repo confirmation waits, and its Confirm calls `performCommit` past `canSubmit` entirely, so the composer stayed live behind the dialog. | — |
 | D-11 | Tauri | The HEAD-move reset was read as a backward slide and scrolled to the bottom of the fresh page, paging again. `log.resetSeq` marked the replacement. ✅ *WS-E* finished it: HI-2's append model deleted the slide, so `resetSeq` now means only "go to row 0" and the `skip > 0` hole it kept (a new commit while parked at offset 0 bumped nothing) has no case left to miss. | — |
 | D-12 | Tauri | An empty parse fell through to "Select a file to view its diff" with a file selected. Both diff panes now have an explicit "No Textual Changes" state, blank while the fetch is in flight. The test is `hasRenderableDiff`, not `!== null`: `parse_diff` returns null only for empty input, while a mode change or pure rename parse into a header with zero hunks — a blank pane, the same dead end one layer along. | — (WS-B: H-9 supplies the reason, and a failed load is an `Err` rather than an empty parse; WS-E: DF-10's presentation half). |
 | D-13 | Tauri | The header hand-rolled a status write that skipped `is_merging`, the `userDeselected` reconciliation, and the badge feed. It now takes the one refresh path as a prop: **one status writer in the client**. Checkout and undo also reload branches. | — (WS-F: post-op became status **+ log**, extracted as `reloadAfterHeadMove`). |
-| D-16 | Tauri | `Ctrl+P` reached the shell *and* pushed; ⌃` could not leave a focused terminal; Escape closed overlays instead of reaching `vim`. One rule now (FRONTEND §6.11): `attachCustomKeyEventHandler` releases only the toggle, and the window handlers test the event's origin. | TE-1's modifier narrowing (Tauri still accepts ⌘` too). |
+| D-16 | Tauri | `Ctrl+P` reached the shell *and* pushed; ⌃` could not leave a focused terminal; Escape closed overlays instead of reaching `vim`. One rule now (FRONTEND §6.11): `attachCustomKeyEventHandler` releases only the toggle, and the window handlers test the event's origin. | — (WS-I narrowed the toggle to ⌃`; TE-1's remaining half is the app's *other* chords, deferred to ROADMAP). |
 | D-17 | Tauri | `tab_size: 999` and emptied fields persisted (and the emptied ones failed the save with a raw serde error). WS-B replaced the form's own clamp with `Config::normalized()`, which every writer passes through — including ones that never see this form — and whose bounds the controls now read (`config_bounds`) instead of restating. | — |
 | D-18 | Native | The warm-up fetch ran offline, and against remote-less repos, discarding its outcome. Now gated on the breaker *and* `status.hasRemote`, and reports to the breaker (RM-10). Waits on the new `RepoStore.awaitLoadSettled()` so the gate reads a real status. | — |
 | D-19 | Tauri | The `\ No newline at end of file` marker rendered its backslash twice. `linePrefix` no longer adds one — core keeps it in `content`. | — (WS-E took DF-8's minus sign; the two remaining alignments are native's, WS-P). |
@@ -111,7 +112,6 @@ since the code now carries the reasoning.
 
 | ID | Client | Defect | Severity |
 |---|---|---|---|
-| D-4 | Tauri | **Terminal listener-registration race.** Output and exit listeners are registered two async IPC round trips *after* `start_terminal` returns, while the reader thread is already emitting; Tauri drops events with no listener (`Terminal.svelte:145,154,164`; `event_sink.rs:35-42`). A fast-printing shell loses its first prompt; an instantly-dying shell (the broken-`.zshrc` case the docs claim is handled) can lose `terminal-closed` entirely. Native passes the listener as an argument to the spawn — structurally immune. | High |
 | D-9 | Native | **Collapsing the terminal reflows the emulator to one row.** The zero-height frame is full-width, so SwiftTerm's degenerate-size bail (width *and* height zero) doesn't fire; the buffer reflows to `MINIMUM_ROWS = 1` and each collapse/expand cycle sends a spurious `SIGWINCH` (TerminalDock's `.frame(height: 0)` + SwiftTerm `AppleTerminalView.swift:353-356`). | Medium |
 | D-14 | Native | **Stale-diff scroll: no reset on file switch.** No `ScrollViewReader` exists; `DiffRow.id` is a flat index, so switching files lands at the previous file's scroll offset (verified — no `scrollPosition`/`scrollTo` anywhere in `Sources/LeoGit`). Both Tauri and GitHub Desktop reset on file change. | Medium |
 | D-15 | Native | **Copying from a diff yields garbage.** `.textSelection(.enabled)` spans the gutters, so a copy includes line numbers and `+`/`−` glyphs; tab expansion means tabs come out as spaces (`DiffView.swift`; `DiffLineText.swift:86-88`). GitHub Desktop rebuilds clipboard text from the model. WS-E took the Tauri half of the interim (`user-select: none` on the gutter and prefix); native's `.textSelection` is still pane-wide. | Medium |
@@ -133,8 +133,8 @@ behavior change the user would notice — except battery.
 | E-8 | ✅ *WS-B.* `DiffOptions` makes the render artifacts opt-in, so the native path no longer builds HTML and pairings for the bridge to drop (H-8). `DiffLine.text` became `Option` in the same pass, dropping a duplicate of every line's content from both wires. | was ~40 k allocations per 20 k-line diff load |
 | E-9 | Native | Whole-status epoch re-tokenizes the open diff when *any* file changes (~19–140 ms + 2 `git show` per unrelated edit); a per-file `stat_stamp` compare would gate it. No phase-2 debounce either (Tauri: 80 ms). | up to ~140 ms background CPU per unrelated edit |
 | E-10 | Native | `PathText.fittedParts` is recomputed on every body evaluation (~50 rows × log₂-probes per interaction) — TECHNICAL.md claims it's width-keyed; it isn't. | ~350 text measurements per interaction |
-| E-11 | Tauri | Diff viewer mounts every row (no virtualization) and phase 2 re-parses N `innerHTML`s in one tick. **Half closed in WS-B**: the size guard landed in core (H-15), and terminal output now coalesces under back-pressure instead of crossing once per 4 KiB read (H-14). Virtualization is the ROADMAP item DF-4 defers. | terminal half closed; virtualization deferred to ROADMAP |
-| E-12 | Tauri | Terminal shims are sync `#[tauri::command]`s on the main thread — one hop per keystroke, and `close_terminal` blocks ~250 ms on every teardown. | visible teardown hitch |
+| E-11 | Tauri | Diff viewer mounts every row (no virtualization) and phase 2 re-parses N `innerHTML`s in one tick. **Terminal half closed**: the size guard landed in core (H-15), output coalesces under back-pressure instead of crossing once per 4 KiB read (H-14), and each delivery is now one channel send rather than a window broadcast (WS-I). Virtualization is the ROADMAP item DF-4 defers. | terminal half closed; virtualization deferred to ROADMAP |
+| E-12 | ✅ *WS-I.* `start` / `resize` / `close` are `#[tauri::command(async)]`, off the main thread. `write` deliberately stayed sync — a sync command runs inline in IPC arrival order, and that order *is* the keystroke-ordering guarantee. | was a ~250 ms hitch on every teardown |
 
 ## 4. The parity inventory
 
@@ -937,31 +937,27 @@ and matched, not that it was skipped.
 
 ### 4.10 Terminal (TE)
 
-- **TE-1 · Key routing** — the routing half landed in WS-A (D-16: the shell
-  owns every key but the panel's toggle, FRONTEND §6.11). What remains is the
-  modifier: Tauri still accepts ⌘` too, hijacking macOS window cycling; native
-  is deliberately ⌃` only. Narrow Tauri to Ctrl — in *two* places now, the
-  window handler and `Terminal.svelte`'s custom key handler, which must keep
-  agreeing or the chord becomes unreachable from inside the panel.
-  WS-A's modifier-blind rule leaves ⌘,/⌘B/⌘L/⌘R/⌘P inert with the terminal
-  focused, which is right for `Ctrl` (the shell really does want `Ctrl+R`) and
-  wrong for `Cmd` (no shell consumes it, and macOS reserves ⌘, for Preferences).
-  **Decided by the user: the modifier follows the platform** — ⌘ on macOS, Ctrl
-  on Windows and Linux — which resolves the capture as a side effect rather than
-  as a second rule. **Not scheduled here**: the narrowed capture is correct on
-  the shipping platforms and only imperfect on a macOS Tauri build, so it ships
-  as-is and reopens if it is actually noticed. ROADMAP carries the decision with
-  the affected-chord table. → WS-I (the toggle's own ⌃-only narrowing)
-- **TE-2 · Transport** — D-4 plus E-11/E-12: move Tauri to a
-  frontend-created `Channel` passed into `start_terminal` (mirrors the
-  native seam, kills the race and the per-chunk JSON), mark
-  `start`/`close`/`resize` `(async)` (leave `write` sync — IPC arrival order
-  is the keystroke-ordering guarantee). ✅ *WS-B* for the core half: the reader
-  thread now feeds a bounded channel and a second thread coalesces, so output
-  is slowed rather than dropped when a host falls behind, and a flood arrives
-  in a few dozen deliveries instead of one per 4 KiB read. The batching is
-  back-pressure-driven, not a fixed window — see §6's WS-B entry for why, and
-  for what that means for the `Channel` rewrite. → WS-I
+- **TE-1 · Key routing** — ✅ *WS-A* for the routing half (D-16: the shell owns
+  every key but the panel's toggle, FRONTEND §6.11), ✅ *WS-I* for the toggle's
+  modifier: ⌃` only, in both the window handler and `Terminal.svelte`'s custom
+  key handler, which are one rule written twice — and above `MainLayout`'s
+  `inField` bail, which had been swallowing it in the commit composer since the
+  chord existed (native binds a key equivalent, so it never had the fault). What
+  is left is not the terminal's: WS-A's modifier-blind rule leaves ⌘,/⌘B/⌘L/⌘R/⌘P inert with the
+  terminal focused, which is right for `Ctrl` (the shell really does want
+  `Ctrl+R`) and wrong for `Cmd` (no shell consumes it, and macOS reserves ⌘, for
+  Preferences). **Decided by the user: the modifier follows the platform** — ⌘ on
+  macOS, Ctrl on Windows and Linux — which resolves the capture as a side effect
+  rather than as a second rule. **Not scheduled**: correct on the shipping
+  platforms, imperfect only on a macOS Tauri build, so it reopens if noticed.
+  ROADMAP carries the decision with the affected-chord table.
+- **TE-2 · Transport** — ✅ *WS-B* for the core half (bounded reader→emitter
+  channel, back-pressure-driven coalescing) and ✅ *WS-I* for the host half: the
+  session's stream is a frontend-created `Channel` passed into `start_terminal`,
+  which closes D-4 structurally and mirrors the bridge's seam;
+  `start`/`resize`/`close` became `(async)` and `write` deliberately did not.
+  **The coalescing is still the only batching** — WS-I added none, per WS-B's
+  note.
 - **TE-3 · Collapse/resize** — D-9 (native emulator reflow; fix by pinning
   the inner frame) and the missing native 80 ms resize debounce (a divider
   drag is one SIGWINCH per column crossed today — put the coalescing in
@@ -972,29 +968,28 @@ and matched, not that it was skipped.
 - **TE-4 · Scrollback.** 500 (native) vs 1000 (Tauri) — both library
   defaults, neither chosen. Set 1000 explicitly on both (`git log --stat`
   exceeds 500; VS Code ships 1000). → WS-R
-- **TE-5 · Links + OSC 52.** Plain-click URLs work in Tauri, ⌘-click-only
-  natively. **Decided: modifier-click on both, taught on hover** — the
-  Terminal.app / iTerm convention wins over the plain-click web one, and the
-  discoverability worry that argues for plain click is answered by the
-  affordance instead of by dropping the modifier: keep SwiftTerm's ⌘-click,
-  move the Tauri client from plain click to
-  Ctrl/⌘-click, and both surface the convention on hover the way other
-  terminals do ("Follow link (⌘ + click)": xterm's link-provider hover
-  callback drives a tooltip; SwiftTerm's hover surface needs an API check —
-  a tracking-area overlay if it exposes none). Becomes a shared FRONTEND §6
-  rule, not a §8 row. OSC 52 clipboard works natively (write-only —
-  correct), is ignored by Tauri (add the handler, write-only). → WS-I, WS-R
-- **TE-6 · Refocus.** Confirmed, and ROADMAP tracks it: Tauri never refocuses after
-  focus is stolen (only a click); native has the same call sites but AppKit
-  restores the first responder. Add the `focusin` + reactivation handlers.
-  → WS-I
-- **TE-7 · Small parity.** Header label fallback ("Terminal") when no session
-  (native has it; also mostly obsoletes ROADMAP's expand-hint idea); the "280"
-  constant means dock-height in Tauri and emulator-height natively (~2 rows
-  difference) — pick one meaning; shell preference read fresh per session
-  natively (a native-side Settings change doesn't reach a running Tauri —
-  read the config in `initBackend`); ⌃` needs a native menu-bar home
-  (View ▸ Show/Hide Terminal owning the chord). → WS-I, WS-R
+- **TE-5 · Links + OSC 52.** ✅ *WS-I* for the Tauri half, and the rule is
+  FRONTEND §6.17. Modifier-click on both (⌘ on macOS, Ctrl elsewhere), with the
+  convention taught on hover rather than the modifier dropped — which turned out
+  to be mandatory, not merely nice: xterm's link addon cannot make its own
+  underline conditional, so a gated link with no affordance simply looks broken.
+  OSC 52 is honoured write-only in both clients; the read form is swallowed, not
+  declined. **Native half left, and it leaves Tauri ahead** — per WS-E's rule,
+  stated rather than left to be discovered: SwiftTerm already has ⌘-click and
+  OSC 52, so the *behaviour* matches and only the hover affordance is missing
+  there. It was not taken here because SwiftTerm's hover surface needs an API
+  check first (a tracking-area overlay if it exposes none), which is native UI
+  work in a Tauri workstream. → WS-R
+- **TE-6 · Refocus.** ✅ *WS-I.* The Tauri panel takes the caret back when the
+  window returns, reading `document.activeElement` at that moment rather than
+  latching a `focusin` flag; AppKit already did it natively.
+- **TE-7 · Small parity.** ✅ *WS-I* for three of four: the header strip reads
+  `Terminal` before a session names itself, `280` means the *emulator* in both
+  clients (the header sits above it — rows are what the number is really
+  setting), and the shell preference is already fresh per session in Tauri via
+  the config store's activation re-read, so no second read was added. **Left**:
+  ⌃` needs a native menu-bar home (View ▸ Show/Hide Terminal owning the chord).
+  → WS-M or WS-R
 
 ### 4.11 App shell (SH)
 
@@ -1138,7 +1133,7 @@ is mostly adoption of already-proven native behavior.
    D-2's client gate, D-3, D-8, D-10, D-11, D-12, D-13, D-16, D-17, D-18, D-19
    and RM-10, each summarized in §3.1. D-5 and D-7 went to ground with their
    hoists in WS-B; D-6 shipped early in WS-C; D-4, D-9, D-14, D-15 and D-20
-   stayed with the areas they belong to.
+   stayed with the areas they belong to (D-20 closed in WS-E, D-4 in WS-I).
 
    **Still live.** *A gate is only as good as what it can see* — the workstream
    added `log.resetSeq`, `repoState.statusLoaded`, `RepoStore.awaitLoadSettled()`
@@ -1166,10 +1161,10 @@ is mostly adoption of already-proven native behavior.
      scalar may be declared below `[claude]` and `[ollama]`. A round-trip test
      pins it.
    - **H-14's coalescing is back-pressure-driven, not a fixed window**, and is
-     therefore self-tuning: nothing is held when the host keeps up. TE-2's
-     `Channel` rewrite (WS-I) inherits it and **must not add a second layer of
-     batching**; the native relay's own coalescing is now redundant but harmless
-     (WS-R may simplify it).
+     therefore self-tuning: nothing is held when the host keeps up. WS-I's
+     `Channel` rewrite inherited it and added no second layer, which still
+     stands as the rule; the native relay's own coalescing is redundant but
+     harmless (WS-R may simplify it).
    - **`resize_terminal` ignores a `< 2×2` grid itself**, so D-9 (WS-R) is purely
      the native inner-frame pin.
    - **H-16 still has no consumer.** `copy_text` / `copy_diff_text` are this
@@ -1322,9 +1317,11 @@ is mostly adoption of already-proven native behavior.
      *user's* fetch. The automatic ones deliberately claim no slot. **WS-J
      restructures that poll** and should keep the line where it is.
    - **Tauri's ⌘R is above `MainLayout`'s `inField` bail**, with the composer
-     chords. SH-4 (WS-H) edits the same handler, and the ordering there is
+     chords — and so is ⌃` since WS-I. The ordering in that handler is
      load-bearing: terminal origin first, then the chords that must work inside a
-     field, then the bail, then everything else.
+     field, then the bail, then everything else. **The bail is opt-in, not a
+     default**: a chord placed below it is being declared to be something a
+     person might plausibly be typing, and most are not.
 7. ✅ **WS-G — Tauri branches & merge. Shipped 2026-08-28.** BR-1 through BR-7
    and BR-11, plus SH-4's silently-broken half; the two BR-1 refinements landed
    **natively** in the same change. Per-item state is in §4.4. The dropdown
@@ -1449,26 +1446,90 @@ is mostly adoption of already-proven native behavior.
    - **`tauri-plugin-window-state` needs no capability and no JS package.** It is
      registered in `main.rs` and never invoked; the frontend half of the crate
      exists but nothing here uses it.
-9. **WS-I — Tauri terminal transport (M).** TE-2 and **D-4** together, because
-   the race is a property of the transport: a frontend-created `Channel` passed
-   into `start_terminal` mirrors the native seam and closes the two-round-trip
-   window where the reader thread emits with no listener registered.
-   `start`/`close`/`resize` become `(async)` (E-12); `write` stays sync — IPC
-   arrival order *is* the keystroke-ordering guarantee. Do not add a second
-   layer of batching: WS-B's coalescing is already back-pressure-driven
-   underneath. Then TE-1's remaining narrowing (⌃-only, in *both* the window
-   handler and `Terminal.svelte`'s custom key handler — they must keep agreeing
-   or the chord becomes unreachable from inside the panel), TE-5's Tauri half
-   (modifier-click + hover affordance + an OSC 52 write-only handler), TE-6
-   (refocus after focus is stolen), TE-7's Tauri halves.
+9. **WS-I — Tauri terminal transport (M).** ✅ *Shipped 2026-08-28.* TE-2 and
+   **D-4** landed as one change, because the race was a property of the
+   transport: the session's stream is a `Channel` the frontend builds with its
+   handler attached and passes into `start_terminal`, so the listener exists
+   before core can hold it. `start`/`resize`/`close` became `(async)` (E-12);
+   `write` stayed sync. No second layer of batching was added. With it: TE-1's
+   ⌃-only narrowing in both key handlers, TE-5's Tauri half (modifier-click,
+   hover affordance, write-only OSC 52), TE-6's caret restore, and three of
+   TE-7's four (header fallback, the 280 constant, shell freshness — already
+   satisfied). Gates: `pnpm check` 0/0 over 149 files, prettier clean,
+   `pnpm tauri build` bundled, zero-warning `just mac-build`, 168 core + 24
+   bridge + **2 host** tests, clippy-pedantic 165 core with `leogit` /
+   `leogit-ffi` at zero.
 
-   From WS-H: the window handlers now pass `Escape` to the overlay stack and do
-   nothing else with it, but **`isFromTerminal(e)` still returns before that** —
-   which is correct (§6.11 gives the shell every key but the toggle) and must
-   stay correct when TE-1 narrows the modifier. The shell owning `Escape` and a
-   dialog owning `Escape` never collide in practice, because a dialog takes
-   focus when it mounts; if TE-6's refocus ever runs while one is open, that
-   assumption is what breaks.
+   Findings for whoever takes WS-J and beyond:
+   - **A `Channel`'s id is minted in its JS constructor, before any IPC**, so a
+     handler attached there (or assigned before the `await invoke`) cannot miss
+     anything — but messages delivered before one is attached hit the
+     constructor's no-op default and are **gone, not queued**. The safe form is
+     `new Channel(handler)`; `ch.onmessage = …` after the await is the same bug
+     `listen()` had. Any future streaming command should take its channel as an
+     argument for this reason.
+   - **A per-session message can overtake the command that created the
+     session.** `closed` and `start_terminal`'s return travel independently, so
+     a shell dying on its own startup file reports the death before the caller
+     has a handle. `Terminal.svelte` records that and refuses to adopt the pid
+     afterwards. Anything that returns a handle *and* streams on it needs the
+     same guard.
+   - **Tauri's channel forks by payload size**: JSON under 8 KiB is eval'd
+     directly, anything larger is stashed and fetched by a second async invoke
+     (hence the monotonic index and the JS-side reordering). Core's coalescing
+     can produce up to 256 KiB in one delivery, so a flood takes the fetch path
+     — which is still the right trade (one round trip beats 64 evals, and the
+     bytes avoid being escaped into a JS string literal). **Do not retune
+     `MAX_DELIVERY_BYTES` for this**: it is core's, shared with a host that has
+     no such threshold.
+   - **A page reload leaks the session.** `Channel::send` returns `Ok` into a
+     reloaded document's empty callback registry, so the old PTY and its two
+     threads survive with nobody listening. This is not new — `emit` behaved the
+     same — but it is now easy to state: nothing on the Rust side learns that a
+     channel's other end is gone. Relevant to `just dev`, where a hot reload
+     accumulates shells.
+   - **`attachCustomKeyEventHandler` runs for `keyup` and `keypress` too**, and
+     xterm tests the return value with `!1===`, so `undefined` counts as
+     "process it". Match on `e.type` and return an explicit boolean.
+   - **The `inField` bail had swallowed ⌃` since the chord existed** — found by
+     the user against the native client, where a SwiftUI `keyboardShortcut` is a
+     key equivalent and fires ahead of the first responder, so the question never
+     came up. Toggling the terminal from a half-written commit message is a
+     *normal* thing to do — it is where you go to run what you are describing —
+     and nobody types `Ctrl` + `` ` `` into prose. The chord moved above the bail.
+     **The general lesson is that the bail is the exception, not the default**:
+     placing a chord below it asserts that a person might be typing it, which is
+     false for every modified chord the app currently binds. TE-1's deferred
+     platform split (ROADMAP) should re-read the whole handler with that in mind
+     rather than preserving today's placements.
+   - **xterm's link addon cannot gate its own decorations.** `LinkComputer`
+     pushes links with no `decorations`, which means all of them, so a
+     modifier-gated link still underlines and shows a pointer on a bare hover.
+     The hover affordance is therefore load-bearing rather than a nicety — a
+     gated link without one reads as broken. Making the underline itself
+     conditional needs a hand-written `ILinkProvider`.
+   - **`registerOscHandler` strips the ident and the first `;`**, so an OSC 52
+     handler receives `Pc;Pd` and must split on the *first* separator only. `Pc`
+     is a set (`c`/`s`/`p`/digits, empty meaning the spec default) and
+     `Pd === "?"` is the read request that must be swallowed, not answered.
+   - **`navigator.clipboard` is not usable for anything a click didn't ask
+     for.** WebKit gates a programmatic write on recent user activation, which
+     an OSC 52 write does not have — hence `tauri-plugin-clipboard-manager`,
+     granted `allow-write-text` and deliberately not the read permission. The
+     app's five existing Copy actions are all click-driven and stay where they
+     are.
+   - **The host crate has tests now** (its first two), pinning the channel's
+     JSON. Anything else whose shape is read by hand-written TypeScript and
+     produced by a serde attribute belongs there too.
+   - `utils/platform.ts` holds the one `isMac()` / `isWindows()` test; the
+     second copy of it was about to be written in `Terminal.svelte`.
+   - From WS-H, still true: the window handlers pass `Escape` to the overlay
+     stack, but **`isFromTerminal(e)` returns before that**, which §6.11
+     requires. The shell owning `Escape` and a dialog owning it never collide
+     because a dialog takes focus when it mounts; **TE-6's caret restore is the
+     thing that could break that assumption**, so it fires only on window
+     activation and only when the terminal already holds `activeElement` — it
+     cannot pull focus out of a dialog that opened while the app was away.
 10. **WS-J — Tauri background cadence (M).** The machinery underneath, and
     where the efficiency register concentrates. BG-1 (the visibility ladder +
     paused sweeps + GH Desktop's once-per-session 0–30 s skew), BG-2
@@ -1483,6 +1544,17 @@ is mostly adoption of already-proven native behavior.
     cannot be gated on "the file list changed", and BG-4 is restructuring
     exactly that poll. Until it lands the two clients keep their disagreeing
     rules.
+
+    From WS-I: **BG-6's shape is already proven in this client.** The terminal's
+    caret restore asks `container.contains(document.activeElement)` at the
+    moment it needs the answer rather than latching anything, for exactly the
+    reason BG-6 names — clicking a plain element raises no `focusin`, so the
+    flag never clears. `userTyping` is the same latch with one extra fault:
+    it is set by *any* input or textarea gaining focus, which includes xterm's
+    hidden one, so terminal focus suppressing auto-fetch is currently a side
+    effect rather than a decision. It happens to match the native client, which
+    suppresses on terminal focus deliberately — **so keep the behaviour when you
+    replace the mechanism**, and make it explicit rather than incidental.
 11. **WS-K — Connectivity observer, both clients (M).** **H-17** and BG-3,
     alone because they are a mini-project on a different machine: three OS
     backends, a new `CoreEvent` variant and a new dependency, none of it
@@ -1591,8 +1663,11 @@ is mostly adoption of already-proven native behavior.
     safe, so this is purely the frame — plus the missing 80 ms resize debounce,
     placed in `TerminalController.resize` and *not* the delegate, to keep the
     one-shot initial-size push), TE-4 (scrollback 1000 explicitly, both
-    clients), TE-5's native half (the hover affordance — SwiftTerm's hover
-    surface needs an API check), TE-7's native halves.
+    clients), TE-5's native half (the hover affordance alone — ⌘-click and OSC 52
+    are already right there; SwiftTerm's hover surface needs an API check, and
+    the string to match is the Tauri client's *Follow link (⌘ + click)*), and
+    TE-7's one remaining half if WS-M does not take it (⌃` wants a
+    View ▸ Show/Hide Terminal menu home).
 19. **WS-S — Sweep & contract cleanup (S/M).** What genuinely had no home, plus
     the work that can only land once everything else has:
     - **Leftover efficiency**: RM-11 (move the native sweep's slot re-check
@@ -1660,9 +1735,10 @@ other decision lives inline with the item it governs, marked **Decided** in §4.
 Per workstream, matching the previous plan's bar:
 
 - Zero-warning `xcodebuild` via `just mac-build`; `pnpm check` (svelte-check)
-  0/0; `cargo test --workspace` green (**168 core + 24 bridge** after WS-F,
-  from the 120 + 24 this plan started at — every hoist and every probe rule
-  landed with tests);
+  0/0; `cargo test --workspace` green (**168 core + 24 bridge + 2 host** — the
+  core and bridge counts from WS-F, up from the 120 + 24 this plan started at,
+  and the host's first tests from WS-I, pinning the terminal channel's JSON
+  because the TypeScript that reads it is hand-written);
   `cargo clippy --workspace --all-targets -- -W clippy::pedantic` at
   **165** or better, never worse (the plan opened at 184; WS-B took it to 170,
   WS-C to 166, WS-F to 165), with `leogit` and `leogit-ffi` at zero. A Tauri

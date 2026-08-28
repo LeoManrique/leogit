@@ -8,7 +8,7 @@
 use leogit_core::gh::{self, GhRepo};
 use tauri::AppHandle;
 
-use crate::event_sink::TauriEventSink;
+use crate::event_sink::ProgressSink;
 
 #[tauri::command(async)]
 pub fn check_auth() -> bool {
@@ -36,5 +36,5 @@ pub async fn gh_clone(
     name_with_owner: String,
     target_path: String,
 ) -> Result<String, String> {
-    gh::gh_clone(TauriEventSink::arc(app), name_with_owner, target_path).await
+    gh::gh_clone(ProgressSink::arc(app), name_with_owner, target_path).await
 }

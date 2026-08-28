@@ -72,8 +72,10 @@ static-linking or a local daemon (that decision is open; see the plan).
 - **Request/response** — the §3 catalogue, each `args → Result<T, Error>`. The
   frontend→backend direction is **only** request/response; there are no
   frontend→backend events.
-- **Push (backend→frontend)** — 4 events (§4). Best-effort; a frontend must be able
-  to recover authoritative state by re-issuing the relevant command (e.g. re-`get_status`).
+- **Push (backend→frontend)** — 4 payload kinds (§4): two broadcasts, best-effort, from
+  which a frontend must be able to recover authoritative state by re-issuing the relevant
+  command (e.g. re-`get_status`), and one terminal session's two-message stream, which is
+  delivered on a listener handed in at `start_terminal` and may lose nothing.
 - **State ownership** — durable state (config, repos MRU, terminal PTY sessions)
   lives in the core. Frontends hold only re-derivable view state.
 
@@ -242,7 +244,7 @@ config could not guarantee.
 | Command | Args | Returns |
 |---|---|---|
 | `terminal_pty_info` | – | `PtyInfo` |
-| `start_terminal` | `repoPath, shellId` | `StartedTerminal` (emits per-PID output/closed events) |
+| `start_terminal` | `repoPath, shellId, listener` | `StartedTerminal` (the session's stream runs on `listener`, §4) |
 | `write_terminal` | `pid, data` | `void` |
 | `resize_terminal` | `pid, cols, rows` | `void` |
 | `close_terminal` | `pid` | `void` |
@@ -253,21 +255,30 @@ config could not guarantee.
 |---|---|---|
 | `check_for_update` (net) | – | `UpdateInfo \| null` |
 
-## 4. Event surface (4, backend→frontend only)
+## 4. Backend→frontend surface (4, one direction only)
 
-Events are **best-effort deltas over an authoritative baseline**. On (re)connect or
-any detected gap, a frontend must re-pull the relevant command. Two events are
-**per-PID** (terminal); today's Tauri wire uses dynamic channel names
-`terminal-output-<pid>`/`terminal-closed-<pid>`, but the contract is "output/closed
-for a given pid" — a single stream carrying a `pid` field is an equivalent
-representation (preferred for the SwiftUI/daemon path).
+Two of these are **broadcasts** — anything in the UI may want them, they name what
+they are about, and a dropped one costs only a stale indicator, so they are
+best-effort deltas over an authoritative baseline: on (re)connect or any detected
+gap, a frontend must re-pull the relevant command.
 
-| Event | Payload | Meaning | Frontend action |
+The other two are **one terminal session's stream**, and they are the opposite
+kind of thing: they belong to a single panel, nothing may be dropped, and the
+first of them is produced before the command that started the session has
+returned. **A subscription cannot express that** — the frontend can only subscribe
+after it learns what to subscribe to, and the shell is already printing into the
+gap. So the listener is an *argument to `start_terminal`*, held for the life of
+the session: a `Channel` the frontend constructs with its handler already
+attached (Tauri), a `TerminalEventListener` callback object (UniFFI). Neither
+carries a pid, because the listener is the session. Both transports deliver in
+order.
+
+| Stream | Payload | Meaning | Frontend action |
 |---|---|---|---|
-| `git-progress` | `GitProgressEvent {op:'push'\|'pull'\|'clone', path, percent, text}` | streamed during push/pull/clone | drive a progress indicator; final state from the command's `Result` |
-| `terminal-output` (per-PID) | raw bytes | PTY stdout/stderr | feed the terminal emulator |
-| `terminal-closed` (per-PID) | `TerminalExit {exit_code, signal}` | child exited and was reaped | clean exit (`0`, no signal) → close the panel; otherwise print `[Process exited with code N]` and keep the dead terminal on screen (VS Code behavior) |
-| `open-repo` | `LaunchTarget {path, is_repo}` | warm-start / second-instance target | open that repo in the running window |
+| `git-progress` (broadcast) | `GitProgressEvent {op:'push'\|'pull'\|'clone', path, percent, text}` | streamed during push/pull/clone | drive a progress indicator; final state from the command's `Result` |
+| `open-repo` (broadcast) | `LaunchTarget {path, is_repo}` | warm-start / second-instance target | open that repo in the running window |
+| terminal `output` (per session) | decoded text, coalesced by core | PTY stdout/stderr | feed the terminal emulator |
+| terminal `closed` (per session) | `TerminalExit {exit_code, signal}` | child exited and was reaped | clean exit (`0`, no signal) → close the panel; otherwise print `[Process exited with code N]` and keep the dead terminal on screen (VS Code behavior). It can arrive **before** `start_terminal` returns — a shell that dies on a broken `.zshrc` does exactly that — so the handle must not be adopted afterwards |
 
 ### 4.1 Progress reliability convention (recommended, from `leosync-src`)
 For a streaming transport (SSE / callback): stamp events with a monotonic id; on a
@@ -509,16 +520,25 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    owns every key, with exactly one exception: the chord that toggles the panel, which stays
    reachable from *inside* the panel. Nothing else the app binds may fire from there —
    `Ctrl+P` is readline's previous-history, `Ctrl+R` its reverse search, `Escape` vim's
-   normal mode. The collision is Tauri-shaped, because its chords are `Ctrl`-or-`Cmd` and
-   the shell's modifier is `Ctrl` too: `xterm`'s `attachCustomKeyEventHandler` releases the
-   toggle and swallows the rest, and the window-level handlers re-check each event's origin
-   (`utils/keyboard.ts`) since xterm's input sink is a `<textarea>` and would otherwise pass
-   for a text field. The **native** client has no collision to resolve — its chords are ⌘,
-   the shell's are ⌃ — and AppKit key equivalents precede the first responder, so the
-   toggle already works from inside SwiftTerm. The Tauri client accepts either modifier, so
-   it swallows both; making its modifier follow the platform (⌘ on macOS, `Ctrl` elsewhere)
-   would narrow that to the keys the shell actually wants, and is filed in ROADMAP with the
-   chords it affects.
+   normal mode. **The toggle is ⌃`** in both clients — VS Code's binding, and deliberately
+   not ⌘`, which macOS owns for cycling an app's windows — **and it is never gated on
+   focus.** Nobody types `Ctrl` + `` ` `` into a commit message, and the terminal is exactly
+   where you go *from* the composer to run the thing you are about to describe, so a focused
+   field is no reason to refuse it. The native client gets that for free (a key equivalent
+   fires ahead of the first responder); the Tauri client has to place the test above its
+   own "a field has focus, leave it alone" bail, where the composer's chords already sit.
+   The collision is Tauri-shaped,
+   because its other chords are `Ctrl`-or-`Cmd` and the shell's modifier is `Ctrl` too:
+   `xterm`'s `attachCustomKeyEventHandler` releases the toggle and swallows the rest, and the
+   window-level handlers re-check each event's origin (`utils/keyboard.ts`) since xterm's
+   input sink is a `<textarea>` and would otherwise pass for a text field. **Those two tests
+   are one rule written twice and have to keep agreeing**: narrow one without the other and
+   the chord stops working from inside the panel, which is the one place it is most wanted.
+   The **native** client has no collision to resolve — its chords are ⌘, the shell's are ⌃ —
+   and AppKit key equivalents precede the first responder, so the toggle already works from
+   inside SwiftTerm. Making the Tauri client's *other* chords follow the platform (⌘ on
+   macOS, `Ctrl` elsewhere) would narrow its capture to the keys the shell actually wants,
+   and is filed in ROADMAP with the chords it affects.
 12. **Relative dates** — commit timestamps arrive as ISO-8601 strings
    (`author_date`/`committer_date`, e.g. `2026-08-12T14:03:11+0200`; the core is
    deliberately chrono-free) and each frontend renders them as relative ("5 minutes
@@ -605,6 +625,26 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    client leans on AppKit's own responder order. The same registration answers "is
    anything on top of the repository view", which the app's own chords check before
    firing — a ⌘↩ that means *commit* must not answer a dialog asking about that commit.
+17. **The terminal's pointer and clipboard follow terminal conventions, not the web's.**
+   A URL in the scrollback opens on **modifier-click** — ⌘ on macOS, `Ctrl` elsewhere — never
+   on a plain one, because a plain click belongs to the selection and dragging across a line
+   that happens to contain a URL must not navigate. What that costs in discoverability is
+   paid back by the affordance rather than by dropping the modifier: hovering a link names
+   the gesture ("Follow link (⌘ + click)"), the way Terminal.app and iTerm do. **OSC 52 is
+   honoured write-only.** A shell, `tmux` or `vim` — including one on the far side of an SSH
+   session, where nothing else can reach the local clipboard — may *set* it; the sequence's
+   read form, which types the clipboard back down the TTY, is swallowed and never answered,
+   because anything that can print to the terminal could otherwise exfiltrate whatever the
+   user last copied. The write goes through the OS, not the WebView's clipboard API, which
+   refuses without a recent click — and a shell asking for the clipboard is not a click.
+18. **The terminal keeps the caret across app activation.** Coming back to the window must
+   put the caret back in the shell if that is where it was, because an emulator painted as
+   focused with nothing behind it drops every keystroke until the user clicks. AppKit
+   restores the first responder for the native client; the Tauri client does it by hand, and
+   reads *whether the terminal holds focus* at the moment the window returns rather than
+   latching a flag on the way out — a flag set from `focusin` is only cleared by another
+   `focusin`, and clicking a plain element raises none, so it strands `true` and the shell
+   takes the caret back from wherever the user actually went.
 
 ## 7. Diff rendering contract
 
