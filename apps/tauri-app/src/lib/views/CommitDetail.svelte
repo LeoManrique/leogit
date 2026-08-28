@@ -33,11 +33,20 @@
       {#if stats && (stats.additions > 0 || stats.deletions > 0)}
         <span class="commit-counts">
           {#if stats.additions > 0}<span class="add-count">+{stats.additions}</span>{/if}
-          {#if stats.deletions > 0}<span class="del-count">-{stats.deletions}</span>{/if}
+          <!-- U+2212, not a hyphen: STYLE.md's minus, and the character the
+               native client already renders on the same figure. -->
+          {#if stats.deletions > 0}<span class="del-count">−{stats.deletions}</span>{/if}
         </span>
       {/if}
     </div>
 
+    <!--
+      The message body exactly as `git log` reports it — trailers included,
+      because `%b` already contains them. The card used to render `commit.body`
+      and then `commit.trailers` underneath, so every Co-Authored-By and
+      Signed-off-by line appeared twice, the second time stripped of the
+      paragraph it belongs to.
+    -->
     {#if commit.body}
       <pre class="body">{commit.body}</pre>
     {/if}
@@ -68,13 +77,6 @@
       {/if}
     </div>
 
-    {#if commit.trailers.length > 0}
-      <div class="trailers">
-        {#each commit.trailers as trailer}
-          <code class="trailer">{trailer}</code>
-        {/each}
-      </div>
-    {/if}
   </div>
 {/if}
 
@@ -200,16 +202,4 @@
     font-variant-numeric: tabular-nums;
   }
 
-  .trailers {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .trailer {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--text-muted);
-    background: transparent;
-  }
 </style>

@@ -43,6 +43,27 @@ struct DiffView: View {
             // header rather than as a short body.
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // Crossing the slow threshold dims what is on screen and lays
+                // a spinner over it; it never unmounts it. Swapping the pane
+                // for a bare `ProgressView` gave SwiftUI a different view to
+                // build, so the `ScrollView` was destroyed and rebuilt at the
+                // top — undoing, in the view, exactly what the store's
+                // equality skip exists to preserve. The content is still the
+                // truth about the file the user is reading; the dim says a
+                // newer answer is on its way.
+                .opacity(isReloadingSlowly ? 0.45 : 1)
+                .animation(.easeOut(duration: 0.12), value: isReloadingSlowly)
+                .overlay(alignment: .top) {
+                    if isReloadingSlowly {
+                        // Near the top rather than centred: the rows
+                        // underneath are what is being read, and the pane can
+                        // be tall enough that its middle is below the fold.
+                        ProgressView()
+                            .controlSize(.small)
+                            .padding(.top, 48)
+                            .allowsHitTesting(false)
+                    }
+                }
         }
         .task(
             id: LoadKey(
@@ -52,6 +73,8 @@ struct DiffView: View {
                 highlight: appConfig.syntaxHighlighting
             )
         ) {
+            // A dirty submodule has no diff worth reading — see `content`.
+            guard !isDirtySubmodule else { return }
             await store.load(
                 repoPath: repoPath,
                 file: file,
@@ -60,6 +83,18 @@ struct DiffView: View {
                 highlight: appConfig.syntaxHighlighting
             )
         }
+    }
+
+    private var isReloadingSlowly: Bool {
+        store.phase == .loading(slow: true)
+    }
+
+    /// A submodule changed *inside* while the commit the parent records has
+    /// not moved. `git diff` answers with a bare `Subproject commit <sha>-dirty`
+    /// line, which is not a diff of anything the user can act on from here —
+    /// so the pane explains instead, and the read is never made.
+    private var isDirtySubmodule: Bool {
+        if case .workingTree = target { file.submoduleDirty } else { false }
     }
 
     private var header: some View {
@@ -94,20 +129,31 @@ struct DiffView: View {
 
     /// Seamless-switching rule (the Tauri/GH-Desktop contract, carried by
     /// `DiffStore.phase`): whatever was last shown — diff rows, the binary or
-    /// empty notice — stays on screen while a reload runs, and the spinner
-    /// appears only once the load outlives the slow threshold. A fast first
-    /// load, with nothing old to keep showing, stays blank rather than
-    /// flashing a sub-threshold spinner.
+    /// empty notice — stays on screen while a reload runs. Nothing here
+    /// branches on the slow threshold; that is a dim and an overlay in `body`,
+    /// laid over whichever of these states is already up. A fast first load,
+    /// with nothing old to keep showing, stays blank rather than flashing a
+    /// sub-threshold spinner.
     @ViewBuilder
     private var content: some View {
-        if case .failed(let message) = store.phase {
+        if isDirtySubmodule {
+            ContentUnavailableView(
+                "Submodule Changes",
+                systemImage: "arrow.turn.down.right",
+                description: Text(
+                    """
+                    This submodule has modified content that hasn't been committed. \
+                    Those changes must be committed inside the submodule before they \
+                    can be part of this repository.
+                    """
+                )
+            )
+        } else if case .failed(let message) = store.phase {
             ContentUnavailableView(
                 "Couldn't Load Diff",
                 systemImage: "exclamationmark.triangle",
                 description: Text(message)
             )
-        } else if store.phase == .loading(slow: true) {
-            ProgressView()
         } else if store.payload?.fileDiff.isBinary == true {
             ContentUnavailableView(
                 "Binary File",

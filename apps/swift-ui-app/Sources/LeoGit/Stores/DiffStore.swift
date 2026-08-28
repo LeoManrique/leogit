@@ -76,8 +76,9 @@ final class DiffStore {
     private var pendingShowAnyway = false
 
     /// Where the current load stands. The view's rule: show content whenever
-    /// `payload != nil`, fall back to the spinner only on `loading(slow: true)`
-    /// — or on a fast first load, where there is nothing old to keep showing.
+    /// `payload != nil`, and on `loading(slow: true)` dim it and lay a spinner
+    /// over it rather than replacing it. A fast first load, with nothing old to
+    /// keep showing, stays blank.
     enum Phase: Equatable {
         case idle
         case loading(slow: Bool)
@@ -86,12 +87,11 @@ final class DiffStore {
 
     private(set) var phase: Phase = .idle
 
-    /// How long a load may run before the pane trades the old diff for a
-    /// spinner — the Tauri client's `SLOW_DIFF_THRESHOLD_MS` (150), itself
-    /// ported from GitHub Desktop. (One deliberate improvement: the Tauri
-    /// client also *drops* the old diff at the threshold, so a slow load that
-    /// lands unchanged repaints from scratch; here the payload is kept, so
-    /// the equality skip still preserves scroll in that case.)
+    /// How long a load may run before the pane says so — the Tauri client's
+    /// `SLOW_DIFF_THRESHOLD_MS` (150), itself ported from GitHub Desktop.
+    /// Crossing it dims the diff on screen; the payload is kept either way, so
+    /// a slow load that lands unchanged is absorbed by the equality skip and
+    /// the user keeps their scroll position.
     static let slowLoadThreshold: Duration = .milliseconds(150)
 
     /// Guards against a superseded load writing over a newer one: the blocking

@@ -47,6 +47,7 @@
   import CommitMessage from '$lib/components/CommitMessage.svelte'
   import CommitList from '$lib/components/CommitList.svelte'
   import DiffViewer from '$lib/components/DiffViewer.svelte'
+  import SeamlessDiffPane from '$lib/components/SeamlessDiffPane.svelte'
   import Terminal from '$lib/components/Terminal.svelte'
   import CommitDetail from '$lib/views/CommitDetail.svelte'
   import BranchDropdown from '$lib/views/BranchDropdown.svelte'
@@ -98,12 +99,16 @@
   let commitDiffLoadingTimer: ReturnType<typeof setTimeout> | null = null
 
   const PAGE_SIZE = 50
-  // Hard cap on the in-memory commit log. The CommitList already virtualizes
-  // the DOM, but the underlying array was growing without bound: scrolling
-  // 5K commits kept all 5K CommitInfo objects in memory and made every
-  // refresh re-fetch them. The window slides forward when the user scrolls
-  // past the bottom and back when they scroll past the top, so they never
-  // lose access to history — the working set just stays bounded.
+  /*
+    How deep a *refresh* re-reads, however far the user has paged. The list
+    itself is append-only from HEAD and grows on demand, but re-fetching
+    thousands of rows every time HEAD moves would make a commit cost a `git log`
+    over the whole history; past this depth the oldest rows are dropped instead
+    and re-grow by scrolling. The bound sits at the far end of the list, away
+    from HEAD, so `commits[0]` is the repository's HEAD by construction — which
+    is the property that makes the rewriting actions' gate unambiguous rather
+    than merely correct today. Native's `historyRefreshCap`; FRONTEND §6.8.
+  */
   const MAX_COMMITS = 500
 
   const SIDEBAR_MIN = 280
@@ -434,10 +439,10 @@
       repoState.update((s) => ({
         ...s,
         log: {
+          ...s.log,
           commits,
           hasMore: commits.length === PAGE_SIZE,
           loaded: true,
-          windowStartOffset: 0,
           resetSeq: s.log.resetSeq + 1,
         },
       }))
@@ -446,41 +451,29 @@
     }
   }
 
-  // Refresh the commit log without losing the user's scroll position. We
-  // re-fetch the current window (`count` starting at `windowStartOffset`),
-  // capped at MAX_COMMITS. If HEAD has moved while the user is scrolled
-  // into the past (commits[0].sha changed for the same offset), reset to
-  // the first page so the new HEAD is visible — a small visual jump is
-  // accurate, while silently keeping the old window would mislead the user.
-  // The reset bumps `resetSeq`: the list must scroll to the new HEAD, not
-  // compensate for a slide that never happened.
+  /*
+    Re-read the log from HEAD, as deep as the user has paged and no deeper than
+    MAX_COMMITS. Called when HEAD has moved — a commit, an undo, a checkout —
+    which is the one thing that can invalidate rows the user is already looking
+    at, and the reason the log is refetched rather than patched (FRONTEND §6.8).
+
+    Re-reading from offset 0 is what keeps `commits[0] === HEAD` true for free.
+    The old model refetched the *window* the user had slid to and then had to
+    detect, after the fact, that its top was no longer HEAD — which it only
+    checked past offset 0, so a new commit made while parked at the top of the
+    list bumped nothing at all. There is no window to slide any more, so there
+    is nothing to get wrong.
+
+    `resetSeq` tells the list to go to row 0: it is the new HEAD, and an offset
+    measured against a list whose top just changed means nothing.
+  */
   async function refreshLog(): Promise<void> {
     const repoPath = $appState.repoPath
     if (!repoPath) return
     const current = get(repoState)
     const count = Math.min(Math.max(current.log.commits.length, PAGE_SIZE), MAX_COMMITS)
-    const skip = current.log.windowStartOffset
     try {
-      const commits = await gitApi.getLog(repoPath, count, skip)
-      const headChanged =
-        skip > 0 &&
-        commits.length > 0 &&
-        current.log.commits.length > 0 &&
-        commits[0]?.sha !== current.log.commits[0]?.sha
-      if (headChanged) {
-        const fresh = await gitApi.getLog(repoPath, PAGE_SIZE, 0)
-        repoState.update((s) => ({
-          ...s,
-          log: {
-            commits: fresh,
-            hasMore: fresh.length === PAGE_SIZE,
-            loaded: true,
-            windowStartOffset: 0,
-            resetSeq: s.log.resetSeq + 1,
-          },
-        }))
-        return
-      }
+      const commits = await gitApi.getLog(repoPath, count, 0)
       repoState.update((s) => ({
         ...s,
         log: {
@@ -488,7 +481,7 @@
           commits,
           hasMore: commits.length === count,
           loaded: true,
-          windowStartOffset: skip,
+          resetSeq: s.log.resetSeq + 1,
         },
       }))
     } catch {}
@@ -510,81 +503,44 @@
     } catch {}
   }
 
+  /*
+    Append the next page of older commits. Nothing is dropped from the front:
+    the list only ever grows away from HEAD, so the row the user is looking at
+    keeps its position and no scroll compensation is needed.
+
+    Deduplicated by sha because the 2 s poll can re-read the log under a page
+    already in flight; without it a commit could land in the list twice and
+    give two rows the same key.
+  */
   async function loadMoreCommits(): Promise<void> {
     const repoPath = $appState.repoPath
     if (!repoPath) return
     const current = get(repoState)
-    if (!current.log.hasMore || current.isLoading) return
+    if (!current.log.hasMore || current.log.isPaging) return
 
-    repoState.update((s) => ({ ...s, isLoading: true }))
+    repoState.update((s) => ({ ...s, log: { ...s.log, isPaging: true } }))
     try {
-      const skip = current.log.windowStartOffset + current.log.commits.length
-      const fetched = await gitApi.getLog(repoPath, PAGE_SIZE, skip)
+      const fetched = await gitApi.getLog(repoPath, PAGE_SIZE, current.log.commits.length)
       repoState.update((s) => {
-        const combined = [...s.log.commits, ...fetched]
-        // Slide the window: drop the oldest entries past MAX_COMMITS and
-        // advance windowStartOffset by the same count. CommitList watches
-        // windowStartOffset and compensates its scrollTop so the user's
-        // visible row stays pinned across the slide.
-        if (combined.length <= MAX_COMMITS) {
-          return {
-            ...s,
-            log: { ...s.log, commits: combined, hasMore: fetched.length === PAGE_SIZE, loaded: true },
-            isLoading: false,
-          }
-        }
-        const drop = combined.length - MAX_COMMITS
+        const known = new Set(s.log.commits.map((c) => c.sha))
         return {
           ...s,
           log: {
             ...s.log,
-            commits: combined.slice(drop),
+            commits: [...s.log.commits, ...fetched.filter((c) => !known.has(c.sha))],
             hasMore: fetched.length === PAGE_SIZE,
             loaded: true,
-            windowStartOffset: s.log.windowStartOffset + drop,
+            isPaging: false,
           },
-          isLoading: false,
         }
       })
     } catch (error) {
-      repoState.update((s) => ({ ...s, isLoading: false }))
-      reportActionError(error)
-    }
-  }
-
-  async function loadEarlierCommits(): Promise<void> {
-    const repoPath = $appState.repoPath
-    if (!repoPath) return
-    const current = get(repoState)
-    if (current.isLoading || current.log.windowStartOffset === 0) return
-
-    repoState.update((s) => ({ ...s, isLoading: true }))
-    try {
-      const want = Math.min(PAGE_SIZE, current.log.windowStartOffset)
-      const skip = current.log.windowStartOffset - want
-      const fetched = await gitApi.getLog(repoPath, want, skip)
-      repoState.update((s) => {
-        if (fetched.length === 0) return { ...s, isLoading: false }
-        const combined = [...fetched, ...s.log.commits]
-        // Mirror of loadMoreCommits: drop from the end if we'd exceed the
-        // cap. Slide-backward never increases hasMore (we know the tail
-        // already had more if it did before).
-        const overflow = Math.max(0, combined.length - MAX_COMMITS)
-        return {
-          ...s,
-          log: {
-            ...s.log,
-            commits: overflow > 0 ? combined.slice(0, combined.length - overflow) : combined,
-            hasMore: s.log.hasMore || overflow > 0,
-            loaded: true,
-            windowStartOffset: skip,
-          },
-          isLoading: false,
-        }
-      })
-    } catch (error) {
-      repoState.update((s) => ({ ...s, isLoading: false }))
-      reportActionError(error)
+      repoState.update((s) => ({ ...s, log: { ...s.log, isPaging: false } }))
+      // Reading further into the past is not an operation the user is blocked
+      // on — the history they already have is still on screen and still
+      // correct. Scrolling again re-asks, so the failure states itself and
+      // gets out of the way instead of taking the window mid-scroll.
+      reportNotice(error)
     }
   }
 
@@ -611,20 +567,29 @@
       diffLoadingTimer = null
     }
 
+    // A submodule that is dirty inside but whose recorded commit hasn't moved
+    // has no diff worth reading: git answers with an opaque
+    // `Subproject commit …-dirty` line, which the pane replaces with an
+    // explanation anyway. Branch here rather than in the template alone, or
+    // every click on such a row spends a `git diff` on output nobody renders.
+    const isDirtySubmodule = file?.submodule_dirty ?? false
+
     // Clearing to null on every switch caused the "Loading diff…" flash
     // even for sub-50 ms fetches. Now we keep the previous diff on screen
     // and only flip isDiffLoadingSlow=true after SLOW_DIFF_THRESHOLD_MS,
-    // at which point the template falls back to the spinner.
+    // at which point the template dims it and overlays the spinner.
     repoState.update((s) => ({
       ...s,
       activeFile: file,
-      isDiffLoading: file !== null,
+      isDiffLoading: file !== null && !isDirtySubmodule,
       isDiffLoadingSlow: false,
-      // Drop the stale diff immediately when the user deselects; only keep
-      // it on screen during an actual transition between two files.
-      activeFileDiff: file === null ? null : s.activeFileDiff,
+      // Drop the stale diff immediately when the user deselects, and when the
+      // new selection is a row that will never produce one; only keep it on
+      // screen during an actual transition between two rendered diffs.
+      activeFileDiff: file === null || isDirtySubmodule ? null : s.activeFileDiff,
+      activeFileDiffError: undefined,
     }))
-    if (!file) return
+    if (!file || isDirtySubmodule) return
 
     const repoPath = $appState.repoPath
     if (!repoPath) return
@@ -632,9 +597,13 @@
     diffLoadingTimer = setTimeout(() => {
       diffLoadingTimer = null
       const s = get(repoState)
-      // Only escalate if the fetch we started is still the active one.
+      // Only escalate if the fetch we started is still the active one. The
+      // payload deliberately stays: crossing the threshold dims what is on
+      // screen, it does not unmount it. Dropping it here meant a slow load that
+      // landed unchanged repainted and re-tokenized the whole pane from
+      // scratch, and cost the user their scroll position on the way.
       if (s.activeFile?.path === file.path && s.isDiffLoading) {
-        repoState.update((st) => ({ ...st, isDiffLoadingSlow: true, activeFileDiff: null }))
+        repoState.update((st) => ({ ...st, isDiffLoadingSlow: true }))
       }
     }, SLOW_DIFF_THRESHOLD_MS)
 
@@ -656,6 +625,7 @@
       repoState.update((s) => ({
         ...s,
         activeFileDiff: parsed,
+        activeFileDiffError: undefined,
         isDiffLoading: false,
         isDiffLoadingSlow: false,
       }))
@@ -665,12 +635,19 @@
         clearTimeout(diffLoadingTimer)
         diffLoadingTimer = null
       }
+      // Inline, in the pane that was going to show it, and with the stale diff
+      // cleared: a failure to read *this* file is not an operation the window
+      // has to stop for, and leaving the previous file's rows standing behind a
+      // modal described one diff while rendering another (FRONTEND §6.3). The
+      // retry is the row itself — the payload is gone, so clicking the file
+      // again re-reads rather than short-circuiting on what is already open.
       repoState.update((s) => ({
         ...s,
+        activeFileDiff: null,
+        activeFileDiffError: String(error),
         isDiffLoading: false,
         isDiffLoadingSlow: false,
       }))
-      reportActionError(error, () => void loadDiffForFile(file, { ...opts, force: true }))
     }
   }
 
@@ -697,6 +674,12 @@
   }
 
   async function loadCommitFiles(commit: CommitInfo | null): Promise<void> {
+    // Re-selecting the commit already open blanked the pane and refetched
+    // everything it was showing, for a row the user clicked because it was
+    // already the one they wanted. A commit's identity *is* its sha — its
+    // files and totals cannot change without the sha changing — so there is
+    // nothing a second read could return.
+    if (commit && get(repoState).activeCommit?.sha === commit.sha) return
     repoState.update((s) => ({
       ...s,
       activeCommit: commit,
@@ -751,6 +734,7 @@
       isCommitDiffLoading: file !== null,
       isCommitDiffLoadingSlow: false,
       activeCommitFileDiff: file === null ? null : s.activeCommitFileDiff,
+      activeCommitFileDiffError: undefined,
     }))
     if (!file) return
 
@@ -764,12 +748,9 @@
     commitDiffLoadingTimer = setTimeout(() => {
       commitDiffLoadingTimer = null
       const s = get(repoState)
+      // Same rule as the changes pane above: dim, don't unmount.
       if (s.activeCommitFile?.path === file.path && s.isCommitDiffLoading) {
-        repoState.update((st) => ({
-          ...st,
-          isCommitDiffLoadingSlow: true,
-          activeCommitFileDiff: null,
-        }))
+        repoState.update((st) => ({ ...st, isCommitDiffLoadingSlow: true }))
       }
     }, SLOW_DIFF_THRESHOLD_MS)
 
@@ -786,6 +767,7 @@
       repoState.update((s) => ({
         ...s,
         activeCommitFileDiff: parsed,
+        activeCommitFileDiffError: undefined,
         isCommitDiffLoading: false,
         isCommitDiffLoadingSlow: false,
       }))
@@ -795,12 +777,14 @@
         clearTimeout(commitDiffLoadingTimer)
         commitDiffLoadingTimer = null
       }
+      // Inline and cleared, exactly as the changes pane above.
       repoState.update((s) => ({
         ...s,
+        activeCommitFileDiff: null,
+        activeCommitFileDiffError: String(error),
         isCommitDiffLoading: false,
         isCommitDiffLoadingSlow: false,
       }))
-      reportActionError(error, () => void loadCommitFileDiff(file, { ...opts, force: true }))
     }
   }
 
@@ -956,6 +940,36 @@
       if (current.activeFile) return
       const first = current.status.files[0]
       if (first) void loadDiffForFile(first)
+    })
+  })
+
+  /*
+    The History tab's half of the same rule, and native's exact two conditions:
+    keep the newest commit selected on arrival, and re-seat when a refresh drops
+    the selected sha — which is what an amend or an undo does to it. Landing on
+    "Select a commit" beside a list of commits is the same wasted click the
+    changes pane used to ask for, and rendering the detail of a commit that has
+    been rewritten away is worse than empty: it is wrong.
+
+    Keyed on the *sha list*, and only while History is the visible tab — the
+    pane stays mounted behind Changes, and selecting into it there would spend a
+    `git log` and a diff read on a pane nobody is looking at. The leading `#`
+    keeps "History is showing an empty log" (clear the selection) distinct from
+    "History isn't showing" (do nothing), which a bare empty string cannot.
+  */
+  const historySelectionKey = $derived(
+    $repoState.activeTab === 'history' && $repoState.log.loaded
+      ? `#${$repoState.log.commits.map((c) => c.sha).join('\n')}`
+      : '',
+  )
+  $effect(() => {
+    const key = historySelectionKey
+    untrack(() => {
+      if (!key) return
+      const current = get(repoState)
+      const selected = current.activeCommit?.sha
+      if (selected && current.log.commits.some((c) => c.sha === selected)) return
+      void loadCommitFiles(current.log.commits[0] ?? null)
     })
   })
 
@@ -1651,12 +1665,10 @@
             unpushedShas={$repoState.status.unpushedShas}
             hasResolvedUpstream={$repoState.status.upstream !== ''}
             headSha={$repoState.status.headSha}
-            windowStartOffset={$repoState.log.windowStartOffset}
             resetSeq={$repoState.log.resetSeq}
             loaded={$repoState.log.loaded}
             onSelect={loadCommitFiles}
             onLoadMore={loadMoreCommits}
-            onLoadEarlier={loadEarlierCommits}
             onAmendCommit={handleStartAmending}
             onUndoCommit={handleUndoCommit}
             onCheckoutCommit={handleCheckoutCommit}
@@ -1729,62 +1741,71 @@
 
     <div class="content-area">
       {#if $repoState.activeTab === 'changes'}
-        {#if $repoState.isDiffLoadingSlow}
-          <div class="diff-empty">Loading diff…</div>
-        {:else if $repoState.activeFile?.submodule_dirty}
-          <div class="diff-empty submodule-changes">
-            <p class="submodule-title">Submodule changes</p>
-            <p class="muted">
-              This submodule has modified content that hasn't been committed. Those changes
-              must be committed inside the submodule before they can be part of this
-              repository.
-            </p>
-          </div>
-        {:else if hasRenderableDiff($repoState.activeFileDiff)}
-          <DiffViewer
-            diff={$repoState.activeFileDiff!}
-            selection={null}
-            blobSource={{ kind: 'workingTree', repoPath: $appState.repoPath }}
-            showSelection={false}
-            syntaxHighlighting={$config?.syntax_highlighting ?? true}
-            sideBySide={$config?.side_by_side_diff ?? false}
-            tabSize={$config?.tab_size ?? 4}
-          />
-        {:else if $repoState.activeFileDiff?.size_guard}
-          <!-- Withheld rather than empty: rendering it would be slow, so the
-               pane explains and offers it instead of hanging on it. -->
-          <div class="diff-empty">
-            <p>Large diff</p>
-            <p class="muted">{sizeGuardCopy($repoState.activeFileDiff.size_guard!)}</p>
-            <button class="show-anyway" onclick={() => showActiveDiffAnyway()}>
-              Show diff anyway
-            </button>
-          </div>
-        {:else if $repoState.activeFile}
-          <!--
-            A file IS selected but there is nothing to render. Core says which
-            of the three unrelated reasons it is; falling through to the
-            no-selection copy below told the user to select the file they had
-            already selected. Stays blank while the fetch is in flight so a
-            sub-threshold load doesn't flash this state on its way to the diff.
-          -->
-          <div class="diff-empty">
-            {#if !$repoState.isDiffLoading}
-              {@const copy = emptyDiffCopy($repoState.activeFileDiff)}
-              <p>{copy.title}</p>
-              <p class="muted">{copy.detail}</p>
-            {/if}
-          </div>
-        {:else}
-          <div class="diff-empty">
-            {#if $repoState.status.files.length === 0}
-              <p>No changes</p>
-              <p class="muted">Working tree is clean</p>
-            {:else}
-              <p>Select a file to view its diff</p>
-            {/if}
-          </div>
-        {/if}
+        <SeamlessDiffPane stale={$repoState.isDiffLoadingSlow}>
+          {#if $repoState.activeFileDiffError}
+            <!-- The read failed. Inline, where the diff would have been, and
+                 with the stale payload already cleared by the loader — a
+                 modal over the previous file's rows described one diff while
+                 rendering another. Clicking the row again re-reads. -->
+            <div class="diff-empty">
+              <p>Couldn't load diff</p>
+              <p class="muted detail">{$repoState.activeFileDiffError}</p>
+            </div>
+          {:else if $repoState.activeFile?.submodule_dirty}
+            <div class="diff-empty submodule-changes">
+              <p class="submodule-title">Submodule changes</p>
+              <p class="muted">
+                This submodule has modified content that hasn't been committed. Those changes
+                must be committed inside the submodule before they can be part of this
+                repository.
+              </p>
+            </div>
+          {:else if hasRenderableDiff($repoState.activeFileDiff)}
+            <DiffViewer
+              diff={$repoState.activeFileDiff!}
+              selection={null}
+              blobSource={{ kind: 'workingTree', repoPath: $appState.repoPath }}
+              showSelection={false}
+              syntaxHighlighting={$config?.syntax_highlighting ?? true}
+              sideBySide={$config?.side_by_side_diff ?? false}
+              tabSize={$config?.tab_size ?? 4}
+            />
+          {:else if $repoState.activeFileDiff?.size_guard}
+            <!-- Withheld rather than empty: rendering it would be slow, so the
+                 pane explains and offers it instead of hanging on it. -->
+            <div class="diff-empty">
+              <p>Large diff</p>
+              <p class="muted">{sizeGuardCopy($repoState.activeFileDiff.size_guard!)}</p>
+              <button class="show-anyway" onclick={() => showActiveDiffAnyway()}>
+                Show diff anyway
+              </button>
+            </div>
+          {:else if $repoState.activeFile}
+            <!--
+              A file IS selected but there is nothing to render. Core says which
+              of the three unrelated reasons it is; falling through to the
+              no-selection copy below told the user to select the file they had
+              already selected. Stays blank while the fetch is in flight so a
+              sub-threshold load doesn't flash this state on its way to the diff.
+            -->
+            <div class="diff-empty">
+              {#if !$repoState.isDiffLoading}
+                {@const copy = emptyDiffCopy($repoState.activeFileDiff)}
+                <p>{copy.title}</p>
+                <p class="muted">{copy.detail}</p>
+              {/if}
+            </div>
+          {:else}
+            <div class="diff-empty">
+              {#if $repoState.status.files.length === 0}
+                <p>No changes</p>
+                <p class="muted">Working tree is clean</p>
+              {:else}
+                <p>Select a file to view its diff</p>
+              {/if}
+            </div>
+          {/if}
+        </SeamlessDiffPane>
       {:else if $repoState.activeCommit}
         <CommitDetail
           commit={$repoState.activeCommit}
@@ -1813,52 +1834,66 @@
             aria-valuemax={COMMIT_FILES_MAX}
           ></div>
           <div class="commit-diff-pane">
-            {#if $repoState.isCommitDiffLoadingSlow}
-              <div class="diff-empty">Loading diff…</div>
-            {:else if hasRenderableDiff($repoState.activeCommitFileDiff)}
-              <DiffViewer
-                diff={$repoState.activeCommitFileDiff!}
-                selection={null}
-                blobSource={$repoState.activeCommit
-                  ? {
-                      kind: 'commit',
-                      repoPath: $appState.repoPath,
-                      sha: $repoState.activeCommit.sha,
-                    }
-                  : null}
-                showSelection={false}
-                syntaxHighlighting={$config?.syntax_highlighting ?? true}
-                sideBySide={$config?.side_by_side_diff ?? false}
-                tabSize={$config?.tab_size ?? 4}
-              />
-            {:else if $repoState.activeCommitFileDiff?.size_guard}
-              <div class="diff-empty">
-                <p>Large diff</p>
-                <p class="muted">{sizeGuardCopy($repoState.activeCommitFileDiff.size_guard!)}</p>
-                <button class="show-anyway" onclick={() => showActiveCommitDiffAnyway()}>
-                  Show diff anyway
-                </button>
-              </div>
-            {:else if $repoState.activeCommitFile}
-              <!-- Same split as the changes pane above: selected, but nothing
-                   to render, and core names which reason. -->
-              <div class="diff-empty">
-                {#if !$repoState.isCommitDiffLoading}
-                  {@const copy = emptyDiffCopy($repoState.activeCommitFileDiff)}
-                  <p>{copy.title}</p>
-                  <p class="muted">{copy.detail}</p>
-                {/if}
-              </div>
-            {:else}
-              <div class="diff-empty">
-                <p>Select a file to view its diff</p>
-              </div>
-            {/if}
+            <SeamlessDiffPane stale={$repoState.isCommitDiffLoadingSlow}>
+              {#if $repoState.activeCommitFileDiffError}
+                <div class="diff-empty">
+                  <p>Couldn't load diff</p>
+                  <p class="muted detail">{$repoState.activeCommitFileDiffError}</p>
+                </div>
+              {:else if hasRenderableDiff($repoState.activeCommitFileDiff)}
+                <DiffViewer
+                  diff={$repoState.activeCommitFileDiff!}
+                  selection={null}
+                  blobSource={$repoState.activeCommit
+                    ? {
+                        kind: 'commit',
+                        repoPath: $appState.repoPath,
+                        sha: $repoState.activeCommit.sha,
+                      }
+                    : null}
+                  showSelection={false}
+                  syntaxHighlighting={$config?.syntax_highlighting ?? true}
+                  sideBySide={$config?.side_by_side_diff ?? false}
+                  tabSize={$config?.tab_size ?? 4}
+                />
+              {:else if $repoState.activeCommitFileDiff?.size_guard}
+                <div class="diff-empty">
+                  <p>Large diff</p>
+                  <p class="muted">{sizeGuardCopy($repoState.activeCommitFileDiff.size_guard!)}</p>
+                  <button class="show-anyway" onclick={() => showActiveCommitDiffAnyway()}>
+                    Show diff anyway
+                  </button>
+                </div>
+              {:else if $repoState.activeCommitFile}
+                <!-- Same split as the changes pane above: selected, but nothing
+                     to render, and core names which reason. -->
+                <div class="diff-empty">
+                  {#if !$repoState.isCommitDiffLoading}
+                    {@const copy = emptyDiffCopy($repoState.activeCommitFileDiff)}
+                    <p>{copy.title}</p>
+                    <p class="muted">{copy.detail}</p>
+                  {/if}
+                </div>
+              {:else}
+                <div class="diff-empty">
+                  <p>Select a file to view its diff</p>
+                </div>
+              {/if}
+            </SeamlessDiffPane>
           </div>
+        </div>
+      {:else if $repoState.log.loaded && $repoState.log.commits.length === 0}
+        <!-- A repository with no history at all. Inviting the user to select a
+             commit from a list that has none is an instruction they cannot
+             follow; the list beside this pane already says "No commits yet". -->
+        <div class="diff-empty">
+          <p>No commits</p>
+          <p class="muted">This repository has no commit history yet.</p>
         </div>
       {:else}
         <div class="diff-empty">
-          <p>Select a commit to view its changes</p>
+          <p>No commit selected</p>
+          <p class="muted">Select a commit to see its changes.</p>
         </div>
       {/if}
     </div>
@@ -2293,6 +2328,23 @@
     max-width: 420px;
     text-align: center;
     line-height: 1.5;
+  }
+
+  /* Git's own words under a failed load. Mono and selectable because it is
+     data, not prose — the same treatment the error modal gives it, since this
+     pane is now where a diff failure is reported. */
+  .diff-empty .detail {
+    max-width: 520px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-align: left;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    user-select: text;
   }
 
   /* Submodule whose inner working tree is dirty but pointer hasn't moved: the

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte'
   import type { CommitInfo } from '$lib/api/commands'
   import ContextMenu, { type ContextMenuItem } from './ContextMenu.svelte'
 
@@ -24,19 +25,10 @@
      */
     headSha?: string
     /**
-     * Absolute index (0 = HEAD) of `commits[0]` in the full repo log. The
-     * parent slides this window forward/backward as the user scrolls past
-     * the cap. When it changes between renders, we compensate `scrollTop`
-     * by the same pixel amount so the visible row stays pinned across the
-     * slide (otherwise the user's cursor would jump up/down by N rows).
-     */
-    windowStartOffset?: number
-    /**
-     * Bumped by the parent when it *replaces* the window with a fresh page-1
-     * load instead of sliding it (HEAD moved, or a different repo). A
-     * replacement is not a slide: compensating for it scrolls to the bottom
-     * of the new page, which then immediately pages again. We scroll to the
-     * new HEAD instead.
+     * Bumped by the parent when it re-reads the list from HEAD (HEAD moved, a
+     * different repo, the first load) instead of appending a page. Row 0 is
+     * then a commit the user has not seen, and their scroll offset was
+     * measured against a list whose top has changed — so we go to the top.
      */
     resetSeq?: number
     /**
@@ -48,7 +40,6 @@
     loaded?: boolean
     onSelect: (commit: CommitInfo) => void
     onLoadMore: () => void
-    onLoadEarlier?: () => void
     onAmendCommit?: (commit: CommitInfo) => void
     onUndoCommit?: (commit: CommitInfo) => void
     onCheckoutCommit?: (commit: CommitInfo) => void
@@ -60,12 +51,10 @@
     unpushedShas = new Set<string>(),
     hasResolvedUpstream = false,
     headSha = '',
-    windowStartOffset = 0,
     resetSeq = 0,
     loaded = true,
     onSelect,
     onLoadMore,
-    onLoadEarlier,
     onAmendCommit,
     onUndoCommit,
     onCheckoutCommit,
@@ -73,9 +62,17 @@
 
   let contextMenu = $state<{ x: number; y: number; commit: CommitInfo } | null>(null)
 
+  /**
+   * Right-click selects the row it opens on, so the menu and the detail pane
+   * below can never describe two different commits. Native gets this from
+   * `contextMenu(forSelectionType:)` and this client's own file list already
+   * did it by hand; only here did the menu act on a commit the pane wasn't
+   * showing.
+   */
   function openContextMenu(e: MouseEvent, commit: CommitInfo) {
     e.preventDefault()
     e.stopPropagation()
+    if (commit.sha !== selectedSha) onSelect(commit)
     contextMenu = { x: e.clientX, y: e.clientY, commit }
   }
 
@@ -111,7 +108,11 @@
             },
           },
           {
-            label: 'Undo last commit…',
+            // No ellipsis: undo runs immediately, and nothing is lost that the
+            // composer and the working tree don't now hold. The ellipsis its
+            // neighbours carry is a promise of a dialog, and this one never
+            // had a dialog to open.
+            label: 'Undo last commit',
             // HEAD only, and only when we believe it's still local — either we
             // can prove it's unpushed, or we couldn't resolve an upstream at
             // all (so we can't prove it's pushed either).
@@ -124,7 +125,9 @@
             },
           },
           {
-            label: 'Checkout commit',
+            // The other half of the same rule: this one *does* confirm first,
+            // so it says so.
+            label: 'Checkout commit…',
             // Any commit except the current HEAD — checking out HEAD is a
             // no-op. Lands the user in a detached HEAD, matching GitHub Desktop.
             enabled: isPastCommit && onCheckoutCommit !== undefined,
@@ -167,13 +170,40 @@
     if (scrollDist < LOAD_MORE_OFFSET) {
       onLoadMore()
     }
-    // Slide-backward: trigger when the user scrolls toward the top AND we
-    // know there's earlier history out of the window (windowStartOffset>0).
-    // Without the offset guard we'd spam onLoadEarlier on every fresh log
-    // load where scrollTop is naturally 0.
-    if (target.scrollTop < LOAD_MORE_OFFSET && windowStartOffset > 0) {
-      onLoadEarlier?.()
+  }
+
+  /**
+   * Move keyboard focus and the selection to another row, scrolling it into
+   * view first so a virtualized row that isn't mounted yet exists by the time
+   * we reach for it. The file list's `focusRowAt`, which is where the pattern
+   * and its `tick()` ordering are explained — this was the one list in the app
+   * an arrow key did nothing in, so a keyboard user had to tab through every
+   * commit to reach the next one.
+   */
+  async function focusRowAt(index: number) {
+    const clamped = Math.max(0, Math.min(commits.length - 1, index))
+    const next = commits[clamped]
+    if (!next) return
+    onSelect(next)
+
+    if (scrollContainer) {
+      const top = clamped * ROW_HEIGHT
+      const bottom = top + ROW_HEIGHT
+      const vh = scrollContainer.clientHeight
+      let newScroll = scrollContainer.scrollTop
+      if (top < newScroll) newScroll = top
+      else if (bottom > newScroll + vh) newScroll = bottom - vh
+      if (newScroll !== scrollContainer.scrollTop) {
+        scrollContainer.scrollTop = newScroll
+        // Synchronously, so the derived visible range updates before tick().
+        scrollTop = newScroll
+      }
     }
+
+    await tick()
+    scrollContainer
+      ?.querySelector<HTMLDivElement>(`[data-commit-row-index="${clamped}"]`)
+      ?.focus({ preventScroll: true })
   }
 
   function getVisibleRange() {
@@ -228,8 +258,23 @@
     })
   }
 
-  function handleRowKeyDown(e: KeyboardEvent, commit: CommitInfo) {
-    if (e.key === 'Enter' || e.key === ' ') {
+  function handleRowKeyDown(e: KeyboardEvent, commit: CommitInfo, index: number) {
+    // Home/End first — on macOS those arrive as Cmd+ArrowUp / Cmd+ArrowDown,
+    // so they have to beat the plain Arrow branches below.
+    if (e.key === 'Home' || (e.key === 'ArrowUp' && e.metaKey)) {
+      e.preventDefault()
+      focusRowAt(0)
+    } else if (e.key === 'End' || (e.key === 'ArrowDown' && e.metaKey)) {
+      e.preventDefault()
+      focusRowAt(commits.length - 1)
+    } else if (e.key === 'ArrowDown') {
+      // The container would scroll otherwise; move the selection instead.
+      e.preventDefault()
+      focusRowAt(index + 1)
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      focusRowAt(index - 1)
+    } else if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault()
       onSelect(commit)
     }
@@ -276,50 +321,27 @@
   const offsetPx = $derived(startIndex * ROW_HEIGHT)
 
   /*
-    Keep the viewport where the user left it as the parent moves the window.
+    Go to the top when the parent re-reads the list from HEAD.
 
-    Two different moves arrive on the same props, and treating them alike is
-    what made a HEAD move scroll the list to its bottom:
+    Paging needs no counterpart: rows are only ever appended past the ones on
+    screen, so every visible row keeps its position and the viewport is already
+    where the user left it. A re-read is the only move that changes what row 0
+    *is* — and row 0 is then the commit they just made, checked out or undid,
+    which is what they should be looking at.
 
-    - A *slide* (drop from one end, append to the other) shifts every
-      remaining commit `N` rows within the array. We subtract
-      `N * ROW_HEIGHT` from scrollTop so the user's visible row stays
-      anchored. Slide-backward is symmetric.
-    - A *replacement* — a fresh page 1 after HEAD moved, or a different
-      repository — is not a shift of the same rows, so there is nothing to
-      compensate. `resetSeq` marks it. Row 0 is now the new HEAD, which is
-      exactly what the user should be looking at, so we go to the top.
-      Compensating instead sent scrollTop *down* by the whole old offset,
-      landing at the end of the fresh page and firing another page load.
-
-    Reading the props inside the effect makes them the dependencies; the
-    previous values live in $state so the diff is observable across runs
-    without infinite-looping.
+    Reading `resetSeq` inside the effect makes it the dependency; the previous
+    value lives in $state so the change is observable across runs without
+    looping.
   */
-  let lastWindowStart = $state<number | null>(null)
   let lastResetSeq = $state<number | null>(null)
   $effect(() => {
-    const offset = windowStartOffset
     const seq = resetSeq
-    if (lastWindowStart === null) {
-      lastWindowStart = offset
-      lastResetSeq = seq
-      return
-    }
-    if (seq !== lastResetSeq) {
-      lastResetSeq = seq
-      lastWindowStart = offset
-      if (scrollContainer) {
-        scrollContainer.scrollTop = 0
-        scrollTop = 0
-      }
-      return
-    }
-    const delta = offset - lastWindowStart
-    if (delta === 0 || !scrollContainer) return
-    scrollContainer.scrollTop -= delta * ROW_HEIGHT
-    scrollTop = scrollContainer.scrollTop
-    lastWindowStart = offset
+    if (lastResetSeq === seq) return
+    const first = lastResetSeq === null
+    lastResetSeq = seq
+    if (first || !scrollContainer) return
+    scrollContainer.scrollTop = 0
+    scrollTop = 0
   })
 </script>
 
@@ -331,16 +353,18 @@
   {/if}
   <div class="virtual-scroll" style="height: {commits.length * ROW_HEIGHT}px">
     <div class="visible-items" style="transform: translateY({offsetPx}px)">
-      {#each visibleCommits as commit (commit.sha)}
+      {#each visibleCommits as commit, i (commit.sha)}
+        {@const rowIndex = startIndex + i}
         {@const tags = commit.tags}
         {@const isUnpushed = unpushedShas.has(commit.sha)}
         <div
           class="commit-row"
           class:selected={commit.sha === selectedSha}
+          data-commit-row-index={rowIndex}
           title={formatDateFull(commit.author_date)}
           onclick={() => onSelect(commit)}
           oncontextmenu={(e) => openContextMenu(e, commit)}
-          onkeydown={(e) => handleRowKeyDown(e, commit)}
+          onkeydown={(e) => handleRowKeyDown(e, commit, rowIndex)}
           role="button"
           tabindex="0"
         >

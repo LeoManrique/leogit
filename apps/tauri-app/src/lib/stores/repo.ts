@@ -39,22 +39,28 @@ export interface RepoStatus {
 export interface RepoState {
   status: RepoStatus
   statusLoaded: boolean
+  /**
+   * The commit log, as an **append-only list rooted at HEAD**: `commits[0]` is
+   * the repository's HEAD, always, and paging only ever adds older rows to the
+   * end. Nothing is ever dropped from the front, which is what makes the
+   * rewriting actions safe to reason about — see `CommitList.headSha`.
+   */
   log: {
     commits: CommitInfo[]
     hasMore: boolean
     loaded: boolean
     /**
-     * Absolute commit index (0 = HEAD) of `commits[0]`. The on-screen array
-     * is capped at MAX_COMMITS and slides forward / backward as the user
-     * scrolls, so the absolute position is tracked separately from the array.
+     * A page fetch is in flight. Deliberately its own flag rather than a
+     * repo-wide one: paging History used to disable the Commit button on the
+     * other tab, which has nothing to do with reading older commits.
      */
-    windowStartOffset: number
+    isPaging: boolean
     /**
-     * Bumped whenever the window is *replaced* by a fresh page-1 load (HEAD
-     * moved, a different repo, the first load) rather than slid by one page.
-     * `CommitList` compensates `scrollTop` for a slide; a replacement is not
-     * a slide, so it has to be told apart — compensating for one scrolls the
-     * user to the bottom of the new page and immediately pages again.
+     * Bumped whenever the list is re-read from HEAD (HEAD moved, a different
+     * repo, the first load) rather than extended by a page. `CommitList`
+     * answers it by scrolling to row 0 — the new HEAD is what the user should
+     * be looking at, and their old offset means nothing against a list whose
+     * top just changed.
      */
     resetSeq: number
   }
@@ -64,6 +70,14 @@ export interface RepoState {
   diffSelection: Map<string, DiffSelection>
   activeFile: FileEntry | null
   activeFileDiff: ParsedDiff | null
+  /**
+   * Why the open file has no diff on screen. A diff that failed to load is not
+   * a diff that is empty, and it is not an operation the user is waiting on
+   * either — it belongs in the pane that was going to show it, not in the
+   * window-taking modal (FRONTEND §6.3). Set only alongside a cleared payload:
+   * a stale diff must never stand behind an error describing a newer one.
+   */
+  activeFileDiffError?: string
   isDiffLoading: boolean
   /**
    * Flips true once a diff fetch has been pending for ≥150 ms. The viewer keeps
@@ -79,9 +93,10 @@ export interface RepoState {
   activeCommitStats: CommitStats | null
   activeCommitFile: FileEntry | null
   activeCommitFileDiff: ParsedDiff | null
+  /** The commit pane's half of {@link RepoState.activeFileDiffError}. */
+  activeCommitFileDiffError?: string
   isCommitDiffLoading: boolean
   isCommitDiffLoadingSlow: boolean
-  isLoading: boolean
   commitToAmend: CommitInfo | null
   /**
    * One-shot seed for the commit composer after an Undo Commit. The composer
@@ -140,7 +155,7 @@ const defaultState: RepoState = {
     commits: [],
     hasMore: true,
     loaded: false,
-    windowStartOffset: 0,
+    isPaging: false,
     resetSeq: 0,
   },
   branches: [],
@@ -159,7 +174,6 @@ const defaultState: RepoState = {
   activeCommitFileDiff: null,
   isCommitDiffLoading: false,
   isCommitDiffLoadingSlow: false,
-  isLoading: false,
   commitToAmend: null,
   restoreMessage: null,
 }
@@ -172,10 +186,10 @@ export function resetRepoState() {
     selectedFiles: new Set(),
     userDeselected: new Set(),
     diffSelection: new Map(),
-    // A repo switch replaces the commit window like any other replacement, so
-    // the counter keeps going up rather than restarting at 0 — `CommitList`
-    // reads *a change* in it, and 0-after-0 would read as no change and leave
-    // it compensating a slide that never happened.
+    // A repo switch re-reads the list from HEAD like any other reset, so the
+    // counter keeps going up rather than restarting at 0 — `CommitList` reads
+    // *a change* in it, and 0-after-0 would read as no change and leave the
+    // new repository's history scrolled to the old one's offset.
     log: { ...defaultState.log, resetSeq: s.log.resetSeq + 1 },
   }))
 }
@@ -215,7 +229,7 @@ export function dismissNotice() {
 }
 
 export const canCommit = derived(repoState, ($state) => {
-  return $state.selectedFiles.size > 0 && !$state.isLoading
+  return $state.selectedFiles.size > 0
 })
 
 export const hasMergeConflicts = derived(repoState, ($state) => {

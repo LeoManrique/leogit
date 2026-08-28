@@ -127,7 +127,10 @@
 
   function linePrefix(line: DiffLine): string {
     if (line.line_type === 'Add') return '+'
-    if (line.line_type === 'Delete') return '-'
+    // U+2212 MINUS SIGN, not a hyphen — STYLE.md's glyph for a removed line,
+    // and what the native pane renders. It sits at the `+`'s optical weight
+    // and width, which a hyphen does not.
+    if (line.line_type === 'Delete') return '−'
     // No prefix for `\ No newline at end of file`: core keeps that marker's
     // own leading backslash in `content`, so adding one renders it twice.
     if (line.line_type === 'Hunk') return '@'
@@ -206,7 +209,7 @@
       {#if diff && (diff.additions > 0 || diff.deletions > 0)}
         <span class="line-counts">
           {#if diff.additions > 0}<span class="add-count">+{diff.additions}</span>{/if}
-          {#if diff.deletions > 0}<span class="del-count">-{diff.deletions}</span>{/if}
+          {#if diff.deletions > 0}<span class="del-count">−{diff.deletions}</span>{/if}
         </span>
       {/if}
     </div>
@@ -256,16 +259,30 @@
       <div class="diff-body" bind:this={scrollContainer}>
         {#each rows as row (row.key)}
           {#if row.kind === 'header'}
-            <div
-              class="hunk-header"
-              onclick={(e) => { if (e.shiftKey) onHunkToggle(row.hunkIdx) }}
-              onkeydown={(e) => { if ((e.key === 'Enter' || e.key === ' ') && e.shiftKey) { e.preventDefault(); onHunkToggle(row.hunkIdx) } }}
-              role="button"
-              tabindex="0"
-            >
-              <span class="hunk-text">{row.line.text ?? row.line.content}</span>
-              {#if showSelection}<span class="hunk-hint">Shift+click for hunk</span>{/if}
-            </div>
+            <!--
+              Two headers, not one with conditional attributes: while per-line
+              staging is unwired, `showSelection` is false everywhere and the
+              interactive form costs real usability — a focusable no-op button
+              per hunk, one tab stop each on an unvirtualized list, whose text
+              could not be selected because a control does not select. The
+              scaffolding stays for when staging is finished; its cost does not.
+            -->
+            {#if showSelection}
+              <div
+                class="hunk-header interactive"
+                onclick={(e) => { if (e.shiftKey) onHunkToggle(row.hunkIdx) }}
+                onkeydown={(e) => { if ((e.key === 'Enter' || e.key === ' ') && e.shiftKey) { e.preventDefault(); onHunkToggle(row.hunkIdx) } }}
+                role="button"
+                tabindex="0"
+              >
+                <span class="hunk-text">{row.line.text ?? row.line.content}</span>
+                <span class="hunk-hint">Shift+click for hunk</span>
+              </div>
+            {:else}
+              <div class="hunk-header">
+                <span class="hunk-text">{row.line.text ?? row.line.content}</span>
+              </div>
+            {/if}
           {:else}
             <div class="diff-line {lineTypeClass(row.line.line_type)}">
               <span class="line-number old">{row.line.old_line_no ?? ''}</span>
@@ -390,6 +407,11 @@
     color: var(--text-muted);
     border-top: 1px solid var(--border-inactive);
     border-bottom: 1px solid var(--border-inactive);
+  }
+
+  /* Only the staging form is a control; the plain band is text you can select
+     like the rest of the diff. */
+  .hunk-header.interactive {
     cursor: pointer;
     user-select: none;
   }
@@ -439,6 +461,13 @@
     border-right: 1px solid var(--border-inactive);
   }
 
+  /*
+    Out of the selection along with the gutter: dragging across a diff should
+    put the file's own lines on the clipboard, not `+`/`−` glyphs the viewer
+    added. (The whole-model copy that also fixes side-by-side interleaving is
+    core's `copy_diff_text`, waiting on a Copy action to call it; this is the
+    half that costs nothing and helps every ordinary drag-select today.)
+  */
   .line-prefix {
     display: inline-flex;
     align-items: center;
@@ -447,6 +476,7 @@
     padding: 0 4px;
     flex-shrink: 0;
     font-weight: 500;
+    user-select: none;
   }
 
   .diff-add .line-prefix,

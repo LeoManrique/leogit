@@ -158,8 +158,15 @@ fresh parse equals what's shown (`DiffPayload: Equatable`), so rows, scroll posi
 tokens survive an epoch bump untouched; tokens still refresh in the background on an equal
 payload — context lines can recolour when blob content changed without the diff text changing
 — and swap in only when different. `DiffView`'s content rule mirrors it: last-shown state
-stays during a reload, spinner only on `loading(slow: true)`, and a fast first load stays
-blank rather than flashing a sub-threshold spinner.
+stays during a reload, and a fast first load stays blank rather than flashing a
+sub-threshold spinner. Crossing the threshold is a **modifier on that content, not a
+branch beside it** — `.opacity(0.45)` plus a top-aligned `ProgressView` overlay — because a
+branch swaps the view SwiftUI builds and so destroys the `ScrollView`'s identity: the store
+kept the payload, the view threw the scroll position away anyway, and the equality skip
+above was preserving something nothing could see. `content`'s first branch is the dirty
+submodule, decided before the read: `git diff` answers a submodule that changed inside with
+a bare `Subproject commit <sha>-dirty` line, so the pane explains and the subprocess is
+never spawned (the `.task` guards on the same flag).
 Token `start`/`end` and `IntraLineRange` are code-point indices, which in Swift is the
 `AttributedString.unicodeScalars` view — never `characters`, whose grapheme clusters can span
 several code points.
@@ -179,7 +186,10 @@ Committing crosses as the same two calls the Svelte client makes — `format_com
 then `commit` — and needed no new type mirrors: core's `commit` owns the whole staging story
 (it resets the index and re-stages exactly the files it was handed), so there is no separate
 stage step to expose. Neither client uses `diff::generate_patch`/`DiffSelection` yet;
-per-hunk staging is future work for both.
+per-hunk staging is future work for both. Its Svelte scaffolding stays in place but stops
+costing anything while unwired: `DiffViewer` renders the hunk header as a control only when
+`showSelection` is set, so today's band is plain text — selectable like the rest of the diff,
+and no longer one focusable no-op button per hunk on an unvirtualized list.
 
 Branches and merge cross 1:1 as well (`list_branches`, `create_branch`, `switch_branch`,
 `delete_branch`; `merge_branch`, `merge_squash`, `commit_squash_merge`, `merge_abort`,
@@ -529,8 +539,10 @@ functions use `--first-parent`, so a merge commit shows its first-parent changes
 populated file list whose every diff was empty on the repository's first commit — pinned by
 `commit_diff_covers_the_root_commit_regardless_of_show_root`).
 The history list itself pages: `get_log`'s `skip` appends a page whenever the last row
-materialises, and quiet refreshes re-fetch at the scrolled depth capped at 500 (the Tauri
-window's `MAX_COMMITS`), with appends de-duplicated by sha against a poll's concurrent reload.
+materialises, and quiet refreshes re-fetch at the scrolled depth capped at 500 (both clients'
+`MAX_COMMITS` / `historyRefreshCap`), with appends de-duplicated by sha against a poll's
+concurrent reload. Both clients now run that same append-only model — see the Tauri section
+below for what it replaced and why.
 
 **Row context menus** are the per-item actions both lists hang off a right-click. Their seven
 core functions had shipped in the Tauri host for months without a bridge export — `discard_files`,
@@ -555,11 +567,10 @@ re-submitted as a new commit. `commit` then relaxes its empty-file guard, becaus
 fix: `CommitStore` moved from the Changes pane (now `ChangesSidebar`) to `ContentView`, since the tab bar swaps panes by
 rebuilding them — which discarded any in-progress message on every tab switch, and would have
 made amend impossible, as amend is started from the History tab and finished in the Changes tab.
-Which commit is `HEAD` comes from `status.head_sha`, not from the row's index: the Tauri list
-compares against index 0 of its loaded page, so after its sliding window advances, row 0 is no
-longer HEAD yet still offers Amend and Undo. Undo's own gate is ported as-is — offered only when
-the commit is provably unpushed, or when no upstream resolved at all and nothing can prove it was
-pushed either.
+Which commit is `HEAD` comes from `status.head_sha`, not from the row's index, in both clients —
+an index into a loaded page is only HEAD for as long as nothing moves the page's top. Undo's own
+gate is shared too: offered only when the commit is provably unpushed, or when no upstream
+resolved at all and nothing can prove it was pushed either.
 
 The embedded terminal crosses as the bridge's second foreign callback trait:
 `TerminalEventListener { on_output(pid, data), on_closed(pid, exit) }` — `exit` is a
@@ -777,12 +788,14 @@ Every command is registered in [src-tauri/src/main.rs](apps/tauri-app/src-tauri/
 The three core writable Svelte stores, all in [src/lib/stores](apps/tauri-app/src/lib/stores):
 
 - **`appState`** — top-level phase machine (`loading` / `repo-picker` / `main` / `error`), the discovered repo list, the chosen repo path, and whether `gh` is authenticated. `App.svelte` renders `MainLayout` for `main` and, for every other phase, a `.pre-main` column of `<Header>` + the phase's content — so app-level chrome exists in all of them (see *Repo-less phases*).
-- **`repoState`** — everything tied to the currently open repo: status (branch, upstream, ahead/behind, files, isMerging), log pagination, branches, the user's selection sets (`selectedFiles`, `userDeselected`), per-file diff selection (`Map<path, DiffSelection>`), active file/diff, active commit/files/diff, loading flags, a `statusLoaded` flag (default status ≠ loaded status — anything that *skips* work on a status field has to know the difference, since `hasRemote` defaults to false and a switch resets it), and **three failure fields with different owners**, written through `reportActionError` / `reportNotice` in the store rather than by each call site building its own `repoState.update` — the classification is then a choice of function, not a shape copied from the site next door, which is how reveal-in-Finder came to seize the window. `error` (with an optional `errorRetry` bound to the same attempt) is an operation the user was waiting on and goes to the blocking `ErrorModal`; `notice` is an OS hand-off that didn't take and goes to a dismissible strip, dismissible because nothing else can ever disprove it; `pollError` is written only by refreshes the app started itself — set after three consecutive failures, cleared by any successful read, rendered in the same strip without a ✕ because its own recovery retires it. `refreshStatus` takes `{silent, background}` as two separate opts for exactly this: *silent* means "don't write `error`", which a user action's follow-up refresh also wants, while *background* means "this one is mine" and is what feeds the streak. Conflating them let three `index.lock` races behind a commit and two discards accuse a healthy repository of having vanished. Keeping the three apart is what lets a repository that really has gone away say so without a modal the user must dismiss every two seconds.
+- **`repoState`** — everything tied to the currently open repo: status (branch, upstream, ahead/behind, files, isMerging), log pagination, branches, the user's selection sets (`selectedFiles`, `userDeselected`), per-file diff selection (`Map<path, DiffSelection>`), active file/diff, active commit/files/diff, loading flags, a `statusLoaded` flag (default status ≠ loaded status — anything that *skips* work on a status field has to know the difference, since `hasRemote` defaults to false and a switch resets it), and **three failure fields with different owners**, written through `reportActionError` / `reportNotice` in the store rather than by each call site building its own `repoState.update` — the classification is then a choice of function, not a shape copied from the site next door, which is how reveal-in-Finder came to seize the window. `error` (with an optional `errorRetry` bound to the same attempt) is an operation the user was waiting on and goes to the blocking `ErrorModal`; `notice` is an OS hand-off that didn't take and goes to a dismissible strip, dismissible because nothing else can ever disprove it; `pollError` is written only by refreshes the app started itself — set after three consecutive failures, cleared by any successful read, rendered in the same strip without a ✕ because its own recovery retires it. `refreshStatus` takes `{silent, background}` as two separate opts for exactly this: *silent* means "don't write `error`", which a user action's follow-up refresh also wants, while *background* means "this one is mine" and is what feeds the streak. Conflating them let three `index.lock` races behind a commit and two discards accuse a healthy repository of having vanished. Keeping the three apart is what lets a repository that really has gone away say so without a modal the user must dismiss every two seconds. A **fourth** kind never reaches any of them: `activeFileDiffError` / `activeCommitFileDiffError` are per-pane and render inline where the diff would have been, always alongside a cleared payload. A failed read of one file blocks nothing (the rest of the repository is on screen and correct) and is the user's own task (so the strip above the content is the wrong place), which puts it outside §6.13's two classes entirely. Re-selecting the row is the retry, and works because the payload is gone: the loader's "already open" short-circuit tests it.
 - **`config`** — the live Config object. `refreshConfig()` reloads from disk and also calls `applyTheme()` which flips `document.documentElement.dataset.theme`.
 
 Alongside these are smaller purpose-built stores: **`networkOps`** holds the user-initiated network op in flight (`activeNetworkOp` — the poll/auto-fetch/scheduler pause on it and the Push/Pull handlers use it for mutual exclusion) and its live transfer progress (`networkProgress`, fed from `git-progress` events), **`repoIdentifiers`** lazily caches each repo's GitHub identifier (a module-level map that re-publishes on each fetch, so reopening the repo picker is free), **`repoSync`** caches each repo's ahead/behind counts and working-tree `dirty` flag for the picker's pull/push badges and dirty dot (`setRepoSync` records values the active poll already computed; `syncRepo` fetches + recomputes one repo, with per-path in-flight de-duplication; its change-equality guard compares every field, so a new one must be added there too or its transitions get swallowed), and **`reposState`** mirrors the persisted `repos-state.json` document — the `repoSortMode` / `cloneSortMode` / `recentRepos` writables plus thin wrappers over the backend's atomic writers: `patchReposState` → the `patch_state` command (one field-wise read-modify-write under a process-wide lock, so a patch can never clobber another writer's field), `recordRecentRepo` → the `record_recent_repo` command (backend owns the MRU move-to-front/de-dupe/cap and returns the authoritative list, which reseeds the `recentRepos` store), and `hydrateReposState` (startup seed). Both wrappers log-and-swallow failures, so callers never need a rejection path for lost preferences.
 
 `MainLayout.svelte` is the orchestrator: it owns the polling intervals, focus listeners, and most of the cross-cutting handlers (commit, switch branch, merge, etc.). Components stay dumb — they receive props and emit callbacks; they don't read or write the stores directly when avoidable.
+
+Both diff panes — the Changes tab's and the commit detail's — render through **`SeamlessDiffPane`**, a wrapper whose only job is the loading treatment: it dims its children and lays a spinner over them once the load outlives the slow threshold, and never unmounts them. The panes are the same pane twice and the rule had been written twice; the old shape swapped the whole thing for a "Loading diff…" line, discarding the rendered rows, their syntax tokens and the scroll position on every slow load, including the ones that came back identical. The loader stopped nulling the payload at the threshold to match.
 
 ### Selection bookkeeping
 
@@ -800,7 +813,13 @@ This is what keeps polling unobtrusive: a 2 s status refresh never silently re-s
 
 [CommitList.svelte](apps/tauri-app/src/lib/components/CommitList.svelte) virtualizes the same way (50px rows, spacer of `commits.length * 50px`). It measures the viewport height with a **ResizeObserver**, not a one-shot `clientHeight` read: the History pane is `display: none` while the Changes tab is active, so a single measurement at mount can capture 0 and strand the rendered range at `ceil(0 / ROW_HEIGHT) + buffer` ≈ 5 rows. The observer re-measures when the pane gains size, so the full window of commits renders once History is shown.
 
-The list distinguishes two ways the parent can move that window, because they need opposite treatment. A **slide** (page in at one end, drop from the other) shifts the same commits within the array, so `scrollTop` is compensated by `delta × ROW_HEIGHT` and the visible row stays pinned; `windowStartOffset` is the signal. A **replacement** — a fresh page 1 after HEAD moved, the first load, a different repository — shares no rows with what was there, so there is nothing to compensate: `log.resetSeq` marks it and the list scrolls to row 0, which is the new HEAD. Treating the second as the first is a real bug, not a nicety: the reset drives `windowStartOffset` from N to 0, compensation reads that as a backward slide, `scrollTop` jumps by the whole old offset, and the list lands at the end of the fresh page — which immediately triggers another page fetch.
+The **log is append-only and rooted at HEAD**: `commits[0]` is the repository's HEAD, always. Paging adds older rows to the end (deduplicated by sha against a concurrent poll reload) and drops nothing, so every visible row keeps its position and there is no scroll compensation to get right. The only move that changes what row 0 *is* is a re-read from HEAD — a commit, a checkout, an undo, a different repository — which `log.resetSeq` marks and the list answers by scrolling to row 0.
+
+It replaced a bidirectional sliding window that tracked the absolute index of row 0 (`windowStartOffset`) and compensated `scrollTop` by `delta × ROW_HEIGHT` on every slide. The window worked, and cost more than it bought: row 0 stopped being HEAD the moment it advanced, which is what let Amend and Undo be offered on the wrong commit; a replacement had to be told apart from a slide by a second signal or the list scrolled to the end of the fresh page and paged again; and the HEAD-moved test it needed could only fire past offset 0, so a commit made while parked at the top of the list moved nothing at all. Re-reading from offset 0 makes `commits[0] === HEAD` true by construction, and none of those cases exist to be handled.
+
+Paging keeps `log.isPaging` rather than the repo-wide `isLoading` it used to set — reading further into the past has nothing to do with whether a commit can be made, and it was disabling the Commit button on the other tab. A failed page goes to the non-blocking banner (`reportNotice`): the history already on screen is still correct, and scrolling again re-asks.
+
+Selection is a `$derived` key read by an `untrack`ed `$effect`, the shape the changes pane's auto-select uses: a string of the loaded shas, gated on History being the visible tab so the pane behind Changes doesn't spend a `git log` and a diff read on a selection nobody is looking at. The effect re-seats on native's two conditions — nothing selected, or the selected sha is no longer in the list, which is what an amend or an undo does to it. Its leading `#` is load-bearing: it keeps "History is showing an empty log" (clear the selection) distinct from "History isn't showing" (do nothing), which a bare empty string cannot.
 
 ### Polling and lifecycle
 

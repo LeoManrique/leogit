@@ -34,7 +34,7 @@ static-linking or a local daemon (that decision is open; see the plan).
 - The backend **categorizes and computes**; frontends **render and orchestrate**.
   Frontends never re-derive git state the core already returns (e.g. file status
   categories, ahead/behind, merge conflicts).
-- Today's surface: **4 events, ~35 DTOs**, and a command catalogue (§3) each host exposes
+- Today's surface: **4 events, ~45 DTOs**, and a command catalogue (§3) each host exposes
   **to the extent it consumes it**. The Tauri host registers **73** `#[tauri::command]`s,
   each with a wrapper in `apps/tauri-app/src/lib/api/commands.ts`; the UniFFI bridge
   exports **61** functions. The two sets are deliberately not identical, and a command
@@ -77,12 +77,12 @@ static-linking or a local daemon (that decision is open; see the plan).
 - **State ownership** — durable state (config, repos MRU, terminal PTY sessions)
   lives in the core. Frontends hold only re-derivable view state.
 
-## 3. Command surface (68)
+## 3. Command surface (73)
 
 Grouped by namespace. `args` are the logical inputs (camelCase on the wire);
 `→` is the return DTO (§5). "async/net" marks network operations that may stream
 progress (§4.1) and can be slow. This is the catalogue of operations core offers a
-frontend — the Tauri host registers all 68; the native bridge exposes the subset it
+frontend — the Tauri host registers all 73; the native bridge exposes the subset it
 consumes, plus seven of its own (§1).
 
 ### 3.1 Config & state — 6
@@ -275,7 +275,7 @@ gap or reconnect, emit a synthetic **resync** signal and have stores re-pull
 authoritative state. `git-progress` is advisory only — the command's return value is
 the source of truth for success/failure.
 
-## 5. Data model (~30 DTOs)
+## 5. Data model (~45 DTOs)
 
 Authoring model today: **hand-mirrored** on each side (Rust serde struct ↔ TS
 interface ↔ future Swift `Codable`), kept in sync by convention + this document. No
@@ -354,10 +354,19 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
 3. **Seamless diff loads** — loading a file/commit diff must **guard stale responses**
    (drop results if the user moved on), keep the **previous diff on screen** while the
    replacement loads, and use a **150ms slow-load threshold** (`SLOW_DIFF_THRESHOLD_MS` /
-   `DiffStore.slowLoadThreshold`) before falling back to a "Loading…" state — ported from
-   GitHub Desktop's `SeamlessDiffSwitcher`. The native client additionally skips publishing
-   a result equal to what's shown, so scroll and tokens survive; a permitted refinement,
-   not a divergence (the observable rule — no flash under the threshold — is shared).
+   `DiffStore.slowLoadThreshold`) before saying so — ported from GitHub Desktop's
+   `SeamlessDiffSwitcher`. Crossing the threshold **dims what is on screen and lays a
+   spinner over it; it never unmounts it**. Unmounting throws away the rendered rows,
+   their syntax tokens and the user's scroll position on every slow load, including the
+   ones that come back identical — which is the case the native client's equality skip
+   exists for, and which the view has to stop undoing. A first load with nothing old to
+   keep showing stays blank under the threshold and takes the spinner over the blank
+   pane past it. The native client additionally skips publishing a result equal to
+   what's shown, so scroll and tokens survive; a permitted refinement, not a divergence
+   (the observable rule — no flash under the threshold — is shared).
+   **Scroll**: a reload of the *same* file keeps the user's scroll offset; a *different*
+   file resets to the top. Both clients key that on the rendered diff's own paths, so a
+   forced re-read (a focus return, a whitespace-setting toggle) counts as the same file.
    A diff with **nothing to render** is a state of its own, and the pane must say so rather
    than fall through to the nothing-is-selected copy — the user did select a file. It must
    also say *which* nothing it is: `empty_reason` distinguishes "this file matches its
@@ -365,8 +374,15 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    them" from "the file changed without changing any lines" (a mode change or a pure
    rename). One caption covering all three told the user a file was unchanged when a
    setting was simply hiding the change. A **failed** load is not any of these — it
-   rejects, and the pane must clear rather than leave a stale diff standing behind an
-   error.
+   rejects, and the pane must clear and state the failure **inline, where the diff would
+   have been**. It is not one of §6.13's two classes: the user is not blocked (the rest
+   of the repository is untouched and readable) and it is their task (so a strip that
+   sits above the content is the wrong place for it). Re-selecting the row is the retry,
+   and works because the payload is gone.
+   A **dirty submodule** — changed inside, with the commit the parent records unmoved —
+   is decided *before* the read, in both clients: `git diff` answers with a bare
+   `Subproject commit <sha>-dirty` line, so the pane explains instead and the
+   subprocess is never spawned.
 4. **File selection semantics** — inclusion is *derived*: every committable file is
    included unless the user opted it out, so the 2s poll cannot re-check a file they
    just unchecked. How long an opt-out survives its path leaving the list is where the
@@ -419,10 +435,24 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    buttons do — a keyboard route past the commit/generate lockout is still a way for a
    late AI result to land on a composer the commit just cleared.
 8. **History** — commit history is a **flat linear list** (no DAG/graph layout), paged
-   through `get_log` `{max_count, skip}`. Two invariants are shared: a refresh re-reads at
-   most **500** commits however deep the user has scrolled (deeper rows re-grow on demand),
-   and the log is refetched when HEAD moves rather than patched. The paging model itself is
-   platform policy (§8) — one client slides a fixed window, the other appends.
+   through `get_log` `{max_count, skip}`, and the model is shared: the list is
+   **append-only and rooted at HEAD**. `commits[0]` is the repository's HEAD, always;
+   paging only ever adds older rows to the end, deduplicated by sha against what is
+   already loaded, and nothing is ever dropped from the front. That is what makes the
+   rewriting actions' gate unambiguous rather than merely correct — Amend and Undo test
+   `status.head_sha`, and a list whose top can drift is how they came to be offered on
+   the wrong commit. Only page size is per-platform (50 in Tauri, 100 natively), and it
+   is a scroll-feel choice, not a behavioural one. Two further invariants: the log is
+   **refetched when HEAD moves** rather than patched — and only then, since an existing
+   commit's content cannot change without its sha changing — and that refetch re-reads at
+   most **500** commits however deep the user has scrolled, dropping the oldest rows,
+   which re-grow on demand. The bound sits at the far end of the list, away from HEAD.
+   The list scrolls to row 0 on a refetch: it is a commit the user has not seen, and an
+   offset measured against a list whose top just changed means nothing.
+   **Selection** follows the same two conditions in both clients: keep the newest commit
+   selected on arrival, and re-seat when a refetch drops the selected sha — which is what
+   an amend or an undo does to it. A right-click selects the row it opens on, so the menu
+   and the detail pane can never describe two different commits.
 9. **Repo search** — the filter over a repository list is **loose on names, strict on
    paths**: the query may appear as a scattered subsequence in a repo's name(s), but a
    path must contain it contiguously and only below the deepest root it sits under —
@@ -534,7 +564,6 @@ every deliberate difference here.
 | Exclusion set (which changed files are left out of a commit) | an opt-out is pruned the tick its path leaves the file list, so a file that vanishes for one refresh — a formatter rewriting it — is silently re-included | an opt-out persists for the session, so nothing can re-include a file the user unchecked. Converging on the native rule plus a grace window is filed (parity plan CH-7/H-20); until then this is a real behavioural difference, not a presentation one |
 | Background cadence while unfocused/hidden (§6.1) | no explicit pause and no visibility term: the status poll is a flat 2 s `setInterval` and auto-fetch a flat `fetch_interval_ms` one, so the hidden-window cadence is whatever the host WebView's timer throttling makes it. `document.hidden` is read only to *trigger* the on-activation resync | the active repo never stops, and the cadence is explicit: status poll 2 s frontmost / 10 s visible-unfocused / 30 s hidden, auto-fetch interval ×3 while hidden, only the multi-repo sweeps pausing when inactive (`BackgroundSchedulingPolicy`), with an App Nap assertion held while a repo is open so the timers are not coalesced away |
 | File-list selection & keyboard (§6.4) | shift-click extends a multi-row selection (a separate anchor for the checkbox column, Finder/Gmail semantics), Space toggles the focused row's checkbox and bulk-toggles a multi-selection, Home/End jump to first/last | single-selection `List`: arrow keys move the active row, and there is no range selection, Space toggle, or Home/End |
-| History paging (§6.8) | 50-commit pages into a bidirectional **sliding window** capped at 500: scrolling past either end drops from the far end and `windowStartOffset` tracks the absolute index of row 0, with `scrollTop` compensated so the visible row stays pinned. A HEAD move *replaces* the window with a fresh page 1 instead of sliding it, which is a distinct signal (`log.resetSeq`) precisely so it is not compensated — the list scrolls to the new HEAD | 100-commit pages **appended** without dropping, de-duplicated by sha against what is already loaded; only a *refresh* is capped, at the same 500 |
 | Relative-date ticking (§6.12) | a 10 s tick re-renders the visible rows, skipped while the History pane is hidden or the window is backgrounded, so an open list never goes stale | formatted once per refresh and not re-ticked; the 2 s poll is what moves the labels on |
 | Side-by-side diff (`side_by_side_diff`) | split layout toggle, honoured by `DiffViewer` | not implemented — unified only; a layout feature awaiting its own design pass (ROADMAP), the config field crosses saves untouched |
 
