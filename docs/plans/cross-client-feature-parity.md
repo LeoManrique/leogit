@@ -1,6 +1,6 @@
 # Plan — Cross-client feature parity (SwiftUI ⇄ Tauri)
 
-> Status: **in progress — WS-A…WS-E shipped 2026-08-27, WS-F through WS-I 2026-08-28; WS-J is next.**
+> Status: **in progress — WS-A…WS-E shipped 2026-08-27, WS-F through WS-J 2026-08-28; WS-K is next (and needs a Linux machine — see §6's sequencing note).**
 > The remaining work was re-cut into seventeen smaller workstreams (C…S) on
 > 2026-08-27 after WS-B proved too large to review as one piece — see §6.
 > Accepted 2026-08-27 with every open decision resolved. Per-workstream state
@@ -92,7 +92,7 @@ fix *is*, since the code now carries the reasoning.
 |---|---|---|---|
 | D-1 | Tauri | **Destructive.** Amend/Undo/Checkout gated on the row's index into the *loaded window*, so past a slide Undo reset the real HEAD and seeded the composer from another commit. Now gated on `status.head_sha`, per FRONTEND §6.10. | — |
 | D-2 | Tauri | A remote-less repo's doomed `git fetch origin` opened the breaker against every other repo. `fetchActiveRemote` now gates on `status.hasRemote`, like the tier path already did — and on the new `statusLoaded`, since `hasRemote` defaults to false and an unqualified read would decide "no remote" about a repo nobody has looked at yet. Natively, `silentFetch` returns `Bool?` so a slot conflict or a local `git remote` failure stops being reported as a network failure. | — (WS-B: `get_remote` answers `Option`, so the guard is live rather than dead). |
-| D-3 | Tauri | Silent poll failures vanished forever. Three consecutive **background** failures now raise a non-blocking banner off `repoState.pollError` — native's shape and threshold, and its ownership: `refreshStatus` grew a `background` opt separate from `silent`, because four of the seven silent callers are user actions whose own `index.lock` races would otherwise accuse a healthy repo. Reset per repository in both clients. | BG-4's equality gate (the other half of that item). |
+| D-3 | Tauri | Silent poll failures vanished forever. Three consecutive **background** failures now raise a non-blocking banner off `repoState.pollError` — native's shape and threshold, and its ownership: `refreshStatus` grew a `background` opt separate from `silent`, because four of the seven silent callers are user actions whose own `index.lock` races would otherwise accuse a healthy repo. Reset per repository in both clients. | — (BG-4's equality gate, the other half of that item, closed in WS-J; a skipped tick still retires the banner). |
 | D-4 | Tauri | **Terminal listener-registration race.** Output and exit listeners were registered two async IPC round trips *after* `start_terminal` returned, while the reader thread was already emitting, and Tauri drops an event with no listener. The session's stream is now a `Channel` built with its handler attached and passed *into* `start_terminal`, mirroring the bridge — the id is minted client-side before any IPC, so the gap cannot exist. | — (the close message can now overtake `start_terminal`'s return, which the panel handles by refusing to adopt the pid afterwards). |
 | D-8 | Native | ⌘W with a text field still focused dropped the typed value. `flushPendingSave` now also writes an edit that never scheduled a save, guarded by a diff against `lastPersisted` — which holds the *normalized* form of the fields, not the raw file, or a config written by the other client would be rewritten on an open-and-close that changed nothing. A completed debounce also clears `pendingSave` now (generation-guarded), which it never did. | — |
 | D-10 | Tauri | A commit could land mid-Generate and have the late result overwrite the cleared composer. `canSubmit` gained `!isGenerating`, and the lockout runs off `isCommitInProgress` — `isCommitting` is still false while the embedded-repo confirmation waits, and its Confirm calls `performCommit` past `canSubmit` entirely, so the composer stayed live behind the dialog. | — |
@@ -124,11 +124,11 @@ behavior change the user would notice — except battery.
 | ID | Where | Waste | Scale |
 |---|---|---|---|
 | E-1 | ✅ *WS-B.* `merging` rides on `RepoStatus`, answered by a filesystem read of `<repo>/.git` rather than a subprocess (H-1). The waste it named was real; its explanation was not — `get_status` never resolved the git dir. | was ~1 800 spawns/hour **per client** |
-| E-2 | Tauri | `pollHeadSha` spawns `git rev-parse HEAD` every tick although `status.head_sha` from the same tick already holds it. | ~30 spawns/min |
-| E-3 | Tauri | No visibility gating anywhere: hidden window keeps the 2 s poll (≈120 subprocesses/min if the engine doesn't throttle) and the tier scheduler fetching up to 19 remotes on a 2/5/10-min rotation, forever. Native: 30 s ladder + paused sweeps. | ~60× hidden-state cost |
-| E-4 | Tauri | Three independent tier `setInterval`s collide every 10 min — up to 3 concurrent background `git fetch` + auto-fetch + a visible sweep. The "sequential" comment is only true within a tier. | 4 concurrent fetches worst case |
-| E-5 | Tauri | **Half closed in WS-C**: RM-4's MRU sort deleted the `get_last_commit_timestamp` call with the store that made it. Dropdown open still fires `get_repo_identifier` per repo, unbounded in parallel — the only unbounded fan-out left in either client. | was 2N processes at once, now N (N = repos) |
-| E-6 | Tauri | Poll publishes a fresh `repoState` (plus two new `Set`s) every tick even when nothing changed → every subscriber re-renders every 2 s on an idle repo. Native equality-skips. | continuous idle re-render |
+| E-2 | ✅ *WS-J.* `pollHeadSha` is gone and `refreshStatus` returns the status it read, so HEAD is compared against `head_sha` from the reply already in hand. The command went with it — its last two callers were this and the post-op re-seed — which is FRONTEND §6.1's rule finally reaching the code. | was ~30 spawns/min |
+| E-3 | ✅ *WS-J* with BG-1. The hidden window drops to the 30 s rung, auto-fetch stretches ×3, and the tier scheduler parks outright until the window is active again — deadlines keep passing while parked, so waking up is one sequential catch-up rather than a lost cycle. | was ~60× hidden-state cost |
+| E-4 | ✅ *WS-J.* One `pacedLoop` over a three-deadline array, native's exact shape: it sleeps to the nearest deadline and runs the due tiers sequentially, so "sequential" is now true across tiers as well as within them. | was 4 concurrent fetches worst case |
+| E-5 | ✅ *WS-C* (RM-4's MRU sort deleted the `get_last_commit_timestamp` call with the store that made it) and *WS-J*: `ensureRepoIdentifiers` queues its paths and drains them four at a time, so opening the switcher on a machine with fifty repositories no longer spawns fifty `git remote get-url` processes in one turn. | was 2N at once, now ≤4 |
+| E-6 | ✅ *WS-J* with BG-4. An idle repository publishes nothing. The same pass fixed the native mirror of it: `RepoDirectoryStore.noteActiveStatus` wrote an identical `RepoSync` into an observed dictionary on every tick, invalidating every switcher row. | was continuous idle re-render, both clients |
 | E-7 | Native | Every discard/ignore triggers a **full** reload — status + up to 500-commit log + `is_merging` + a progress-bar flash — though neither can change history. Tauri does a silent status refresh. | one `git log`@500 per row action |
 | E-8 | ✅ *WS-B.* `DiffOptions` makes the render artifacts opt-in, so the native path no longer builds HTML and pairings for the bridge to drop (H-8). `DiffLine.text` became `Option` in the same pass, dropping a duplicate of every line's content from both wires. | was ~40 k allocations per 20 k-line diff load |
 | E-9 | Native | Whole-status epoch re-tokenizes the open diff when *any* file changes (~19–140 ms + 2 `git show` per unrelated edit); a per-file `stat_stamp` compare would gate it. No phase-2 debounce either (Tauri: 80 ms). | up to ~140 ms background CPU per unrelated edit |
@@ -258,22 +258,21 @@ and matched, not that it was skipped.
 
 ### 4.2 Background machinery, connectivity, update checker (BG)
 
-- **BG-1 · Cadence policy.** Native: 2/10/30 s status ladder by visibility,
-  auto-fetch ×3 while hidden, sweeps paused while inactive, all under an App
-  Nap assertion. Tauri: flat timers, nothing gated (E-3). **Native right
-  and it is the GitHub Desktop model** (which pauses its indicator sweep on
-  blur). Port to Tauri via `document.hidden`/`hasFocus()` and a
-  self-scheduling `setTimeout` chain (which also delivers BG-2/BG-3 for free).
-  Steal GitHub Desktop's one improvement on both: a once-per-session random
-  0–30 s skew so multiple windows don't fetch in sync. → WS-J
+- **BG-1 · Cadence policy.** ✅ *WS-J.* `services/backgroundPolicy.ts` is
+  native's `BackgroundSchedulingPolicy`, table for table: a three-state ladder
+  (`active` / `inactive` / `hidden`, from `document.hidden` + `hasFocus()`),
+  2/10/30 s status poll, auto-fetch ×3 while hidden, and only the multi-repo
+  sweeps pausing. The 0–30 s once-per-session skew landed on **both** clients,
+  on the automatic fetch only — skewing the status poll would delay the first
+  local read after launch by up to half a minute, visibly, for no contention
+  worth avoiding. The one thing the web client cannot pin is the hidden rung
+  (no App Nap analogue; a WebView may throttle a backgrounded document), which
+  can only make hidden work *cheaper* and is recorded as the residual §8 row.
 - **BG-2 · Live re-arm of `auto_fetch` / `fetch_interval_ms`.** ✅ *WS-H* for
-  the re-arm itself: an effect watching those two config fields calls
-  `startAutoFetch`, so a Settings change applies at once and a native-side edit
-  applies on the next activation (which re-reads the config). It was taken
-  there because ST-3 could not port native's "no restart needed" footer while
-  it was false. What remains for WS-J is the *shape* underneath — replacing the
-  flat `setInterval`s with the self-scheduling `setTimeout` chain BG-1 needs,
-  which is where native's idle 30 s re-check while disabled also belongs. → WS-J
+  the re-arm, ✅ *WS-J* for the shape: `services/pacedLoop.ts` replaced both
+  `setInterval`s. Native's idle 30 s re-check has no equivalent and needs none
+  — a parked loop (`dueAt` of `Infinity`) is re-armed by the config effect
+  directly, and a native-side edit arrives on the next wake-up's config read.
 - **BG-3 · Connectivity signal.** Native `NWPathMonitor` is authoritative;
   Tauri's `navigator.onLine` is hard-wired `true` on WebKitGTK, silently
   disabling the offline gate, the recovery kick, and the update-check retry on
@@ -289,11 +288,14 @@ and matched, not that it was skipped.
   backend, which is the dead-wiring shape this plan otherwise deletes. It is
   now a workstream of its own (see §6's WS-K entry) because three OS backends
   on a Linux machine is not a rider on anything. → WS-K
-- **BG-4 · Poll equality + failure surfacing.** The failure half landed in WS-A
-  (D-3: the 3-tick streak on the poll-owned `pollError` flag, reset on repo
-  switch in both clients). What remains is E-6: port the native equality skip
-  (a `stat_stamp`-aware fingerprint makes it free), which is also the hook for
-  DF-1 (Tauri's stale open diff). → WS-J
+- **BG-4 · Poll equality + failure surfacing.** ✅ The failure half landed in
+  WS-A (D-3), the equality half in *WS-J*: `refreshStatus` compares
+  `JSON.stringify(status)` against the previous reply and returns without
+  touching the store when they match. Whole-value rather than a named-field
+  fingerprint, for the reason native's `Equatable` compare is whole-value — a
+  hand-picked list is one a later field silently falls out of. Only *silent*
+  refreshes take it (an explicit one also clears the error modal on success),
+  and a standing `pollError` still retires on a skipped tick.
 - **BG-5 · Update checker.** Tauri-only today (confirmed: zero
   `check_for_update` references in the FFI). Everything platform-independent
   is already in core (release request, strict version compare, per-platform
@@ -304,11 +306,14 @@ and matched, not that it was skipped.
   GitHub API answer says nothing about git remotes, and D-2 shows the breaker
   can be open spuriously); give `NetworkPathObserver` multiple recovery
   subscribers rather than a second monitor. → WS-M
-- **BG-6 · Typing guard.** Native queries the first responder at tick time
-  (stateless); Tauri latches a `focusin/focusout` flag that strands `true`
-  when a focused element is removed (killing a focused terminal) — auto-fetch
-  silently dead for the session. Replace with an `activeElement` read at tick
-  time. → WS-J
+- **BG-6 · Typing guard.** ✅ *WS-J.* `utils/focus.ts` holds one predicate over
+  a node, asked about `e.target` by the key handler and about
+  `document.activeElement` by the fetch tick. The latch is gone, and with it
+  the fault where killing a focused terminal left auto-fetch dead for the
+  session. Terminal focus still suppresses the fetch — xterm's hidden textarea
+  matches — but as a decision now rather than a side effect: it is what native
+  does deliberately, and a shell is exactly where the file list gets changed
+  from.
 - **BG-7 · Un-occlude resync.** Tauri resyncs on visibility *and* focus;
   native only on app activation (documented — up to one 30 s beat after
   un-occluding without activating). Cheap to close: fire the existing resync
@@ -487,21 +492,19 @@ and matched, not that it was skipped.
 - **CH-6 · Embedded/submodule row treatment.** Tauri swaps the status glyph
   for ↪ (the documented style); native appends a width-eating text tag. Adopt
   the glyph. → WS-N
-- **CH-7 · Exclusion-set semantics.** The clients disagree and the native
-  comment claims they don't: Tauri prunes a vanished path's opt-out every
-  tick (DESIGN.md documents it); native persists it (safer failure mode —
-  a file you excluded stays excluded through a formatter flicker; Tauri's can
-  silently re-include and commit a file you deliberately excluded) but
-  unbounded. **Decided: native semantics on both + prune after a grace of N
-  consecutive absent ticks** (≈30 s at the visible cadence). The failure modes
-  aren't symmetric: an over-long exclusion costs one visible checkbox click,
-  a premature prune costs a commit you didn't mean to make and never saw
-  happen — and the grace window bounds the set without reopening the flicker
-  hole. Hoist the reconciliation to core (H-20; written twice today, already
-  drifted). **Decided by the user: land it with BG-4's equality gate** —
-  the grace counter has to advance every tick, so it cannot be gated on "the
-  file list changed" and would cost the Tauri poll a second crossing every 2 s;
-  BG-4 is restructuring that poll anyway. → WS-J
+- **CH-7 · Exclusion-set semantics.** ✅ *WS-J*, on both clients, through
+  `core::exclusions::reconcile_exclusions` (H-20). Native semantics plus a
+  grace window; the native comment claiming the two clients already matched is
+  gone. Three refinements the entry hadn't anticipated. The window is
+  **wall-clock, not a tick count**, because BG-1's ladder makes a tick worth
+  anything from 2 s to 30 s. It **also counts consecutive misses**, because
+  wall-clock alone fails at the other end of that same ladder: at the 30 s rung
+  one read is charged the entire window, so a purely time-based rule prunes on
+  the *first* look — the look that can land mid-rewrite — and the window would
+  have bought nothing exactly where unattended rewrites are likeliest. And the
+  IPC cost the decision worried about is **skipped entirely while the set is
+  empty**, which is the app's usual state, so the poll pays only once the user
+  has unchecked something.
 - **CH-8 · Discard confirmation copy.** Native names the actual per-file
   outcome (restored from HEAD vs moved to Trash) — what FRONTEND §6.10 asks for; Tauri
   states both rules generically and dismisses on backdrop click (STYLE.md
@@ -557,12 +560,13 @@ and matched, not that it was skipped.
 
 ### 4.6 Diff viewer (DF)
 
-- **DF-1 · Open-diff freshness (Tauri).** `stat_stamp` reaches the Tauri
-  client on every poll and is never read (verified). Adopt the reload — but
-  per-file (compare the active file's stamp), which is *better* than native's
-  whole-status epoch: it also fixes E-9 on the native side by gating the
-  reload on the open file's own stamp. The FRONTEND §8 staleness row then retires.
-  → WS-J (Tauri), WS-P (native gate)
+- **DF-1 · Open-diff freshness (Tauri).** ✅ *WS-J* for the Tauri half, and
+  per-file as the entry intended: a `$derived` key of the active file's
+  `path`, `xy` and `stat_stamp`, read by an `untrack`ed effect that reloads
+  only when the *same* path's key moved — a different path means the selection
+  changed and its own load is already in flight. The §8 staleness row retired
+  with it. The native gate (E-9) is still WS-P's, and this is the shape to
+  copy. → WS-P (native gate)
 - **DF-2 · Side-by-side.** Tauri-only (sanctioned FRONTEND §8 row). Two facts change
   the calculus: core already computes `sbs_pairs` on the native path and the
   bridge throws them away (E-8), and GitHub Desktop treats split/unified as a
@@ -827,10 +831,11 @@ and matched, not that it was skipped.
   the one setting in the window that used to be ignored until a restart, and
   the reason native's "no restart needed" footer could not be ported honestly
   before. This is BG-2's *first* half, taken here because ST-3 could not ship a
-  true footer without it; the self-scheduling `setTimeout` chain that replaces
-  the flat intervals is untouched and stays WS-J's. **Still open, native:** no
-  control for the two AI timeouts, so they are Tauri-set and natively honoured
-  (now a FRONTEND §8 row). → WS-J, WS-R
+  true footer without it; ✅ *WS-J* replaced the flat intervals underneath with
+  the self-scheduling chain, and the effect now reschedules a loop rather than
+  restarting a timer. **Still open, native:** no control for the two AI
+  timeouts, so they are Tauri-set and natively honoured (now a FRONTEND §8
+  row). → WS-R
 - **ST-2 · Save semantics** — ✅ *WS-B.* `patch_config` is the only writer, and
   it reads-edits-normalizes-writes under a lock the shared file never had, so
   a surface can only change the fields it names. `Config::normalized()` runs on
@@ -1065,10 +1070,17 @@ applied: hoist when the logic is pure, duplicated (or about to be), and
 IPC-cost-free; keep per-platform when it's presentation or host-lifecycle.
 None of these sacrifice measurable performance; several *save* subprocesses.
 
-Eighteen shipped in WS-B and H-3 in WS-F. The two left are the two the rule
-above disqualifies for opposite reasons: H-20 costs IPC on every tick (→ WS-J,
-with the poll restructure it belongs to), and H-17 is three OS backends that
-cannot be verified from macOS (→ WS-K, a workstream of its own).
+Eighteen shipped in WS-B, H-3 in WS-F and H-20 in WS-J. The one left is H-17:
+three OS backends that cannot be verified from macOS (→ WS-K, a workstream of
+its own).
+
+**H-20 shipped as a pure function the client calls only when it has something
+to ask about**, which is the answer to the IPC objection that deferred it. The
+reconciliation needs the excluded set, the present paths and the time elapsed;
+the first is almost always empty, so the client short-circuits and the crossing
+never happens. That is a third shape worth remembering beside H-3's: a hoist
+whose cost is real but *conditional* can be paid only in the condition, rather
+than folded into a call that always happens.
 
 **H-3 shipped as a field, not a command, and that is the rule above doing its
 job.** A `sync_proposal` command would have been IPC-cost-free for native (an
@@ -1100,7 +1112,7 @@ rather than keeping it beside the field.
 | H-17 | `core::net` connectivity observer emitting online/offline over the event seam — Linux netlink backend first, then macOS/Windows | Tauri's hard-wired `navigator.onLine` on WebKitGTK; eventually native's separate `NetworkPathObserver` (BG-3) | WS-K |
 | H-18 | ✅ `gh_clone` through the `git clone` streaming seam (`gh repo clone … -- --progress`) | the progress-less gh clone in both clients (CL-6) | shipped |
 | H-19 | ✅ `fetch(.., background)` picks the 8/8/12 s budget for automatic fetches | an automatic fetch holding the single slot on the 15/30/600 s user budget (BG-8) | shipped |
-| H-20 | exclusion-set reconciliation (keep an opt-out through a grace window, drop it after N absent ticks) | the two hand-written, already-drifted exclusion rules (CH-7) | WS-J |
+| H-20 | ✅ `exclusions::reconcile_exclusions(&[Exclusion], &[String], elapsed_ms)` + `EXCLUSION_GRACE_MS` / `EXCLUSION_GRACE_READS`, 10 tests; the window is wall-clock *and* a consecutive-miss count, because the cadence ladder breaks either term used alone | the two hand-written, already-drifted exclusion rules (CH-7) | shipped |
 
 Deliberately **not** hoisted: sort collation (locale into a chrono-free core —
 no), relative-date formatting (platform), scheduling policy (host lifecycle),
@@ -1154,8 +1166,8 @@ is mostly adoption of already-proven native behavior.
    - **`ConfigPatch` fields default to "leave it alone"** (`#[uniffi(default =
      None)]`), so a one-field write is one line, and clearing an optional field
      is patching it to `""` — the blank-means-absent rule doing double duty.
-     ST-3's instant-apply rewrite in WS-H is a small change per control rather
-     than a redesign.
+     It is what made ST-3's instant-apply form a change per control rather than
+     a redesign, and what WS-R's native half still has to adopt.
    - **`config.toml` field order is load-bearing.** `toml` serializes in
      declaration order and a table swallows every key after it, so nothing
      scalar may be declared below `[claude]` and `[ollama]`. A round-trip test
@@ -1186,10 +1198,11 @@ is mostly adoption of already-proven native behavior.
      `Open Repository…`, which **WS-L must delete in the same change that gives
      Welcome the discovery list** (RM-1). `resolve_repo_root` is FFI-only; the
      Tauri launch restore uses `is_git_repo`, the cheap existence check it wants.
-   - **Settings' close is a handler, not `showSettings = false`.** All three
-     dismissals in `MainLayout` route through `closeSettings()`. **WS-H rewrites
-     this dialog (ST-3) and must keep every dismissal on that handler**, or a
-     scan-path edit silently stops re-walking.
+   - **Discovery re-walks where the setting changes, not where the dialog
+     closes.** WS-H removed both hosts' `closeSettings` handlers and hung the
+     walk off the `scan_paths` / `scan_depth` patch instead, which is why the
+     rule survived a dialog rewrite: a hook on dismissal is a hook someone can
+     route around.
    - **`RepoListEmptyState.svelte` is the shared empty state for both repo
      lists.** WS-L ports the same three answers natively; change the strings
      there, not in a copy.
@@ -1314,8 +1327,9 @@ is mostly adoption of already-proven native behavior.
      `pub use` from `leogit_core`, and UniFFI lowercases the first letter of each
      variant (`PublishRepository` → `.publishRepository`).
    - **`activeNetworkOp` has a fourth kind, `'fetch'`**, claimed only by the
-     *user's* fetch. The automatic ones deliberately claim no slot. **WS-J
-     restructures that poll** and should keep the line where it is.
+     *user's* fetch. The automatic ones deliberately claim no slot; WS-J's
+     restructure kept that line exactly where it was, and the policy module now
+     reads the store so every loop asks the same question.
    - **Tauri's ⌘R is above `MainLayout`'s `inField` bail**, with the composer
      chords — and so is ⌃` since WS-I. The ordering in that handler is
      load-bearing: terminal origin first, then the chords that must work inside a
@@ -1379,182 +1393,239 @@ is mostly adoption of already-proven native behavior.
      site and FRONTEND §3.7 — but it is a live trap for the next reader.
 8. **WS-H — Tauri settings & window chrome (S/M).** ✅ *Shipped 2026-08-28.*
    Settings became instant-apply: each control patches its own field through
-   `patch_config` (discrete controls on the click, text and numeric fields on
-   `change`, which already means blur-or-Return), the whole-object save is gone
-   and the footer is a single Close (ST-3). With it: the seconds-not-milliseconds
-   interval field (ST-4), the scan-path Edit ▸ Done lock, which also re-walks
-   discovery where the edit was made (ST-10), the revert-on-refused-write that
-   ST-7 had left to inherit, and the auto-fetch re-arm without which native's
-   ported "no restart needed" footer would have been a lie (ST-1 / BG-2's first
-   half). Around it: ⌘1/⌘2 (SH-2), the overlay-stack fold (SH-4), window frame
-   restoration and a repo-named title (SH-6), and the visible tab surviving a
-   repo switch (SH-7). Gates: `pnpm check` 0/0 over 147 files, prettier clean,
-   `pnpm tauri build` bundled, zero-warning `just mac-build`, 168 core + 24
-   bridge tests, clippy-pedantic 165 core with `leogit` / `leogit-ffi` at zero.
+   `patch_config`, the whole-object save is gone and the footer is a single
+   Close (ST-3). With it: the seconds-not-milliseconds interval field (ST-4),
+   the scan-path Edit ▸ Done lock that re-walks discovery where the edit was
+   made (ST-10), ST-7's revert-on-refused-write, and the auto-fetch re-arm
+   (ST-1 / BG-2's first half). Around it: ⌘1/⌘2 (SH-2), the overlay-stack fold
+   (SH-4), window frame restoration and a repo-named title (SH-6), and the
+   visible tab surviving a repo switch (SH-7).
 
-   Findings for whoever takes WS-I and beyond:
+   **Still live.**
    - **The native Settings window has D-5's lost update at form scale, and it is
-     WS-R's first item.** `SettingsStore.currentPatch` names the *same twelve
-     fields on every save*, filled from what `load()` read when the window
-     opened — so a `tab_size` the Tauri client writes while that window stands
-     open is reverted by the next unrelated toggle. `patch_config` cannot
-     protect against this; a field-wise writer only helps a caller that names
-     fields field-wise. The Tauri form now sends one field per write, which is
-     both the fix and the reference.
+     WS-R's first item.** `SettingsStore.currentPatch`
+     (`SettingsStore.swift:196-215`) names the *same twelve fields on every
+     save*, filled from what `load()` read when the window opened — so a
+     `tab_size` the Tauri client writes while that window stands open is
+     reverted by the next unrelated toggle. `patch_config` cannot protect
+     against this; a field-wise writer only helps a caller that names fields
+     field-wise. The Tauri form is the reference.
    - **A Svelte `value={expr}` will not repaint a control whose expression did
-     not change**, even when the DOM has diverged from it. That is exactly the
-     clamp case — 999 typed into a field already at its maximum comes back as
-     the maximum, so nothing in the model moved and the control keeps showing
-     999 — and it is why the form carries a `{#key formSeq}` bumped on a refused
-     write and on a write whose result equalled what was already there. Any
-     surface that promises "the backend's correction is what you see" needs the
+     not change**, even when the DOM has diverged from it — 999 typed into a
+     field already at its maximum comes back as the maximum, so nothing in the
+     model moved and the control keeps showing 999. Hence the `{#key formSeq}`
+     bumped on a refused write and on one whose result equalled what was there.
+     Any surface promising "the backend's correction is what you see" needs the
      same escape hatch.
-   - **`modalOpen` had never been told about four dialogs.** The hand-kept list
-     WS-G warned about listed eleven flags and omitted `EmbeddedRepoConfirm`,
-     `ForcePushConfirm`, `PublishRepository` and `InitRepoConfirm` — so ⌘↩ fired
-     a commit straight through the embedded-repo confirmation *asking about that
-     commit*. It is now the overlay stack's depth, which cannot be forgotten
-     because it is not a list. If a future surface needs to be excluded from
-     that count, exclude it explicitly rather than by not registering: not
+   - **A hand-kept list of surfaces is a list someone forgets to join.**
+     `modalOpen` had never been told about four dialogs, so ⌘↩ fired a commit
+     through the embedded-repo confirmation asking about that commit. It is the
+     overlay stack's depth now, which cannot be forgotten because it is not a
+     list. Excluding a future surface from that count is done explicitly — not
      registering also takes away its Escape.
-   - **Escape was being handled twice for the context menu**, closing the menu
-     and the popover under it. Its own window listener answered the key *and*
-     let the host's handler run. Any component that keeps a window-level key
-     listener has to say which keys it is *not* claiming — the arrows stayed,
-     Escape moved to the stack.
-   - **Both hosts' `closeSettings` are gone**, and with them the divergence where
-     the picker phase re-walked discovery on close and the main phase re-walked
-     unconditionally. The walk now hangs off the `scan_paths` / `scan_depth`
-     patch inside the overlay. If WS-L gives Welcome a discovery list, it needs
-     no Settings-close hook — the setting already announces itself.
+   - **Both hosts' `closeSettings` are gone**; the discovery walk hangs off the
+     `scan_paths` / `scan_depth` patch inside the overlay. **If WS-L gives
+     Welcome a discovery list, it needs no Settings-close hook** — the setting
+     already announces itself.
    - **`git::get_repo_name` is a registered Tauri command with no caller.** The
-     window title uses the client's own `basename()`, as every other repo label
-     in the client does (CH-12's rule: don't cross the IPC boundary for path
-     arithmetic already in hand). Add it to WS-S's dead-wrapper sweep alongside
-     `rename_branch` and `delete_remote_branch`.
-   - **`capabilities/default.json` needed one new entry** (`core:window:allow-set-title`)
-     — `core:window:default` covers reads only. TECHNICAL's copy of that file
-     was also missing `dialog:allow-open`, which has been there since the clone
-     dialog landed; both are corrected. A pasted config block is the same
-     staleness hazard as WS-G's API table.
+     window title uses the client's own `basename()` (CH-12's rule: don't cross
+     the IPC boundary for path arithmetic already in hand). One for WS-S's
+     dead-wrapper sweep, alongside `rename_branch` and `delete_remote_branch`.
    - **STYLE's *Forms (Settings)* section describes toggle switches and
      segmented controls that only the native form has.** The Tauri form still
      draws a checkbox and a `<select>`, deliberately: that is a visual migration
-     under ROADMAP's Primer→Apple item, not parity work, and doing it here would
-     have made a behavioural change unreviewable. The section now says which
+     under ROADMAP's Primer→Apple item, not parity work. The section says which
      bullets are the target and which are today.
-   - **`tauri-plugin-window-state` needs no capability and no JS package.** It is
-     registered in `main.rs` and never invoked; the frontend half of the crate
-     exists but nothing here uses it.
 9. **WS-I — Tauri terminal transport (M).** ✅ *Shipped 2026-08-28.* TE-2 and
    **D-4** landed as one change, because the race was a property of the
    transport: the session's stream is a `Channel` the frontend builds with its
    handler attached and passes into `start_terminal`, so the listener exists
    before core can hold it. `start`/`resize`/`close` became `(async)` (E-12);
-   `write` stayed sync. No second layer of batching was added. With it: TE-1's
-   ⌃-only narrowing in both key handlers, TE-5's Tauri half (modifier-click,
-   hover affordance, write-only OSC 52), TE-6's caret restore, and three of
-   TE-7's four (header fallback, the 280 constant, shell freshness — already
-   satisfied). Gates: `pnpm check` 0/0 over 149 files, prettier clean,
-   `pnpm tauri build` bundled, zero-warning `just mac-build`, 168 core + 24
-   bridge + **2 host** tests, clippy-pedantic 165 core with `leogit` /
-   `leogit-ffi` at zero.
+   `write` stayed sync. With it: TE-1's ⌃-only narrowing in both key handlers,
+   TE-5's Tauri half (modifier-click, hover affordance, write-only OSC 52),
+   TE-6's caret restore, and three of TE-7's four.
 
-   Findings for whoever takes WS-J and beyond:
+   **Still live.**
    - **A `Channel`'s id is minted in its JS constructor, before any IPC**, so a
-     handler attached there (or assigned before the `await invoke`) cannot miss
-     anything — but messages delivered before one is attached hit the
-     constructor's no-op default and are **gone, not queued**. The safe form is
-     `new Channel(handler)`; `ch.onmessage = …` after the await is the same bug
-     `listen()` had. Any future streaming command should take its channel as an
-     argument for this reason.
+     handler attached there cannot miss anything — but messages delivered before
+     one is attached hit the constructor's no-op default and are **gone, not
+     queued**. The safe form is `new Channel(handler)`; `ch.onmessage = …` after
+     the await is the same bug `listen()` had. Any future streaming command
+     should take its channel as an argument for this reason.
    - **A per-session message can overtake the command that created the
      session.** `closed` and `start_terminal`'s return travel independently, so
      a shell dying on its own startup file reports the death before the caller
-     has a handle. `Terminal.svelte` records that and refuses to adopt the pid
-     afterwards. Anything that returns a handle *and* streams on it needs the
+     has a handle. Anything that returns a handle *and* streams on it needs the
      same guard.
    - **Tauri's channel forks by payload size**: JSON under 8 KiB is eval'd
-     directly, anything larger is stashed and fetched by a second async invoke
-     (hence the monotonic index and the JS-side reordering). Core's coalescing
-     can produce up to 256 KiB in one delivery, so a flood takes the fetch path
-     — which is still the right trade (one round trip beats 64 evals, and the
-     bytes avoid being escaped into a JS string literal). **Do not retune
-     `MAX_DELIVERY_BYTES` for this**: it is core's, shared with a host that has
-     no such threshold.
+     directly, anything larger is stashed and fetched by a second async invoke.
+     Core's coalescing can produce 256 KiB in one delivery, so a flood takes the
+     fetch path — still the right trade. **Do not retune `MAX_DELIVERY_BYTES`
+     for this**: it is core's, shared with a host that has no such threshold.
    - **A page reload leaks the session.** `Channel::send` returns `Ok` into a
      reloaded document's empty callback registry, so the old PTY and its two
-     threads survive with nobody listening. This is not new — `emit` behaved the
-     same — but it is now easy to state: nothing on the Rust side learns that a
-     channel's other end is gone. Relevant to `just dev`, where a hot reload
+     threads survive with nobody listening. Nothing on the Rust side learns that
+     a channel's other end is gone. Relevant to `just dev`, where a hot reload
      accumulates shells.
    - **`attachCustomKeyEventHandler` runs for `keyup` and `keypress` too**, and
      xterm tests the return value with `!1===`, so `undefined` counts as
      "process it". Match on `e.type` and return an explicit boolean.
-   - **The `inField` bail had swallowed ⌃` since the chord existed** — found by
-     the user against the native client, where a SwiftUI `keyboardShortcut` is a
-     key equivalent and fires ahead of the first responder, so the question never
-     came up. Toggling the terminal from a half-written commit message is a
-     *normal* thing to do — it is where you go to run what you are describing —
-     and nobody types `Ctrl` + `` ` `` into prose. The chord moved above the bail.
-     **The general lesson is that the bail is the exception, not the default**:
-     placing a chord below it asserts that a person might be typing it, which is
-     false for every modified chord the app currently binds. TE-1's deferred
-     platform split (ROADMAP) should re-read the whole handler with that in mind
-     rather than preserving today's placements.
    - **xterm's link addon cannot gate its own decorations.** `LinkComputer`
      pushes links with no `decorations`, which means all of them, so a
-     modifier-gated link still underlines and shows a pointer on a bare hover.
-     The hover affordance is therefore load-bearing rather than a nicety — a
-     gated link without one reads as broken. Making the underline itself
-     conditional needs a hand-written `ILinkProvider`.
-   - **`registerOscHandler` strips the ident and the first `;`**, so an OSC 52
-     handler receives `Pc;Pd` and must split on the *first* separator only. `Pc`
-     is a set (`c`/`s`/`p`/digits, empty meaning the spec default) and
-     `Pd === "?"` is the read request that must be swallowed, not answered.
+     modifier-gated link still underlines on a bare hover. The hover affordance
+     is load-bearing rather than a nicety — WS-R's native half has to match the
+     string *Follow link (⌘ + click)*. Making the underline conditional needs a
+     hand-written `ILinkProvider`.
    - **`navigator.clipboard` is not usable for anything a click didn't ask
-     for.** WebKit gates a programmatic write on recent user activation, which
-     an OSC 52 write does not have — hence `tauri-plugin-clipboard-manager`,
-     granted `allow-write-text` and deliberately not the read permission. The
-     app's five existing Copy actions are all click-driven and stay where they
-     are.
-   - **The host crate has tests now** (its first two), pinning the channel's
-     JSON. Anything else whose shape is read by hand-written TypeScript and
-     produced by a serde attribute belongs there too.
+     for** — WebKit gates a programmatic write on recent user activation, which
+     an OSC 52 write does not have. Hence `tauri-plugin-clipboard-manager`,
+     granted `allow-write-text` and deliberately not the read permission.
+   - **The host crate has tests now**, pinning the channel's JSON. Anything else
+     whose shape is read by hand-written TypeScript and produced by a serde
+     attribute belongs there too.
+   - **The bail is the exception, not the default.** `MainLayout`'s "a field has
+     focus, leave it alone" bail had swallowed ⌃` since the chord existed —
+     found by the user against the native client, where a SwiftUI
+     `keyboardShortcut` is a key equivalent and the question never came up.
+     Placing a chord below the bail asserts that a person might be typing it,
+     which is false for every modified chord the app binds. **TE-1's deferred
+     platform split (ROADMAP) should re-read the whole handler with that in
+     mind** rather than preserving today's placements.
    - `utils/platform.ts` holds the one `isMac()` / `isWindows()` test; the
      second copy of it was about to be written in `Terminal.svelte`.
-   - From WS-H, still true: the window handlers pass `Escape` to the overlay
-     stack, but **`isFromTerminal(e)` returns before that**, which §6.11
-     requires. The shell owning `Escape` and a dialog owning it never collide
-     because a dialog takes focus when it mounts; **TE-6's caret restore is the
-     thing that could break that assumption**, so it fires only on window
-     activation and only when the terminal already holds `activeElement` — it
+   - The window handlers pass `Escape` to the overlay stack, but
+     **`isFromTerminal(e)` returns before that**, which §6.11 requires. The
+     shell owning `Escape` and a dialog owning it never collide because a dialog
+     takes focus when it mounts; TE-6's caret restore fires only on window
+     activation and only when the terminal already holds `activeElement`, so it
      cannot pull focus out of a dialog that opened while the app was away.
-10. **WS-J — Tauri background cadence (M).** The machinery underneath, and
-    where the efficiency register concentrates. BG-1 (the visibility ladder +
-    paused sweeps + GH Desktop's once-per-session 0–30 s skew), BG-2
-    (self-scheduling `setTimeout` chain, which delivers the `auto_fetch` re-arm
-    for free), BG-4's equality gate (E-6), BG-6 (read `activeElement` at tick
-    time instead of latching a `focusin` flag that strands `true`), DF-1's
-    Tauri half (the `stat_stamp` that already arrives every tick and is never
-    read), E-2 (`pollHeadSha` duplicates `status.head_sha` from the same tick),
-    E-4 (one tier loop, not three colliding), E-5's remainder (bound the
-    fan-out; RM-4 already halves it). Plus **H-20 / CH-7**, deferred here by the
-    user: the exclusion-set grace counter has to advance every tick, so it
-    cannot be gated on "the file list changed", and BG-4 is restructuring
-    exactly that poll. Until it lands the two clients keep their disagreeing
-    rules.
+10. **WS-J — Tauri background cadence (M).** ✅ *Shipped 2026-08-28.* BG-1,
+    BG-2's remaining shape, BG-4/E-6, BG-6, DF-1's Tauri half, E-2, E-3, E-4,
+    E-5's remainder — and **H-20 / CH-7 on both clients**. Per-item state is in
+    §4.2, §4.5, §4.6 and the §3.2 register. Three new modules carry it:
+    `services/backgroundPolicy.ts` (the activity ladder, native's table ported),
+    `services/pacedLoop.ts` (the self-scheduling chain all three loops share)
+    and `core/src/exclusions.rs` (the opt-out grace window both clients call).
+    `utils/focus.ts` holds the one text-entry predicate. `get_head_sha` was
+    deleted end to end — core, shim, registration, wrapper and FRONTEND row —
+    since E-2 took its last caller. Gates: `pnpm check` 0/0 over 152 files,
+    prettier clean, `pnpm tauri build` bundled, zero-warning `just mac-build`,
+    **178 core** + 24 bridge + 2 host tests, clippy-pedantic 165 core with
+    `leogit` / `leogit-ffi` at zero.
 
-    From WS-I: **BG-6's shape is already proven in this client.** The terminal's
-    caret restore asks `container.contains(document.activeElement)` at the
-    moment it needs the answer rather than latching anything, for exactly the
-    reason BG-6 names — clicking a plain element raises no `focusin`, so the
-    flag never clears. `userTyping` is the same latch with one extra fault:
-    it is set by *any* input or textarea gaining focus, which includes xterm's
-    hidden one, so terminal focus suppressing auto-fetch is currently a side
-    effect rather than a decision. It happens to match the native client, which
-    suppresses on terminal focus deliberately — **so keep the behaviour when you
-    replace the mechanism**, and make it explicit rather than incidental.
+    Findings for whoever takes WS-K and beyond:
+    - **`setInterval` is the wrong primitive for anything whose rate can
+      change**, and every background loop in this client had one. Its period is
+      fixed when it is armed, so a cadence that depends on state means tearing
+      the timer down and rebuilding it, and a run that outlives its period
+      stacks a second on top of the first. Deciding the next delay *after* each
+      run settles gives non-overlap, immediate re-cadencing and a representable
+      "parked" state for free — the in-flight guard, the re-arm dance and the
+      `intervalMs <= 0` early return all disappeared into it. Native reached the
+      same shape from the other direction (`while !Task.isCancelled` + `sleep`);
+      this is that loop written for a host without structured concurrency.
+    - **Independent timers are a fan-out waiting for their common multiple.**
+      The three tier `setInterval`s were 2/5/10 min, so every ten minutes all
+      three fired in the same turn and the "sequential" each tier promised was
+      true only within itself. One loop over a deadline array — native's shape,
+      copied — makes the promise true globally. **The general form: when N
+      timers guard one shared resource, they are one timer.**
+    - **A parked loop needs something to un-park it, and only some conditions
+      raise events.** The tier loop parks on the *activity* half of
+      `canRunRepoSweeps()` and not on the network-op half, because an activity
+      change fires a listener and a transfer ending fires nothing. Parking on
+      the full predicate would have left the scheduler dead until the next time
+      the user alt-tabbed. Anything that gates a loop on a composite predicate
+      has to ask which of its terms are observable.
+    - **The equality gate is whole-value on purpose.** `JSON.stringify(status)`
+      rather than a named-field fingerprint, matching native's `Equatable`
+      compare: a hand-picked list is one that a field added later silently falls
+      out of, and the failure is invisible — a new field simply stops moving the
+      UI. It costs one serialization of an object that was parsed a microsecond
+      earlier, which is nothing against the subprocesses that produced it.
+    - **Anything that must advance every tick has to live outside that gate.**
+      The exclusion clock is the example: a path is pruned for having been
+      *absent* long enough, which an unchanged file list keeps being true of, so
+      gating the aging on "something changed" would freeze it exactly when it
+      matters. The gate ended up depending on the reconcile's answer rather than
+      the reverse.
+    - **A cadence ladder breaks a tick count *and* a bare wall-clock window, in
+      opposite directions, and CH-7 needed both terms.** It was specified as "N
+      consecutive absent ticks (≈30 s at the visible cadence)"; with BG-1 in the
+      same workstream a tick is 2 s or 30 s, so N ticks would have meant
+      anything up to seven minutes — hence wall-clock. But the first attempt was
+      wall-clock *alone*, at 30 s, which the review pass caught: the hidden rung
+      is also 30 s, so one tick is charged the entire window and the opt-out was
+      pruned on the **first** observed absence — the one read that can land
+      mid-rewrite, and the exact failure the window exists to prevent, now
+      concentrated at the rung where unattended rewrites are likeliest. The rule
+      is `absent_ms >= 30 s && absent_reads >= 2`. **The general lesson: a
+      duration threshold is only meaningful when it is comfortably larger than
+      the sampling interval, and when the interval is variable it is safer to
+      say what you mean — "not on one observation" — than to encode it as a
+      time.** Check any other threshold in this codebase against its sampler:
+      the diff debounce and the slow-load threshold are fine (they sample
+      continuously), but a future one might not be.
+    - **A hoist's IPC cost can be conditional rather than structural.** §5's
+      rule disqualified H-20 for costing a crossing per tick; the crossing only
+      exists when the user has excluded something, which is rare, so the client
+      short-circuits an empty set and the objection evaporates. Worth trying
+      before distorting a call that always happens (H-3's shape) or giving up on
+      the hoist.
+    - **`document.hidden` is not occlusion.** The native policy reads AppKit's
+      occlusion state; the WebView sets `hidden` for a minimized or hidden
+      window and *may* set it for a fully covered one. Where it doesn't, the
+      window reports `inactive` and polls at 10 s — slower than frontmost,
+      faster than the hidden rung, never wrong in a way the user can see. The
+      residual difference is a §8 row, not a bug.
+    - **The hidden rung is a floor, not a guarantee.** A WebView may throttle
+      timers in a backgrounded document, so 30 s is "30 s or slower" — which
+      only makes hidden work cheaper, and the wake-up resync is what actually
+      guarantees a current screen. Pinning it exactly would mean a Rust-side
+      ticker emitting an event nothing else needs; **WS-K is the workstream that
+      would already be adding a `CoreEvent`**, so if that turns out to be wanted,
+      that is where it is cheapest.
+    - **The wake-up condition is a *rise* in the ladder**, not a single event.
+      `focus` and `visibilitychange` both fire on one activation and a
+      hidden→visible→focused wake is two steps; ranking the three states and
+      resyncing when the rank goes up dedupes that structurally, with the
+      `resyncing` flag left in place for the overlapping case. It also kept
+      BG-7's Tauri behaviour (resync on the occlusion edge as well as focus),
+      which native still lacks.
+    - **A throttle whose reason has gone should go with it.** The tier
+      scheduler's 30 s refocus throttle existed because focus and
+      `visibilitychange` double-fired; with deadlines, a second kick simply
+      finds nothing due. It was kept anyway — a rapid alt-tab would otherwise
+      re-fetch the top five repositories on every pass — but the *reason* is now
+      rate-limiting, not deduplication, and the comment says so.
+    - **`document.activeElement` does not clear when the window loses focus** —
+      that is what `document.hasFocus()` is for. A typing guard built on the
+      element alone answers "still typing" for the whole time the user is away
+      in another app, which would have held back every automatic fetch the
+      ladder is stretching rather than pausing. The native predicate gets this
+      free (`NSApp.keyWindow` is nil while inactive, so its first responder is),
+      which is why "port the native rule" was not the same as "port the native
+      *expression* of the rule". Anything that ports a first-responder question
+      to the DOM needs the `hasFocus()` half.
+    - **A tier abandoned mid-fan-out loses its whole cycle, and a blur is now
+      enough to abandon one.** `dueAt[index]` is advanced *before* the tier runs
+      (so a slow tier doesn't drift the next one), and `syncTier` returns on
+      losing `canRunRepoSweeps()` — which since BG-1 includes "the window is
+      active". Alt-tabbing halfway through tier 2 therefore leaves its remaining
+      repos on stale badges for the full 10 minutes; `kickTopTier` only pulls
+      tier 0 forward. **This is native's behaviour, ported faithfully**
+      (`RepoDirectoryStore.runScheduler` has the same order), and the data is
+      the most deferrable in the app, so it was left alone rather than made to
+      differ. If it ever matters, the fix is to restore an abandoned tier's
+      deadline to "due now" instead of advancing it — at the cost of re-fetching
+      the repos it had already reached, on both clients.
+    - **Native carries two efficiency defects of the same family as E-6**, both
+      out of scope here: `RepoStore`'s `workingTreeEpoch` bumps on any status
+      change, so an unrelated edit re-parses the open diff (E-9, WS-P), and
+      `sweepVisible` checks `canRunRepoSweeps` once at entry rather than inside
+      its loop (RM-11, WS-S). The third — `noteActiveStatus` rewriting an
+      identical `RepoSync` every tick — was fixed here because it *is* E-6,
+      one store along.
 11. **WS-K — Connectivity observer, both clients (M).** **H-17** and BG-3,
     alone because they are a mini-project on a different machine: three OS
     backends, a new `CoreEvent` variant and a new dependency, none of it
@@ -1564,6 +1635,17 @@ is mostly adoption of already-proven native behavior.
     user's Linux machine is where the only consumer is written. Then macOS, and
     only once it proves equivalent does native retire `NetworkPathObserver`.
     Until then `navigator.onLine` stays authoritative-negative only.
+
+    From WS-J: **the Tauri adopter is two call sites, not a search.**
+    `connectivity.ts` still owns the breaker and `shouldAttemptBackground()`;
+    what an online/offline `CoreEvent` replaces is `isBrowserOffline()` inside
+    it, plus the `window.addEventListener('online', …)` in `initConnectivity`
+    and in `updateChecker`. The recovery kick already routes through
+    `repoSyncScheduler.kickTopTier()`, which is deadline-based now, so a
+    recovery that arrives while the window is parked simply brings the top
+    tier's deadline forward instead of firing a fan-out into a hidden window.
+    If the observer's transport ends up wanting a per-subscription channel
+    rather than a broadcast, WS-I's entry above is the shape.
 12. **WS-L — Native welcome, switcher & clone (M).** The native block starts
     where the user does. RM-1 (Welcome is a dead end today — reuse the
     switcher's list as its body, run discovery from it, adopt the
@@ -1700,11 +1782,12 @@ Suggested order: **A → B → … → S**, as lettered. Each workstream maintai
 own doc rows as it lands (per CLAUDE.md); WS-S carries only what needs the whole
 plan finished.
 
-One sequencing note that is not free to reorder: **WS-K can run at any point
-after WS-J** — it needs a Linux machine rather than a predecessor, so schedule
-it when that machine is available instead of blocking the native block behind
-it. (The other was H-3, the last core hoist and the one Tauri-block entry that
-also touched native code; it shipped with WS-F.)
+One sequencing note that is not free to reorder: **WS-K needs a Linux machine
+rather than a predecessor** — WS-J, the workstream it waited on, has shipped, so
+schedule it when that machine is available and run WS-L…WS-S in the meantime
+rather than blocking the native block behind it. (The other such entry was H-3,
+the last core hoist and the one Tauri-block item that also touched native code;
+it shipped with WS-F.)
 
 ## 7. Standing decisions
 
@@ -1735,9 +1818,9 @@ other decision lives inline with the item it governs, marked **Decided** in §4.
 Per workstream, matching the previous plan's bar:
 
 - Zero-warning `xcodebuild` via `just mac-build`; `pnpm check` (svelte-check)
-  0/0; `cargo test --workspace` green (**168 core + 24 bridge + 2 host** — the
-  core and bridge counts from WS-F, up from the 120 + 24 this plan started at,
-  and the host's first tests from WS-I, pinning the terminal channel's JSON
+  0/0; `cargo test --workspace` green (**178 core + 24 bridge + 2 host** — up
+  from the 120 + 24 this plan started at; the last ten are WS-J's `exclusions`
+  module, and the host's two are WS-I's, pinning the terminal channel's JSON
   because the TypeScript that reads it is hand-written);
   `cargo clippy --workspace --all-targets -- -W clippy::pedantic` at
   **165** or better, never worse (the plan opened at 184; WS-B took it to 170,

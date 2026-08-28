@@ -17,10 +17,26 @@ final class CommitStore {
     /// Optional message body, joined below the summary with a blank line.
     var details = ""
 
-    /// Paths the user explicitly unchecked. Deliberately not pruned when a
-    /// path leaves the file list — matching the Tauri client — so a file that
-    /// briefly disappears (e.g. touched by a formatter) keeps its opt-out.
+    /// Paths the user explicitly unchecked.
+    ///
+    /// An opt-out outlives its path leaving the file list, so a file that
+    /// briefly disappears — a formatter rewriting it between two status reads —
+    /// keeps it and cannot be silently re-included by the next commit. It does
+    /// not outlive it *forever*: `pruneExpiredExclusions(against:)` drops one
+    /// whose path has been gone longer than core's grace window. Both clients
+    /// run that one rule.
     private(set) var excludedPaths: Set<String> = []
+
+    /// How long, and over how many status reads, each excluded path has been
+    /// missing from the file list. The clock behind `excludedPaths`, kept beside
+    /// it rather than inside it because every reader of that set asks one
+    /// question — "is this path excluded?" — and a dictionary of clocks would
+    /// make each of them carry the answer to a different one. Written only where
+    /// the set is.
+    private var clocks: [String: Exclusion] = [:]
+
+    /// When the ages above were last advanced.
+    private var lastReconcile = Date.now
 
     private(set) var isCommitting = false
 
@@ -110,12 +126,20 @@ final class CommitStore {
         files.filter { isIncluded($0) }
     }
 
+    /// A freshly unchecked path: zero on both terms, which is also what core
+    /// answers for a path it can still see.
+    private static func newClock(for path: String) -> Exclusion {
+        Exclusion(path: path, absentMs: 0, absentReads: 0)
+    }
+
     func setIncluded(_ file: FileEntry, _ include: Bool) {
         guard Self.isCommittable(file) else { return }
         if include {
             excludedPaths.remove(file.path)
+            clocks.removeValue(forKey: file.path)
         } else {
             excludedPaths.insert(file.path)
+            clocks[file.path] = Self.newClock(for: file.path)
         }
     }
 
@@ -123,9 +147,45 @@ final class CommitStore {
         let committable = files.filter(Self.isCommittable).map(\.path)
         if include {
             excludedPaths.subtract(committable)
+            for path in committable { clocks.removeValue(forKey: path) }
         } else {
             excludedPaths.formUnion(committable)
+            for path in committable { clocks[path] = Self.newClock(for: path) }
         }
+    }
+
+    /// Age the opt-outs against the file list a status read just produced, and
+    /// drop the ones that have now been gone long enough, and over enough reads,
+    /// to be gone rather than mid-rewrite.
+    ///
+    /// Called from the status poll rather than from wherever the file list
+    /// changes: a path is pruned for having been *absent* long enough, which is
+    /// exactly what an unchanged file list keeps being true of. Elapsed time is
+    /// measured here, so an irregular caller — a tick the poll skipped while a
+    /// transfer held the slot — costs an opt-out nothing and buys it nothing.
+    ///
+    /// The crossing is skipped entirely while nothing is excluded, which is the
+    /// usual state of the app.
+    func pruneExpiredExclusions(against files: [FileEntry]) {
+        let now = Date.now
+        let elapsed = max(now.timeIntervalSince(lastReconcile), 0) * 1000
+        lastReconcile = now
+        guard !excludedPaths.isEmpty else {
+            clocks = [:]
+            return
+        }
+        let excluded = excludedPaths.map { clocks[$0] ?? Self.newClock(for: $0) }
+        // Total by construction: `UInt32(someDouble)` traps on anything it can't
+        // represent, and a clock that jumped is not worth a crash. Anything past
+        // the range is the same answer as the maximum — every window expired.
+        let elapsedMs = UInt32(exactly: elapsed.rounded(.down)) ?? .max
+        let kept = GitBridge.survivingExclusions(
+            excluded,
+            present: files.map(\.path),
+            elapsedMs: elapsedMs
+        )
+        excludedPaths = Set(kept.map(\.path))
+        clocks = Dictionary(uniqueKeysWithValues: kept.map { ($0.path, $0) })
     }
 
     /// Forget everything typed and unchecked — for switching repositories.
@@ -133,6 +193,8 @@ final class CommitStore {
         summary = ""
         details = ""
         excludedPaths = []
+        clocks = [:]
+        lastReconcile = .now
         errorMessage = nil
         amendTarget = nil
         coAuthors = []

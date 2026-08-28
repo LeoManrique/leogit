@@ -59,6 +59,10 @@ struct ContentView: View {
     /// Dedupes the activate resync — activation notifications can burst.
     @State private var isResyncing = false
 
+    /// A once-per-launch 0–30 s offset on the first automatic fetch, so two
+    /// windows started together don't stay in phase. See `autoFetchLoop`.
+    private static let sessionFetchSkew: Duration = .milliseconds(Int64.random(in: 0...30_000))
+
     init() {
         let policy = BackgroundSchedulingPolicy()
         _schedulingPolicy = State(initialValue: policy)
@@ -404,6 +408,10 @@ struct ContentView: View {
                 // Feeds the switcher's badge for the open repo for free —
                 // the reason the scheduler excludes it from every tier.
                 directoryStore.noteActiveStatus(repoPath, status)
+                // Age the composer's opt-outs on the tick rather than on a
+                // file-list change: a path is pruned for having been *absent*
+                // long enough, which an unchanged list keeps being true of.
+                commitStore.pruneExpiredExclusions(against: status.files)
                 if status.headSha != previousHead {
                     // HEAD moved outside the app — a terminal checkout,
                     // commit, or merge: the branch menu's checkmark and each
@@ -463,8 +471,16 @@ struct ContentView: View {
     /// (FRONTEND.md §8): unlike the old `NSApp.isActive` gate, neither
     /// losing focus nor a hidden window stops it — hiding stretches the
     /// interval instead, so ahead/behind are already right on return.
+    ///
+    /// The first sleep carries `sessionFetchSkew` so this window's fetches
+    /// don't stay in lockstep with another's — GitHub Desktop's trick, and it
+    /// earns its keep here because LeoGit's two clients read the same
+    /// repositories from the same machine and would otherwise contend for
+    /// `index.lock` on the same beat forever. The warm-up fetch already ran by
+    /// then, so the offset costs the user nothing.
     @MainActor
     private func autoFetchLoop(repoPath: String) async {
+        var skew = Self.sessionFetchSkew
         while !Task.isCancelled {
             let config = appConfig.config
             let intervalMs = config?.autoFetch == true ? (config?.fetchIntervalMs ?? 0) : 0
@@ -474,7 +490,8 @@ struct ContentView: View {
                 intervalMs > 0
                 ? schedulingPolicy.autoFetchInterval(configured: .milliseconds(Int64(intervalMs)))
                 : .seconds(30)
-            try? await Task.sleep(for: interval)
+            try? await Task.sleep(for: interval + skew)
+            skew = .zero
             if Task.isCancelled { return }
             guard intervalMs > 0,
                 schedulingPolicy.canAutoFetch,

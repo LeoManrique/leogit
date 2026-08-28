@@ -37,20 +37,19 @@ static-linking or a local daemon (that decision is open; see the plan).
 - Today's surface: **4 events, ~45 DTOs**, and a command catalogue (§3) each host exposes
   **to the extent it consumes it**. The Tauri host registers **73** `#[tauri::command]`s,
   each with a wrapper in `apps/tauri-app/src/lib/api/commands.ts`; the UniFFI bridge
-  exports **61** functions. The two sets are deliberately not identical, and a command
+  exports **62** functions. The two sets are deliberately not identical, and a command
   reaching one host does not oblige the other — what is required is that the difference be
   recorded, here or in §8, never left silent.
   - No native export: `check_auth`, `check_for_update`, `delete_remote_branch`,
     `generate_patch`, `generate_inverse_patch`, `get_ahead_behind`,
-    `get_head_sha`, `get_repo_identifier`, `get_repo_name`,
+    `get_repo_identifier`, `get_repo_name`,
     `has_staged_changes`, `highlight_diff`, `init_repo`, `is_git_repo`, `open_url`,
     `rename_branch`, `take_pending_launch_target`, `terminal_pty_info`. Three of those the
     native client reaches under another name (`repo_display_name` for `get_repo_name`,
     `resolve_repo_root` for `is_git_repo`, the structured `tokenize_diff` for the
-    HTML-shaped `highlight_diff`); `get_head_sha` is redundant against `get_status`
-    (§6.1); `take_pending_launch_target` and `init_repo` serve the launch path, which is
-    Tauri-only (§8); and the rest the bridge omits because it carries no
-    surface a client does not call.
+    HTML-shaped `highlight_diff`); `take_pending_launch_target` and `init_repo` serve the
+    launch path, which is Tauri-only (§8); and the rest the bridge omits because it
+    carries no surface a client does not call.
   - No Tauri command: `core_version`, `fix_path_env`, `repo_display_name`,
     `resolve_repo_root`, `tokenize_diff`.
   - Registered Tauri-side but called by nothing in the Svelte client:
@@ -114,10 +113,14 @@ Clearing an optional field is patching it to `""` — the config's standing
 |---|---|---|
 | `get_status` | `repoPath` | `RepoStatus` |
 | `file_status_styles` | – | `FileStatusStyle[]` |
-| `get_head_sha` | `repoPath` | `string` |
 | `get_selected_diff` | `repoPath, files` | `string` (the AI input; never parsed) |
 | `get_log` | `repoPath, opts:{max_count, skip}` | `CommitInfo[]` |
 | `get_commit_detail` | `repoPath, sha` | `CommitDetail` (files + totals, one `git log`) |
+
+There is no `get_head_sha`: `RepoStatus.head_sha` is already in every status
+reply (porcelain v2 emits the HEAD OID as `# branch.oid`), so asking for it
+separately was a second subprocess per poll tick for a field the first one had
+already delivered. §6.1's "HEAD moved since the last tick" rule reads that field.
 
 The raw-diff getters are gone: reading and parsing were always done together,
 and fusing them (§3.10) removed a round trip per file selection and gave the
@@ -136,7 +139,7 @@ strings that a changed-file list draws on every repaint.
 | `delete_remote_branch` (net) | `repoPath, remote, branch` | `void` |
 | `rename_branch` | `repoPath, oldName, newName` | `void` |
 
-### 3.5 Git — commit & staging — 9
+### 3.5 Git — commit & staging — 10
 | Command | Args | Returns |
 |---|---|---|
 | `commit` | `repoPath, message, files, amend` | `void` |
@@ -147,7 +150,17 @@ strings that a changed-file list draws on every repaint.
 | `append_to_gitignore` | `repoPath, patterns` | `void` |
 | `ignore_paths` | `repoPath, paths` | `void` |
 | `format_commit_message` | `summary, description, coAuthors` | `string` |
+| `reconcile_exclusions` | `excluded: Exclusion[], present: string[], elapsedMs` | `Exclusion[]` (the survivors) |
 | `effective_scan_paths` | `scanPaths` | `string[]` |
+
+`reconcile_exclusions` is the grace window behind §6.4, and the client skips the
+crossing while nothing is excluded — the usual case. `elapsedMs` is wall-clock
+time since the previous call rather than a tick count, because the poll's
+cadence changes with what the window is doing (§6.1) and counting ticks would
+make one window mean anything between 30 seconds and seven minutes. The reply
+also carries a count of consecutive misses, because elapsed time alone is not
+enough in the other direction: at the 30 s rung a single read is charged the
+whole window, and that read is exactly the one that can land mid-rewrite.
 
 ### 3.6 Git — sync / remote — 8
 | Command | Args | Returns |
@@ -311,7 +324,7 @@ codegen decision is open (plan §10.7).
 | History | `CommitInfo` (sha, short_sha, summary, body, author, committer, parents[], trailers[], co_authors[], body_without_coauthors, tags[]); `CommitStats` (additions, deletions); `CommitDetail` (files[], stats) |
 | Branches / remote | `BranchInfo` (name, is_remote, is_current); `AheadBehind`; `RepoSync` (ahead, behind, has_remote, fetched, dirty); `RepoIdentifier` (owner, name); `MergeResult` (success, fast_forward, conflicts[], error_message?) |
 | Diff | `DiffLine` (content, line_type, line numbers, `intra_line_diff: IntraLineRange`, and `text?` — the raw patch line, present only on `Hunk` and `NoNewline` rows, which are the only ones that read it); `IntraLineRange`, `HunkHeader`, `Hunk`, `FileDiff` (old_path, new_path, file_header, hunks[], is_binary); `SbsPair`; `DiffOptions` (html, side_by_side, show_anyway); `ParsedDiff` (file_diff, html[], sbs_pairs[], additions, deletions, empty_reason?, size_guard?); `EmptyDiffReason` (`NoChanges`/`WhitespaceOnly`/`NoTextualChanges`); `DiffSizeGuard` (reason, bytes, longest_line); `Token` (start, end, class: `TokenClass`) / `TokenLine` — the structured highlight layer under the HTML (§7); `DiffSelection` |
-| Commit composer | `CommitMessage` (title, description) |
+| Commit composer | `CommitMessage` (title, description); `Exclusion` (path, absent_ms, absent_reads — how long and over how many consecutive status reads an opt-out's path has been missing from the file list; both zero while it is present, and §6.4's window needs both to expire) |
 | Config / persistence | `Config` (theme, fetch_interval_ms, ai_provider, auto_fetch, syntax_highlighting, scan_paths[], scan_depth, side_by_side_diff, hide_whitespace, tab_size, terminal_shell?, then the `claude` and `ollama` tables — **nothing scalar may follow them**, since a TOML table swallows every key after it); `ClaudeConfig` (model?, timeout_secs); `OllamaConfig` (model?, server_url, timeout_secs); `ConfigPatch` (every field optional — absent means "leave it alone", `""` means "clear it"); `Bounds`/`ConfigBounds`; `ReposState`; `ReposStatePatch` |
 | Repo list | `RepoRow` (path, names[] — every label the user might type for that row); `CloneTarget` (normalized_url, repo_name, target_path) |
 | GitHub | `GhRepo` (name_with_owner, name, description, is_private, pushed_at) |
@@ -342,13 +355,36 @@ The backend does the git work; these are the **frontend orchestration rules** th
 define LeoGit's behavior and must match on both platforms. (Today they live in
 `MainLayout.svelte`, `lib/services/`, `lib/stores/`.)
 
-1. **Status polling** — poll `get_status` every **2s** while a repo is open, and refresh
-   the commit log whenever **HEAD moved since the last tick**. `RepoStatus.head_sha` is
-   what answers that: porcelain v2 emits the HEAD OID as `# branch.oid`, so `get_status`
-   already carries it at no cost and the rule mandates no second command. Auto-fetch
-   (`fetch`/`repo_sync_status`) every **30s** when `auto_fetch` is on. **Pause all
-   polling** while a network op is in flight; resync on refocus. What happens while the
-   window is hidden or blurred is platform policy — §8. Automatic fetches are additionally
+1. **Status polling** — poll `get_status` while a repo is open, and refresh the commit
+   log **and the branch list** whenever **HEAD moved since the last tick**.
+   `RepoStatus.head_sha` is what answers that: porcelain v2 emits the HEAD OID as
+   `# branch.oid`, so `get_status` already carries it at no cost and the rule mandates no
+   second command. A checkout made in the terminal moves the branch menu's checkmark as
+   well as the history, which is why both reload.
+   **The cadence is the window's activity ladder, in both clients**: **2 s** frontmost,
+   **10 s** visible but not focused, **30 s** hidden, with the automatic fetch's own
+   interval stretched **×3** while hidden. Neither loop ever *stops* for focus or
+   visibility — a visible-but-unfocused window that has quietly gone stale is the failure
+   this prevents, and a hidden window that keeps ticking slowly is what makes coming back
+   to it show a current screen instead of a catch-up. Only the multi-repo badge sweeps
+   pause when the window is neither focused nor on screen: nobody is looking at a badge
+   for a repository in a window nobody is looking at, and the wake-up resync is their
+   catch-up path. Auto-fetch (`fetch`/`repo_sync_status`) runs on `fetch_interval_ms`
+   (default **30s**) when `auto_fetch` is on, and is additionally **held back while text
+   has the keyboard** — a fetch can reorder the file list under a half-written commit
+   message, and the embedded terminal counts as text entry because it is exactly where
+   that list is being changed from. That question is asked *at the moment of the tick*;
+   a latched focus flag strands, because removing a focused element raises no
+   `focusout`.
+   **Pause all polling** while a network op is in flight; resync when the window wakes
+   up. A **once-per-session 0–30 s skew** offsets the first automatic fetch so two windows
+   started together don't stay in lockstep on the same repositories; the status poll is
+   deliberately not skewed.
+   A tick that finds **nothing changed publishes nothing** — an idle repository must not
+   re-render the window every cadence — and the comparison is of the *whole*
+   `RepoStatus`, not a hand-picked list of fields that a later field would silently fall
+   out of. `stat_stamp` is what makes that comparison see content edits at all (§5.2).
+   Automatic fetches are additionally
    gated on `RepoStatus.has_remote`: `get_remote` answers `"origin"` for a repo with no
    remote (§ *Notable invariants*), so an ungated tick spawns a doomed `git fetch` whose
    failures then open the connectivity breaker against every *other* repo. The gate skips
@@ -423,9 +459,25 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    `Subproject commit <sha>-dirty` line, so the pane explains instead and the
    subprocess is never spawned.
 4. **File selection semantics** — inclusion is *derived*: every committable file is
-   included unless the user opted it out, so the 2s poll cannot re-check a file they
-   just unchecked. How long an opt-out survives its path leaving the list is where the
-   two clients still differ (§8). The
+   included unless the user opted it out, so a poll tick cannot re-check a file they
+   just unchecked. **An opt-out outlives its path leaving the list, for a grace window
+   of 30 seconds *and* at least two consecutive misses** (`reconcile_exclusions`,
+   §3.5) — the two failure modes are not symmetric, and both clients run the one rule.
+   Dropping it the moment the path disappears re-includes a file the user deliberately
+   unchecked, because a formatter rewrote it between two reads, and the next commit takes
+   it: a commit nobody meant to make and never saw happen. Keeping it forever costs
+   nothing but an unbounded set.
+   **Both terms of the window are load-bearing, and each covers what the other cannot.**
+   It is wall-clock rather than a count of ticks because the cadence is not a constant
+   (§6.1) and "fifteen ticks" would mean anything from 30 seconds to seven minutes. But
+   elapsed time alone fails at the other end of the same ladder: at the 30 s rung one
+   read is charged the entire window, and a transfer can hand over minutes in a single
+   lump, so a purely time-based rule would drop the opt-out on the **first** look — which
+   is precisely the look that can land in the half-second a formatter has the file
+   renamed away. Two consecutive misses cannot be one unlucky read, at any cadence.
+   Both counters advance on **every** tick rather than on a changed file list — a path is
+   dropped for having been *absent* long enough, which an unchanged list keeps being true
+   of — and a single reappearance resets both. The
    list is keyboard-navigable: arrows move the active row and load its diff. Staging is
    **whole-file** today (partial-hunk staging is scaffolded but inactive). How far the
    keyboard and the pointer go beyond that — range selection, a Space toggle, Home/End —
@@ -434,7 +486,13 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
 5. **Connectivity circuit-breaker** — after consecutive failures, back off
    (30s→5min) and gate background git ops on connectivity; recover on reconnect.
 6. **Tiered background refresh** — repos refresh in tiers (2/5/10 min) with staggered
-   kicks, an on-switch sweep, and an on-visible sweep.
+   kicks, an on-switch sweep, and an on-visible sweep. **One loop with three deadlines,
+   not three timers**: independent timers come due together on their common multiple and
+   fire three fetch fan-outs in the same turn, which is the opposite of the sequential
+   fan-out each tier promises. Sequential within a tier *and* across them, with the
+   policy re-checked before every repository so a transfer starting — or the window
+   going away — abandons the rest of the tier rather than finishing a fan-out nobody is
+   waiting for. The active repo is in no tier: the status poll feeds its badge for free.
 7. **Commit composer** — AI generation via `generate_commit_message`; auto-summary
    from a single changed file; amend/undo re-seed the message. `format_commit_message`
    composes summary + description + co-authors. **Generate is gated on the provider
@@ -542,8 +600,9 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
 12. **Relative dates** — commit timestamps arrive as ISO-8601 strings
    (`author_date`/`committer_date`, e.g. `2026-08-12T14:03:11+0200`; the core is
    deliberately chrono-free) and each frontend renders them as relative ("5 minutes
-   ago"), recomputed on every refresh. Whether an idle list also re-ticks between
-   refreshes is platform policy (§8).
+   ago"), recomputed whenever the list is republished — which, under §6.1's equality
+   gate, an idle repository never is. Whether an idle list also re-ticks on its own is
+   platform policy (§8), and it is the only thing that keeps such a list honest.
 13. **Failure surfacing is classified, not uniform.** Every failure lands in one of two
    places, and which one is decided by *whether the user is waiting on it*, never by how
    severe it looks. An operation the user asked for and is waiting on — a transfer, a
@@ -698,11 +757,9 @@ every deliberate difference here.
 | Settings field coverage (§6.15) | every `Config` field the app reads has a control | no control for `theme` (a permanent exemption, above), `side_by_side_diff` (awaiting the layout, above), or the two AI timeouts — so a timeout set in the Tauri client bounds native's requests but cannot be changed there. Closing the timeout gap is the parity plan's WS-R |
 | Repo-search labels (§6.9) | rows carry the GitHub `owner/name` when it is known, and both it and the basename are searchable | basename only — GitHub identifiers are not fetched natively yet (ROADMAP) |
 | Context-menu scope (§6.10) | multi-row selection, so discard also acts on a whole selection | single-selection lists, so every item acts on the right-clicked row |
-| Open-diff freshness | stale until reselect — the poll never reloads the open diff (adopting `stat_stamp` the same way would fix it; ROADMAP) | reloads within a poll tick: `stat_stamp` makes the status comparison see content edits, `workingTreeEpoch` re-keys the load, the equality skip absorbs no-ops |
-| Exclusion set (which changed files are left out of a commit) | an opt-out is pruned the tick its path leaves the file list, so a file that vanishes for one refresh — a formatter rewriting it — is silently re-included | an opt-out persists for the session, so nothing can re-include a file the user unchecked. Converging on the native rule plus a grace window is filed (parity plan CH-7/H-20); until then this is a real behavioural difference, not a presentation one |
-| Background cadence while unfocused/hidden (§6.1) | no explicit pause and no visibility term: the status poll is a flat 2 s `setInterval` and auto-fetch a flat `fetch_interval_ms` one, so the hidden-window cadence is whatever the host WebView's timer throttling makes it. `document.hidden` is read only to *trigger* the on-activation resync | the active repo never stops, and the cadence is explicit: status poll 2 s frontmost / 10 s visible-unfocused / 30 s hidden, auto-fetch interval ×3 while hidden, only the multi-repo sweeps pausing when inactive (`BackgroundSchedulingPolicy`), with an App Nap assertion held while a repo is open so the timers are not coalesced away |
+| Background-cadence enforcement (§6.1) | the ladder is a self-scheduling `setTimeout` chain, so a WebView free to throttle a backgrounded document can only make the hidden rung *slower* than 30 s; the wake-up resync is what guarantees a current screen | an App Nap assertion is held while a repo is open, so the same ladder's timers are not coalesced away, and the hidden rung is exactly 30 s (`AppNapSuppressor`) |
 | File-list selection & keyboard (§6.4) | shift-click extends a multi-row selection (a separate anchor for the checkbox column, Finder/Gmail semantics), Space toggles the focused row's checkbox and bulk-toggles a multi-selection, Home/End jump to first/last | single-selection `List`: arrow keys move the active row, and there is no range selection, Space toggle, or Home/End |
-| Relative-date ticking (§6.12) | a 10 s tick re-renders the visible rows, skipped while the History pane is hidden or the window is backgrounded, so an open list never goes stale | formatted once per refresh and not re-ticked; the 2 s poll is what moves the labels on |
+| Relative-date ticking (§6.12) | a 10 s tick re-renders the visible rows, skipped while the History pane is hidden or the window is backgrounded, so an open list never goes stale | formatted once per republish and not re-ticked, so an idle repository's labels stop ageing until something in its status moves |
 | Side-by-side diff (`side_by_side_diff`) | split layout toggle, honoured by `DiffViewer` | not implemented — unified only; a layout feature awaiting its own design pass (ROADMAP), the config field crosses saves untouched |
 | Pending-count placement (§6.2) | `↓N` / `↑N` capsules on the sync button's trailing edge, each with its own arrow | plain `↑N ↓N` text in its own toolbar item left of the button: macOS renders a toolbar control's label as text and icon only, so no custom view can ride the face, and no system API badges a toolbar item |
 | Transfer progress surface | inside the control that started it — a fill wiping across the sync button, sweeping where git reports no percentage | a full-width strip under the toolbar with a real indeterminate state, plus git's line verbatim |

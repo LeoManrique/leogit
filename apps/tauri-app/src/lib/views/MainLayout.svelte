@@ -28,7 +28,9 @@
   import {
     gitApi,
     diffApi,
+    exclusionsApi,
     WEBVIEW_DIFF_OPTIONS,
+    type Exclusion,
     type FileEntry,
     type CommitInfo,
     type Config,
@@ -38,10 +40,23 @@
     type LaunchTarget,
     type MergeResult,
     type ParsedDiff,
+    type RepoStatus as GitStatus,
   } from '$lib/api/commands'
   import * as fileActions from '$lib/services/fileActions'
   import type { FileContextActions } from '$lib/services/fileActions'
   import { isFromTerminal } from '$lib/utils/keyboard'
+  import { isTextInputElement, isTextInputFocused } from '$lib/utils/focus'
+  import {
+    autoFetchIntervalMs as pacedFetchIntervalMs,
+    canAutoFetch,
+    canPollStatus,
+    observeActivity,
+    statusPollIntervalMs,
+    wokeUp,
+    SESSION_FETCH_SKEW_MS,
+    type ActivityState,
+  } from '$lib/services/backgroundPolicy'
+  import { pacedLoop } from '$lib/services/pacedLoop'
 
   import Header from '$lib/components/Header.svelte'
   import TabBar from '$lib/components/TabBar.svelte'
@@ -85,9 +100,6 @@
   // whenever no session is up, which that function starts.
   let terminal = $state<{ runCommand: (command: string) => void } | null>(null)
 
-  let statusInterval: ReturnType<typeof setInterval> | null = null
-  let fetchInterval: ReturnType<typeof setInterval> | null = null
-  let userTyping = $state(false)
   let lastHeadSha: string | null = null
 
   // Defer the "Loading diff…" placeholder so sub-150 ms fetches swap the
@@ -342,22 +354,145 @@
   let quietFailureStreak = 0
   const QUIET_FAILURE_THRESHOLD = 3
 
+  /*
+    The last status read, verbatim, as the equality gate compares it.
+
+    Whole-value, not a hand-picked list of fields: the native client compares
+    the whole `RepoStatus` through its synthesized `Equatable`, and a
+    fingerprint naming fields by hand is a list someone has to remember to
+    extend — the failure being that a *new* field stops moving the UI, silently,
+    for whoever adds it. The string is the JSON the backend just sent, so
+    building it costs one serialization of an object that was parsed a
+    microsecond ago, and `stat_stamp` rides inside it: a file that was modified
+    and still is compares equal without it, which is why an idle repository can
+    be recognized at all.
+  */
+  let lastStatusJson: string | null = null
+
+  /*
+    How long, and over how many status reads, each excluded path has been
+    missing from the file list.
+
+    Kept beside `userDeselected` rather than inside it because every reader of
+    that set asks one question — "is this path excluded?" — and a map of clocks
+    would make each of them carry the answer to a different one. One writer
+    (the reconcile below), rebuilt wholesale from core's answer, so the two
+    cannot drift apart.
+  */
+  let exclusionClocks = new Map<string, Exclusion>()
+  let lastReconcileAt = Date.now()
+  /* `elapsed_ms` crosses as a u32, so it is clamped to that range at both ends:
+     a machine resumed from a long sleep would otherwise hand over a number the
+     backend can't take, and a clock that jumped backwards a negative one.
+     Anything past the top is the same answer anyway — every grace window has
+     expired — and anything below zero means no time has passed. */
+  const MAX_ELAPSED_MS = 0xffff_ffff
+  const NOTHING_PRUNED: ReadonlySet<string> = new Set()
+
+  /**
+   * Age the commit composer's opt-outs against the file list that just arrived
+   * and answer with the paths whose grace window has run out.
+   *
+   * An opt-out used to be dropped the moment its path left the list, which
+   * meant a formatter rewriting a file between two ticks silently re-included
+   * it — and the next commit took a file the user had deliberately unchecked.
+   * The rule is core's now ({@link exclusionsApi.reconcile}), shared with the
+   * native client so the two cannot answer differently.
+   *
+   * The crossing is skipped entirely while nothing is excluded, which is the
+   * usual state of the app: the poll pays for this only once the user has
+   * actually unchecked something.
+   */
+  async function pruneExpiredExclusions(present: string[]): Promise<ReadonlySet<string>> {
+    const now = Date.now()
+    const elapsedMs = Math.min(Math.max(now - lastReconcileAt, 0), MAX_ELAPSED_MS)
+    lastReconcileAt = now
+    const excludedPaths = get(repoState).userDeselected
+    if (excludedPaths.size === 0) {
+      exclusionClocks.clear()
+      return NOTHING_PRUNED
+    }
+    // A path with no clock yet is one the user has just unchecked: it starts at
+    // zero on both terms, which is also what core answers for a present path.
+    const excluded: Exclusion[] = [...excludedPaths].map(
+      (path) => exclusionClocks.get(path) ?? { path, absent_ms: 0, absent_reads: 0 },
+    )
+    let kept: Exclusion[]
+    try {
+      kept = await exclusionsApi.reconcile(excluded, present, elapsedMs)
+    } catch (error) {
+      // A failed reconcile prunes nothing. Losing an opt-out costs a commit
+      // nobody meant to make; keeping one costs a checkbox click.
+      console.warn('[exclusions] reconcile failed, keeping every opt-out:', error)
+      return NOTHING_PRUNED
+    }
+    exclusionClocks = new Map(kept.map((entry) => [entry.path, entry]))
+    const survived = new Set(kept.map((entry) => entry.path))
+    const pruned = new Set<string>()
+    for (const entry of excluded) {
+      if (!survived.has(entry.path)) pruned.add(entry.path)
+    }
+    return pruned
+  }
+
+  /**
+   * Read the repository's status and publish it, returning what was read so
+   * callers can act on the fields they care about without asking git a second
+   * time — HEAD in particular, which used to cost its own `rev-parse` every
+   * tick although `head_sha` was already in hand.
+   */
   async function refreshStatus(
     opts: { silent?: boolean; background?: boolean } = {},
-  ): Promise<void> {
+  ): Promise<GitStatus | null> {
     const repoPath = $appState.repoPath
-    if (!repoPath) return
+    if (!repoPath) return null
     try {
       const status = await gitApi.getStatus(repoPath)
+      // A read the user has moved on from is thrown away rather than published.
+      // A switch resets the poll's memory and publishes the new repository
+      // immediately, so a tick still in flight against the old one would
+      // otherwise paint its branch, files and counts over the new repository —
+      // and now also re-seed `lastHeadSha` and the fingerprint from it, which
+      // is what makes this worth a guard rather than a shrug.
+      if (get(appState).repoPath !== repoPath) return null
+      // Clocks advance on every tick, changed list or not: a path is pruned for
+      // having been *absent* long enough, which is precisely what an unchanged
+      // file list keeps being true of.
+      const pruned = await pruneExpiredExclusions(status.files.map((f) => f.path))
+      if (get(appState).repoPath !== repoPath) return null
+      const fingerprint = JSON.stringify(status)
+      /*
+        Nothing moved, so nothing is published. A repository nobody is editing
+        produced a fresh `RepoState` — and three fresh `Set`s inside it — every
+        two seconds, and every subscriber in the window re-rendered on it
+        forever. Only the silent path takes the shortcut: an explicit refresh
+        also clears the error modal on success, and that is a state change even
+        when the status underneath is identical.
+      */
+      const unchanged =
+        opts.silent === true &&
+        fingerprint === lastStatusJson &&
+        pruned.size === 0 &&
+        get(repoState).statusLoaded
+      lastStatusJson = fingerprint
+      quietFailureStreak = 0
+      if (unchanged) {
+        // Any successful read still proves the repository is back, so a
+        // standing poll banner retires even on a tick that publishes nothing.
+        if (get(repoState).pollError !== undefined) {
+          repoState.update((s) => ({ ...s, pollError: undefined }))
+        }
+        return status
+      }
       repoState.update((s) => {
         const presentPaths = new Set(status.files.map((f) => f.path))
-        const nextSelected = new Set<string>()
-        for (const f of status.files) {
-          if (isCommittable(f) && !s.userDeselected.has(f.path)) nextSelected.add(f.path)
-        }
         const nextDeselected = new Set<string>()
         for (const p of s.userDeselected) {
-          if (presentPaths.has(p)) nextDeselected.add(p)
+          if (!pruned.has(p)) nextDeselected.add(p)
+        }
+        const nextSelected = new Set<string>()
+        for (const f of status.files) {
+          if (isCommittable(f) && !nextDeselected.has(f.path)) nextSelected.add(f.path)
         }
         // If the file the user was viewing has just been committed (or
         // otherwise dropped out of the working tree), drop the diff too —
@@ -394,25 +529,25 @@
           pollError: undefined,
         }
       })
-      quietFailureStreak = 0
       // Keep the picker's badge for the active repo live off the same counts
-      // the 2s poll already computed — no extra fetch needed for the open
-      // repo. `dirty` comes straight from the file list the Changes tab
-      // renders, so for the visible repo dot and tab agree by construction.
+      // the poll already computed — no extra fetch needed for the open repo.
+      // `dirty` comes straight from the file list the Changes tab renders, so
+      // for the visible repo dot and tab agree by construction.
       setRepoSync(repoPath, {
         ahead: status.ahead,
         behind: status.behind,
         hasRemote: status.has_remote,
         dirty: status.files.length > 0,
       })
+      return status
     } catch (error) {
       if (!opts.silent) {
         // An explicit refresh (⌘R, a post-op reload) that failed — retrying it
         // is exactly what the user would do next.
         reportActionError(error, () => void refreshStatus(opts))
-        return
+        return null
       }
-      if (!opts.background) return // a user action's own follow-up: it reported already
+      if (!opts.background) return null // a user action's own follow-up: it reported already
       // Swallow the blip, surface the streak. The banner is non-blocking on
       // purpose — a background tick must never seize the window the way an
       // action's failure modal does.
@@ -420,6 +555,7 @@
       if (quietFailureStreak >= QUIET_FAILURE_THRESHOLD) {
         repoState.update((s) => ({ ...s, pollError: String(error) }))
       }
+      return null
     }
   }
 
@@ -488,20 +624,28 @@
     } catch {}
   }
 
-  async function pollHeadSha(): Promise<void> {
-    const repoPath = $appState.repoPath
-    if (!repoPath) return
-    try {
-      const sha = await gitApi.getHeadSha(repoPath)
-      if (lastHeadSha === null) {
-        lastHeadSha = sha
-        return
-      }
-      if (sha !== lastHeadSha) {
-        lastHeadSha = sha
-        await refreshLog()
-      }
-    } catch {}
+  /**
+   * React to HEAD having moved under us — a terminal commit, checkout or merge.
+   *
+   * Answered from the status the caller just read rather than from a
+   * `rev-parse` of its own: porcelain v2 emits the HEAD OID as `# branch.oid`,
+   * so `get_status` has already carried it at no cost, and the second
+   * subprocess this used to spawn every tick was a duplicate of a field sitting
+   * in the same reply. FRONTEND §6.1 mandates exactly that, and only the code
+   * hadn't caught up.
+   *
+   * The branch list reloads with the history: a checkout in the terminal moves
+   * the menu's checkmark and each branch's metadata, and reloading only the log
+   * left the menu describing where HEAD used to be.
+   */
+  async function adoptHeadSha(headSha: string): Promise<void> {
+    if (lastHeadSha === null) {
+      lastHeadSha = headSha
+      return
+    }
+    if (headSha === lastHeadSha) return
+    lastHeadSha = headSha
+    await Promise.all([refreshLog(), refreshBranches()])
   }
 
   /*
@@ -652,9 +796,10 @@
     }
   }
 
-  // Re-fetch the diff for the file currently open in the changes pane. Used on
-  // app re-focus, where the file may have been edited on disk while we were
-  // away. No-op when nothing is selected.
+  // Re-fetch the diff for the file currently open in the changes pane, because
+  // its bytes on disk have moved. `force`, since the path is unchanged and the
+  // ordinary path guard would treat the request as a no-op. No-op when nothing
+  // is selected.
   function reloadActiveDiff(): void {
     const active = get(repoState).activeFile
     if (active) loadDiffForFile(active, { force: true })
@@ -836,53 +981,83 @@
     await refreshStatus({ silent: true, background: true })
   }
 
-  // In-flight guard for the 2 s poll: a cycle that outlives the interval (repo
-  // under heavy load, e.g. a big push compressing objects) must not stack a
-  // second cycle on top of it — each one spawns several git processes.
-  let statusPollInFlight = false
-
-  function startStatusPolling(): void {
-    if (statusInterval) clearInterval(statusInterval)
-    statusInterval = setInterval(async () => {
-      if ($appState.phase !== 'main') return
-      // Pause while a push/pull/publish runs: polling mid-transfer only adds
+  /**
+   * The active repository's status poll — how a change made outside the app,
+   * in the terminal or an editor, appears by itself.
+   *
+   * A self-scheduling chain rather than a `setInterval`, because the cadence is
+   * not a constant: it is the window's activity ladder (2 s frontmost, 10 s
+   * visible, 30 s hidden), re-read after every tick. The loop also can't
+   * overlap itself, which is what the in-flight flag used to be for — a cycle
+   * that outran the interval on a repo under heavy load would otherwise stack a
+   * second one on top of it, each spawning several git processes.
+   */
+  const statusLoop = pacedLoop({
+    label: 'status-poll',
+    dueAt: (lastRunAt) => lastRunAt + statusPollIntervalMs(),
+    run: async () => {
+      if (get(appState).phase !== 'main') return
+      // Paused while a push/pull/publish runs: polling mid-transfer only adds
       // git processes that contend with it for the repo's disk and locks. The
       // op's own handler refreshes status when it completes.
-      if ($activeNetworkOp || statusPollInFlight) return
-      statusPollInFlight = true
-      try {
-        await refreshStatus({ silent: true, background: true })
-        await pollHeadSha()
-      } finally {
-        statusPollInFlight = false
-      }
-    }, 2000)
-  }
+      if (!canPollStatus()) return
+      const status = await refreshStatus({ silent: true, background: true })
+      if (status) await adoptHeadSha(status.head_sha)
+    },
+  })
 
   /**
    * How often the automatic fetch should run under this config, or 0 for never
-   * — the one place the two settings are read together, so arming the timer at
-   * launch, on a repo switch and on a settings change can't disagree about what
-   * "auto-fetch off" means.
+   * — the one place the two settings are read together, so the launch arm, a
+   * repo switch and a settings change can't disagree about what "auto-fetch
+   * off" means.
    */
-  function autoFetchIntervalMs(cfg: Config | null): number {
+  function configuredFetchIntervalMs(cfg: Config | null): number {
     return cfg?.auto_fetch ? cfg.fetch_interval_ms || 30000 : 0
   }
 
-  function startAutoFetch(intervalMs: number): void {
-    if (fetchInterval) clearInterval(fetchInterval)
-    if (intervalMs <= 0) return
-    fetchInterval = setInterval(() => {
-      if ($appState.phase !== 'main' || userTyping || $activeNetworkOp) return
-      performAutoFetch()
-    }, intervalMs)
-  }
+  /**
+   * The active repository's automatic fetch.
+   *
+   * Switched off, the loop parks rather than running an idle re-check: turning
+   * it back on re-arms it directly through the config effect below, including
+   * when the change was made in the native client (which arrives on the next
+   * wake-up, with the config re-read).
+   *
+   * Held back while text has the keyboard, asked at the moment of the tick: a
+   * fetch can reorder the file list, and doing that under a half-written commit
+   * message or a live checkbox is the one background effect the user would
+   * actually feel. The terminal counts as text entry, deliberately and in both
+   * clients — a shell is exactly where the list is being changed from.
+   */
+  const fetchLoop = pacedLoop({
+    label: 'auto-fetch',
+    skewFirstMs: SESSION_FETCH_SKEW_MS,
+    dueAt: (lastRunAt) => {
+      const configured = configuredFetchIntervalMs(get(config))
+      return configured > 0
+        ? lastRunAt + pacedFetchIntervalMs(configured)
+        : Number.POSITIVE_INFINITY
+    },
+    run: async () => {
+      if (get(appState).phase !== 'main') return
+      if (!canAutoFetch() || isTextInputFocused()) return
+      await performAutoFetch()
+    },
+  })
 
-  // Re-sync when the app becomes active again — window focus, or the window
-  // turning visible. Status and HEAD may have moved, and the file open in the
-  // changes pane may have been edited on disk while we were away, so its diff
-  // is re-fetched too. Guarded against overlapping runs since `focus` and
-  // `visibilitychange` can both fire on a single window activation.
+  // Re-sync when the window wakes up — regains focus, or comes back on screen.
+  // Status and HEAD may have moved while we were away.
+  //
+  // The open file's diff is deliberately *not* re-fetched here any more. It used
+  // to be, unconditionally, because there was no way to tell whether the file
+  // had changed; the stamp effect below is that way, and it fires off the very
+  // status read this function awaits. Keeping both meant two `git diff`s of the
+  // same file racing on every single activation, with nothing deciding which
+  // answer won — and a read on every activation where nothing had changed at all.
+  //
+  // Guarded against overlapping runs: waking from hidden straight to frontmost
+  // is two steps up the ladder, and both of them are a wake-up.
   let resyncing = false
   async function resyncOnActive(): Promise<void> {
     // Skipped during a network op for the same reason the poll pauses; the
@@ -899,29 +1074,25 @@
       // Coming back to the app: fetch the active repo so a remote that moved
       // while we were away surfaces on the Pull button, then refresh local state.
       await fetchActiveRemote()
-      await refreshStatus({ silent: true, background: true })
-      pollHeadSha()
-      reloadActiveDiff()
-      // Also refresh the top recents tier so their picker badges aren't stale.
-      repoSyncScheduler.refocusSync()
+      const status = await refreshStatus({ silent: true, background: true })
+      if (status) void adoptHeadSha(status.head_sha)
+      // Also refresh the top recents tier so their picker badges aren't stale;
+      // the tier loop itself was parked while we were away.
+      repoSyncScheduler.kickTopTier()
     } finally {
       resyncing = false
     }
   }
 
-  function handleVisibilityChange(): void {
-    if (!document.hidden) resyncOnActive()
-  }
-
-  function handleWindowFocus(): void {
-    resyncOnActive()
-  }
-
-  function handleFocusEvent(e: FocusEvent): void {
-    const t = e.target as HTMLElement | null
-    if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) {
-      userTyping = e.type === 'focusin'
-    }
+  /**
+   * The window changed activity state: re-decide every cadence that depends on
+   * it, and catch up if it woke up.
+   */
+  function handleActivityChange(state: ActivityState, previous: ActivityState): void {
+    statusLoop.reschedule()
+    fetchLoop.reschedule()
+    repoSyncScheduler.onActivityChange()
+    if (wokeUp(state, previous)) void resyncOnActive()
   }
 
   function handleFileActivate(file: FileEntry) {
@@ -951,6 +1122,46 @@
       if (current.activeFile) return
       const first = current.status.files[0]
       if (first) void loadDiffForFile(first)
+    })
+  })
+
+  /*
+    Keep the open diff in step with the file on disk.
+
+    The pane used to go stale until the row was reselected: a poll tick brought
+    the file's new bytes into the status reply and nothing looked at them. What
+    makes the edit visible is `stat_stamp` — core's mtime + size for the
+    working-tree side of each entry — because porcelain v2 carries no worktree
+    hash, so a file that was modified and is still modified reads identically
+    from one tick to the next. `xy` rides in the key too, so staging or
+    unstaging the file reloads it as well: the bytes didn't move, but the diff
+    being shown is against a different side.
+
+    Keyed per file, which is narrower than the native client's whole-status
+    epoch — an unrelated edit elsewhere in the tree re-tokenizes nothing here.
+    Same shape as the auto-select rule above: a `$derived` string settles before
+    the effect sees it, and the effect reloads only when the *same* path's stamp
+    moved. A different path means the user changed the selection, and that
+    selection's own load is already in flight. NUL joins the key's parts because
+    it is the one byte a git path cannot contain, so "is this the same file?"
+    can't be fooled by a filename with a space in it.
+  */
+  const activeFileStamp = $derived.by(() => {
+    const active = $repoState.activeFile
+    if (!active) return ''
+    const entry = $repoState.status.files.find((f) => f.path === active.path)
+    return entry ? `${entry.path}\u0000${entry.xy}\u0000${entry.stat_stamp ?? ''}` : ''
+  })
+  let lastFileStamp = ''
+  $effect(() => {
+    const stamp = activeFileStamp
+    untrack(() => {
+      const previous = lastFileStamp
+      lastFileStamp = stamp
+      if (!stamp || !previous) return
+      const path = stamp.slice(0, stamp.indexOf('\u0000'))
+      if (!previous.startsWith(`${path}\u0000`)) return
+      reloadActiveDiff()
     })
   })
 
@@ -993,21 +1204,16 @@
    * after every network operation; this is the same rule, and it also covers
    * the local operations that move HEAD.
    *
-   * `lastHeadSha` is re-seeded from what just landed so the next poll tick
-   * doesn't read a moved HEAD and refetch the log a second time.
+   * `lastHeadSha` is re-seeded from the status this already read, so the next
+   * poll tick doesn't see a moved HEAD and refetch the log a second time.
    *
    * `silent` belongs to the caller: an operation that already reported its own
    * outcome (a commit) passes it, while one the user is still waiting to see
    * finish (a transfer, ⌘R) doesn't, so a failed read reaches them.
    */
   async function reloadAfterHeadMove(opts: { silent?: boolean } = {}): Promise<void> {
-    await Promise.all([refreshStatus(opts), refreshLog()])
-    const repoPath = $appState.repoPath
-    if (repoPath) {
-      try {
-        lastHeadSha = await gitApi.getHeadSha(repoPath)
-      } catch {}
-    }
+    const [status] = await Promise.all([refreshStatus(opts), refreshLog()])
+    if (status) lastHeadSha = status.head_sha
   }
 
   /**
@@ -1253,17 +1459,34 @@
     openWithDefault: (file) => runFileAction((repo) => fileActions.openWithDefault(repo, file)),
   }
 
+  /**
+   * Forget everything the background loops remember *about one repository*.
+   *
+   * Each of these answers a question of the form "has this changed since I last
+   * looked?", and carrying an answer about the old repository into the new one
+   * is wrong in a different way each time: a stale HEAD refetches the log (or
+   * fails to), a stale status fingerprint suppresses the first publish, a stale
+   * file stamp reloads a diff that was never open, a stale exclusion clock prunes
+   * an opt-out the user has not made yet, and a carried failure streak lets two
+   * failures on the old repository plus one on the new raise the new one's
+   * banner. `resetRepoState` clears `pollError` itself.
+   */
+  function resetPollState(): void {
+    lastHeadSha = null
+    lastStatusJson = null
+    lastFileStamp = ''
+    exclusionClocks.clear()
+    lastReconcileAt = Date.now()
+    quietFailureStreak = 0
+  }
+
   async function handleSwitchRepo(repo: string) {
     if (!repo || repo === $appState.repoPath) {
       showRepos = false
       return
     }
     showRepos = false
-    lastHeadSha = null
-    // The streak describes one repository's readability; carrying it across a
-    // switch would let two failures on the old repo plus one on the new raise
-    // the new one's banner. (`resetRepoState` clears `pollError` itself.)
-    quietFailureStreak = 0
+    resetPollState()
     resetRepoState()
     appState.update((s) => ({ ...s, repoPath: repo }))
     await patchReposState({ last_opened_repo: repo })
@@ -1273,8 +1496,12 @@
     recordRecentRepo(repo)
     repoSyncScheduler.syncOnSwitch(repo)
     try {
-      await Promise.all([refreshStatus(), refreshBranches(), loadInitialLog()])
-      startAutoFetch(autoFetchIntervalMs($config))
+      const [status] = await Promise.all([refreshStatus(), refreshBranches(), loadInitialLog()])
+      if (status) lastHeadSha = status.head_sha
+      // Re-start rather than reschedule: the new repository's cadence is
+      // measured from the fetch that just opened it, not from the last one the
+      // previous repository ran.
+      fetchLoop.start()
     } catch (error) {
       reportActionError(error)
     }
@@ -1601,8 +1828,7 @@
   }
 
   function handleKeyDown(e: KeyboardEvent) {
-    const t = e.target as HTMLElement | null
-    const inField = t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement
+    const inField = isTextInputElement(e.target)
     const meta = e.ctrlKey || e.metaKey
 
     // The terminal owns its keys. The panel's own toggle is the single
@@ -1703,13 +1929,15 @@
     // The repo we launched into counts as the most-recent open.
     const repoPath = $appState.repoPath
     if (repoPath) recordRecentRepo(repoPath)
-    await Promise.all([refreshStatus(), refreshBranches(), loadInitialLog()])
-    startStatusPolling()
-    startAutoFetch(autoFetchIntervalMs($config))
+    const [status] = await Promise.all([refreshStatus(), refreshBranches(), loadInitialLog()])
+    if (status) lastHeadSha = status.head_sha
+    statusLoop.start()
+    fetchLoop.start()
     // Kick one immediate fetch of the open repo so the Pull "behind" badge
     // resolves within a second of launch instead of waiting up to a full
     // auto-fetch interval (and at all when auto-fetch is off). Non-blocking so
-    // it never delays first paint. Mirrors the fetch-on-refocus behaviour.
+    // it never delays first paint. Mirrors the fetch-on-wake-up behaviour, and
+    // it is why the loop's own start-up skew costs the user nothing.
     void performAutoFetch()
     // Background pull/push badges for the other recent repos in the picker.
     repoSyncScheduler.start()
@@ -1722,28 +1950,23 @@
   })
 
   /**
-   * Re-arm the automatic fetch whenever its two settings move.
+   * Re-decide the automatic fetch's next run whenever its two settings move.
    *
-   * The timer used to be armed at launch and on a repo switch only, so turning
-   * auto-fetch off left it running until the app was restarted and a new
-   * interval never took effect at all — the one setting in the window that
-   * quietly ignored you. Watching the config rather than the Settings dialog
-   * also covers a change made in the native client, which arrives on the next
-   * window activation through `resyncOnActive`'s config re-read.
+   * Watching the config rather than the Settings dialog also covers a change
+   * made in the native client, which arrives on the next wake-up through
+   * `resyncOnActive`'s config re-read.
+   *
+   * Rescheduling rather than restarting is what makes "off" and "on" symmetric:
+   * the interval is measured from the last fetch either way, so switching
+   * auto-fetch off parks the loop where it stands, and switching it back on
+   * runs it as soon as the *configured* interval says it is due — immediately
+   * if it has been off for longer than that. The native client idles on a 30 s
+   * re-check to notice the same change.
    */
-  let lastFetchPolicy = $state<string | undefined>(undefined)
+  const fetchPolicy = $derived(`${$config?.auto_fetch}:${$config?.fetch_interval_ms}`)
   $effect(() => {
-    const cfg = $config
-    if (!cfg) return
-    const policy = `${cfg.auto_fetch}:${cfg.fetch_interval_ms}`
-    if (lastFetchPolicy === undefined) {
-      lastFetchPolicy = policy
-      return
-    }
-    if (policy !== lastFetchPolicy) {
-      lastFetchPolicy = policy
-      startAutoFetch(autoFetchIntervalMs(cfg))
-    }
+    void fetchPolicy
+    untrack(() => fetchLoop.reschedule())
   })
 
   // When hide_whitespace toggles in settings, reload the active diff
@@ -1779,6 +2002,7 @@
 
   let unlistenOpenRepo: (() => void) | null = null
   let teardownConnectivity: (() => void) | null = null
+  let teardownActivity: (() => void) | null = null
 
   onMount(() => {
     initialize().catch(console.error)
@@ -1790,29 +2014,23 @@
     }).then((u) => {
       unlistenOpenRepo = u
     })
-    document.addEventListener('visibilitychange', handleVisibilityChange)
-    window.addEventListener('focus', handleWindowFocus)
-    document.addEventListener('focusin', handleFocusEvent)
-    document.addEventListener('focusout', handleFocusEvent)
+    teardownActivity = observeActivity(handleActivityChange)
     window.addEventListener('keydown', handleKeyDown)
     // The moment the OS reports connectivity back, refresh the active repo and
     // the top picker tier immediately instead of waiting out the backoff window.
     teardownConnectivity = initConnectivity(() => {
       if ($appState.phase !== 'main') return
       void performAutoFetch()
-      repoSyncScheduler.refocusSync()
+      repoSyncScheduler.kickTopTier()
     })
 
     return () => {
-      if (statusInterval) clearInterval(statusInterval)
-      if (fetchInterval) clearInterval(fetchInterval)
+      statusLoop.stop()
+      fetchLoop.stop()
       repoSyncScheduler.stop()
       teardownConnectivity?.()
+      teardownActivity?.()
       unlistenOpenRepo?.()
-      document.removeEventListener('visibilitychange', handleVisibilityChange)
-      window.removeEventListener('focus', handleWindowFocus)
-      document.removeEventListener('focusin', handleFocusEvent)
-      document.removeEventListener('focusout', handleFocusEvent)
       window.removeEventListener('keydown', handleKeyDown)
     }
   })

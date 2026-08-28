@@ -2,7 +2,7 @@
 //!
 //! Core's streaming producers (git `--progress`, PTY output) hold an
 //! `Arc<dyn EventSink>`; these are the Tauri implementations. There are two,
-//! scoped exactly the way the UniFFI bridge's are, because the two streams
+//! scoped exactly the way the `UniFFI` bridge's are, because the two streams
 //! want opposite things from a transport:
 //!
 //! * **Git progress** is a broadcast about a named repository. Any part of the

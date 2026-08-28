@@ -31,11 +31,6 @@ pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
 }
 
 #[tauri::command(async)]
-pub fn get_head_sha(repo_path: String) -> Result<String, String> {
-    git::get_head_sha(repo_path)
-}
-
-#[tauri::command(async)]
 pub fn get_selected_diff(repo_path: String, files: Vec<FileEntry>) -> Result<String, String> {
     git::get_selected_diff(repo_path, files)
 }

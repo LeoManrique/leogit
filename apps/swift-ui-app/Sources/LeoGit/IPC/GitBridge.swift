@@ -561,15 +561,31 @@ enum GitBridge {
     //
     // Deliberately synchronous, unlike every wrapper above: these touch no
     // filesystem and spawn nothing, so there is no blocking work to move off
-    // the caller's executor — and both are read from a view's computed
-    // property, where an `await` would force the answer into state that lags
-    // a keystroke behind the field it describes.
+    // the caller's executor. The picker rules are also read from a view's
+    // computed property, where an `await` would force the answer into state
+    // that lags a keystroke behind the field it describes.
 
     /// Narrow and rank picker rows against a typed query, strongest match
     /// first; ties keep the caller's ordering, so an MRU arrangement survives
     /// filtering. One crossing per keystroke rather than one per row.
     static func matchingRepos(query: String, rows: [RepoRow], scanFolders: [String]) -> [String] {
         filterRepos(query: query, rows: rows, scanFolders: scanFolders)
+    }
+
+    /// Which of the commit composer's opt-outs survive the file list a status
+    /// read just produced — the ones still present, plus the ones whose path
+    /// has been gone for less than core's grace window.
+    ///
+    /// `elapsedMs` is wall-clock time since the previous call rather than a
+    /// count of ticks, because the poll's cadence changes with what the window
+    /// is doing: counting ticks would make one grace window mean anything
+    /// between 30 seconds and seven minutes.
+    static func survivingExclusions(
+        _ excluded: [Exclusion],
+        present: [String],
+        elapsedMs: UInt32
+    ) -> [Exclusion] {
+        reconcileExclusions(excluded: excluded, present: present, elapsedMs: elapsedMs)
     }
 
     /// What cloning `rawURL` under `parent` would produce — the URL to hand

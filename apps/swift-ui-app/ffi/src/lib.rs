@@ -37,7 +37,9 @@
 use std::sync::Arc;
 
 use leogit_core::events::{CoreEvent, EventSink};
-use leogit_core::{ai, config, diff, gh, git, highlight, os, process, repos, shell, terminal};
+use leogit_core::{
+    ai, config, diff, exclusions, gh, git, highlight, os, process, repos, shell, terminal,
+};
 
 // Re-exported so Swift sees the real core types. Names are used by the
 // `#[uniffi::remote]` declarations below.
@@ -51,6 +53,7 @@ pub use leogit_core::diff::{
     HunkHeader, IntraLineRange, LineType,
 };
 pub use leogit_core::events::TerminalExit;
+pub use leogit_core::exclusions::Exclusion;
 pub use leogit_core::gh::GhRepo;
 pub use leogit_core::git::{
     BranchInfo, CommitDetail, CommitInfo, CommitStats, DiscardPlan, FileEntry, FileStatus,
@@ -127,6 +130,14 @@ pub struct FileEntry {
     pub embedded: bool,
     pub submodule_dirty: bool,
     pub stat_stamp: Option<String>,
+}
+
+/// Mirrors [`leogit_core::exclusions::Exclusion`].
+#[uniffi::remote(Record)]
+pub struct Exclusion {
+    pub path: String,
+    pub absent_ms: u32,
+    pub absent_reads: u32,
 }
 
 /// Mirrors [`leogit_core::git::SyncProposal`].
@@ -1548,6 +1559,23 @@ pub fn filter_repos(query: String, rows: Vec<RepoRow>, scan_folders: Vec<String>
 #[uniffi::export]
 pub fn derive_clone_target(raw_url: String, parent: String) -> Option<CloneTarget> {
     repos::derive_clone_target(&raw_url, &parent)
+}
+
+/// Age the commit composer's opt-outs against the file list a status read just
+/// produced, dropping the ones whose path has been gone longer than the grace
+/// window. See `exclusions::reconcile_exclusions` for why the window exists.
+///
+/// `elapsed_ms` is wall-clock time since the previous call, not a tick count:
+/// the poll's cadence changes with what the window is doing, so counting ticks
+/// would make the window mean anything between 30 seconds and seven minutes.
+#[must_use]
+#[uniffi::export]
+pub fn reconcile_exclusions(
+    excluded: Vec<Exclusion>,
+    present: Vec<String>,
+    elapsed_ms: u32,
+) -> Vec<Exclusion> {
+    exclusions::reconcile_exclusions(&excluded, &present, elapsed_ms)
 }
 
 /// Where a clone of `repo_name` lands under `parent` — the GitHub tab's half

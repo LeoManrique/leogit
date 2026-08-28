@@ -454,7 +454,6 @@ export const gitApi = {
   getStatus: (repoPath: string) => invoke<RepoStatus>('get_status', { repoPath }),
   /** Letter + label for every status, fetched once — not per row per repaint. */
   fileStatusStyles: () => invoke<FileStatusStyle[]>('file_status_styles'),
-  getHeadSha: (repoPath: string) => invoke<string>('get_head_sha', { repoPath }),
   getSelectedDiff: (repoPath: string, files: FileEntry[]) =>
     invoke<string>('get_selected_diff', { repoPath, files }),
   getLog: (repoPath: string, maxCount: number, skip: number) =>
@@ -759,6 +758,30 @@ export const reposApi = {
   /** Where a clone of `repoName` lands under `parent` — the GitHub tab's half. */
   cloneTargetPath: (parent: string, repoName: string) =>
     invoke<string | null>('clone_target_path', { parent, repoName }),
+}
+
+/** One path the user has excluded from the next commit, with how long and over
+ *  how many status reads it has been missing from the file list. */
+export interface Exclusion {
+  path: string
+  absent_ms: number
+  absent_reads: number
+}
+
+export const exclusionsApi = {
+  /**
+   * Age the commit composer's opt-outs against the file list the status read
+   * just produced, dropping the ones whose path has been gone longer than
+   * core's grace window.
+   *
+   * `elapsedMs` is wall-clock time since the previous call, not a tick count:
+   * the poll's cadence changes with what the window is doing, so counting ticks
+   * would make the window mean anything between 30 seconds and seven minutes.
+   * Callers skip this crossing entirely when nothing is excluded, which is the
+   * usual case.
+   */
+  reconcile: (excluded: Exclusion[], present: string[], elapsedMs: number) =>
+    invoke<Exclusion[]>('reconcile_exclusions', { excluded, present, elapsedMs }),
 }
 
 /** A newer leogit release on GitHub, as reported by `check_for_update`. */

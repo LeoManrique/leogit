@@ -9,6 +9,7 @@
 pub mod ai;
 pub mod config;
 pub mod diff;
+pub mod exclusions;
 pub mod gh;
 pub mod git;
 pub mod highlight;

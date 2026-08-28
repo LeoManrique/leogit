@@ -3,7 +3,7 @@
 use leogit_core::launch as core_launch;
 use leogit_lib::launch_glue;
 use leogit_lib::shims::{
-    ai, config, diff, gh, git, highlight, launch, os, repos, shell, terminal, update,
+    ai, config, diff, exclusions, gh, git, highlight, launch, os, repos, shell, terminal, update,
 };
 
 fn main() {
@@ -46,7 +46,6 @@ fn main() {
             config::record_recent_repo,
             git::file_status_styles,
             git::get_status,
-            git::get_head_sha,
             git::get_selected_diff,
             git::get_log,
             git::get_commit_detail,
@@ -110,6 +109,7 @@ fn main() {
             repos::filter_repos,
             repos::derive_clone_target,
             repos::clone_target_path,
+            exclusions::reconcile_exclusions,
             launch::take_pending_launch_target,
         ])
         .run(tauri::generate_context!())

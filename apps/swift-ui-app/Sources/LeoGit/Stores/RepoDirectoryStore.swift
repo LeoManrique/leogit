@@ -167,16 +167,23 @@ final class RepoDirectoryStore {
     }
 
     /// Fold the open repo's freshly polled status into its badge cache — the
-    /// same free feed the Tauri client takes from its 2 s poll, and the
+    /// same free feed the Tauri client takes from its status poll, and the
     /// reason the active repo needs no tier.
+    ///
+    /// Written only when it differs. `syncByPath` is observed, and assigning an
+    /// equal value still counts as a mutation, so an idle repository was
+    /// invalidating every switcher row on every tick — the same waste
+    /// `RepoStore`'s equality skip exists to prevent, one store along.
     func noteActiveStatus(_ path: String, _ status: RepoStatus) {
-        syncByPath[path] = RepoSync(
+        let summary = RepoSync(
             ahead: status.ahead,
             behind: status.behind,
             hasRemote: status.hasRemote,
             fetched: true,
             dirty: !status.files.isEmpty
         )
+        guard syncByPath[path] != summary else { return }
+        syncByPath[path] = summary
     }
 
     /// Fetch-less badge sweep for the rows the switcher is showing: rows with

@@ -10,7 +10,7 @@ A calm desktop Git client built with Tauri 2, Rust, and Svelte 5. Designed to ge
 - **Manage branches** from one menu in both clients — switch, create, delete, and **merge** (regular or squash, with a commit-count preview, conflicts reported as git wrote them, and an abort that is reachable even for a merge you started in the terminal). The list is re-read whenever the menu opens, so a branch made outside the app is there.
 - **Sync from one adaptive button** whose face is whatever the repository needs next — Publish, Publish branch, Pull, Push, Fetch — with both ahead-behind counts on it, live transfer progress (an in-button fill plus git's own `Writing objects… MiB/s` line in the header), Fetch and force-push-with-lease (only on a genuinely diverged branch) under its chevron, and the same ladder on ⌘P. Or **publish a remote-less repo to GitHub** in one click via the GitHub CLI.
 - **Embedded terminal** docked under the diff pane (⌃`), running the user's `$SHELL` in the repo directory — links open on ⌘/Ctrl-click, `vim` and `tmux` can set the system clipboard through OSC 52 (never read it), and nothing the shell prints is lost, including a shell that dies on its own startup file.
-- **Auto-fetch** + 2 s status polling so the UI stays in sync with anything the user does in another terminal.
+- **Auto-fetch** + a status poll that keeps the UI in sync with anything the user does in another terminal, on a cadence that follows the window: 2 s while you are in it, slower while you are not, and nothing at all published when nothing changed.
 - **Light / dark themes**, a layout and window frame that reopen where you left them, and a TOML config in the platform config dir (`~/Library/Application Support/leogit/` on macOS, `~/.config/leogit/` on Linux) — edited from a Settings window in either client that applies each change as you make it, with no Save button and nothing to lose by closing.
 
 ## Requirements
@@ -74,7 +74,7 @@ diffs → commit (checkbox file list + message composer, AI-generated messages v
 CLI or Ollama sharing the Tauri client's config) → branches (switch / create / delete
 and merge or squash-merge, with conflict + abort handling) → sync (pull / push / fetch with
 live transfer progress, publish-branch first push, force-push-with-lease, and one-click
-publish of a remote-less repo to GitHub, plus auto-fetch, 2 s status polling, and resync
+publish of a remote-less repo to GitHub, plus auto-fetch, status polling, and resync
 on app re-activation) → history → an embedded terminal (SwiftTerm, ⌃` to toggle, fed by
 the same core PTY as the Tauri client, staying open with the exit code when the shell
 dies) → cloning (your GitHub repos via `gh` or any URL, with live progress) —
