@@ -80,7 +80,11 @@ the same core PTY as the Tauri client, staying open with the exit code when the 
 dies) → cloning (your GitHub repos via `gh` or any URL, with live progress) —
 with a repo picker — the same searchable list in the toolbar switcher and on the screen
 shown before a repository opens, rows named by their remote with dirty / pull / push
-indicators — that restores the last opened repo at launch, and a native Settings window
+indicators — that restores the last opened repo at launch, or opens a folder handed to it
+from outside (`open -a LeoGit <dir>`, a drop on the Dock icon, Finder's Open With — one
+that isn't a repository yet is offered one; the installed `leogit` command still opens the
+Tauri build), a menu bar carrying the app's shortcuts, a release check with the same quiet
+update chip, and a native Settings window
 (⌘,) editing the same shared config. Every Tauri flow is now ported. Building it also needs Xcode's Metal Toolchain component
 (`xcodebuild -downloadComponent MetalToolchain`, once) for SwiftTerm's shaders.
 

@@ -159,7 +159,10 @@ mod tests {
             &paths(&[]),
             1,
         );
-        assert!(kept.is_empty(), "grace window should have expired: {kept:?}");
+        assert!(
+            kept.is_empty(),
+            "grace window should have expired: {kept:?}"
+        );
     }
 
     #[test]
@@ -184,7 +187,10 @@ mod tests {
         let after_one = reconcile_exclusions(&excluded(&[("a.txt", 0, 0)]), &paths(&[]), 30_000);
         assert_eq!(after_one, excluded(&[("a.txt", 30_000, 1)]));
         let after_two = reconcile_exclusions(&after_one, &paths(&[]), 30_000);
-        assert!(after_two.is_empty(), "two misses should prune: {after_two:?}");
+        assert!(
+            after_two.is_empty(),
+            "two misses should prune: {after_two:?}"
+        );
     }
 
     #[test]
@@ -219,7 +225,10 @@ mod tests {
             &paths(&[]),
             u32::MAX,
         );
-        assert!(kept.is_empty(), "saturating add should still prune: {kept:?}");
+        assert!(
+            kept.is_empty(),
+            "saturating add should still prune: {kept:?}"
+        );
     }
 
     #[test]

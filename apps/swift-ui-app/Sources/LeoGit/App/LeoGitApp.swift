@@ -2,6 +2,11 @@ import SwiftUI
 
 @main
 struct LeoGitApp: App {
+    /// Only AppKit is told when a folder is opened from outside the app, so
+    /// the delegate exists to catch `application(_:open:)` — and owns the
+    /// store it publishes into, which the scene hands down to the root view.
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
     @State private var store = RepoStore()
 
     /// The one native owner of the shared config (see its doc comment for
@@ -22,6 +27,7 @@ struct LeoGitApp: App {
             ContentView()
                 .environment(store)
                 .environment(appConfig)
+                .environment(appDelegate.launch)
                 .task {
                     await store.loadCoreVersion()
                     await appConfig.reload()
@@ -29,21 +35,13 @@ struct LeoGitApp: App {
         }
         .defaultSize(width: 980, height: 660)
         .windowToolbarStyle(.unified)
+        // The menu bar is the app's own documentation for the chords it
+        // answers; see `AppMenus.swift` for why each item is shaped the way
+        // it is.
         .commands {
-            CommandGroup(replacing: .newItem) {}
-
-            // The View-menu home of the reload the toolbar Refresh button
-            // used to carry — the toolbar's one button is the adaptive sync
-            // control now. Posted as a notification because commands live on
-            // the scene while the stores live in ContentView; the listener
-            // ignores it while no repo is open or a transfer is running.
-            CommandGroup(after: .toolbar) {
-                Button("Refresh") {
-                    NotificationCenter.default.post(name: .leogitRefreshRequested, object: nil)
-                }
-                .keyboardShortcut("r")
-            }
-
+            FileCommands()
+            ViewCommands()
+            BranchCommands()
             RepositoryCommands()
         }
 
@@ -53,32 +51,6 @@ struct LeoGitApp: App {
         Settings {
             SettingsView()
                 .environment(appConfig)
-        }
-    }
-}
-
-/// The menu-bar home of the toolbar's adaptive sync button: one item that
-/// renames itself to whatever the button proposes — Publish, Publish Branch,
-/// Pull, Push, Fetch — and runs the same closure under ⌘P.
-///
-/// The action arrives as a focused scene value — unlike ⌘R's plain
-/// notification — because this item's *title* depends on repository state:
-/// a notification could fire the action but not label it, and a menu item
-/// that lies about what it does is worse than no shortcut. Its perform
-/// closure still hops through a notification, since the sheet and alert
-/// the action may open live with the toolbar button.
-private struct RepositoryCommands: Commands {
-    @FocusedValue(\.syncCommand) private var syncCommand: SyncCommand?
-
-    var body: some Commands {
-        CommandMenu("Repository") {
-            // Titled for the neutral state while no repository is open, so
-            // the item reads sensibly even though it's disabled there.
-            Button(syncCommand?.title ?? "Fetch") {
-                syncCommand?.perform()
-            }
-            .keyboardShortcut("p")
-            .disabled(syncCommand?.isEnabled != true)
         }
     }
 }
@@ -97,4 +69,13 @@ extension Notification.Name {
     /// discovery walks. The main window re-walks; the Settings scene is a
     /// separate scene and cannot reach `RepoDirectoryStore` directly.
     static let leogitScanPathsChanged = Notification.Name("leogitScanPathsChanged")
+
+    /// Posted by File ▸ Clone Repository… (⇧⌘O). The root view presents the
+    /// sheet, so the item works with or without a repository open.
+    static let leogitCloneRequested = Notification.Name("leogitCloneRequested")
+
+    /// Posted by a Branch menu item; the object is the `BranchAction` it
+    /// stands for. `BranchMenu` performs it, so the sheets and confirmations
+    /// the action opens stay with the toolbar control a click would have used.
+    static let leogitBranchActionRequested = Notification.Name("leogitBranchActionRequested")
 }

@@ -1,6 +1,6 @@
 # Plan — Cross-client feature parity (SwiftUI ⇄ Tauri)
 
-> Status: **in progress — WS-A…WS-E shipped 2026-08-27, WS-F through WS-J and WS-L 2026-08-28. WS-M is next; WS-K is unblocked but needs a Linux machine (§6's sequencing note), so it is taken whenever that machine is available.**
+> Status: **in progress — WS-A…WS-E shipped 2026-08-27, WS-F through WS-J, WS-L and WS-M 2026-08-28. WS-N is next; WS-K is unblocked but needs a Linux machine (§6's sequencing note), so it is taken whenever that machine is available.**
 > The remaining work was re-cut into seventeen smaller workstreams (C…S) on
 > 2026-08-27 after WS-B proved too large to review as one piece — see §6.
 > Accepted 2026-08-27 with every open decision resolved. Per-workstream state
@@ -312,16 +312,15 @@ and matched, not that it was skipped.
   hand-picked list is one a later field silently falls out of. Only *silent*
   refreshes take it (an explicit one also clears the error modal on success),
   and a standing `pollError` still retires on a skipped tick.
-- **BG-5 · Update checker.** Tauri-only today (confirmed: zero
-  `check_for_update` references in the FFI). Everything platform-independent
-  is already in core (release request, strict version compare, per-platform
-  artifact gate, `install.sh` one-liner, fake-update override, five tests).
-  Native needs: an async FFI export + `UpdateInfo` mirror, an app-scene-level
-  checker (Tauri runs it pre-main too), and a chip. **Do not port the
-  breaker gate** — gate on `isOnline` alone (the checker's own comment notes a
-  GitHub API answer says nothing about git remotes, and D-2 shows the breaker
-  can be open spuriously); give `NetworkPathObserver` multiple recovery
-  subscribers rather than a second monitor. → WS-M
+- **BG-5 · Update checker.** ✅ *WS-M.* `check_for_update` and `open_url`
+  are exported, `UpdateInfo` is mirrored, and one `UpdateStore` runs the check
+  from the root view — so it covers the picker phase, as Tauri's does. Gated on
+  `isOnline` **alone**: the breaker guards git remotes, and one open for those
+  reasons would silently suppress the check for the whole session. The outcome
+  does not feed it either. `NetworkPathObserver` grew keyed recovery
+  subscribers, so the retry sits beside the repository catch-up rather than
+  needing a second monitor. One `UpdateChip` serves the toolbar and the
+  picker.
 - **BG-6 · Typing guard.** ✅ *WS-J.* `utils/focus.ts` holds one predicate over
   a node, asked about `e.target` by the key handler and about
   `document.activeElement` by the fetch tick. The latch is gone, and with it
@@ -1018,40 +1017,49 @@ and matched, not that it was skipped.
   `Terminal` before a session names itself, `280` means the *emulator* in both
   clients (the header sits above it — rows are what the number is really
   setting), and the shell preference is already fresh per session in Tauri via
-  the config store's activation re-read, so no second read was added. **Left**:
-  ⌃` needs a native menu-bar home (View ▸ Show/Hide Terminal owning the chord).
-  → WS-M or WS-R
+  the config store's activation re-read, so no second read was added. ✅ *WS-M* for
+  the fourth: ⌃` moved to View ▸ Show/Hide Terminal, which turned out to be a
+  correctness fix rather than a filing one — a key equivalent on a *button* is
+  matched through the responder chain, so SwiftTerm could swallow it in the one
+  place the chord is most wanted.
 
 ### 4.11 App shell (SH)
 
-- **SH-1 · CLI launch, single-instance, init prompt** — the largest native
-  contract gap. Core's half is done and framework-free. Native work:
-  export `resolve_launch_target`/`set/take_pending_launch_target` +
-  `init_repo` + `is_git_repo`; claim the target in the Welcome task ahead of
-  `restoreLastRepo`; warm start via `NSApplicationDelegate.application(_:open:)`
-  + a `CFBundleDocumentTypes` entry for `public.folder` — which also buys
-  drag-a-folder-onto-the-Dock-icon and Finder "Open With" for free (GitHub
-  Desktop's `open-file` equivalent), and lets FRONTEND §8's launch row stop
-  reading "Tauri only";
-  the "Create a repository here?" confirmation on the root view so it works
-  over Welcome and over an open repo. `install.sh` needs a native branch
-  (`open -a LeoGit --args "$dir"` — note the shell function currently points
-  at a bundle id the native app doesn't use). LaunchServices gives
-  single-instance for free — cheaper than Tauri's socket. → WS-M
-- **SH-2 · Menu bar as the discovery surface.** Native's adaptive-⌘P menu
-  approach is right and structurally more robust (menu key equivalents beat
-  the first responder — the exact class of Tauri's D-16). Extend it: File ▸
-  Open/Clone (fill the emptied `newItem` group), View ▸ ⌘1/⌘2 tabs (GH
-  Desktop's absolute bindings beat Tauri's ⌘L toggle), a Branch menu with ⌘B
-  (Tauri has ⌘B; native has none — bind via the focused-scene-value pattern,
-  not a toolbar shortcut, which never reaches the scene), View ▸ Show/Hide
-  Terminal (TE-7). With those, native needs no `?` overlay — but today
-  ⌘G/⌘↩/⌃`/⌘O exist only as button equivalents, discoverable nowhere. ✅ *WS-H*
-  for the Tauri half: ⌘1/⌘2 select the two tabs absolutely, beside the ⌘L
-  toggle rather than replacing it — the toggle is the one people have, and an
-  absolute binding is what makes the pair worth learning. Tauri on macOS should
-  eventually get a real `tauri::menu`; out of this plan's scope beyond
-  recording it. → WS-M
+- **SH-1 · CLI launch, single-instance, init prompt.** ✅ *WS-M* for the app's
+  half. `CFBundleDocumentTypes` declares `public.folder`, so `open -a LeoGit
+  <dir>` activates the running instance and delivers the folder to
+  `application(_:open:)` — cold and warm through one callback, with Finder's
+  *Open With* and a drop on the Dock icon free. `resolve_launch_target` and
+  `init_repo` are exported; the target outranks `last_opened_repo`; the
+  *Create a repository here?* prompt lives on the root view, so it works over
+  the picker and over an open repository. Two exports the entry asked for were
+  deliberately **not** taken: `is_git_repo`, which has no native consumer
+  (`resolve_repo_root` already validates the restore) and would be dead surface
+  the FFI's own rule forbids, and the `set`/`take_pending_launch_target` pair —
+  see WS-M's §6 entry.
+  **`install.sh` is unfinished and needs a decision** (§6, WS-M's findings):
+  the entry's premise was wrong twice over — the shell function points at a
+  *path*, not a bundle id, and its `open -na … --args` form reaches argv rather
+  than the document callback, so the plan's own suggested command would work
+  only on a cold start. The deeper problem is that `install.sh` installs the
+  Tauri release into that path and the native app has no release artifact, so
+  there is nothing for a branch to key on. → the open question in WS-M's entry
+- **SH-2 · Menu bar as the discovery surface.** ✅ *WS-H* for the Tauri half:
+  ⌘1/⌘2 select the two tabs absolutely, beside the ⌘L toggle rather than
+  replacing it — the toggle is the one people have, and an absolute binding is
+  what makes the pair worth learning. ✅ *WS-M* for native: File ▸ Clone
+  Repository… (⇧⌘O — **not** File ▸ Open, which RM-2 rules out), View ▸ ⌘1/⌘2,
+  View ▸ Show/Hide Terminal, View ▸ Refresh, and a Branch menu rendering the
+  toolbar control's own items from one shared definition. The pattern is the
+  one the entry named: a state-dependent item is a focused scene value
+  published from the *window content*, since one set inside `.toolbar` never
+  reaches the scene.
+  **⌘B was not bound, and should not be**: AppKit matches a key equivalent by
+  walking *into* submenus, so no chord opens a menu, and putting ⌘B on one of
+  the Branch menu's items would give the same chord different meanings in the
+  two clients. Recorded as a FRONTEND §8 row; the menu itself is the
+  discoverability the entry was after. Tauri on macOS should eventually get a
+  real `tauri::menu`; out of this plan's scope beyond recording it.
 - **SH-3 · ⌘R.** ✅ *WS-F.* Tauri's is now native's: status + log + branches,
   guarded on `activeNetworkOp`, and reachable from a focused field — which it
   had to become, since SY-1 removed the Refresh button and left ⌘R as the only
@@ -1701,92 +1709,142 @@ is mostly adoption of already-proven native behavior.
     `just mac-build`, 178 core + 24 bridge + 2 host tests, clippy-pedantic 165
     core with `leogit` / `leogit-ffi` at zero.
 
-    Findings for WS-M and the native block after it:
-    - **A screen that renders before anything has looked will claim there is
-      nothing to find.** The empty state was deciding between "looking" and
-      "found nothing" from `isRefreshing`, which is false *before* the first
-      pass starts as well as after the last one ends — so every launch showed
-      "No repositories found — choose folders to search" for the whole of
-      launch resolution, on machines whose repositories the app was about to
-      list. The fix is a separate `hasSearched`, set on every exit from the
-      walk including the failing ones. **The general shape: a boolean that means
-      "in progress" cannot also answer "has this ever run", and an empty state
-      built on the first one accuses the user's configuration during startup.**
-      Any native surface WS-M adds before a repository is open inherits this
-      screen and this hazard.
-    - **A call to action has to have somewhere to come back to.** The empty
-      state's *Choose folders to search* opens Settings, and native had nothing
-      that re-walked when `scan_paths` changed — so following the advice fixed
-      the setting and left the same screen saying the same thing until the app
-      was restarted. It now posts `leogitScanPathsChanged` from the patch, and
-      the *root* view answers it, not the repository screen: the picker is the
-      surface offering the advice and the one with no switcher to re-open.
-      WS-R rewrites that Settings store field-wise (D-5 at form scale) and must
-      keep the hook on the patch — WS-H's rule about hanging discovery off the
-      setting rather than off a dismissal, in the client that had no dismissal
-      hook to begin with.
-    - **A native picker's cursor cannot be `List(selection:)`.** These lists
-      keep focus in the filter field so typing continues to narrow them, and a
-      SwiftUI `List` only moves a cursor while *it* is first responder. The
-      cursor is read from the field with `onKeyPress` and held as a **path**
-      rather than an index, because the row set changes underneath it — a walk
-      publishes, the sort flips, a query narrows — and an index then points at
-      whatever moved into that slot. A cursor whose row is gone falls back to
-      the first row.
-    - **A SwiftUI `body` is not a memoization boundary.** The first build
-      ranked, disambiguated and (with a query typed) crossed into core *per body
-      pass*, while the identifier store published once per repository — so fifty
-      repositories meant fifty rankings and fifty FFI crossings for one list
-      appearing. The rows are `@State` now, rebuilt from an `Equatable` `Inputs`
-      struct naming exactly what they are a function of, with the label
-      dictionary built once per rebuild. `CloneStore.visibleRepos` is the same
-      pattern for the same reason. **Anything a native view derives from a
-      streaming store wants this shape.**
-    - **A cache flag that is only ever set is not a cache flag.** The clone
-      list's `hasLoadedList` was set on success and never cleared, so a Refresh
-      that failed after a successful load left the cache flagged as loaded, the
-      rows emptied and the error standing until restart. It clears on failure
-      now, and the failure keeps the cached rows — they are still the last true
-      answer. `loadGitHubList` also needed an in-flight guard, because
-      `reopen()` is not cancellation-aware: closing and reopening the sheet
-      during the first twenty-second query started a second one.
-    - **Re-check after every long `await` in a launch path.** The auto-open rule
-      runs after a filesystem crawl that can take seconds, in which the user may
-      have cloned or picked something — and a `.task` being cancelled does not
-      stop the continuation. `store.open` has no same-path guard either, so even
-      the harmless-looking case re-ran a full open. SH-1's launch-target claim
-      lands in the same task and needs the same discipline.
+    Findings still live for the native block:
+    - **A boolean meaning "in progress" cannot also answer "has this ever
+      run".** The picker's empty state read `isRefreshing`, which is false
+      before the first walk starts as well as after the last one ends, so every
+      launch was greeted with "No repositories found — choose folders to
+      search" on a machine whose repositories the app was about to list. A
+      separate `hasSearched`, set on every exit from the walk including the
+      failing ones, is the fix. Any surface that renders before its data source
+      has looked inherits this.
+    - **A call to action has to have somewhere to come back to.** *Choose
+      folders to search* opens Settings, and nothing native re-walked when
+      `scan_paths` changed. `leogitScanPathsChanged` is posted from the patch
+      and answered by the **root** view — the picker is the surface offering the
+      advice and the one with no switcher to re-open. WS-R rewrites that
+      Settings store field-wise and must keep the hook on the patch.
+    - **A SwiftUI `body` is not a memoization boundary.** The picker ranked,
+      disambiguated and crossed into core *per body pass* while the identifier
+      store published once per repository — fifty repositories, fifty rankings
+      and fifty FFI crossings for one list appearing. The rows are `@State`,
+      rebuilt from an `Equatable` `Inputs` struct naming exactly what they are a
+      function of. `CloneStore.visibleRepos` is the same pattern. **Anything a
+      native view derives from a streaming store wants this shape** — including
+      WS-N's file list.
     - **A `disabled` control cannot explain itself.** Neither `.disabled(…)` nor
-      the DOM's `disabled` attribute delivers pointer events, so a tooltip on a
-      blocked row never appears — which is the entire reason the row is on
-      screen rather than hidden. Both clients dim and refuse instead
-      (`aria-disabled` on the web). The same applies to any future "you can't do
-      this right now" affordance.
-    - **`sweepVisible`'s throttle is charged by a pass that finishes.** One walk
-      publishes rows twice (MRU, then the walk), and the sweep is keyed on the
-      row list — so stamping the 30 s window on *entry* let the interim
-      MRU-only pass spend it, after which the pass over the complete list only
-      filled rows that had no summary at all. The loop is cancellation-aware
-      and stamps at the end.
+      the DOM attribute delivers pointer events, so the tooltip saying why is
+      never seen — which is the entire reason the row is on screen rather than
+      hidden. Both clients dim and refuse instead. This applies to any future
+      "you can't do this right now" affordance.
+    - **Re-check after every long `await` in a launch path.** A `.task` being
+      cancelled does not stop its continuation, and `store.open` has no
+      same-path guard, so a rule that fires after a filesystem crawl must re-ask
+      what it started from.
     - **Still pointing the wrong way, for WS-S.** A *re-walk* that fails is an
       inline row with a Retry natively and a `console.error` in Tauri, whose
       pickers then show "No repositories found" for a walk that never ran.
       Tauri's launch-time `phase: 'error'` covers only the first walk. Small,
       and the native shape is the one to port.
-13. **WS-M — Native launch, menus & updater (M).** SH-1, the largest native
-    contract gap: export `resolve_launch_target` /
-    `set`+`take_pending_launch_target` / `init_repo` / `is_git_repo`, claim the
-    target ahead of `restoreLastRepo`, warm start via
-    `NSApplicationDelegate.application(_:open:)` + a `CFBundleDocumentTypes`
-    entry for `public.folder` (which buys drag-onto-Dock and Finder "Open With"
-    free), the "Create a repository here?" confirmation on the root view, and
-    `install.sh`'s native branch — whose bundle-id mismatch breaks *any*
-    scripted launch today. LaunchServices gives single-instance free. With it
-    SH-2's native half (File ▸ Open/Clone, View ▸ ⌘1/⌘2, a Branch menu with ⌘B
-    via the focused-scene-value pattern, View ▸ Show/Hide Terminal owning ⌃`) —
-    today ⌘G/⌘↩/⌃`/⌘O are discoverable nowhere — and BG-5 (the update checker:
-    async FFI export + `UpdateInfo` mirror + scene-level checker + chip, gated
-    on `isOnline` alone, **not** the breaker).
+13. **WS-M — Native launch, menus & updater (M).** ✅ **Shipped 2026-08-28**,
+    with one part deliberately unfinished and put to the user (below). SH-1's
+    app half: `CFBundleDocumentTypes: public.folder` makes LaunchServices
+    deliver `open -a LeoGit <dir>` to `application(_:open:)` cold and warm
+    alike, so single-instance, Finder *Open With* and drag-onto-Dock all come
+    from the platform — the installed `leogit` command is not yet one of those
+    routes, which is the open question below; the target outranks
+    `last_opened_repo`; a folder that isn't a repository raises *Create a
+    repository here?* from the root view.
+    SH-2's native half: File ▸ Clone Repository… (⇧⌘O), View ▸ ⌘1/⌘2, View ▸
+    Show/Hide Terminal (TE-7's ⌃`), View ▸ Refresh, and a Branch menu sharing
+    one `BranchMenuContent` with the toolbar control. BG-5: `UpdateStore` +
+    `UpdateChip`, once per session, gated on `isOnline` alone. Per-item state is
+    in §4.2, §4.10 and §4.11. New native files: `App/AppDelegate.swift`,
+    `App/AppMenus.swift`, `Stores/LaunchStore.swift`, `Stores/UpdateStore.swift`,
+    `Screens/InitRepoSheet.swift`, `Design/UpdateChip.swift`; the FFI gained
+    `resolve_launch_target`, `init_repo`, `open_url` and `check_for_update` plus
+    `LaunchTarget` / `UpdateInfo` mirrors (63 → 67 exports). Gates: `pnpm check`
+    0/0 over 153 files, prettier clean, `pnpm tauri build` bundled, zero-warning
+    `just mac-build`, 178 core + 24 bridge + 2 host tests, clippy-pedantic 165
+    core with `leogit` / `leogit-ffi` at zero. (`cargo fmt --all` also
+    reformatted two files it had drifted on, `core/src/ai.rs` and
+    `core/src/exclusions.rs` — mechanical, and it makes `cargo fmt --check`
+    clean.)
+
+    **Open question for the user — `install.sh` has no native branch, and the
+    plan's suggested one would not work.** Three separate problems, none of
+    which the app side can settle:
+    - The shell function points at a **path** (`/Applications/leogit.app`), not
+      a bundle id. On a case-insensitive volume that path is also where a native
+      `LeoGit.app` would land, so the two bundles cannot coexist there.
+    - Its `open -na … --args "$dir"` form sends the folder through **argv**,
+      which reaches the native app only on a cold start — `--args` is not
+      delivered to an already-running instance. The working form is
+      `open -a … "$dir"` (no `-n`, no `--args`), which the Tauri app in turn
+      would ignore, having no document types.
+    - `install.sh` installs the **Tauri** release, and the native app has no
+      release artifact at all, so there is nothing for an installer branch to
+      key on.
+
+      Options: **(a)** leave it — `leogit` keeps opening the shipped Tauri app,
+      and the native app is reached from Finder, `just mac-run`, or
+      `open -a <path> <dir>` by hand until it ships; **(b)** have the function
+      prefer the native bundle when LaunchServices knows one —
+      `open -b com.leomanrique.leogit.mac "$dir" || open -na "/Applications/leogit.app" --args "$dir"`
+      — which is cheap and needs no installer change, but silently points
+      `leogit` at whatever native build the machine last registered, including a
+      stale DerivedData one; **(c)** give the native app a release artifact and
+      a real installer branch, which is release engineering rather than parity
+      and belongs outside this plan.
+
+    Findings for WS-N and the native block after it:
+    - **`.onChange` cannot see a value set before the modifier existed**, and on
+      a cold start that is the normal case: AppKit delivers
+      `application(_:open:)` between will- and did-finish-launching, ahead of
+      every SwiftUI task. So the launch path claims the target *itself* and the
+      handler covers only later ones. It also reads a **kept** copy of the
+      target rather than the claimable one, because the two consumers run in the
+      same turn and their order is not fixed — a launch that fell through to the
+      remembered repository would open it on top of the one that was asked for.
+      **Any native state fed by an AppKit callback wants both halves of this.**
+    - **A cancelled `Task` finishes after its replacement is stored**, so a loop
+      that clears its own handle on exit drops the reference to the task that is
+      still running — and the next start, seeing `nil`, adds a third. The handle
+      is cleared only where it is replaced. `UpdateStore` is the instance; any
+      retry loop restarted by an event has the same shape.
+    - **A menu-bar menu has no "about to open" hook.** The toolbar branch menu
+      re-reads `list_branches` from `onAppear`, which is what BR-3's
+      "moment of intent" rule depends on; the menu-bar copy gets nothing
+      equivalent, and `.onAppear` inside `CommandMenu` content is unreliable at
+      best and a reload loop at worst. The answer was to reload on app
+      activation instead — which is *better* for the case that motivated BR-3,
+      since a branch created in a terminal is followed by returning to the app.
+      **Any menu-bar surface mirroring an in-window one inherits this.**
+    - **The same chord declared in two rendered copies of one view is
+      registered twice**, and SwiftUI resolves the duplicate arbitrarily. A
+      shared menu-content view therefore takes a flag saying which copy owns the
+      key equivalents; only the menu bar does, since it is also the copy that is
+      always present.
+    - **A window hosts one sheet at a time, so the root view has one slot.**
+      Two `.sheet` modifiers on the same view is not two slots: a request
+      arriving while the other is up has nowhere to go, and the binding it set
+      can be left standing so that `.sheet(item:)` — which compares ids — never
+      presents that item again. The root now carries a single `RootSheet` enum,
+      where assigning *replaces*, which is also the right answer since the newer
+      request is the one the user just made. **WS-N adds surfaces to this
+      view's subtree** and inherits the collision.
+    - **A modifier on a view whose body is a `Group` reaches every child.**
+      `BranchMenuContent`'s body is one, so an `.onAppear` hung on the whole
+      thing would have fired the branch reload once per section; it sits on a
+      single child instead. `.disabled` propagating the same way is what makes
+      the busy state work, so the rule cuts both ways.
+    - **`RepoStore.open` still has no reentrancy guard**, which WS-M did not
+      add because the hazard predates it: two overlapping opens interleave
+      `repoPath` with `loadRepoData`, so a fast double switch can leave one
+      repository's path beside another's history. `switchRepo`'s same-path guard
+      does not help, since `repoPath` is published after an `await`. Small, and
+      WS-Q or WS-S is the place — the same file's `awaitLoadSettled` already has
+      the depth-count machinery a guard would build on.
 14. **WS-N — Native file list & composer (M).** CH-1 (multi-select via
     `List(selection: Set<String>)`) and CH-2 (Space to include/exclude — the
     highest-frequency action in the app has no native keyboard route at all)
@@ -1857,9 +1915,7 @@ is mostly adoption of already-proven native behavior.
     one-shot initial-size push), TE-4 (scrollback 1000 explicitly, both
     clients), TE-5's native half (the hover affordance alone — ⌘-click and OSC 52
     are already right there; SwiftTerm's hover surface needs an API check, and
-    the string to match is the Tauri client's *Follow link (⌘ + click)*), and
-    TE-7's one remaining half if WS-M does not take it (⌃` wants a
-    View ▸ Show/Hide Terminal menu home).
+    the string to match is the Tauri client's *Follow link (⌘ + click)*).
 19. **WS-S — Sweep & contract cleanup (S/M).** What genuinely had no home, plus
     the work that can only land once everything else has:
     - **Leftover efficiency**: RM-11 (move the native sweep's slot re-check
@@ -1961,10 +2017,9 @@ written as each chunk lands, no duplication between documents:
 - **TECHNICAL.md** — new mechanics paragraphs only for genuinely new machinery
   (the core hoists, the Tauri channel transport, the native launch path), plus
   the claims WS-S lists as their areas land.
-- **DESIGN.md** — flow 1 is shared from step 2 on since WS-L; what is left
-  Tauri-only there is how a launch can be *told* which repository to open
-  (`leogit <dir>`, the second-instance forward, the *Create a repository here?*
-  prompt), which retires with WS-M. The per-flow client hedges retire as parity
+- **DESIGN.md** — flow 1 is shared end to end since WS-M, `leogit <dir>` and
+  the *Create a repository here?* prompt included, and flow 11 (the update
+  chip) is now both clients'. The per-flow client hedges retire as parity
   closes them. One difference flow 10 now records rather than hides: Return in
   the clone list is two presses in Tauri (its cursor and its selection are
   separate, so the first press makes the destination visible) and one natively
@@ -2007,6 +2062,7 @@ written as each chunk lands, no duplication between documents:
   `merge_preview` core function (BR-3's cousin).
 - A Tauri macOS `tauri::menu` (SH-2) — the platform-respect follow-up once
   the shortcut surface stabilizes.
-- The `install.sh` bundle-id mismatch (SH-1) breaks *any* scripted launch of
-  the native app today — fixed as part of WS-M's CLI work, noted here because
-  it affects packaging beyond this plan.
+- `install.sh` still launches only the Tauri bundle (SH-1). WS-M established
+  that this is a packaging question, not an app one — the native app has no
+  release artifact and the two bundles compete for one case-insensitive path —
+  so it is parked on the user's decision recorded in WS-M's §6 entry.

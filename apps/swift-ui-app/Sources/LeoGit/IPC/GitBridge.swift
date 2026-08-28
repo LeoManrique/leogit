@@ -33,6 +33,23 @@ enum GitBridge {
         try resolveRepoRoot(path: path)
     }
 
+    /// Where a `leogit <dir>` invocation points, or `nil` when the arguments
+    /// name no usable folder — which is a plain launch, not an error. An
+    /// existing folder always resolves; `isRepo` is what tells "open this"
+    /// from "offer to create one here".
+    @concurrent
+    static func launchTarget(arguments: [String], workingDirectory: String) async -> LaunchTarget? {
+        resolveLaunchTarget(args: arguments, cwd: workingDirectory)
+    }
+
+    /// `git init` a folder and answer the path to open. Idempotent: a folder
+    /// already inside a repository yields that repository's root instead of
+    /// nesting a new one inside it.
+    @concurrent
+    static func initRepository(at path: String) async throws -> String {
+        try initRepo(path: path)
+    }
+
     /// Directory name shown as the repository's title.
     @concurrent
     static func name(of path: String) async -> String {
@@ -182,6 +199,14 @@ enum GitBridge {
     @concurrent
     static func openWithDefaultApp(in repoPath: String, relativePath: String) async throws {
         try openPath(repoPath: repoPath, relPath: relativePath)
+    }
+
+    /// Open an `https://` URL in the default browser. Routed through core
+    /// rather than `NSWorkspace` so both clients hand the address to the OS
+    /// behind the same scheme and metacharacter guard.
+    @concurrent
+    static func openInBrowser(_ url: String) async throws {
+        try openUrl(url: url)
     }
 
     /// Check out a commit by sha, detaching `HEAD` — the next status reports
@@ -610,6 +635,22 @@ enum GitBridge {
     @concurrent
     static func syncSummary(of repoPath: String, fetching: Bool) async throws -> RepoSync {
         try await repoSyncStatus(repoPath: repoPath, doFetch: fetching)
+    }
+
+    // MARK: - Update check
+
+    /// A release newer than this build, or `nil` when it is current — which
+    /// also covers a newer tag whose artifact for this platform has not been
+    /// uploaded yet, since offering one the installer cannot complete is
+    /// worse than staying quiet.
+    ///
+    /// Throwing means the *check* failed (offline, rate-limited, GitHub
+    /// down), which the caller retries quietly and never shows.
+    ///
+    /// Already async in the bindings — core drives the request through tokio —
+    /// so no `@concurrent` hop is needed or wanted here.
+    static func latestRelease() async throws -> UpdateInfo? {
+        try await checkForUpdate()
     }
 
     // MARK: - Embedded terminal

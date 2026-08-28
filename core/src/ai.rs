@@ -125,11 +125,19 @@ pub struct ProviderStatus {
 
 impl ProviderStatus {
     fn ready() -> Self {
-        Self { ready: true, reason: String::new(), fix_command: String::new() }
+        Self {
+            ready: true,
+            reason: String::new(),
+            fix_command: String::new(),
+        }
     }
 
     fn blocked(reason: impl Into<String>, fix_command: &str) -> Self {
-        Self { ready: false, reason: reason.into(), fix_command: fix_command.to_string() }
+        Self {
+            ready: false,
+            reason: reason.into(),
+            fix_command: fix_command.to_string(),
+        }
     }
 }
 
@@ -199,7 +207,10 @@ pub async fn check_provider_status(
 async fn run_claude(args: &[&str]) -> Option<std::process::Output> {
     let mut cmd = tokio::process::Command::new("claude");
     cmd.args(args);
-    super::process::hide_console_async(&mut cmd).output().await.ok()
+    super::process::hide_console_async(&mut cmd)
+        .output()
+        .await
+        .ok()
 }
 
 /// Installed *and* signed in — two separate questions, asked in that order so
@@ -255,8 +266,14 @@ async fn check_ollama(config: &AiProviderConfig) -> ProviderStatus {
         return ProviderStatus::ready();
     }
     ProviderStatus::blocked(
-        format!("Ollama isn't answering at {base_url}. Start it, or change the address in Settings."),
-        if is_loopback_url(&base_url) { OLLAMA_SERVE_COMMAND } else { "" },
+        format!(
+            "Ollama isn't answering at {base_url}. Start it, or change the address in Settings."
+        ),
+        if is_loopback_url(&base_url) {
+            OLLAMA_SERVE_COMMAND
+        } else {
+            ""
+        },
     )
 }
 

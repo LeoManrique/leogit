@@ -14,9 +14,17 @@ struct WelcomeView: View {
     let coreVersion: String
     let directory: RepoDirectoryStore
     let identifiers: RepoIdentifierStore
+
+    /// A newer release, when one is known. This screen carries the chip
+    /// because the toolbar it lives in on the repository screen does not
+    /// exist here, and the launch with no repository to restore is exactly
+    /// the one where a user has a moment to act on it.
+    let update: UpdateInfo?
+
     let onSelect: (String) -> Void
     let onClone: () -> Void
     let onChooseFolders: () -> Void
+    let onDismissUpdate: () -> Void
 
     var body: some View {
         VStack(spacing: 16) {
@@ -44,6 +52,11 @@ struct WelcomeView: View {
             .frame(maxWidth: 420)
             .background(.background.secondary, in: .rect(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.separator))
+
+            if let update {
+                UpdateChip(info: update, onDismiss: onDismissUpdate)
+                    .controlSize(.small)
+            }
 
             if !coreVersion.isEmpty {
                 // Proves the Rust bridge answered before any repo was opened.

@@ -38,7 +38,8 @@ use std::sync::Arc;
 
 use leogit_core::events::{CoreEvent, EventSink};
 use leogit_core::{
-    ai, config, diff, exclusions, gh, git, highlight, os, process, repos, shell, terminal,
+    ai, config, diff, exclusions, gh, git, highlight, launch, os, process, repos, shell, terminal,
+    update,
 };
 
 // Re-exported so Swift sees the real core types. Names are used by the
@@ -60,9 +61,11 @@ pub use leogit_core::git::{
     FileStatusStyle, LogOptions, MergeResult, RepoIdentifier, RepoStatus, RepoSync, SyncProposal,
 };
 pub use leogit_core::highlight::{BlobSource, Token, TokenClass};
+pub use leogit_core::launch::LaunchTarget;
 pub use leogit_core::repos::{CloneTarget, RepoRow};
 pub use leogit_core::shell::ShellOption;
 pub use leogit_core::terminal::StartedTerminal;
+pub use leogit_core::update::UpdateInfo;
 
 uniffi::setup_scaffolding!();
 
@@ -388,6 +391,21 @@ pub enum BlobSource {
     Commit { repo_path: String, sha: String },
 }
 
+/// Mirrors [`leogit_core::launch::LaunchTarget`].
+#[uniffi::remote(Record)]
+pub struct LaunchTarget {
+    pub path: String,
+    pub is_repo: bool,
+}
+
+/// Mirrors [`leogit_core::update::UpdateInfo`].
+#[uniffi::remote(Record)]
+pub struct UpdateInfo {
+    pub version: String,
+    pub url: String,
+    pub install_command: Option<String>,
+}
+
 /// The structured result of parsing one file's raw diff.
 ///
 /// A purpose-built record rather than a `#[uniffi::remote]` mirror of core's
@@ -452,6 +470,23 @@ pub fn fix_path_env() {
 #[uniffi::export]
 pub fn resolve_repo_root(path: String) -> Result<String, GitError> {
     git::resolve_repo_root(&path).map_err(|message| GitError::Failed { message })
+}
+
+/// `git init` a folder so it can be opened, returning the absolute path to
+/// open. Backs the "this folder isn't a repository yet" prompt a
+/// `leogit <dir>` invocation raises.
+///
+/// Idempotent: a folder already inside a repository yields that repository's
+/// root rather than nesting a new one, so confirming twice — or confirming
+/// after the user ran `git init` in a terminal — opens rather than fails.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when the folder can't be created or resolved
+/// (permissions, a file in the way), or when `git init` itself fails.
+#[uniffi::export]
+pub fn init_repo(path: String) -> Result<String, GitError> {
+    git::init_repo(&path).map_err(GitError::from)
 }
 
 /// The display name for the repository at `path` (its directory name).
@@ -733,6 +768,23 @@ pub fn reveal_path(repo_path: String, rel_path: String) -> Result<(), GitError> 
 #[uniffi::export]
 pub fn open_path(repo_path: String, rel_path: String) -> Result<(), GitError> {
     os::open_path(repo_path, rel_path).map_err(GitError::from)
+}
+
+/// Open an `https://` URL in the default browser — the update chip's release
+/// page.
+///
+/// Routed through core rather than `NSWorkspace` so both clients open a URL
+/// behind the same scheme allowlist and metacharacter rejection: the address
+/// comes from GitHub's own release payload, and a client that skipped the
+/// guard would be the one place an unexpected one reached a shell.
+///
+/// # Errors
+///
+/// Returns [`GitError`] for a non-`https` URL or one containing shell
+/// metacharacters, or when the browser can't be spawned.
+#[uniffi::export]
+pub fn open_url(url: String) -> Result<(), GitError> {
+    os::open_url(url).map_err(GitError::from)
 }
 
 /// Check out a commit by sha, detaching `HEAD`. `get_status` then reports
@@ -1649,6 +1701,49 @@ pub async fn repo_sync_status(repo_path: String, do_fetch: bool) -> Result<RepoS
             message: format!("repo_sync_status did not complete: {join_error}"),
         })?
         .map_err(GitError::from)
+}
+
+// ---------------------------------------------------------------------------
+// Exported functions — launch target and update check
+// ---------------------------------------------------------------------------
+
+/// Resolve an argv list to the folder a `leogit <dir>` invocation points at.
+///
+/// Skips `args[0]` and takes the first non-flag argument, resolving a relative
+/// path against `cwd`. `None` for a bare launch, a path that doesn't exist, or
+/// one that isn't a directory — all of which just open the app. An existing
+/// directory always resolves: `is_repo` is what distinguishes "open this
+/// repository" from "offer to create one here".
+///
+/// The native host also feeds this the single path `AppKit` hands it in
+/// `application(_:open:)`, as a one-element argv, so the folder a
+/// double-click delivers is resolved by the same rule as one typed at a
+/// prompt — including resolving a subdirectory up to its repository root.
+///
+/// Core's pending-target slot deliberately has no native export: it exists so
+/// the Tauri host can stash a target before a window exists, and the native
+/// client has a second source (`application(_:open:)`, which can fire at any
+/// time) that a process global couldn't publish to the UI. One observable
+/// Swift store owns both instead.
+#[must_use]
+#[uniffi::export]
+pub fn resolve_launch_target(args: Vec<String>, cwd: String) -> Option<LaunchTarget> {
+    launch::resolve_launch_target(&args, std::path::Path::new(&cwd))
+}
+
+/// Ask GitHub Releases whether a version newer than this build exists.
+/// `None` means this build is current — or that the newer release has no
+/// artifact for this platform yet, which core withholds rather than offering
+/// an update the installer could not complete.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when the check itself fails (offline, rate-limited,
+/// GitHub down). That is "couldn't check", not "no update": the caller retries
+/// quietly and shows the user nothing.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn check_for_update() -> Result<Option<UpdateInfo>, GitError> {
+    update::check_for_update().await.map_err(GitError::from)
 }
 
 // ---------------------------------------------------------------------------

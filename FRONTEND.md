@@ -37,22 +37,26 @@ static-linking or a local daemon (that decision is open; see the plan).
 - Today's surface: **4 events, ~45 DTOs**, and a command catalogue (§3) each host exposes
   **to the extent it consumes it**. The Tauri host registers **73** `#[tauri::command]`s,
   each with a wrapper in `apps/tauri-app/src/lib/api/commands.ts`; the UniFFI bridge
-  exports **63** functions. The two sets are deliberately not identical, and a command
+  exports **67** functions. The two sets are deliberately not identical, and a command
   reaching one host does not oblige the other — what is required is that the difference be
   recorded, here or in §8, never left silent.
-  - No native export: `check_auth`, `check_for_update`, `delete_remote_branch`,
-    `generate_patch`, `generate_inverse_patch`, `get_ahead_behind`, `get_repo_name`,
-    `has_staged_changes`, `highlight_diff`, `init_repo`, `is_git_repo`, `open_url`,
-    `rename_branch`, `take_pending_launch_target`, `terminal_pty_info`. Three of those the
+  - No native export: `check_auth`, `delete_remote_branch`, `generate_patch`,
+    `generate_inverse_patch`, `get_ahead_behind`, `get_repo_identifier`,
+    `get_repo_name`, `has_staged_changes`, `highlight_diff`, `is_git_repo`,
+    `rename_branch`, `take_pending_launch_target`, `terminal_pty_info`. Four of those the
     native client reaches under another name (`repo_display_name` for `get_repo_name`,
     `resolve_repo_root` for `is_git_repo`, the structured `tokenize_diff` for the
-    HTML-shaped `highlight_diff`), as does `get_repo_identifier` — exported as
-    `repo_identifier`, async so the picker's per-row `git config` reads never
-    hold a Swift cooperative thread; `take_pending_launch_target` and `init_repo` serve the
-    launch path, which is Tauri-only (§8); and the rest the bridge omits because it
-    carries no surface a client does not call.
+    HTML-shaped `highlight_diff`, and `repo_identifier` for `get_repo_identifier` —
+    async so the picker's per-row `git config` reads never hold a Swift cooperative
+    thread). `take_pending_launch_target` is core's process-global slot for a
+    cold-start target, which the native client deliberately does not use: it has a
+    second source for the same thing (`application(_:open:)`, which fires at any
+    time), and a global the UI cannot observe would have to be polled — one
+    observable Swift store owns both routes instead. The rest the bridge omits
+    because it carries no surface a client does not call.
   - No Tauri command: `core_version`, `fix_path_env`, `repo_display_name`,
-    `resolve_repo_root`, `tokenize_diff`.
+    `repo_identifier`, `resolve_launch_target`, `resolve_repo_root`,
+    `tokenize_diff`.
   - Registered Tauri-side but called by nothing in the Svelte client:
     `copy_diff_text`, `generate_patch`, `generate_inverse_patch`,
     `get_ahead_behind`, `has_staged_changes`, `rename_branch`,
@@ -108,6 +112,15 @@ Clearing an optional field is patching it to `""` — the config's standing
 | Command | Args | Returns |
 |---|---|---|
 | `take_pending_launch_target` | – | `LaunchTarget \| null` (cold-start `leogit <dir>` claim) |
+
+One rule (`core::launch::resolve_launch_target`), two ways to reach it. The
+Tauri host runs it itself before a window exists and parks the answer in a
+process global the frontend claims through the command above; the native bridge
+exports the **resolver** instead (`resolve_launch_target`, one of the seven
+native-only functions in §1), feeding it either the process's argv or the single
+path AppKit hands it in `application(_:open:)` as a one-element argv — so a
+folder delivered by double-click resolves by the same rule as one typed at a
+prompt, subdirectory walk-up included.
 
 ### 3.3 Git — status / diff / log — 5
 | Command | Args | Returns |
@@ -555,11 +568,12 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    shown while nothing is open, and the header/toolbar switcher), and **they are one
    surface**: same rows, same labels, same three empty states, same footer. Only the
    room they have differs.
-   - **Which repository opens by itself, at launch**: the recorded `last_opened_repo`
-     if it is still a repository, else — when discovery found **exactly one** — that
-     one, else the picker. The auto-open belongs to launch alone: a later scan-path
-     edit that happens to narrow the list to one must not pull the user out of the
-     picker they are standing in.
+   - **Which repository opens by itself, at launch**: a folder named on the command
+     line (§6.19) outranks everything, else the recorded `last_opened_repo` if it is
+     still a repository, else — when discovery found **exactly one** — that one, else
+     the picker. The auto-open belongs to launch alone: a later scan-path edit that
+     happens to narrow the list to one must not pull the user out of the picker they
+     are standing in.
    - **Rows** are labelled by the remote's repository name where one is parseable, the
      folder's name otherwise, with a muted `owner/` prefix on the rows whose label
      another row shares — a repository with no remote has no owner to disambiguate
@@ -607,8 +621,9 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    not ⌘`, which macOS owns for cycling an app's windows — **and it is never gated on
    focus.** Nobody types `Ctrl` + `` ` `` into a commit message, and the terminal is exactly
    where you go *from* the composer to run the thing you are about to describe, so a focused
-   field is no reason to refuse it. The native client gets that for free (a key equivalent
-   fires ahead of the first responder); the Tauri client has to place the test above its
+   field is no reason to refuse it. The native client gets it from a **menu** key
+   equivalent, which AppKit matches before it consults whatever holds focus; the Tauri
+   client has to place the test above its
    own "a field has focus, leave it alone" bail, where the composer's chords already sit.
    The collision is Tauri-shaped,
    because its other chords are `Ctrl`-or-`Cmd` and the shell's modifier is `Ctrl` too:
@@ -618,8 +633,10 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    are one rule written twice and have to keep agreeing**: narrow one without the other and
    the chord stops working from inside the panel, which is the one place it is most wanted.
    The **native** client has no collision to resolve — its chords are ⌘, the shell's are ⌃ —
-   and AppKit key equivalents precede the first responder, so the toggle already works from
-   inside SwiftTerm. Making the Tauri client's *other* chords follow the platform (⌘ on
+   but the menu is load-bearing rather than decorative: a key equivalent on a *button* is
+   matched through the responder chain, which SwiftTerm sits at the head of. So the chord
+   lives on View ▸ Show/Hide Terminal and not on the panel's own toggle, which is also
+   where a user looks for it. Making the Tauri client's *other* chords follow the platform (⌘ on
    macOS, `Ctrl` elsewhere) would narrow its capture to the keys the shell actually wants,
    and is filed in ROADMAP with the chords it affects.
 12. **Relative dates** — commit timestamps arrive as ISO-8601 strings
@@ -730,6 +747,41 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    `focusin`, and clicking a plain element raises none, so it strands `true` and the shell
    takes the caret back from wherever the user actually went.
 
+19. **A folder named from outside the app opens it, and a folder that isn't a
+   repository asks.** `leogit <dir>`, and on macOS also a drop on the Dock icon or
+   Finder's *Open With*, resolves through `resolve_launch_target`: the first non-flag
+   argument, relative paths against the working directory, canonicalized, and walked
+   **up** to the repository root so `leogit src/` opens the repository rather than
+   offering to nest one inside it. A path that doesn't exist, or isn't a directory,
+   just launches or focuses the app — a bare `leogit` is the normal way to open it.
+   An existing folder **always** resolves, because the answer to "that isn't a
+   repository" is the prompt, not silence: **"Create a repository here?"**, naming the
+   folder and its path, saying that creating one leaves the files where they are and
+   commits nothing. It is raised over whatever is showing — the picker, another
+   repository, the first launch — because it belongs to none of them, keeps its context
+   and states git's refusal in place if `init_repo` fails, and re-runs are safe:
+   `init_repo` returns the enclosing repository's root rather than nesting.
+   Re-invoking on the repository already open is window activation and nothing else —
+   no reset, no refetch, no MRU bump. A repository outside every scan path keeps its
+   row from then on through the shared MRU (§6.9).
+   **A second invocation must never open a second window.** The Tauri host intercepts
+   it with `plugin-single-instance`; macOS does it in LaunchServices (§8). (The `leogit`
+   shell function `install.sh` writes still targets the Tauri bundle, so today it is
+   `open -a LeoGit <dir>`, the Dock and Finder that exercise the native path.)
+20. **The release check is once per session, and never interrupts.** One
+   `check_for_update` on start, retried every 30 minutes **only while attempts keep
+   failing** and once more on the offline→online edge — launching offline is exactly
+   when the first attempt was skipped. Any *answer* ends it, "you are current"
+   included: releases do not ship often enough to poll for. It is gated on the OS
+   connectivity signal **alone, never on the circuit-breaker**, and its outcome
+   **never feeds the breaker**: the breaker guards git remotes, and a rate-limited
+   GitHub API answer says nothing about those in either direction. A failed check is
+   not an error the user is shown — it is "couldn't check", which is what the retry is
+   for. A found release surfaces as one quiet chip offering the `install_command` to
+   copy, the release page, and a dismissal that lasts the session and is deliberately
+   **not** persisted, so a skipped release resurfaces on the next start rather than
+   being forgotten forever. Never a banner, modal, or toast.
+
 ## 7. Diff rendering contract
 
 `FileDiff`/`Hunk`/`DiffLine` are the **structured** truth. Syntax highlighting and
@@ -772,7 +824,8 @@ every deliberate difference here.
 | Opening a repository from disk | the one `plugin-dialog.open` call chooses a *clone destination*; repositories otherwise arrive from discovery, a clone, or `leogit <dir>` | the same: the one `.fileImporter` chooses a clone destination, and repositories arrive from discovery or a clone |
 | Home dir | `@tauri-apps/api/path`'s `homeDir` | `FileManager` |
 | Reveal / open / open-url | core `os::*` commands (unchanged) | core `os::*` commands (unchanged) |
-| Launch target / second instance | the whole contract: `leogit <dir>` resolves through `core::launch`, a cold start claims it with `take_pending_launch_target`, and a second invocation focuses the window and forwards an `open-repo` event via `plugin-single-instance` | not implemented — no app delegate, no `onOpenURL`, no `CFBundleURLTypes`/`CFBundleDocumentTypes`, and neither launch command is exported to the bridge. The rest of the launch resolution below is shared |
+| Launch target / second instance | a cold start resolves argv in `main` and parks it for the frontend to claim; a second invocation is intercepted by `plugin-single-instance`, which focuses the window and forwards an `open-repo` event | LaunchServices does both: `CFBundleDocumentTypes` declares `public.folder`, so `open -a LeoGit <dir>` activates the running instance and delivers the folder to `NSApplicationDelegate.application(_:open:)` — cold and warm through one callback, with Finder's *Open With* and a drop on the Dock icon coming free. Same resolution rule (`resolve_launch_target`), same precedence, same init prompt |
+| Opening the branch surface | ⌘B toggles the branch popover | no equivalent: AppKit matches a key equivalent by walking *into* submenus, so a menu-bar menu cannot be opened by a chord, and binding ⌘B to one of its items would give the same chord different meanings in the two clients. The Branch menu itself is the discovery surface, and macOS's own ⌃F2 focuses the menu bar |
 | Diff rendering | HTML spans (`{@html}`) | structured runs → `AttributedString` |
 | Terminal widget | `xterm.js` | SwiftTerm (PTY backend reused) |
 | Virtualized lists | hand-rolled windowing | native `List`/`LazyVStack`/`Table` |
@@ -787,6 +840,8 @@ every deliberate difference here.
 | Side-by-side diff (`side_by_side_diff`) | split layout toggle, honoured by `DiffViewer` | not implemented — unified only; a layout feature awaiting its own design pass (ROADMAP), the config field crosses saves untouched |
 | Pending-count placement (§6.2) | `↓N` / `↑N` capsules on the sync button's trailing edge, each with its own arrow | plain `↑N ↓N` text in its own toolbar item left of the button: macOS renders a toolbar control's label as text and icon only, so no custom view can ride the face, and no system API badges a toolbar item |
 | Transfer progress surface | inside the control that started it — a fill wiping across the sync button, sweeping where git reports no percentage | a full-width strip under the toolbar with a real indeterminate state, plus git's line verbatim |
+| Shortcut discovery | no menu bar, so the chords are documented by a `?` overlay listing them | the menu bar is the documentation: File ▸ Clone Repository… (⇧⌘O), View ▸ Changes/History (⌘1/⌘2), View ▸ Show/Hide Terminal (⌃`), View ▸ Refresh (⌘R), Branch ▸ the same items the toolbar control offers (⇧⌘N on New Branch), Repository ▸ the sync ladder's proposal (⌘P). A menu equivalent is also matched ahead of the responder chain, which is what makes ⌃` work from inside the terminal |
+| Update-chip placement (§6.20) | in the header's trailing cluster, outside the repo-scoped controls, so it shows in the pre-main phases too | a toolbar item on the repository screen and a control beneath the list on the picker — the native picker has no toolbar to put it in, and both native surfaces render the one `UpdateChip` |
 | Branch-menu shape (§6.14) | a popover: filter input, keyboard cursor over the rows, the four actions as a footer, and the two that need a branch narrowing the same list under a header that states the question | a stock `Menu`: an inline `Picker` for locals, a plain-button section for remotes, and the same four actions with `Merge into “…”` and `Delete Branch` as submenus. AppKit supplies the scrolling, type-select and cursor the popover hand-rolls |
 
 Neither client offers a per-folder open action anywhere, deliberately: a repo

@@ -30,74 +30,32 @@ struct BranchMenu: View {
     private var currentBranch: String { status?.branch ?? "" }
     private var isDetached: Bool { status?.detached ?? false }
 
-    /// Anything but the current branch can be merged into it, remotes included.
-    private var mergeCandidates: [BranchInfo] {
-        store.branches.filter { $0.name != currentBranch }
-    }
-
-    /// Only local, non-current branches are deletable, like the Tauri client.
-    private var deletableBranches: [BranchInfo] {
-        store.localBranches.filter { $0.name != currentBranch }
+    /// This control's items as data, with every closure wired straight to the
+    /// state beside it. The identical value is published to the menu bar from
+    /// the window content (a focused scene value set inside `.toolbar` never
+    /// reaches the scene), where the closures post instead.
+    private var command: BranchCommand {
+        BranchCommand(
+            localBranches: store.localBranches,
+            remoteBranches: store.remoteBranches,
+            current: currentBranch,
+            isDetached: isDetached,
+            isMerging: isMerging,
+            isBusy: store.isBusy,
+            perform: perform
+        )
     }
 
     var body: some View {
         Menu {
-            Picker("Local Branches", selection: switchSelection) {
-                ForEach(store.localBranches) { branch in
-                    Text(branch.name).tag(branch.name)
-                }
-            }
-            .pickerStyle(.inline)
-            // Menu content is built when the menu opens, so this reloads the
-            // list at the moment of intent — how branches created or deleted
-            // from an outside terminal appear without a manual refresh (the
-            // status poll only catches the ones that move HEAD). `load`
-            // replaces rows in place on success and never touches `isBusy`,
-            // so the open menu doesn't flicker.
-            .onAppear {
+            // Menu content is built when the menu opens, so `onOpen` reloads
+            // the list at the moment of intent — how branches created or
+            // deleted from an outside terminal appear without a manual
+            // refresh (the status poll only catches the ones that move HEAD).
+            // `load` replaces rows in place on success and never touches
+            // `isBusy`, so the open menu doesn't flicker.
+            BranchMenuContent(command: command) {
                 Task { await store.load(repoPath: repoPath) }
-            }
-
-            if !store.remoteBranches.isEmpty {
-                Section("Remote Branches") {
-                    ForEach(store.remoteBranches) { branch in
-                        Button(branch.name) { switchTo(branch.name) }
-                    }
-                }
-            }
-
-            Section {
-                Button("New Branch…") { isCreating = true }
-
-                // Hidden mid-merge: git refuses a second merge over an
-                // unresolved one, so offering the submenu there is an
-                // invitation to a refusal. Abort takes its place below.
-                if !isDetached && !isMerging && !mergeCandidates.isEmpty {
-                    Menu("Merge into “\(currentBranch)”…") {
-                        ForEach(mergeCandidates) { branch in
-                            Button(branch.name) {
-                                mergeSource = MergeSource(name: branch.name)
-                            }
-                        }
-                    }
-                }
-
-                if isMerging {
-                    Button("Abort Merge…", role: .destructive) {
-                        isConfirmingAbort = true
-                    }
-                }
-
-                if !deletableBranches.isEmpty {
-                    Menu("Delete Branch") {
-                        ForEach(deletableBranches) { branch in
-                            Button(branch.name, role: .destructive) {
-                                pendingDelete = branch.name
-                                isConfirmingDelete = true
-                            }
-                        }
-                    }
-                }
             }
         } label: {
             Label(menuLabel, systemImage: "arrow.triangle.branch")
@@ -158,6 +116,35 @@ struct BranchMenu: View {
         } message: {
             Text(alertMessage ?? "")
         }
+        // The same items chosen from the menu bar. They arrive as requests
+        // rather than as calls because `BranchCommands` lives on the scene,
+        // while every sheet and confirmation an action opens lives here.
+        .onReceive(NotificationCenter.default.publisher(for: .leogitBranchActionRequested)) {
+            notification in
+            guard let action = notification.object as? BranchAction else { return }
+            perform(action)
+        }
+    }
+
+    /// The one place a branch action turns into state. Both surfaces route
+    /// here, so a menu-bar Merge opens the same sheet the toolbar's does —
+    /// and a busy store refuses both alike, rather than one of them.
+    @MainActor
+    private func perform(_ action: BranchAction) {
+        guard !store.isBusy else { return }
+        switch action {
+        case let .switchTo(branch):
+            switchTo(branch)
+        case .create:
+            isCreating = true
+        case let .merge(branch):
+            mergeSource = MergeSource(name: branch)
+        case .abortMerge:
+            isConfirmingAbort = true
+        case let .delete(branch):
+            pendingDelete = branch
+            isConfirmingDelete = true
+        }
     }
 
     /// The exceptional states ride the label too — the window subtitle that
@@ -172,18 +159,6 @@ struct BranchMenu: View {
         }
         guard !currentBranch.isEmpty else { return "Branches" }
         return isMerging ? "\(currentBranch) · merging" : currentBranch
-    }
-
-    /// Selection drives the switch: reading reflects status, writing checks
-    /// out the picked branch.
-    private var switchSelection: Binding<String> {
-        Binding(
-            get: { currentBranch },
-            set: { picked in
-                guard picked != currentBranch else { return }
-                switchTo(picked)
-            }
-        )
     }
 
     private func switchTo(_ branch: String) {
@@ -222,6 +197,154 @@ struct BranchMenu: View {
 private struct MergeSource: Identifiable {
     let name: String
     var id: String { name }
+}
+
+/// What a branch item asks for. Carried as the object of
+/// `.leogitBranchActionRequested` when the request comes from the menu bar.
+enum BranchAction: Sendable {
+    case switchTo(String)
+    case create
+    case merge(String)
+    case abortMerge
+    case delete(String)
+}
+
+/// Everything the branch items are a function of, plus the one closure that
+/// performs them — published as a focused scene value so the menu bar can
+/// render the same list the toolbar control does.
+struct BranchCommand {
+    var localBranches: [BranchInfo]
+    var remoteBranches: [BranchInfo]
+    var current: String
+    var isDetached: Bool
+    var isMerging: Bool
+    /// One branch operation runs at a time; a second would contend on
+    /// `index.lock`. The items dim rather than silently refusing, so the menu
+    /// bar says what the toolbar control's own `.disabled` already says.
+    var isBusy: Bool
+    var perform: (BranchAction) -> Void
+}
+
+extension FocusedValues {
+    @Entry var branchCommand: BranchCommand?
+}
+
+/// The branch items themselves, defined once and rendered by both the toolbar
+/// menu and the menu-bar Branch menu.
+///
+/// Written as a view rather than duplicated into each host because the two had
+/// no way to stay in step otherwise, and a branch action reachable from one
+/// menu and not the other is precisely the drift this plan keeps finding. The
+/// derived sets — what can be merged, what can be deleted — live here for the
+/// same reason: they are rules about the list, not about either host.
+struct BranchMenuContent: View {
+    let command: BranchCommand
+
+    /// Whether this copy owns the key equivalents. Only the menu bar does:
+    /// the two hosts render the same items, and declaring a shortcut in both
+    /// registers the same chord twice, which SwiftUI resolves arbitrarily.
+    /// The menu bar is also the copy that is always present, so a chord bound
+    /// there does not come and go with a popover.
+    var bindsShortcuts = false
+
+    /// Run when this copy is built, which for a pull-down menu is the moment
+    /// it opens. Carried by the toolbar copy alone: the menu bar's is rebuilt
+    /// on every republish, not on opening, so hanging a `for-each-ref` off it
+    /// would spend one per state change and answer nobody's intent.
+    /// Attached to a single child rather than the whole body — a `Group`
+    /// propagates a modifier to each of its children, which would mean one
+    /// reload per section.
+    var onOpen: (() -> Void)?
+
+    /// Anything but the current branch can be merged into it, remotes
+    /// included.
+    private var mergeCandidates: [BranchInfo] {
+        (command.localBranches + command.remoteBranches).filter { $0.name != command.current }
+    }
+
+    /// Only local, non-current branches are deletable, like the Tauri client.
+    private var deletableBranches: [BranchInfo] {
+        command.localBranches.filter { $0.name != command.current }
+    }
+
+    /// Selection drives the switch: reading reflects status, writing checks
+    /// out the picked branch.
+    private var switchSelection: Binding<String> {
+        Binding(
+            get: { command.current },
+            set: { picked in
+                guard picked != command.current else { return }
+                command.perform(.switchTo(picked))
+            }
+        )
+    }
+
+    var body: some View {
+        Group {
+            Picker("Local Branches", selection: switchSelection) {
+                ForEach(command.localBranches) { branch in
+                    Text(branch.name).tag(branch.name)
+                }
+            }
+            .pickerStyle(.inline)
+            .onAppear { onOpen?() }
+
+            if !command.remoteBranches.isEmpty {
+                Section("Remote Branches") {
+                    ForEach(command.remoteBranches) { branch in
+                        Button(branch.name) { command.perform(.switchTo(branch.name)) }
+                    }
+                }
+            }
+
+            Section {
+                Button("New Branch…") { command.perform(.create) }
+                    .modifier(OptionalShortcut(key: "n", isActive: bindsShortcuts))
+
+                // Hidden mid-merge: git refuses a second merge over an
+                // unresolved one, so offering the submenu there is an
+                // invitation to a refusal. Abort takes its place below.
+                if !command.isDetached && !command.isMerging && !mergeCandidates.isEmpty {
+                    Menu("Merge into “\(command.current)”…") {
+                        ForEach(mergeCandidates) { branch in
+                            Button(branch.name) { command.perform(.merge(branch.name)) }
+                        }
+                    }
+                }
+
+                if command.isMerging {
+                    Button("Abort Merge…", role: .destructive) { command.perform(.abortMerge) }
+                }
+
+                if !deletableBranches.isEmpty {
+                    Menu("Delete Branch") {
+                        ForEach(deletableBranches) { branch in
+                            Button(branch.name, role: .destructive) {
+                                command.perform(.delete(branch.name))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .disabled(command.isBusy)
+    }
+}
+
+/// ⇧⌘N, but only on the copy of the menu that owns it.
+///
+/// `.keyboardShortcut` has no "sometimes" form, and a plain `if` around the
+/// button would give SwiftUI two structurally different views for the same
+/// item. A modifier keeps one view and turns the binding on or off.
+private struct OptionalShortcut: ViewModifier {
+    let key: KeyEquivalent
+    let isActive: Bool
+
+    func body(content: Content) -> some View {
+        content.keyboardShortcut(
+            isActive ? KeyboardShortcut(key, modifiers: [.shift, .command]) : nil
+        )
+    }
 }
 
 /// Name a branch, create it off HEAD, and land on it. Failures show inline

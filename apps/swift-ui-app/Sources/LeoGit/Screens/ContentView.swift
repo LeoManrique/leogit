@@ -25,6 +25,11 @@ struct ContentView: View {
     @Environment(RepoStore.self) private var store
     @Environment(AppConfigStore.self) private var appConfig
 
+    /// Folders handed to the app from outside it — `leogit <dir>`, a drop on
+    /// the Dock icon, Finder's Open With. Owned by the app delegate, which is
+    /// the only thing AppKit tells.
+    @Environment(LaunchStore.self) private var launch
+
     /// The picker rows' "no repositories found — choose folders" action.
     @Environment(\.openSettings) private var openSettings
 
@@ -43,6 +48,12 @@ struct ContentView: View {
     /// that had not changed.
     @State private var cloneStore = CloneStore()
 
+    /// The once-per-session release check. Owned by the root view, not the
+    /// repository screen, so it also runs while the app sits on the picker —
+    /// the launch where the user is least busy is a fine one to mention a
+    /// release on.
+    @State private var updateStore = UpdateStore()
+
     /// "May background work run right now?" — the policy every loop below
     /// consults by predicate name; its doc comment carries the table.
     /// Created alongside `syncStore` in `init` because the store publishes
@@ -54,7 +65,14 @@ struct ContentView: View {
     /// is started from the *History* tab, so it has to survive the switch
     /// that puts the composer on screen.
     @State private var commitStore = CommitStore()
-    @State private var isCloneSheetPresented = false
+    /// The one sheet the root view can present. A window hosts one sheet at a
+    /// time, so this is a single slot rather than two `isPresented` flags:
+    /// with two, a request that arrived while the other was up had nowhere to
+    /// go and left a binding set that could never present again. Assigning
+    /// replaces, which is also the right answer — the newer request is the one
+    /// the user just made.
+    @State private var sheet: RootSheet?
+
     @State private var tab: RepoTab = .changes
 
     /// Each tab's selection, keyed by path / sha so a reload that replaces
@@ -91,14 +109,26 @@ struct ContentView: View {
                     coreVersion: store.coreVersionText,
                     directory: directoryStore,
                     identifiers: identifierStore,
+                    update: updateStore.visible,
                     onSelect: switchRepo,
-                    onClone: { isCloneSheetPresented = true },
-                    onChooseFolders: { openSettings() }
+                    onClone: { sheet = .clone },
+                    onChooseFolders: { openSettings() },
+                    onDismissUpdate: { updateStore.isDismissed = true }
                 )
                 .task { await resolveLaunchRepo() }
             }
         }
         .frame(minWidth: 720, minHeight: 460)
+        // The release check belongs to the app's lifetime, not a repository's,
+        // and the recovery kick is registered under its own key so it does not
+        // displace the repository screen's catch-up on the same edge.
+        .task {
+            let isOnline = isOnlineCheck
+            directoryStore.networkObserver.onRecover("update") {
+                updateStore.networkDidRecover(isOnline: isOnline)
+            }
+            updateStore.start(isOnline: isOnline)
+        }
         // The policy's two inputs this view owns: which window hosts the UI
         // (its occlusion gates everything) and whether a repo is open (the
         // App Nap assertion's other half). Attached to the root so they
@@ -114,12 +144,35 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .leogitScanPathsChanged)) { _ in
             Task { await directoryStore.refreshDirectory() }
         }
-        .sheet(isPresented: $isCloneSheetPresented) {
-            // A successful clone opens the fresh repo directly — the
-            // `.task(id: repoPath)` chain then records it as recent and
-            // runs the warm-up fetch like any other open.
-            CloneSheet(store: cloneStore) { repoPath in
-                Task { await store.open(at: URL(fileURLWithPath: repoPath, isDirectory: true)) }
+        // File ▸ Clone Repository…, which has to work in both phases: the
+        // sheet is presented from here, so the menu item does not need a
+        // repository open to be useful — the user with none is the one most
+        // likely to want it.
+        .onReceive(NotificationCenter.default.publisher(for: .leogitCloneRequested)) { _ in
+            sheet = .clone
+        }
+        // Every later `leogit <dir>` — the launch path claims the first one
+        // itself, since a modifier cannot observe a change that happened
+        // before it existed.
+        .onChange(of: launch.pending) { _, target in
+            guard target != nil, let claimed = launch.claim() else { return }
+            open(launchTarget: claimed)
+        }
+        .sheet(item: $sheet) { presented in
+            switch presented {
+            case .clone:
+                // A successful clone opens the fresh repo directly — the
+                // `.task(id: repoPath)` chain then records it as recent and
+                // runs the warm-up fetch like any other open.
+                CloneSheet(store: cloneStore) { repoPath in
+                    Task {
+                        await store.open(at: URL(fileURLWithPath: repoPath, isDirectory: true))
+                    }
+                }
+            case let .initRepo(path):
+                InitRepoSheet(path: path) { repoPath in
+                    switchRepo(repoPath)
+                }
             }
         }
     }
@@ -177,9 +230,13 @@ struct ContentView: View {
         }
         .task {
             // The offline→online kick registers with the screen (not a
-            // repo): the closure reads the open repo at fire time, and on
-            // Welcome no registration exists — nothing to catch up there.
-            directoryStore.networkObserver.onRecover = {
+            // repo): the closure reads the open repo at fire time, so it stays
+            // harmlessly registered after a return to Welcome — there it
+            // closes the breaker's backoff window, which is right whether or
+            // not a repository is open, and stops before the per-repo catch-up.
+            // Keyed, so the release check's handler on the same edge sits
+            // beside it rather than replacing it.
+            directoryStore.networkObserver.onRecover("repository") {
                 Task { await resyncOnReconnect() }
             }
             // Discovery is a filesystem walk that takes a moment on a deep
@@ -235,7 +292,7 @@ struct ContentView: View {
                         ? "Finishing the current transfer — switching repositories is unavailable"
                         : nil,
                     onSelect: switchRepo,
-                    onClone: { isCloneSheetPresented = true },
+                    onClone: { sheet = .clone },
                     onChooseFolders: { openSettings() }
                 )
             }
@@ -254,6 +311,16 @@ struct ContentView: View {
             // leading from trailing, so the break is explicit — this pushes
             // the sync cluster to the trailing edge.
             ToolbarSpacer(.flexible)
+
+            // Informational, so it keeps its distance from the action: the
+            // fixed spacer below breaks the capsule grouping that adjacent
+            // items would otherwise share with the sync control.
+            if let update = updateStore.visible {
+                ToolbarItem {
+                    UpdateChip(info: update) { updateStore.isDismissed = true }
+                }
+                ToolbarSpacer(.fixed)
+            }
 
             // Ahead/behind as standalone informative text beside the sync
             // button — a toolbar control can't host a count badge on macOS,
@@ -286,6 +353,15 @@ struct ContentView: View {
         // `SyncControls`, whose sheet, alert, and busy guard live with the
         // button, so ⌘P runs the exact click path.
         .focusedSceneValue(\.syncCommand, syncMenuCommand)
+        // The rest of the menu bar's repository-dependent items, published
+        // from the window content for the same reason: a value set inside
+        // `.toolbar` never reaches the scene.
+        .focusedSceneValue(\.tabCommand, TabCommand { tab = $0 })
+        .focusedSceneValue(
+            \.terminalCommand,
+            TerminalCommand(isExpanded: terminalStore.isExpanded, toggle: terminalStore.toggle)
+        )
+        .focusedSceneValue(\.branchCommand, branchMenuCommand)
         .overlay(alignment: .top) {
             if let operation = syncStore.activeOperation {
                 SyncProgressBanner(
@@ -369,6 +445,36 @@ struct ContentView: View {
             isEnabled: proposal.isActionable && syncStore.activeOperation == nil
         ) {
             NotificationCenter.default.post(name: .leogitSyncActionRequested, object: nil)
+        }
+    }
+
+    /// The OS connectivity verdict, asked at the moment it matters rather
+    /// than captured as a value — a check scheduled half an hour out would
+    /// otherwise gate on the network the app launched with. Captures the
+    /// observer rather than this view, so a long-lived task holds the one
+    /// object it reads.
+    private var isOnlineCheck: @MainActor () -> Bool {
+        let observer = directoryStore.networkObserver
+        return { observer.isOnline }
+    }
+
+    /// The Branch menu's items as data. Its perform closure posts rather than
+    /// acting, because every sheet and confirmation a branch action opens
+    /// lives with the toolbar control — so a menu-bar Merge takes the exact
+    /// path a click takes.
+    private var branchMenuCommand: BranchCommand {
+        BranchCommand(
+            localBranches: branchStore.localBranches,
+            remoteBranches: branchStore.remoteBranches,
+            current: store.status?.branch ?? "",
+            isDetached: store.status?.detached ?? false,
+            isMerging: store.isMerging,
+            isBusy: branchStore.isBusy
+        ) { action in
+            NotificationCenter.default.post(
+                name: .leogitBranchActionRequested,
+                object: action
+            )
         }
     }
 
@@ -569,6 +675,14 @@ struct ContentView: View {
             }
         }
         await store.refreshQuietly(forceDiffReload: true)
+        // A branch created or deleted outside the app moves no HEAD, so the
+        // poll's HEAD compare never notices it. Returning to the app is when
+        // that is most likely to have just happened — and the menu bar's
+        // Branch menu needs it, having no "about to open" hook of its own the
+        // way the toolbar control does.
+        if let repoPath = store.repoPath {
+            await branchStore.load(repoPath: repoPath)
+        }
         await directoryStore.refocusSweep(
             activePath: store.repoPath,
             policy: schedulingPolicy
@@ -645,7 +759,14 @@ struct ContentView: View {
     /// Which repository the app opens by itself, once per launch — the
     /// resolution both clients perform, in the same order.
     ///
-    /// The recorded repo comes first and does not wait on discovery: the two
+    /// A folder named on the command line wins outright, so `leogit <dir>`
+    /// opens what it was pointed at rather than what was open last time. A
+    /// folder that is *not* a repository does not win: it raises the prompt
+    /// and lets the rest of the resolution run underneath, so the question
+    /// lands over the picker or the restored repository instead of a blank
+    /// window.
+    ///
+    /// The recorded repo comes next and does not wait on discovery: the two
     /// clients hand the working repository to each other through the shared
     /// state file, and `open` validates the path itself, so making the restore
     /// queue behind a filesystem crawl would only delay the common launch.
@@ -658,6 +779,25 @@ struct ContentView: View {
     private func resolveLaunchRepo() async {
         guard !hasResolvedLaunchRepo else { return }
         hasResolvedLaunchRepo = true
+
+        // argv covers a launch that bypassed LaunchServices; anything the
+        // delegate has already been handed is resolving in the same store, so
+        // one wait covers both routes. Without it this races its own answer
+        // and restores the previous repository on top of the requested one.
+        launch.readProcessArguments()
+        await launch.settle()
+        // Claimed here rather than left to the handler below: `.onChange`
+        // does not observe a value that was already set when the modifier was
+        // installed, and on a cold start the folder is delivered before any
+        // SwiftUI task runs — so trusting the handler alone would drop exactly
+        // the case this feature exists for. Whichever of the two gets there
+        // first wins; `claim` is one-shot, so the other finds nothing.
+        if let target = launch.claim() {
+            open(launchTarget: target)
+            if target.isRepo { return }
+        } else if launch.latest?.isRepo == true {
+            return
+        }
 
         if let last = (try? await GitBridge.reposState())?.lastOpenedRepo {
             await store.open(at: URL(fileURLWithPath: last, isDirectory: true))
@@ -691,6 +831,43 @@ struct ContentView: View {
     private func switchRepo(_ path: String) {
         guard path != store.repoPath else { return }
         Task { await store.open(at: URL(fileURLWithPath: path, isDirectory: true)) }
+    }
+
+    /// Act on a folder handed to the app from outside it. A repository opens;
+    /// anything else raises the prompt to create one there, which is the only
+    /// way the invocation can report that it found a folder but no repository.
+    ///
+    /// Re-running `leogit .` on the open repository is a no-op beyond the
+    /// window activation LaunchServices already performed — `switchRepo`
+    /// refuses the same path, so nothing resets under the user.
+    @MainActor
+    private func open(launchTarget target: LaunchTarget) {
+        if target.isRepo {
+            switchRepo(target.path)
+        } else {
+            // A newer explicit request outranks a dialog left standing —
+            // except while a clone is actually *running*, which is the one
+            // sheet the user is waiting on and the one this must not replace.
+            guard !cloneStore.isCloning else {
+                print("[launch] clone in progress — not prompting for \(target.path)")
+                return
+            }
+            sheet = .initRepo(target.path)
+        }
+    }
+}
+
+/// What the root view can put in its one sheet slot.
+private enum RootSheet: Identifiable {
+    case clone
+    /// A folder the user is being asked whether to turn into a repository.
+    case initRepo(String)
+
+    var id: String {
+        switch self {
+        case .clone: "clone"
+        case let .initRepo(path): "init:\(path)"
+        }
     }
 }
 

@@ -4,9 +4,10 @@ import Observation
 /// The OS's answer to "is there a network right now?" — the native analogue
 /// of the Tauri client's `navigator.onLine` check and `online`-event
 /// recovery kick, which `ConnectivityBreaker` shipped without. One
-/// `NWPathMonitor` feeds `isOnline`; the offline→online edge fires
-/// `onRecover`, the hook the owner uses to reset the breaker and catch up
-/// instead of waiting out a backoff window.
+/// `NWPathMonitor` feeds `isOnline`, and the offline→online edge runs every
+/// handler registered through `onRecover(_:perform:)` — the repository
+/// screen's catch-up, which resets the breaker instead of waiting out a
+/// backoff window, and the release check's retry.
 ///
 /// This type only observes — composing the signal with the breaker
 /// (`RepoDirectoryStore.shouldAttemptBackground`) is the owner's job, so the
@@ -19,10 +20,15 @@ final class NetworkPathObserver {
     /// and a false start would fire a spurious recovery kick on launch.
     private(set) var isOnline = true
 
-    /// Called on the offline→online edge, on the main actor. Registered by
-    /// the repository screen; nil (welcome, no repo) means nothing to catch
-    /// up.
-    @ObservationIgnored var onRecover: (@MainActor () -> Void)?
+    /// What runs on the offline→online edge, on the main actor, keyed by
+    /// subscriber.
+    ///
+    /// More than one thing wants that edge — the repository screen's catch-up
+    /// and the update check's retry — and each is registered from a `.task`
+    /// that can run again, so the key makes re-registration replace rather
+    /// than stack. A second `NWPathMonitor` per subscriber would be the other
+    /// way to do it, and would pay the OS twice for one answer.
+    @ObservationIgnored private var recoveryHandlers: [String: @MainActor () -> Void] = [:]
 
     @ObservationIgnored private let monitor = NWPathMonitor()
 
@@ -43,11 +49,16 @@ final class NetworkPathObserver {
         monitor.cancel()
     }
 
+    /// Register (or replace) what `key` runs when the network comes back.
+    func onRecover(_ key: String, perform handler: @escaping @MainActor () -> Void) {
+        recoveryHandlers[key] = handler
+    }
+
     private func update(isOnline: Bool) {
         guard isOnline != self.isOnline else { return }
         self.isOnline = isOnline
         if isOnline {
-            onRecover?()
+            for handler in recoveryHandlers.values { handler() }
         }
     }
 }

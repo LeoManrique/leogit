@@ -79,6 +79,23 @@ targets:
         LSMinimumSystemVersion: "26.0"
         NSHumanReadableCopyright: "© 2026 Leonardo Manrique"
 
+        # Declaring folders as a document type is what routes `open -a LeoGit
+        # <dir>` into
+        # `NSApplicationDelegate.application(_:open:)`, cold and warm alike, so
+        # LaunchServices supplies the single-instance behaviour the Tauri host
+        # needs a socket plugin for. Finder's "Open With" and dropping a folder
+        # on the Dock icon come with it.
+        #
+        # Rank Alternate, role Viewer: the app opens a folder when it is asked
+        # to and never competes to become the machine's default handler for
+        # every folder on it — which Owner or Default would invite.
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Folder
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - public.folder
+
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.leomanrique.leogit.mac
