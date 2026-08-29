@@ -99,7 +99,8 @@ leogit/
 │           ├── IPC/GitBridge.swift  # The only place Swift calls Rust (@concurrent wrappers)
 │           ├── Stores/RepoStore.swift  # @MainActor @Observable state for the open repo
 │           ├── Screens/             # ContentView, WelcomeView, the tab panes (Changes/History × Sidebar/DetailPane)
-│           └── Design/              # Date formatting, FileStatus, path + shared file list
+│           ├── Services/            # Host-free rules: list navigation, selection, collation, connectivity
+│           └── Design/              # Date formatting, FileStatus, path + shared file list, failure alert
 ├── justfile                         # install / dev / build / check / format / mac-*
 └── DESIGN.md / TECHNICAL.md / STYLE.md / FRONTEND.md / ROADMAP.md / README.md
 ```
@@ -305,8 +306,31 @@ last explicit load exits, success or failure. The claim is a *depth count*, not 
 action's `onWorkingTreeChanged`, a clone handing its path straight to `open`), and a Bool
 would let the inner one's exit release everyone while the outer load still has no status.
 Reading a `nil` status and guessing is how a gate silently stops applying whenever the
-load happens to be slower than its caller. The poll's
-`RepoStore.refreshQuietly` never touches `isLoading`, refetches history only when
+load happens to be slower than its caller. Between the two sits
+`RepoStore.refreshWorkingTree()`, for an action that changed the working tree but cannot
+have moved `HEAD` — a discard, an ignore. It re-reads only the status: `refresh()` would
+re-run `git log` at up to 500 commits and flash the progress bar for an answer already on
+screen, which is what a whole-list discard used to cost per row. It is not the poll's path
+either — this *is* the user's action completing, so a failed read is theirs to see rather
+than one tick of a streak, and a successful read bumps the epoch whether or not the status
+value moved, since the file a discard rewrote may be the one on screen and its status row
+can read the same before and after. The Tauri client has always done a silent status refresh
+here.
+
+Two things about it are load-bearing and neither is obvious. **`head_sha` is an edge, and
+this method must not consume it.** The action cannot have moved `HEAD`, but a commit made in
+a terminal since the last tick can have — and both the poll's history refetch and the branch
+reload beside it are edge-triggered off that field. Writing the new status without doing
+their work would leave History and the branch menu stale until `HEAD` happened to move
+again, indefinitely. So a moved `head_sha` hands over to the full reload and the method
+*returns* that it did, because the branch list lives in another store and the caller owns
+it. And **it claims the load lock even though it shows no progress**: `isLoading` was doing
+double duty as the poll's mutual exclusion, so a read that skipped `beginLoad` to avoid the
+bar also stopped blocking the poll — and a tick that starts before the action's re-read and
+resolves after it lands a pre-action snapshot on top, putting discarded files back in the
+list. `beginLoad(showsProgress:)` separates the two, and `isBusy` (the depth count) is what
+the poll and ⌘R now guard on. The poll's
+`RepoStore.refreshQuietly` never touches either, refetches history only when
 `head_sha` moved, and bumps `workingTreeEpoch` (the diff-reload key; one meaning — "the
 working tree may differ from what any derived view shows, re-derive if you care") when the
 status value changed — plus unconditionally on app re-activation
@@ -588,8 +612,15 @@ of a path carries the file's identity — so the view binary-searches the larges
 rendered width fits, measuring with the very `NSFont` it draws with, mirroring the hidden
 measuring span the Svelte component uses. It is greedy horizontally (the component's
 `flex: 1 1 0`), so its width never depends on its own text and the measurement cannot feed
-back into layout; the fit is recomputed from `onGeometryChange`, which only fires when the
-width actually changes.
+back into layout. **The fit is held in `@State` and re-derived only when one of its inputs
+moves** — the path, the measured width, or either face — through a single
+`.onChange(of:initial:)` over all three. Deriving it in `body` instead cost ~log₂(path) text
+measurements per visible row on every repaint, including the ones a hover or a checkbox click
+causes, for an answer that could not have changed. Both faces are measured, not only drawn:
+the filename takes a medium weight on a row included in the next commit, and a fit measured in
+the lighter face would overflow the row it had just promised to fit. The view also owns its own
+tooltip, and only when it actually shortened something — a tooltip repeating what is already on
+screen teaches people to ignore the ones that say something.
 
 The repository screen is one `HSplitView` hosted by `ContentView` *above* the tabs — the
 Tauri two-column grid: the sidebar column (`RepoTabBar`, then `ChangesSidebar` or
@@ -599,9 +630,11 @@ stable `VStack` whose *content* switches on the tab, so the split — and its di
 — is never rebuilt by a tab change or an empty list. The previous shape, a per-tab
 `HSplitView` swapped out wholesale and replaced by a full-width empty state on a clean tree,
 is what made the composer vanish and the terminal span the window. Each tab's selection
-(`selectedPath`, `selectedSha`) is `@State` in `ContentView` because the list and its detail
-now sit on opposite sides of the split; the sidebars re-seed it on list change and the detail
-panes only read it. The composer's height is `@AppStorage("commitComposerHeight")` in
+(`changesSelection` + the `selectedPath` derived from it, and `selectedSha`) is `@State` in
+`ContentView` because the list and its detail now sit on opposite sides of the split — and
+because a tab switch rebuilds the pane, which would otherwise drop the highlight every time
+someone looked at History. The sidebars re-seed it on list change and the detail panes only
+read it. The composer's height is `@AppStorage("commitComposerHeight")` in
 `ChangesSidebar` (220 pt default, 180–600 — Tauri's `commitHeight` bounds), applied as a
 fixed `.frame(height:)` with the description `TextEditor` on `maxHeight: .infinity`, so extra
 height becomes description; `Design/RowResizeHandle.swift` turns a drag on the padded
@@ -663,7 +696,46 @@ the menu and the diff pane always describe the same item — the re-select the T
 performs by hand — and returning nothing from its builder deactivates it, which is how the History
 detail's file list keeps its rows menu-less while sharing `ChangedFileList` with the Changes tab.
 Whether a menu exists at all is a stored flag rather than an empty builder, so the modifier is
-never attached where there is nothing to show.
+never attached where there is nothing to show. That modifier is also what makes multi-row
+actions work for free: it hands the builder the **whole selection** when the right-click starts
+inside one and just the clicked row otherwise, which is the Tauri rule without the Tauri
+bookkeeping.
+
+**Selection is a `Set`, and the shown file is derived from it.** `List(selection: Set<String>)`
+brings shift-click, shift-arrow and the rest from AppKit, so no anchors are tracked by hand;
+what a `Set` cannot carry is *which* row a gesture landed on, so `Services/FileListSelection.swift`
+answers the one question the diff pane has — a single-row selection is the choice and the pane
+follows it, a multi-row one leaves the pane on the file it was showing, and a fallback picks the
+first selected row in **list** order rather than `Set.first`, which is a hash order and would
+land differently from one launch to the next. Both file lists route through it: the Changes tab
+via `ChangesSidebar`, the commit detail via `CommitDetailStore.selectionChanged()`. Space is an
+`.onKeyPress` on the list rather than on a row, since the selection — not a focus ring — is what
+it acts on; a focused row checkbox still gets its own Space first, because AppKit gives a focused
+control the key before the view behind it.
+
+The select-all checkbox is `Toggle(sources:isOn:)`, the multi-source initializer, which is the
+only route to a **mixed** checkbox in SwiftUI: it takes a `Binding<[RowInclusion]>` built from
+the committable rows and projects `\.isIncluded` out of each element. A plain `Toggle(isOn:)`
+has two states, and a two-state select-all reads *off* over a list that is mostly on.
+
+**Where a row action's failure goes is a choice of function, not a shape copied from the site
+next door** — the native counterpart of the Tauri store's `reportActionError` / `reportNotice`
+pair, and for the same reason (that is how *couldn't reveal the file in Finder* came to seize
+the Tauri window). `Design/ActionFailureAlert.swift` holds one `ActionFailure` value and one
+`.actionFailureAlert(_:)` modifier; `ChangesSidebar` exposes `write` and `handOff`, and every
+call site picks one. `write` — both ignore actions — takes the window and carries a retry
+closure, because these fail on a write race far more often than on anything the user would
+have to change first. `handOff` — reveal, open-with — goes to `ErrorBanner`, which grew a ✕
+for exactly this class: nothing else can ever retire it, where the poll's own banner is
+retired by its own recovery (`RepoStore.canDismissError` is that split). `SyncControls` and
+`BranchMenu` route through the same modifier rather than each declaring its own `.alert`.
+**The sidebar raises its failure but does not present it** — `ContentView` does, beside the
+sheet slot, so the window's modal surfaces are decided in one place and a sidebar already
+behind a sheet is not trying to put an alert in front of it. That is also where the retry
+closure is retired: a repo switch clears it, before the `repoPath` it captured at menu-build
+time names the wrong repository. The discard confirmation is the documented exception: it is a
+**sheet**, so it stays up saying *Discarding…* and keeps its own refusal, which §6.13's
+refinement puts inside the dialog that raised it rather than in a second window over it.
 
 Amend mode lives in `CommitStore` (`amendTarget` plus the commit's `co_authors`, which the
 composer has no field for and simply re-attaches to the next message). Two behaviours are
@@ -1426,7 +1498,7 @@ DiffViewer's debounced (80 ms) phase 2 and its `lastDiff` guard (which keeps the
 The frontend builds warning-free (`pnpm check` and `vite build` both report 0 a11y warnings). These conventions keep it that way — Svelte's compiler enforces them:
 
 - **Overlays close via backdrop target-check, not `stopPropagation`.** Every modal/dropdown backdrop is `role="presentation"` with `onclick={(e) => { if (e.target === e.currentTarget) close() }}`. The inner dialog is `role="dialog" aria-modal="true" tabindex="-1"` with **no** click handler. The old pattern (inner `onclick={e => e.stopPropagation()}`) tripped both "click handler needs a keyboard handler" and "dialog role needs a tabindex". Affects [ErrorModal](apps/tauri-app/src/lib/components/ErrorModal.svelte), [ForcePushConfirm](apps/tauri-app/src/lib/components/ForcePushConfirm.svelte), [SettingsOverlay](apps/tauri-app/src/lib/views/SettingsOverlay.svelte), [HelpOverlay](apps/tauri-app/src/lib/views/HelpOverlay.svelte), and the repo/branch overlays in [MainLayout](apps/tauri-app/src/lib/views/MainLayout.svelte).
-- **Resize handles are `role="slider"`, not `role="separator"`.** A focusable separator (the ARIA "window splitter") is flagged by Svelte either way — the mouse listener warns on a non-interactive role, and adding `tabindex` warns again (`a11y_no_noninteractive_tabindex`). `slider` is the interactive role Svelte accepts, and it fits: each handle has `tabindex=0`, `aria-orientation`, `aria-valuenow/min/max`, and an `onkeydown` (Arrow keys nudge by `RESIZE_STEP` = 16px, Home/End jump to min/max). The keyboard handlers share one `splitterKey()` helper in MainLayout. The composer's handle additionally clamps against measured geometry, mirroring native's `ChangesSidebar`: a wrapper around both tab panes carries `bind:clientHeight` (the Changes pane itself is `display: none` on History and would report zero), `commitMax` is that height less an 80px list floor, and both the drag and the rendered height obey it. The stored `leogit:commitHeight` is left alone, so a window that grows gives the height back without a fresh drag — while capping the *drag* too keeps the divider moving on the first pixel instead of spending an invisible surplus.
+- **Resize handles are `role="slider"`, not `role="separator"`.** A focusable separator (the ARIA "window splitter") is flagged by Svelte either way — the mouse listener warns on a non-interactive role, and adding `tabindex` warns again (`a11y_no_noninteractive_tabindex`). `slider` is the interactive role Svelte accepts, and it fits: each handle has `tabindex=0`, `aria-orientation`, `aria-valuenow/min/max`, and an `onkeydown` (Arrow keys nudge by `RESIZE_STEP` = 16px, Home/End jump to min/max). The keyboard handlers share one `splitterKey()` helper in MainLayout. Native's `RowResizeHandle` binds the same four keys to the same 16 pt step through `.onKeyPress`, reports itself with `accessibilityAdjustableAction`, and calls one `onCommit` when a gesture or key settles — so `UserDefaults` is written **once** per drag rather than per frame, from a transient `draggingHeight` the owner flushes. The composer's handle additionally clamps against measured geometry, mirroring native's `ChangesSidebar`: a wrapper around both tab panes carries `bind:clientHeight` (the Changes pane itself is `display: none` on History and would report zero), `commitMax` is that height less an 80px list floor, and both the drag and the rendered height obey it. The stored `leogit:commitHeight` is left alone, so a window that grows gives the height back without a fresh drag — while capping the *drag* too keeps the divider moving on the first pixel instead of spending an invisible surplus.
 - **`use:autofocus`, never the `autofocus` attribute.** The attribute is flagged (`a11y_autofocus`) and is unreliable for inputs that mount inside `{#if}` blocks. The [autofocus action](apps/tauri-app/src/lib/actions/autofocus.ts) calls `node.focus()` on mount instead.
 - **Autocorrect is disabled once, at the root.** `<html>` in [index.html](apps/tauri-app/index.html) carries `autocorrect="off" autocapitalize="off" spellcheck="false"`. All three are inheritable HTML attributes, so every descendant input/textarea/contenteditable inherits them — no field opts out individually, and WebKit's macOS autocorrect pills, inline predictions, and spell squiggles stay off app-wide. Only add these attributes to a specific field if it needs to *re-enable* the behavior.
 - **The app hands a fix to its own terminal rather than running it.** `Terminal.svelte` exports `runCommand`, which writes `<command>\r` to the PTY and queues when the shell is still starting — so a caller need not know whether the panel is warm, since it may have been created by the very click calling it (`MainLayout.runInTerminal` starts and expands the panel, `await tick()`s for the mount, then hands the command over). The queue is flushed *after* the output listener is registered, or the command would run with its echo dropped into D-4's window and the user would see a bare prompt. This exists because the one command worth offering — `claude auth login` — opens a browser and then blocks on stdin for a pasted code: driving that ourselves would mean rebuilding a terminal beside the one we ship, and asking for an auth code in app chrome is a habit worth not teaching. Core supplies the command string (`ProviderStatus.fix_command`), the client supplies the shell, and the button spells the command out because the app is about to type into the user's shell.

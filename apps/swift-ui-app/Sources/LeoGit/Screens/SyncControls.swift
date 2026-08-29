@@ -23,9 +23,9 @@ struct SyncControls: View {
     /// tree, push/fetch move the ahead/behind counts.
     let onWorkingTreeChanged: () async -> Void
 
-    /// Failure text from a finished operation, shown as an alert — git's own
+    /// Failure from a finished operation, shown as §6.13's modal — git's own
     /// message, verbatim, like the Tauri error modal.
-    @State private var alertMessage: String?
+    @State private var failure: ActionFailure?
     @State private var isConfirmingForcePush = false
     @State private var isPublishSheetPresented = false
 
@@ -100,17 +100,7 @@ struct SyncControls: View {
                 """
             )
         }
-        .alert(
-            "Error",
-            isPresented: Binding(
-                get: { alertMessage != nil },
-                set: { if !$0 { alertMessage = nil } }
-            )
-        ) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(alertMessage ?? "")
-        }
+        .actionFailureAlert($failure)
     }
 
     /// The states with no meaningful secondary action — GitHub Desktop's
@@ -208,9 +198,9 @@ struct SyncControls: View {
 
     private func pull() {
         Task {
-            let failure = await store.pull(repoPath: repoPath)
+            let message = await store.pull(repoPath: repoPath)
             await onWorkingTreeChanged()
-            if let failure { alertMessage = failure }
+            if let message { failure = ActionFailure(message) }
         }
     }
 
@@ -220,22 +210,22 @@ struct SyncControls: View {
         // synthesised: this is what makes a first push `--set-upstream`.
         let setUpstream = !hasUpstream
         Task {
-            let failure = await store.push(
+            let message = await store.push(
                 repoPath: repoPath,
                 branch: branch,
                 setUpstream: setUpstream,
                 forceWithLease: forceWithLease
             )
             await onWorkingTreeChanged()
-            if let failure { alertMessage = failure }
+            if let message { failure = ActionFailure(message) }
         }
     }
 
     private func fetch() {
         Task {
-            let failure = await store.fetch(repoPath: repoPath)
+            let message = await store.fetch(repoPath: repoPath)
             await onWorkingTreeChanged()
-            if let failure { alertMessage = failure }
+            if let message { failure = ActionFailure(message) }
         }
     }
 }

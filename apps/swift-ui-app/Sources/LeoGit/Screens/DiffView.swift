@@ -99,7 +99,7 @@ struct DiffView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            FileStatusBadge(status: file.status)
+            FileStatusBadge(file: file)
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(file.displayName)

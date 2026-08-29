@@ -76,8 +76,9 @@ private struct CommitDetailView: View {
             HSplitView {
                 // Tighter than the outer panes — plain path rows need less
                 // room, and this diff should dominate its split too.
-                ChangedFileList(files: store.files, selectedPath: $store.selectedPath)
+                ChangedFileList(files: store.files, selection: $store.selection)
                     .frame(minWidth: 200, idealWidth: 240, maxWidth: 360)
+                    .onChange(of: store.selection) { store.selectionChanged() }
                 fileDiff
                     .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
             }

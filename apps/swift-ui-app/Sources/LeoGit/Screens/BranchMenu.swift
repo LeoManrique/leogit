@@ -22,8 +22,8 @@ struct BranchMenu: View {
     @State private var pendingDelete: String?
     @State private var isConfirmingDelete = false
     @State private var isConfirmingAbort = false
-    /// Failure text from menu-launched operations, shown as an alert.
-    @State private var alertMessage: String?
+    /// Failure from a menu-launched operation, shown as §6.13's modal.
+    @State private var failure: ActionFailure?
 
     /// Current branch by name comparison against status, like the Tauri
     /// client — empty while detached, so no row gets the checkmark.
@@ -79,10 +79,10 @@ struct BranchMenu: View {
                 target: currentBranch,
                 store: store,
                 repoPath: repoPath
-            ) { failure in
+            ) { message in
                 await onWorkingTreeChanged()
-                if let failure {
-                    alertMessage = failure
+                if let message {
+                    failure = ActionFailure(message)
                 }
             }
         }
@@ -105,17 +105,7 @@ struct BranchMenu: View {
         } message: {
             Text("Conflict resolutions are discarded and the working tree returns to its pre-merge state.")
         }
-        .alert(
-            "Error",
-            isPresented: Binding(
-                get: { alertMessage != nil },
-                set: { if !$0 { alertMessage = nil } }
-            )
-        ) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(alertMessage ?? "")
-        }
+        .actionFailureAlert($failure)
         // The same items chosen from the menu bar. They arrive as requests
         // rather than as calls because `BranchCommands` lives on the scene,
         // while every sheet and confirmation an action opens lives here.
@@ -163,8 +153,8 @@ struct BranchMenu: View {
 
     private func switchTo(_ branch: String) {
         Task {
-            if let failure = await store.switchTo(branch, repoPath: repoPath) {
-                alertMessage = failure
+            if let message = await store.switchTo(branch, repoPath: repoPath) {
+                failure = ActionFailure(message)
             } else {
                 await onWorkingTreeChanged()
             }
@@ -174,20 +164,20 @@ struct BranchMenu: View {
     private func delete(_ name: String) {
         pendingDelete = nil
         Task {
-            if let failure = await store.delete(name, repoPath: repoPath) {
-                alertMessage = failure
+            if let message = await store.delete(name, repoPath: repoPath) {
+                failure = ActionFailure(message)
             }
         }
     }
 
     private func abortMerge() {
         Task {
-            let failure = await store.abortMerge(repoPath: repoPath)
+            let message = await store.abortMerge(repoPath: repoPath)
             // Success or not, MERGE_HEAD and the working tree may have
             // changed — reload before surfacing any failure.
             await onWorkingTreeChanged()
-            if let failure {
-                alertMessage = failure
+            if let message {
+                failure = ActionFailure(message)
             }
         }
     }

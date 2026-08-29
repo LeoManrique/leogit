@@ -66,12 +66,22 @@ struct ContentView: View {
     /// that puts the composer on screen.
     @State private var commitStore = CommitStore()
     /// The one sheet the root view can present. A window hosts one sheet at a
-    /// time, so this is a single slot rather than two `isPresented` flags:
-    /// with two, a request that arrived while the other was up had nowhere to
-    /// go and left a binding set that could never present again. Assigning
-    /// replaces, which is also the right answer — the newer request is the one
-    /// the user just made.
+    /// time, so this is a single slot rather than an `isPresented` flag per
+    /// kind: with several, a request that arrived while another was up had
+    /// nowhere to go and left a binding set that could never present again.
+    /// **Every request site checks the slot is free and drops its request when
+    /// it is not** — the sheet already standing there was opened deliberately,
+    /// and can be mid-write; the menu item or command that lost is one keypress
+    /// away once it closes.
     @State private var sheet: RootSheet?
+
+    /// FRONTEND §6.13's modal, for a write the user was waiting on. Presented
+    /// here rather than by the view that raised it, so the window's modal
+    /// surfaces are decided in one place — the sidebar that raises one can
+    /// already be behind a sheet by the time the answer arrives. Cleared on a
+    /// repo switch, which is also what retires the retry closure it carries
+    /// before that closure's captured path names the wrong repository.
+    @State private var actionFailure: ActionFailure?
 
     @State private var tab: RepoTab = .changes
 
@@ -79,6 +89,11 @@ struct ContentView: View {
     /// every row value keeps it. Held here because each tab's list and its
     /// detail sit on opposite sides of the split — and so a round trip
     /// through the other tab comes back to the same file or commit.
+    ///
+    /// The Changes list highlights a *set* of rows, since a discard can act on
+    /// several at once; `selectedPath` is the one whose diff shows, derived
+    /// from that set by `FileListSelection`.
+    @State private var changesSelection: Set<String> = []
     @State private var selectedPath: String?
     @State private var selectedSha: String?
 
@@ -149,6 +164,11 @@ struct ContentView: View {
         // repository open to be useful — the user with none is the one most
         // likely to want it.
         .onReceive(NotificationCenter.default.publisher(for: .leogitCloneRequested)) { _ in
+            // ⇧⌘O reaches the menu bar even while a sheet is up — macOS leaves
+            // the menu live under a document-modal sheet — and the slot is not
+            // free. Dropped rather than swapped: the sheet standing there is
+            // one the user opened deliberately and may be mid-write.
+            guard sheet == nil else { return }
             sheet = .clone
         }
         // Every later `leogit <dir>` — the launch path claims the first one
@@ -158,6 +178,7 @@ struct ContentView: View {
             guard target != nil, let claimed = launch.claim() else { return }
             open(launchTarget: claimed)
         }
+        .actionFailureAlert($actionFailure)
         .sheet(item: $sheet) { presented in
             switch presented {
             case .clone:
@@ -172,6 +193,10 @@ struct ContentView: View {
             case let .initRepo(path):
                 InitRepoSheet(path: path) { repoPath in
                     switchRepo(repoPath)
+                }
+            case let .discard(files):
+                DiscardSheet(repoPath: store.repoPath ?? "", files: files) {
+                    await store.refreshWorkingTree()
                 }
             }
         }
@@ -189,7 +214,10 @@ struct ContentView: View {
     private func repositoryScreen(repoPath: String) -> some View {
         VStack(spacing: 0) {
             if let errorMessage = store.errorMessage {
-                ErrorBanner(message: errorMessage)
+                ErrorBanner(
+                    message: errorMessage,
+                    onDismiss: store.canDismissError ? { store.errorMessage = nil } : nil
+                )
             }
 
             HSplitView {
@@ -214,6 +242,8 @@ struct ContentView: View {
             // draft message, checkbox opt-outs, or amend target — nor its
             // selections, which the sidebars re-seed from the new lists.
             commitStore.reset()
+            actionFailure = nil
+            changesSelection = []
             selectedPath = nil
             selectedSha = nil
             // Sessions never survive a repo switch — a shell from the prior
@@ -263,7 +293,7 @@ struct ContentView: View {
             // history, and branches. Held back during a network operation,
             // the way the Tauri client pauses its status poll: `git status`
             // racing a pull can trip over transient lock files.
-            guard !store.isLoading, syncStore.activeOperation == nil else { return }
+            guard !store.isBusy, syncStore.activeOperation == nil else { return }
             Task {
                 await store.refresh()
                 await branchStore.load(repoPath: repoPath)
@@ -392,9 +422,25 @@ struct ContentView: View {
                     repoPath: repoPath,
                     files: store.status?.files ?? [],
                     commitStore: commitStore,
+                    selection: $changesSelection,
                     selectedPath: $selectedPath,
-                    onWorkingTreeChanged: { await store.refresh() },
-                    onError: { store.errorMessage = $0 },
+                    onCommitted: { await store.refresh() },
+                    // Discard and ignore change the working tree and nothing
+                    // else, so history is not re-read — a 500-commit `git log`
+                    // and a progress-bar flash per row action.
+                    onWorkingTreeChanged: {
+                        // A commit made in a terminal since the last tick can
+                        // have moved HEAD under a row action. The store reloads
+                        // history for that and says so; the branch menu's
+                        // checkmark is the other thing that went stale, and it
+                        // lives in another store.
+                        if await store.refreshWorkingTree() {
+                            await branchStore.load(repoPath: repoPath)
+                        }
+                    },
+                    onNotice: { store.errorMessage = $0 },
+                    onFailure: { actionFailure = $0 },
+                    onDiscard: { sheet = .discard($0) },
                     onRunInTerminal: terminalStore.run
                 )
             case .history:
@@ -529,7 +575,7 @@ struct ContentView: View {
         while !Task.isCancelled {
             try? await Task.sleep(for: schedulingPolicy.statusPollInterval)
             if Task.isCancelled { return }
-            guard schedulingPolicy.canPollStatus, !store.isLoading else { continue }
+            guard schedulingPolicy.canPollStatus, !store.isBusy else { continue }
             let previousHead = store.status?.headSha
             await store.refreshQuietly()
             if let repoPath = store.repoPath, let status = store.status {
@@ -845,11 +891,12 @@ struct ContentView: View {
         if target.isRepo {
             switchRepo(target.path)
         } else {
-            // A newer explicit request outranks a dialog left standing —
-            // except while a clone is actually *running*, which is the one
-            // sheet the user is waiting on and the one this must not replace.
-            guard !cloneStore.isCloning else {
-                print("[launch] clone in progress — not prompting for \(target.path)")
+            // The sheet slot has one occupant, and a `leogit <dir>` typed in a
+            // terminal is not a reason to take it from a clone that is running
+            // or a discard that is writing. The prompt is dropped; re-running
+            // the command once the sheet is gone raises it again.
+            guard sheet == nil else {
+                print("[launch] a sheet is up — not prompting for \(target.path)")
                 return
             }
             sheet = .initRepo(target.path)
@@ -862,18 +909,30 @@ private enum RootSheet: Identifiable {
     case clone
     /// A folder the user is being asked whether to turn into a repository.
     case initRepo(String)
+    /// Changed files the user is being asked whether to throw away. Raised
+    /// from the Changes sidebar but presented here, because the window has one
+    /// sheet slot and a second `.sheet` further down the tree is not a second
+    /// one — it is the same slot, contended for.
+    case discard([FileEntry])
 
     var id: String {
         switch self {
         case .clone: "clone"
         case let .initRepo(path): "init:\(path)"
+        case let .discard(files): "discard:\(files.map(\.path).joined(separator: "\n"))"
         }
     }
 }
 
-/// Non-blocking failure banner; the last good data stays on screen behind it.
+/// FRONTEND §6.13's second class: a failure that was never the user's task.
+/// Non-blocking, so the last good data stays on screen behind it.
 struct ErrorBanner: View {
     let message: String
+
+    /// Retire the banner by hand. `nil` for the status poll's own, whose
+    /// recovery retires it — a ✕ there would hide a repository that is still
+    /// unreadable. Everything else needs one, because nothing else will.
+    var onDismiss: (() -> Void)?
 
     var body: some View {
         HStack(spacing: 8) {
@@ -883,6 +942,17 @@ struct ErrorBanner: View {
                 .font(.callout)
                 .textSelection(.enabled)
             Spacer(minLength: 0)
+
+            if let onDismiss {
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark")
+                        .font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Dismiss")
+                .accessibilityLabel("Dismiss")
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)

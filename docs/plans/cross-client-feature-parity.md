@@ -1,6 +1,6 @@
 # Plan — Cross-client feature parity (SwiftUI ⇄ Tauri)
 
-> Status: **in progress — WS-A…WS-E shipped 2026-08-27, WS-F through WS-J, WS-L and WS-M 2026-08-28. WS-N is next; WS-K is unblocked but needs a Linux machine (§6's sequencing note), so it is taken whenever that machine is available.**
+> Status: **in progress — WS-A…WS-E shipped 2026-08-27, WS-F through WS-J and WS-L…WS-N 2026-08-28. WS-O is next; WS-K is unblocked but needs a Linux machine (§6's sequencing note), so it is taken whenever that machine is available. WS-T is the deliberate last one.**
 > The remaining work was re-cut into seventeen smaller workstreams (C…S) on
 > 2026-08-27 after WS-B proved too large to review as one piece — see §6.
 > Accepted 2026-08-27 with every open decision resolved. Per-workstream state
@@ -129,10 +129,10 @@ behavior change the user would notice — except battery.
 | E-4 | ✅ *WS-J.* One `pacedLoop` over a three-deadline array, native's exact shape: it sleeps to the nearest deadline and runs the due tiers sequentially, so "sequential" is now true across tiers as well as within them. | was 4 concurrent fetches worst case |
 | E-5 | ✅ *WS-C* (RM-4's MRU sort deleted the `get_last_commit_timestamp` call with the store that made it) and *WS-J*: `ensureRepoIdentifiers` queues its paths and drains them four at a time, so opening the switcher on a machine with fifty repositories no longer spawns fifty `git remote get-url` processes in one turn. | was 2N at once, now ≤4 |
 | E-6 | ✅ *WS-J* with BG-4. An idle repository publishes nothing. The same pass fixed the native mirror of it: `RepoDirectoryStore.noteActiveStatus` wrote an identical `RepoSync` into an observed dictionary on every tick, invalidating every switcher row. | was continuous idle re-render, both clients |
-| E-7 | Native | Every discard/ignore triggers a **full** reload — status + up to 500-commit log + `is_merging` + a progress-bar flash — though neither can change history. Tauri does a silent status refresh. | one `git log`@500 per row action |
+| E-7 | ✅ *WS-N.* `RepoStore.refreshWorkingTree()` re-reads the status only, for the actions that cannot move `HEAD`. Not `refreshQuietly` either: this *is* the user's action completing, so a failed read is theirs to see rather than one tick of a streak, and the epoch is bumped unconditionally since the file a discard rewrote may be the one on screen. The 30-file case also stopped being 30 calls — CH-1's bulk discard is one. | was one `git log`@500 per row action |
 | E-8 | ✅ *WS-B.* `DiffOptions` makes the render artifacts opt-in, so the native path no longer builds HTML and pairings for the bridge to drop (H-8). `DiffLine.text` became `Option` in the same pass, dropping a duplicate of every line's content from both wires. | was ~40 k allocations per 20 k-line diff load |
 | E-9 | Native | Whole-status epoch re-tokenizes the open diff when *any* file changes (~19–140 ms + 2 `git show` per unrelated edit); a per-file `stat_stamp` compare would gate it. No phase-2 debounce either (Tauri: 80 ms). | up to ~140 ms background CPU per unrelated edit |
-| E-10 | Native | `PathText.fittedParts` is recomputed on every body evaluation (~50 rows × log₂-probes per interaction) — TECHNICAL.md claims it's width-keyed; it isn't. | ~350 text measurements per interaction |
+| E-10 | ✅ *WS-N.* The fit is held in `@State` and re-derived from one `.onChange` over its three inputs (path, measured width, faces), so a hover, a selection change or a checkbox click no longer re-measures every visible row. TECHNICAL.md now describes what the code does. | was ~350 text measurements per interaction |
 | E-11 | Tauri | Diff viewer mounts every row (no virtualization) and phase 2 re-parses N `innerHTML`s in one tick. **Terminal half closed**: the size guard landed in core (H-15), output coalesces under back-pressure instead of crossing once per 4 KiB read (H-14), and each delivery is now one channel send rather than a window broadcast (WS-I). Virtualization is the ROADMAP item DF-4 defers. | terminal half closed; virtualization deferred to ROADMAP |
 | E-12 | ✅ *WS-I.* `start` / `resize` / `close` are `#[tauri::command(async)]`, off the main thread. `write` deliberately stayed sync — a sync command runs inline in IPC arrival order, and that order *is* the keystroke-ordering guarantee. | was a ~250 ms hitch on every teardown |
 
@@ -466,22 +466,20 @@ and matched, not that it was skipped.
 
 ### 4.5 Changes tab & commit flow (CH)
 
-- **CH-1 · Multi-select + bulk actions.** Tauri (and GH Desktop): row range
-  selection with a separate checkbox anchor, bulk Space toggle, "Discard N
-  Selected Changes…". Native: single-selection by construction — recorded as a
-  FRONTEND §8 divergence, with §6.4's shared floor reduced to arrow-key row
-  activation because of it. Close it natively
-  (`List(selection: Set<String>)`); the efficiency case is real too (a 30-file
-  discard is ~90 subprocesses + 30 reloads natively vs ~3 + 1 in Tauri).
-  Delete the FRONTEND §8 row. → WS-N
-- **CH-2 · Space / keyboard toggle.** Native has **no keyboard route to
-  include/exclude a file at all** (the highest-frequency action in the app);
-  Tauri and GH Desktop toggle on Space, bulk-toggle in a selection. → WS-N
-- **CH-3 · Select-all header.** Decided: **tri-state checkbox + native's label**,
-  both clients. ✅ *WS-D* for the label half — Tauri now says
-  "3 of 12 files included", counting *committable* files so a dirty submodule is
-  in neither figure. Native's binary toggle, which lies the moment one file is
-  unchecked, is the half left. → WS-N
+- **CH-1 · Multi-select + bulk actions.** ✅ *WS-N.* `List(selection: Set<String>)`,
+  so shift-click and shift-arrow are AppKit's rather than hand-tracked anchors, and
+  `contextMenu(forSelectionType:)` already hands the menu the whole selection when
+  the right-click starts inside one — which is the Tauri re-select rule without the
+  bookkeeping. Multi-row collapses to "Discard N Selected Changes…", one bulk call.
+  The old §8 row is gone; the new one records what still differs (which row an
+  extension leaves open — a `Set` cannot say which one was clicked).
+- **CH-2 · Space / keyboard toggle.** ✅ *WS-N.* `.onKeyPress(.space)` on the
+  *list*, not a row — the selection is what it acts on, and a focused row checkbox
+  still gets the key first because AppKit gives a focused control priority. Same
+  target state as the master checkbox in both clients: any excluded → include all.
+- **CH-3 · Select-all header.** ✅ *WS-D* (label) + *WS-N* (tri-state).
+  `Toggle(sources:isOn:)` is the only route to a mixed checkbox in SwiftUI; it takes
+  a `Binding<[RowInclusion]>` over the committable rows.
 - **CH-4 · Status badge style.** The conflicted letter differs between the
   clients (`U` in Tauri, `!` natively): **verdict `U`** — git's own porcelain
   letter, which is the vocabulary native's own comment claims to follow. Hoist
@@ -500,13 +498,16 @@ and matched, not that it was skipped.
   the status colour at 15% behind its own letter — set from one `--badge-tint`
   per row so the letter and the wash can't name different statuses, and applied
   to the embedded / dirty-submodule glyphs too so the column doesn't read ragged.
-- **CH-5 · Rename display.** Tauri and GH Desktop render `old → new`
-  (STYLE.md mandates it); native shows only the destination —
-  indistinguishable from an add. Also missing in the native diff header
-  (DF-8) and commit file list. → WS-N
-- **CH-6 · Embedded/submodule row treatment.** Tauri swaps the status glyph
-  for ↪ (the documented style); native appends a width-eating text tag. Adopt
-  the glyph. → WS-N
+- **CH-5 · Rename display.** ✅ *WS-N* for both file lists (they share
+  `ChangedFileList`): `orig_path → path`, the from-side fully muted, both sides
+  greedy so they split the row evenly and truncate filename-first independently.
+  The native **diff header** is still destination-only — DF-8's remaining half,
+  WS-P.
+- **CH-6 · Embedded/submodule row treatment.** ✅ *WS-N.* The ↪ replaces the
+  status letter (blue for an embedded repo, muted for a dirty submodule) rather
+  than sitting beside it, because the letter is the part that would be wrong. The
+  two explanatory sentences live once, on `FileEntry.repositoryEntryHint`, read by
+  the badge and by the disabled checkbox.
 - **CH-7 · Exclusion-set semantics.** ✅ *WS-J*, on both clients, through
   `core::exclusions::reconcile_exclusions` (H-20). Native semantics plus a
   grace window; the native comment claiming the two clients already matched is
@@ -529,13 +530,20 @@ and matched, not that it was skipped.
   three cases the guess got wrong (a staged re-add of a path that exists in
   HEAD, a rename whose original is *not* in HEAD, and every file under an
   unborn HEAD) now read truthfully instead of promising something the action
-  then doesn't do. Native still lacks Tauri's in-flight busy state. → WS-N
+  then doesn't do. ✅ *WS-N* for the rest: the native confirmation became a
+  **sheet**, since a system confirmation dismisses on the click and can therefore
+  neither say *Discarding…* nor hold the refusal §6.13 keeps inside the dialog
+  that raised it. Its outcome sentences are Tauri's count-based forms, which work
+  at any N, with the question line naming the single file.
 - **CH-9 · Embedded-repo confirm.** Tauri's copy is better (names the outer
   repo, states the clone consequence, "Commit as link" verb); native's system
   `confirmationDialog` is the right container. Merge: native container +
   Tauri text. ✅ *WS-D* for the Tauri half: one `canCancel` gate now answers
   the backdrop, Escape and the Cancel button, where only Escape had checked —
-  the tell that a per-dismissal list had already drifted once. → WS-N
+  the tell that a per-dismissal list had already drifted once. ✅ *WS-N* for the
+  merge: Tauri's title, body and **Commit as link** verb inside native's
+  confirmation. D-10's native half rode along — the composer locks while the
+  dialog waits, since Confirm commits the files the dialog was *opened* with.
 - **CH-10 · Composer details.** Port to native: the 72-char summary counter
   (STYLE.md; skip Tauri's silent 200-char hard cap — it truncates pasted
   and AI-generated summaries), the included-row weight cue, tooltip only when
@@ -547,7 +555,12 @@ and matched, not that it was skipped.
   History and under any dialog; and the height clamp landed, measured off a
   wrapper around both tab panes because the Changes pane reports zero while
   History shows. D-10's lockout landed in WS-A, and ST-7's revert turned out to
-  have landed in WS-B. → WS-N
+  have landed in WS-B. ✅ *WS-N* for the native half: all six, plus the deliberate
+  omission of the 200-char cap. The counter sits **beside** the field rather than
+  inside it — `NSTextField` scrolls its own text to the trailing edge as the caret
+  moves, so an overlay would land on the characters it is counting. The weight cue
+  is measured as well as drawn (`PathText.nameWeight`), or a fit taken in the
+  lighter face would overflow the row it had just promised to fit.
 - **CH-11 · Row-action errors** (with **SH-5**). Decided: **split by class in
   both** — an operation the user is waiting on takes the modal, with a retry
   where the same attempt can just be made again; a failure that was never their
@@ -558,9 +571,14 @@ and matched, not that it was skipped.
   came to seize the window. The strip gained a second, dismissible variant (the
   poll's own has no ✕ because its own recovery retires it; nothing can retire
   this one), and `ErrorModal` was finally passed the `onRetry` it has always
-  accepted. The rule is now FRONTEND §6.13. Native's remaining drift: discard,
-  checkout and undo failures go to its banner where the rule puts them in the
-  modal, and its banner still has no dismiss. → WS-N, WS-Q
+  accepted. The rule is now FRONTEND §6.13. ✅ *WS-N* for the native changes tab:
+  one `ActionFailure` + `.actionFailureAlert`, adopted by `SyncControls` and
+  `BranchMenu` too, so this client also has one such function rather than a copied
+  `.alert` per site. Discard and ignore take the window with a retry (they fail on
+  a lock race far more often than on anything the user must change first), reveal
+  and open-with take the strip, and the strip gained its ✕ — split on
+  `RepoStore.canDismissError`, since the poll's own banner is retired by its own
+  recovery. Checkout and undo are still native's drift. → WS-Q
 - **CH-12 · Copy File Path.** ✅ *WS-D.* Tauri crossed to the backend and back to
   concatenate two strings it already held. `utils/path.ts` gained `absolutePath`
   — the one place the filesystem path and git's always-`/` path meet — which
@@ -1746,119 +1764,149 @@ is mostly adoption of already-proven native behavior.
       pickers then show "No repositories found" for a walk that never ran.
       Tauri's launch-time `phase: 'error'` covers only the first walk. Small,
       and the native shape is the one to port.
-13. **WS-M — Native launch, menus & updater (M).** ✅ **Shipped 2026-08-28**,
-    with one part deliberately unfinished and put to the user (below). SH-1's
-    app half: `CFBundleDocumentTypes: public.folder` makes LaunchServices
-    deliver `open -a LeoGit <dir>` to `application(_:open:)` cold and warm
-    alike, so single-instance, Finder *Open With* and drag-onto-Dock all come
-    from the platform — the installed `leogit` command is not yet one of those
-    routes, which is the open question below; the target outranks
-    `last_opened_repo`; a folder that isn't a repository raises *Create a
-    repository here?* from the root view.
-    SH-2's native half: File ▸ Clone Repository… (⇧⌘O), View ▸ ⌘1/⌘2, View ▸
-    Show/Hide Terminal (TE-7's ⌃`), View ▸ Refresh, and a Branch menu sharing
-    one `BranchMenuContent` with the toolbar control. BG-5: `UpdateStore` +
-    `UpdateChip`, once per session, gated on `isOnline` alone. Per-item state is
-    in §4.2, §4.10 and §4.11. New native files: `App/AppDelegate.swift`,
-    `App/AppMenus.swift`, `Stores/LaunchStore.swift`, `Stores/UpdateStore.swift`,
-    `Screens/InitRepoSheet.swift`, `Design/UpdateChip.swift`; the FFI gained
+13. **WS-M — Native launch, menus & updater (M).** ✅ **Shipped 2026-08-28.**
+    SH-1's app half: `CFBundleDocumentTypes: public.folder` makes LaunchServices
+    deliver `open -a LeoGit <dir>` to `application(_:open:)` cold and warm alike,
+    so single-instance, Finder *Open With* and drag-onto-Dock all come from the
+    platform; the target outranks `last_opened_repo`, and a folder that isn't a
+    repository raises *Create a repository here?*. SH-2's native half: the menu
+    bar (File ▸ Clone ⇧⌘O, View ▸ ⌘1/⌘2, View ▸ Show/Hide Terminal — TE-7's ⌃` —
+    View ▸ Refresh, and a Branch menu sharing one `BranchMenuContent` with the
+    toolbar control). BG-5: `UpdateStore` + `UpdateChip`, once per session, gated
+    on `isOnline` alone. Per-item state is in §4.2, §4.10 and §4.11. The FFI gained
     `resolve_launch_target`, `init_repo`, `open_url` and `check_for_update` plus
-    `LaunchTarget` / `UpdateInfo` mirrors (63 → 67 exports). Gates: `pnpm check`
-    0/0 over 153 files, prettier clean, `pnpm tauri build` bundled, zero-warning
-    `just mac-build`, 178 core + 24 bridge + 2 host tests, clippy-pedantic 165
-    core with `leogit` / `leogit-ffi` at zero. (`cargo fmt --all` also
-    reformatted two files it had drifted on, `core/src/ai.rs` and
-    `core/src/exclusions.rs` — mechanical, and it makes `cargo fmt --check`
-    clean.)
+    `LaunchTarget` / `UpdateInfo` mirrors (63 → 67 exports). Three deliberate
+    deviations from this document's text, each recorded where it belongs:
+    `is_git_repo` and the pending-target setters stayed unexported (dead surface,
+    and native needs an observable slot fed by two sources), and there is no ⌘B
+    (FRONTEND §8).
 
-    **Open question for the user — `install.sh` has no native branch, and the
-    plan's suggested one would not work.** Three separate problems, none of
-    which the app side can settle:
-    - The shell function points at a **path** (`/Applications/leogit.app`), not
-      a bundle id. On a case-insensitive volume that path is also where a native
-      `LeoGit.app` would land, so the two bundles cannot coexist there.
-    - Its `open -na … --args "$dir"` form sends the folder through **argv**,
-      which reaches the native app only on a cold start — `--args` is not
-      delivered to an already-running instance. The working form is
-      `open -a … "$dir"` (no `-n`, no `--args`), which the Tauri app in turn
-      would ignore, having no document types.
-    - `install.sh` installs the **Tauri** release, and the native app has no
-      release artifact at all, so there is nothing for an installer branch to
-      key on.
-
-      Options: **(a)** leave it — `leogit` keeps opening the shipped Tauri app,
-      and the native app is reached from Finder, `just mac-run`, or
-      `open -a <path> <dir>` by hand until it ships; **(b)** have the function
-      prefer the native bundle when LaunchServices knows one —
-      `open -b com.leomanrique.leogit.mac "$dir" || open -na "/Applications/leogit.app" --args "$dir"`
-      — which is cheap and needs no installer change, but silently points
-      `leogit` at whatever native build the machine last registered, including a
-      stale DerivedData one; **(c)** give the native app a release artifact and
-      a real installer branch, which is release engineering rather than parity
-      and belongs outside this plan.
-
-    Findings for WS-N and the native block after it:
+    **Still live.**
     - **`.onChange` cannot see a value set before the modifier existed**, and on
       a cold start that is the normal case: AppKit delivers
       `application(_:open:)` between will- and did-finish-launching, ahead of
       every SwiftUI task. So the launch path claims the target *itself* and the
       handler covers only later ones. It also reads a **kept** copy of the
       target rather than the claimable one, because the two consumers run in the
-      same turn and their order is not fixed — a launch that fell through to the
-      remembered repository would open it on top of the one that was asked for.
-      **Any native state fed by an AppKit callback wants both halves of this.**
+      same turn and their order is not fixed. **Any native state fed by an AppKit
+      callback wants both halves of this.**
     - **A cancelled `Task` finishes after its replacement is stored**, so a loop
       that clears its own handle on exit drops the reference to the task that is
       still running — and the next start, seeing `nil`, adds a third. The handle
       is cleared only where it is replaced. `UpdateStore` is the instance; any
       retry loop restarted by an event has the same shape.
-    - **A menu-bar menu has no "about to open" hook.** The toolbar branch menu
-      re-reads `list_branches` from `onAppear`, which is what BR-3's
-      "moment of intent" rule depends on; the menu-bar copy gets nothing
-      equivalent, and `.onAppear` inside `CommandMenu` content is unreliable at
-      best and a reload loop at worst. The answer was to reload on app
-      activation instead — which is *better* for the case that motivated BR-3,
-      since a branch created in a terminal is followed by returning to the app.
-      **Any menu-bar surface mirroring an in-window one inherits this.**
+    - **A menu-bar menu has no "about to open" hook**, and `.onAppear` inside
+      `CommandMenu` content is unreliable at best and a reload loop at worst. The
+      branch list reloads on app *activation* instead — better for the case BR-3
+      named, since a branch created in a terminal is followed by returning to the
+      app. **Any menu-bar surface mirroring an in-window one inherits this.**
     - **The same chord declared in two rendered copies of one view is
       registered twice**, and SwiftUI resolves the duplicate arbitrarily. A
-      shared menu-content view therefore takes a flag saying which copy owns the
-      key equivalents; only the menu bar does, since it is also the copy that is
-      always present.
-    - **A window hosts one sheet at a time, so the root view has one slot.**
-      Two `.sheet` modifiers on the same view is not two slots: a request
-      arriving while the other is up has nowhere to go, and the binding it set
-      can be left standing so that `.sheet(item:)` — which compares ids — never
-      presents that item again. The root now carries a single `RootSheet` enum,
-      where assigning *replaces*, which is also the right answer since the newer
-      request is the one the user just made. **WS-N adds surfaces to this
-      view's subtree** and inherits the collision.
+      shared menu-content view takes a flag saying which copy owns the key
+      equivalents; only the menu bar does, since it is also always present.
+    - **A window hosts one sheet at a time, so the root view has one slot.** Two
+      `.sheet` modifiers on the same view is not two slots: a request arriving
+      while the other is up has nowhere to go, and the binding it set can be left
+      standing so that `.sheet(item:)` never presents that item again. The root
+      carries a single `RootSheet` enum, where assigning *replaces*. WS-N added
+      its discard sheet to that slot rather than a second one.
     - **A modifier on a view whose body is a `Group` reaches every child.**
       `BranchMenuContent`'s body is one, so an `.onAppear` hung on the whole
       thing would have fired the branch reload once per section; it sits on a
       single child instead. `.disabled` propagating the same way is what makes
       the busy state work, so the rule cuts both ways.
-    - **`RepoStore.open` still has no reentrancy guard**, which WS-M did not
-      add because the hazard predates it: two overlapping opens interleave
-      `repoPath` with `loadRepoData`, so a fast double switch can leave one
-      repository's path beside another's history. `switchRepo`'s same-path guard
-      does not help, since `repoPath` is published after an `await`. Small, and
-      WS-Q or WS-S is the place — the same file's `awaitLoadSettled` already has
+    - **`RepoStore.open` still has no reentrancy guard.** Two overlapping opens
+      interleave `repoPath` with `loadRepoData`, so a fast double switch can
+      leave one repository's path beside another's history. `switchRepo`'s
+      same-path guard does not help, since `repoPath` is published after an
+      `await`. Small; WS-Q or WS-S is the place — `awaitLoadSettled` already has
       the depth-count machinery a guard would build on.
-14. **WS-N — Native file list & composer (M).** CH-1 (multi-select via
-    `List(selection: Set<String>)`) and CH-2 (Space to include/exclude — the
-    highest-frequency action in the app has no native keyboard route at all)
-    carry the rest: CH-3's native half (true tri-state), CH-5 (`old → new` for
-    renames, indistinguishable from an add today), CH-6 (the ↪ glyph instead of
-    a width-eating text tag), CH-8's native half (in-flight busy state), CH-9's
-    native half (native container + Tauri's text), CH-10's native half (72-char
-    counter, included-row weight cue, truncation-only tooltip, keyboard resize,
-    "Committing…", drag-end coalescing of the `UserDefaults` writes), CH-11's
-    native half (a dismiss ✕ on the banner). **E-7 moves here from the
-    efficiency sweep**: the full reload on every discard/ignore is the same code
-    path CH-1's bulk discard rewrites, and a 30-file discard is ~90 subprocesses
-    + 30 reloads today. **E-10** with it — `PathText.fittedParts` is what
-    renders these rows.
+14. **WS-N — Native file list & composer (M).** ✅ **Shipped 2026-08-28.**
+    CH-1, CH-2, CH-3's native half, CH-5, CH-6, CH-8's, CH-9's, CH-10's and
+    CH-11's, plus **E-7** and **E-10** — per-item state in §4.5 and §3.3. The list
+    is `List(selection: Set<String>)`, so the range gestures are AppKit's rather
+    than hand-tracked anchors and `contextMenu(forSelectionType:)` already hands
+    the menu the whole selection; Space is an `.onKeyPress` on the *list*; the
+    select-all checkbox is `Toggle(sources:isOn:)`, the only route to a mixed
+    checkbox in SwiftUI. Discard became a **sheet** (in-flight state and an
+    in-dialog refusal, neither of which a system confirmation can hold), one bulk
+    call, and a status-only refresh. New native files:
+    `Design/ActionFailureAlert.swift`, `Screens/DiscardSheet.swift`,
+    `Services/FileListSelection.swift`. No FFI change — every core function this
+    needed (`discard_files`, `ignore_paths`, `classify_discard`) already took a
+    whole list. Gates: `pnpm check` 0/0 over 153 files, prettier clean,
+    `pnpm tauri build` bundled, zero-warning `just mac-build`, 178 core + 24
+    bridge + 2 host tests, clippy-pedantic 165 core with `leogit` / `leogit-ffi`
+    at zero.
+
+    **Two follow-ups for WS-S, both one line, both closing a gap this opened in
+    the *other* direction.** Native's discard now keeps its refusal inside the
+    dialog, which is what §6.13's refinement asks for; Tauri's `DiscardConfirm`
+    still closes and raises the modal. And native's ignore failure offers a
+    retry; Tauri's `reportActionError` call site passes none, though the
+    parameter has been there since WS-D.
+
+    Findings for WS-O and the native block after it:
+    - **`head_sha` is an edge, and more than one thing is triggered off it.**
+      A cheaper refresh that writes the status without doing the history and
+      branch reloads *consumes* that edge: both consumers compare against the
+      value it just advanced, see no move, and stay stale indefinitely. The
+      review caught this in `refreshWorkingTree`, which now hands over to the
+      full reload on a moved `HEAD` and returns that it did so the caller can
+      reload branches. **Any future "cheaper path" past a shared refresh has to
+      account for every edge the full one was feeding.**
+    - **`isLoading` was doing double duty**: the progress bar *and* the status
+      poll's mutual exclusion. A read that skipped `beginLoad` to avoid the bar
+      also stopped blocking the poll, so a tick starting before it and resolving
+      after it would land a pre-action snapshot on top. `beginLoad(showsProgress:)`
+      and `isBusy` separate them; anything else that wants a quiet read wants the
+      lock too.
+    - **A macOS menu item is clickable while a sheet is up.** ⇧⌘O reached
+      `sheet = .clone` over a running discard. Every request site now checks the
+      slot is free and **drops** rather than replaces — the sheet standing there
+      was opened deliberately and may be mid-write. WS-O adds no sheet, but
+      anything that does inherits the rule.
+    - **A failure raised in a subtree is presented at the root.** The alert
+      belongs beside the sheet slot for the same reason the sheet does, and the
+      root is also where a repo switch can retire the retry closure before its
+      captured `repoPath` names the wrong repository.
+    - **A conditional modifier rebuilds everything inside it.** `PathText`'s
+      tooltip is one, so it is applied *innermost*: with it outermost, the flip
+      from "not truncated" to "truncated" on the first measured frame tore down
+      the `.onChange(initial: true)` above it and re-ran the whole binary search
+      with nothing changed, once per truncated row per appearance.
+    - **A `Set` selection cannot say which row a gesture landed on.** That is the
+      one thing the Tauri list gets for free from its own click handler, and it
+      is why "which file does the detail pane show" became a rule of its own
+      (`Services/FileListSelection.swift`) rather than a read of the selection:
+      one row selected is the choice, several leaves the pane where it was, and a
+      fallback picks the first in **list** order — never `Set.first`, which is a
+      hash order and lands differently from one launch to the next. **Any native
+      surface deriving a single thing from a multi-selection wants this.**
+    - **Both file lists are one view, so a change to it lands in History too.**
+      `ChangedFileList` is shared, which is what made renames and the ↪ badge
+      free on the commit-detail list — and what made `CommitDetailStore` need a
+      selection `Set` it has no other use for. WS-O's split diff is reached from
+      both lists for the same reason.
+    - **Measure every face you draw.** `PathText` binary-searches a character
+      budget against rendered width; the included-row weight cue changes the
+      filename's face, so the search had to measure the two halves separately or
+      the fit would overflow the row it had just promised to fit. **DF-2's split
+      layout measures too**, and the same rule applies to anything that styles a
+      run differently from the face it was measured in.
+    - **Hold a derived layout answer in state; do not re-derive it in `body`.**
+      E-10 was not a slow algorithm, it was a correct one run on every repaint.
+      The fix is one `.onChange` over an `Equatable` struct of *all* the inputs,
+      so adding an input cannot silently stop invalidating.
+    - **`.borderedProminent` + `.tint(.red)` is the destructive button**, and the
+      sheet gives the default key to nothing — Return must not run a discard.
+      `.cancelAction` on Cancel is what Escape gets.
+    - **One `ActionFailure` modifier is now the client's only `.alert("Error")`.**
+      WS-Q's checkout and undo failures should move onto it rather than growing a
+      fourth copy, and it already carries the retry closure §6.13 asks for.
+      `UpdateChip` keeps its own alert on purpose — its title names the thing
+      that failed ("Could not open the release page"), which is better than
+      "Error", and it should not be genericized to share a modifier.
 15. **WS-O — Native split diff (M).** DF-2 alone, the largest single piece of
     new native UI in the plan. The constraint is that it must not fork the
     renderer: one row model feeds both arrangements, the pairs cross the bridge
@@ -1940,13 +1988,35 @@ is mostly adoption of already-proven native behavior.
       `TerminalSessionView.swift:124-126`,
       `BackgroundSchedulingPolicy.swift:7`, `repoSyncScheduler.ts:66-70`.
     - **Doc claims outside the audit's checklist**, fixed as their area lands:
-      TECHNICAL's width-keyed `PathText` cache (E-10 — it isn't); DESIGN's
-      committer-vs-author date for commit rows (HI-5); DESIGN's header-cluster
-      list (ahead/behind are badges *on* the Pull/Push buttons).
+      DESIGN's committer-vs-author date for commit rows (HI-5); DESIGN's
+      header-cluster list (ahead/behind are badges *on* the Pull/Push buttons).
+      (TECHNICAL's width-keyed `PathText` claim became true in WS-N.)
+    - **Two one-line Tauri catch-ups WS-N opened in the other direction**:
+      `DiscardConfirm` should keep its own refusal rather than closing into the
+      modal (§6.13's refinement, which native now follows), and the discard /
+      ignore `reportActionError` call sites should pass the `retry` the function
+      has accepted since WS-D.
 
-Suggested order: **A → B → … → S**, as lettered. Each workstream maintains its
-own doc rows as it lands (per CLAUDE.md); WS-S carries only what needs the whole
-plan finished.
+20. **WS-T — `leogit` reaches the native app (S).** ✅ **Decided, deliberately
+    last.** `install.sh` writes a `leogit [dir]` shell function pointing at
+    `/Applications/leogit.app` — the **Tauri** bundle, which is the only one with
+    a release artifact. It stays that way until parity is done, because the two
+    candidate shortcuts are both wrong: the function names a *path*, not a bundle
+    id, so on a case-insensitive volume a native `LeoGit.app` cannot coexist there
+    anyway; and its `open -na … --args "$dir"` form sends the folder through
+    **argv**, which reaches a native app only on a cold start, while the working
+    form (`open -a … "$dir"`) is one the Tauri app would ignore, having no
+    document types. Falling back to `open -b <native bundle id>` would silently
+    point `leogit` at whatever build LaunchServices last registered, a stale
+    DerivedData one included. So: **the native app gets a release artifact and a
+    real installer branch, once every other workstream has landed** — release
+    engineering, taken as the last piece rather than smuggled into a parity
+    workstream. Until then the native app is reached from Finder, `just mac-run`,
+    or `open -a <path> <dir>`, and every living doc says so plainly.
+
+Suggested order: **A → B → … → S**, then **T**, as lettered. Each workstream
+maintains its own doc rows as it lands (per CLAUDE.md); WS-S carries only what
+needs the whole plan finished, and WS-T needs WS-S.
 
 One sequencing note that is not free to reorder: **WS-K needs a Linux machine
 rather than a predecessor** — WS-J, the workstream it waited on, has shipped, so
@@ -2015,8 +2085,9 @@ written as each chunk lands, no duplication between documents:
   FRONTEND §5.2 tracks the diff wire as DF-3 changes it, and FRONTEND §7's
   open decision closes with it.
 - **TECHNICAL.md** — new mechanics paragraphs only for genuinely new machinery
-  (the core hoists, the Tauri channel transport, the native launch path), plus
-  the claims WS-S lists as their areas land.
+  (the core hoists, the Tauri channel transport, the native launch path, WS-N's
+  `Set` selection + `FileListSelection` + held `PathText` fit), plus the claims
+  WS-S lists as their areas land.
 - **DESIGN.md** — flow 1 is shared end to end since WS-M, `leogit <dir>` and
   the *Create a repository here?* prompt included, and flow 11 (the update
   chip) is now both clients'. The per-flow client hedges retire as parity
@@ -2025,7 +2096,10 @@ written as each chunk lands, no duplication between documents:
   separate, so the first press makes the destination visible) and one natively
   (arrowing *is* selecting, so the preview already follows the cursor). Both
   satisfy the rule — no clone starts before the user has seen where it lands —
-  and flipping Tauri to one press is the two-line change WS-C flagged.
+  and flipping Tauri to one press is the two-line change WS-C flagged. Flow 3's
+  selection paragraph is shared since WS-N, with the two Tauri-only gestures
+  (the checkbox anchor, and an extension activating the shift-clicked row)
+  called out rather than described as everyone's.
 - **STYLE.md** — the status-letter row settled on `U` + the purple token with
   H-13 (done); WS-C added the *Repo pickers* section (the two lists are one
   component family, with the shared footer and empty state) and the
@@ -2042,7 +2116,10 @@ written as each chunk lands, no duplication between documents:
   destructive text field, units the user thinks in) and marked which of its two
   control-shape bullets are the target rather than today, and replaced the
   focus-on-mount rationale — `Escape` no longer needs focus, so autofocus is
-  there for `Tab`.
+  there for `Tab`; WS-N rewrote the *File list* selection, inclusion-cue and
+  select-all bullets around the set selection and the tri-state checkbox, and
+  noted that the composer's character counter sits inside the field only where
+  the platform's field can reserve room for it.
 - **ROADMAP.md** — items close as their workstreams land; the deferrals this
   plan makes (per-line staging, diff virtualization, branch rename +
   delete-on-remote) are already filed there. WS-L closed the two WS-B and the
@@ -2062,7 +2139,8 @@ written as each chunk lands, no duplication between documents:
   `merge_preview` core function (BR-3's cousin).
 - A Tauri macOS `tauri::menu` (SH-2) — the platform-respect follow-up once
   the shortcut surface stabilizes.
-- `install.sh` still launches only the Tauri bundle (SH-1). WS-M established
-  that this is a packaging question, not an app one — the native app has no
-  release artifact and the two bundles compete for one case-insensitive path —
-  so it is parked on the user's decision recorded in WS-M's §6 entry.
+- The Tauri list's *shift-click on a checkbox to range-toggle* (its second
+  anchor) has no native counterpart, and WS-N did not build one: Space over a
+  swept selection reaches the same result in two presses, and a second anchor
+  is the part of that design most likely to surprise. Revisit only if the
+  keyboard route turns out not to cover it.

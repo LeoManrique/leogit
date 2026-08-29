@@ -21,6 +21,13 @@ struct CommitComposer: View {
     /// verbatim when the user types nothing.
     let autoSummary: String
 
+    /// A confirmation the commit is paused inside is on screen. The store is
+    /// not `isCommitting` yet — nothing has been submitted — but the composer
+    /// must lock all the same: the dialog's Confirm commits the files it was
+    /// opened with, so anything typed or unchecked behind it would either be
+    /// silently dropped or, worse, cleared by a commit it never described.
+    let isConfirmationPending: Bool
+
     let onSubmit: () -> Void
 
     /// Generate a commit message with AI from the checked files' diff.
@@ -51,7 +58,7 @@ struct CommitComposer: View {
     /// (typing mid-generate would be overwritten by the result), and each
     /// button excludes the other — the store's guards enforce the same.
     private var isBusy: Bool {
-        store.isCommitting || store.isGenerating
+        store.isCommitting || store.isGenerating || isConfirmationPending
     }
 
     /// Generate is also held back while the provider is known to be unable to
@@ -68,11 +75,15 @@ struct CommitComposer: View {
                 amendNotice
             }
 
-            WheelScrollableTextField(
-                prompt: autoSummary.isEmpty ? "Summary (required)" : autoSummary,
-                text: $store.summary
-            )
-            .disabled(isBusy)
+            HStack(spacing: 6) {
+                WheelScrollableTextField(
+                    prompt: autoSummary.isEmpty ? "Summary (required)" : autoSummary,
+                    text: $store.summary
+                )
+                .disabled(isBusy)
+
+                summaryCounter
+            }
 
             descriptionEditor
 
@@ -120,6 +131,27 @@ struct CommitComposer: View {
             }
         }
         .padding(10)
+    }
+
+    /// How long the summary is against git's conventional 72-character first
+    /// line. Always shown, like the Tauri counter: a limit you only find out
+    /// about by crossing it has already cost you the edit. Advisory only — it
+    /// colours past 72 and nothing more. Nothing is truncated either, which is
+    /// deliberate: a silent hard cap chops pasted and AI-generated summaries
+    /// with no warning at all.
+    ///
+    /// Beside the field rather than inside it, which is where the Tauri
+    /// counter sits: `NSTextField` scrolls its own text to the trailing edge
+    /// as the caret moves, so a counter overlaid there would end up on top of
+    /// the characters it is counting.
+    private var summaryCounter: some View {
+        Text("\(store.summary.count)/72")
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(
+                store.summary.count > 72 ? AnyShapeStyle(.orange) : AnyShapeStyle(.tertiary)
+            )
+            .fixedSize()
+            .help("Git's conventional length for a commit summary")
     }
 
     /// Amend mode is a state the composer can sit in indefinitely, so it says

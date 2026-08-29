@@ -10,7 +10,9 @@ import SwiftUI
 /// Checkboxes mean "include this file in the next commit" — there is no
 /// staging-area concept, matching the Tauri client: nothing touches the index
 /// until Commit, and core's `commit` then resets and re-stages exactly the
-/// checked files.
+/// checked files. **Inclusion and selection are different things**: the
+/// checkbox column is what the commit will contain, the highlight is what the
+/// pointer and keyboard are pointing at, and either can move without the other.
 struct ChangesSidebar: View {
     let repoPath: String
     let files: [FileEntry]
@@ -21,19 +23,40 @@ struct ChangesSidebar: View {
     /// down with it.
     @Bindable var commitStore: CommitStore
 
-    /// The file whose diff the detail pane shows, keyed by repo-relative
-    /// path (`FileEntry.id`) so it survives a status reload that replaces
-    /// every row value. Owned by the repository screen: the diff lives on the
-    /// far side of the split, and the selection must outlive a tab switch.
+    /// The highlighted rows, by repo-relative path (`FileEntry.id`) so they
+    /// survive a status reload that replaces every row value. Owned by the
+    /// repository screen for the same reason as the draft: a tab switch
+    /// rebuilds this view, and a selection that died with it would drop the
+    /// user back at the top of the list every time they looked at History.
+    @Binding var selection: Set<String>
+
+    /// The file whose diff the detail pane shows. Derived from `selection`
+    /// through `FileListSelection`, which is the one place that rule lives.
     @Binding var selectedPath: String?
 
-    /// Called after a commit, discard, or ignore so the owner reloads status
-    /// and history.
+    /// Called after a commit: HEAD moved, so status *and* history are stale.
+    let onCommitted: () async -> Void
+
+    /// Called after a discard or an ignore: the working tree changed but
+    /// history cannot have, so only the status is re-read.
     let onWorkingTreeChanged: () async -> Void
 
-    /// Failures from the row actions, which have nowhere of their own to
-    /// report: the owner shows them in the screen's error banner.
-    let onError: (String) -> Void
+    /// A hand-off to another program that didn't take — FRONTEND §6.13's
+    /// second class, which the screen shows in its dismissible strip. Failures
+    /// of the actions that *write* stay here, in a modal or in the dialog that
+    /// raised them.
+    let onNotice: (String) -> Void
+
+    /// A write the user was waiting on that failed — §6.13's first class. Like
+    /// the discard sheet, it is *presented* by the repository screen: a window
+    /// shows one thing at a time, and this view can already be behind a sheet
+    /// when the answer arrives.
+    let onFailure: (ActionFailure) -> Void
+
+    /// Ask for the discard confirmation over these files. The sheet itself is
+    /// presented by the repository screen: a window has one sheet slot, and a
+    /// second `.sheet` further down the tree is not a second one.
+    let onDiscard: ([FileEntry]) -> Void
 
     /// Run a shell command in the terminal dock — the composer's offer to fix
     /// an unready AI provider. Owned by the repository screen, which is where
@@ -45,13 +68,6 @@ struct ChangesSidebar: View {
     @State private var pendingFiles: [FileEntry] = []
     @State private var isConfirmingEmbedded = false
 
-    /// The file the discard confirmation is about; `nil` when it's closed.
-    @State private var fileToDiscard: FileEntry?
-    /// What discarding `fileToDiscard` would actually do, as core decides it.
-    /// `nil` until the answer arrives — the dialog opens on the row click and
-    /// fills its message a moment later rather than guessing in the meantime.
-    @State private var discardPlan: DiscardPlan?
-
     /// The composer's height — the one piece of sidebar geometry the user
     /// sets by hand, persisted like the Tauri client's `leogit:commitHeight`
     /// (same default and bounds). `UserDefaults` rather than the shared
@@ -59,6 +75,11 @@ struct ChangesSidebar: View {
     /// `localStorage`. Lives here rather than in `CommitComposer` so the
     /// list and the handle, which share the space, read the same value.
     @AppStorage("commitComposerHeight") private var composerHeight = 220.0
+
+    /// The height while a drag is in progress, before it is worth writing
+    /// down. A drag produces a value per frame and only the last one is worth
+    /// keeping, so `UserDefaults` is written once, on release.
+    @State private var draggingHeight: CGFloat?
 
     /// Measured height of this pane, so a tall stored height can't overflow
     /// a short window: the list keeps a floor and the composer yields.
@@ -80,11 +101,16 @@ struct ChangesSidebar: View {
                 Divider()
                 fileList
             }
-            RowResizeHandle(height: composerHeightBinding, range: composerHeightBounds)
+            RowResizeHandle(
+                height: composerHeightBinding,
+                range: composerHeightBounds,
+                onCommit: persistComposerHeight
+            )
             CommitComposer(
                 store: commitStore,
                 includedCount: includedFiles.count,
                 autoSummary: CommitStore.autoSummary(for: includedFiles),
+                isConfirmationPending: isConfirmingEmbedded,
                 onSubmit: submit,
                 onGenerate: generate,
                 onRunFixCommand: onRunInTerminal
@@ -96,12 +122,17 @@ struct ChangesSidebar: View {
         } action: { height in
             availableHeight = height
         }
-        .onChange(of: files.map(\.path), initial: true) {
-            // Keep something selected: first file on arrival, and again
-            // when a reload drops the previously selected path.
-            if selectedPath == nil || !files.contains(where: { $0.path == selectedPath }) {
-                selectedPath = files.first?.path
-            }
+        // A drag that is cancelled rather than ended — the window deactivating
+        // mid-gesture — never reaches `onCommit`, and the height would be lost
+        // at the next launch. Leaving is the other moment it is settled.
+        .onDisappear(perform: persistComposerHeight)
+        .onChange(of: files.map(\.path), initial: true) { reseat() }
+        .onChange(of: selection) {
+            selectedPath = FileListSelection.activePath(
+                in: selection,
+                of: files,
+                keeping: selectedPath
+            )
         }
         .task {
             // The provider picker mirrors the shared config file; one read
@@ -115,32 +146,38 @@ struct ChangesSidebar: View {
             // a reason to spawn `claude --version` again.
             await commitStore.refreshProviderStatus()
         }
-        .confirmationDialog(
-            "Commit Embedded Repositories?",
-            isPresented: $isConfirmingEmbedded
-        ) {
-            Button("Commit") { performCommit(pendingFiles) }
+        .confirmationDialog(embeddedTitle, isPresented: $isConfirmingEmbedded) {
+            Button("Commit as link") { performCommit(pendingFiles) }
             Button("Cancel", role: .cancel) { pendingFiles = [] }
         } message: {
             Text(embeddedWarning)
         }
-        .confirmationDialog(
-            "Discard Changes?",
-            isPresented: discardConfirmationBinding,
-            presenting: fileToDiscard
-        ) { file in
-            Button("Discard Changes", role: .destructive) { discard(file) }
-            Button("Cancel", role: .cancel) {}
-        } message: { file in
-            Text(discardWarning(for: file))
+    }
+
+    // MARK: Selection
+
+    /// Keep the highlight and the open diff describing files that still exist.
+    ///
+    /// Two things, in order. Rows that have left the working tree are pruned —
+    /// committed, discarded, `git rm`'d in a terminal — because a highlight
+    /// pointing at nothing would still be counted by every action that reads it.
+    /// Then, and only if nothing is left, the list re-seats on the first row.
+    /// Those are the two conditions and no others (STYLE.md): a file the user
+    /// chose is never overridden, and a tick that changes only a row's content
+    /// or status is not a re-seat — the trigger is the *set of paths* changing.
+    private func reseat() {
+        let live = Set(files.map(\.path))
+        let survivors = selection.intersection(live)
+        if survivors.isEmpty {
+            selection = files.first.map { [$0.path] } ?? []
+        } else if survivors != selection {
+            selection = survivors
         }
-        .task(id: fileToDiscard?.path) {
-            guard let file = fileToDiscard else {
-                discardPlan = nil
-                return
-            }
-            discardPlan = await GitBridge.discardPlan(in: repoPath, files: [file])
-        }
+        selectedPath = FileListSelection.activePath(
+            in: selection,
+            of: files,
+            keeping: selectedPath
+        )
     }
 
     // MARK: Composer height
@@ -159,27 +196,42 @@ struct ChangesSidebar: View {
         return range.lowerBound...min(range.upperBound, cap)
     }
 
-    /// The stored height, clamped into today's bounds — a window that grows
-    /// again gets the user's full height back without a fresh drag.
+    /// The height in force: the live drag if there is one, else what was
+    /// stored — clamped into today's bounds, so a window that grows again
+    /// gets the user's full height back without a fresh drag.
     private var effectiveComposerHeight: CGFloat {
         let bounds = composerHeightBounds
-        return min(max(composerHeight, bounds.lowerBound), bounds.upperBound)
+        let height = draggingHeight ?? CGFloat(composerHeight)
+        return min(max(height, bounds.lowerBound), bounds.upperBound)
     }
 
-    /// `@AppStorage` stores a `Double`; the handle speaks geometry.
+    /// The handle writes to the transient value; `persistComposerHeight`
+    /// moves it into `UserDefaults` once the gesture is over.
     private var composerHeightBinding: Binding<CGFloat> {
         Binding {
-            CGFloat(composerHeight)
+            draggingHeight ?? CGFloat(composerHeight)
         } set: { height in
-            composerHeight = Double(height)
+            draggingHeight = height
         }
+    }
+
+    private func persistComposerHeight() {
+        if let draggingHeight {
+            composerHeight = Double(draggingHeight)
+        }
+        draggingHeight = nil
     }
 
     // MARK: List
 
     private var listHeader: some View {
         HStack(spacing: 8) {
-            Toggle("Include all files", isOn: allIncludedBinding)
+            // The multi-source form of `Toggle`, which is the only way to a
+            // *mixed* checkbox in SwiftUI. A two-state select-all lies the
+            // moment one row is unchecked — it reads "off" over a list that is
+            // mostly on — and this is the control people use to answer "what
+            // is going in?" at a glance.
+            Toggle("Include all files", sources: inclusions, isOn: \.isIncluded)
                 .toggleStyle(.checkbox)
                 .labelsHidden()
                 .disabled(committableFiles.isEmpty)
@@ -196,36 +248,61 @@ struct ChangesSidebar: View {
     }
 
     private var fileList: some View {
-        ChangedFileList(files: files, selectedPath: $selectedPath) { file in
+        ChangedFileList(
+            files: files,
+            selection: $selection,
+            isIncluded: { commitStore.isIncluded($0) },
+            onToggleSelection: toggleSelectionInclusion
+        ) { file in
             Toggle("Include \(file.displayName)", isOn: includedBinding(for: file))
                 .toggleStyle(.checkbox)
                 .labelsHidden()
                 .disabled(!CommitStore.isCommittable(file))
-        } menu: { file in
-            rowMenu(for: file)
+                // Offered here too, though a disabled control may not raise a
+                // tooltip at all: the ↪ badge beside it is enabled and carries
+                // the same sentence, so the answer is reachable either way.
+                .help(file.repositoryEntryHint ?? "Include in the next commit")
+        } menu: { targets in
+            rowMenu(for: targets)
         }
     }
 
     // MARK: Row actions
 
-    /// The right-clicked file's menu, in the Tauri client's order and
-    /// wording: the two writes that need confirming or that change the repo
-    /// first, then the copies, then the hand-offs to the system.
+    /// The right-clicked rows' menu.
+    ///
+    /// A multi-row selection collapses to the single action that means
+    /// anything across files. Ignoring several paths at once and copying
+    /// several are not actions either client offers — one `.gitignore` rule per
+    /// right-click is a decision, a dozen at once is an accident.
     @ViewBuilder
-    private func rowMenu(for file: FileEntry) -> some View {
+    private func rowMenu(for targets: [FileEntry]) -> some View {
+        if targets.count > 1 {
+            Button("Discard \(targets.count) Selected Changes…", role: .destructive) {
+                onDiscard(targets)
+            }
+        } else if let file = targets.first {
+            singleRowMenu(for: file)
+        }
+    }
+
+    /// One row's menu, in the Tauri client's order and wording: the two writes
+    /// that need confirming or that change the repo first, then the copies,
+    /// then the hand-offs to the system.
+    @ViewBuilder
+    private func singleRowMenu(for file: FileEntry) -> some View {
         Button("Discard Changes…", role: .destructive) {
-            discardPlan = nil
-            fileToDiscard = file
+            onDiscard([file])
         }
 
         Divider()
 
         Button("Ignore File (Add to .gitignore)") {
-            run { try await GitBridge.ignoreFiles(in: repoPath, paths: [file.path]) }
+            write { try await GitBridge.ignoreFiles(in: repoPath, paths: [file.path]) }
         }
         if let ext = Self.fileExtension(of: file.path) {
             Button("Ignore All \(ext) Files (Add to .gitignore)") {
-                run { try await GitBridge.ignorePatterns(in: repoPath, patterns: ["*\(ext)"]) }
+                write { try await GitBridge.ignorePatterns(in: repoPath, patterns: ["*\(ext)"]) }
             }
         }
 
@@ -239,74 +316,43 @@ struct ChangesSidebar: View {
         // A deleted file has nothing left on disk to show or open. Disabled
         // rather than hidden, so the menu keeps a stable shape.
         Button("Reveal in Finder") {
-            run(refresh: false) {
-                try await GitBridge.revealInFileManager(in: repoPath, relativePath: file.path)
-            }
+            handOff { try await GitBridge.revealInFileManager(in: repoPath, relativePath: file.path) }
         }
         .disabled(file.status == .deleted)
 
         Button("Open with Default Program") {
-            run(refresh: false) {
-                try await GitBridge.openWithDefaultApp(in: repoPath, relativePath: file.path)
-            }
+            handOff { try await GitBridge.openWithDefaultApp(in: repoPath, relativePath: file.path) }
         }
         .disabled(file.status == .deleted)
     }
 
-    /// Run a row action, reporting failure through the screen's banner.
-    /// `refresh` reloads status afterwards — every action that writes to the
-    /// repository changes what the list should show.
-    private func run(refresh: Bool = true, _ action: @escaping () async throws -> Void) {
+    /// A row action that writes to the repository — the two `.gitignore` ones;
+    /// discard has its own sheet, which keeps its own refusal. The user is
+    /// waiting on it, so a failure takes the window (§6.13's first class) and
+    /// offers the same attempt again: these fail on a write race far more often
+    /// than on anything the user would have to change first. Success re-reads
+    /// the status only, since appending a rule cannot move `HEAD`.
+    private func write(_ action: @escaping () async throws -> Void) {
         Task {
             do {
                 try await action()
-                if refresh { await onWorkingTreeChanged() }
+                await onWorkingTreeChanged()
             } catch {
-                onError(error.displayMessage)
+                onFailure(ActionFailure(error.displayMessage) { write(action) })
             }
         }
     }
 
-    private func discard(_ file: FileEntry) {
-        run { try await GitBridge.discardChanges(in: repoPath, files: [file]) }
-    }
-
-    /// `presenting:` needs the value to outlive the dismissal animation, so
-    /// the dialog's own binding clears it rather than the buttons doing so.
-    private var discardConfirmationBinding: Binding<Bool> {
-        Binding {
-            fileToDiscard != nil
-        } set: { isPresented in
-            if !isPresented { fileToDiscard = nil }
-        }
-    }
-
-    /// Discard does one of two things per path, and which one is not obvious
-    /// from the row — so the dialog says it outright rather than asking the
-    /// user to guess whether their file is recoverable.
-    ///
-    /// The answer comes from core, which decides it from actual `HEAD`
-    /// membership, and is the same decision the discard itself runs on. The
-    /// status letter cannot answer it: a staged re-add of a path that exists
-    /// in HEAD is restorable, a rename whose original is *not* in HEAD is not,
-    /// and under an unborn HEAD nothing is — three cases the old guess got
-    /// wrong, each of them a promise the action then broke.
-    private func discardWarning(for file: FileEntry) -> String {
-        guard let plan = discardPlan else {
-            return "Working out what this will do…"
-        }
-        let restored = plan.restore.joined(separator: ", ")
-        let trashed = plan.trash.joined(separator: ", ")
-        return switch (restored.isEmpty, trashed.isEmpty) {
-        case (false, false):
-            "\(restored) comes back and \(trashed) moves to the Trash. This can't be undone."
-        case (false, true):
-            "\(restored) goes back to its committed state. This can't be undone."
-        case (true, false):
-            "\(trashed) was never committed, so there is nothing to restore it to — "
-                + "it moves to the Trash instead."
-        case (true, true):
-            "There is nothing to discard in \(file.path)."
+    /// A hand-off to another program. It changes nothing here, so a failure is
+    /// reported and stepped over: taking the window because Finder wouldn't
+    /// open is a bigger interruption than the thing that failed.
+    private func handOff(_ action: @escaping () async throws -> Void) {
+        Task {
+            do {
+                try await action()
+            } catch {
+                onNotice(error.displayMessage)
+            }
         }
     }
 
@@ -336,11 +382,25 @@ struct ChangesSidebar: View {
         commitStore.includedFiles(from: files)
     }
 
-    private var allIncludedBinding: Binding<Bool> {
-        Binding {
-            !committableFiles.isEmpty && committableFiles.allSatisfy { commitStore.isIncluded($0) }
-        } set: { include in
-            commitStore.setAllIncluded(include, in: files)
+    /// One committable row's inclusion, in the shape `Toggle`'s multi-source
+    /// initializer wants: a collection it can project a `Binding<Bool>` out of.
+    private struct RowInclusion {
+        var isIncluded: Bool
+    }
+
+    private var inclusions: Binding<[RowInclusion]> {
+        // Filtered once and captured, not re-derived inside each closure:
+        // SwiftUI drives a multi-source toggle element by element, so a
+        // select-all over N rows calls both closures N times — and capturing is
+        // also what guarantees the getter and the setter are indexing one list.
+        let committable = committableFiles
+        return Binding {
+            committable.map { RowInclusion(isIncluded: commitStore.isIncluded($0)) }
+        } set: { rows in
+            for (file, row) in zip(committable, rows)
+            where commitStore.isIncluded(file) != row.isIncluded {
+                commitStore.setIncluded(file, row.isIncluded)
+            }
         }
     }
 
@@ -350,6 +410,26 @@ struct ChangesSidebar: View {
         } set: { include in
             commitStore.setIncluded(file, include)
         }
+    }
+
+    /// Space over the list: include or exclude every highlighted row at once —
+    /// the highest-frequency action in the app, which had no keyboard route
+    /// here at all.
+    ///
+    /// The target state is the select-all checkbox's own sentence, deliberately
+    /// the same one: *any excluded → include them all, otherwise exclude them
+    /// all*. A mixed selection resolving to "include" is what makes the key
+    /// usable as a sweep — press it twice and you have exactly the rows you
+    /// swept, whatever state they were in.
+    /// Returns whether it changed anything, so a press over a selection of
+    /// nothing but dirty submodules is *not* swallowed — a key that silently
+    /// does nothing is worse than one the system beeps at.
+    private func toggleSelectionInclusion() -> Bool {
+        let targets = files.filter { selection.contains($0.path) && CommitStore.isCommittable($0) }
+        guard !targets.isEmpty else { return false }
+        let include = targets.contains { !commitStore.isIncluded($0) }
+        commitStore.setAllIncluded(include, in: targets)
+        return true
     }
 
     // MARK: Commit
@@ -373,8 +453,9 @@ struct ChangesSidebar: View {
             // must describe what this commit contains.
             let fallback = CommitStore.autoSummary(for: files)
             if await commitStore.commit(repoPath: repoPath, files: files, autoSummary: fallback) {
-                await onWorkingTreeChanged()
+                await onCommitted()
             }
+            pendingFiles = []
         }
     }
 
@@ -384,10 +465,42 @@ struct ChangesSidebar: View {
         }
     }
 
+    private var embeddedRepos: [FileEntry] {
+        pendingFiles.filter(\.embedded)
+    }
+
+    private var embeddedTitle: String {
+        embeddedRepos.count == 1
+            ? "Commit nested repository as a link?"
+            : "Commit nested repositories as a link?"
+    }
+
+    /// The Tauri dialog's copy, which is the better of the two: it names the
+    /// outer repository, states the consequence for whoever clones it, and
+    /// says what a gitlink *is* rather than assuming the word. Native's
+    /// container — a system confirmation — is the better of the two, so the
+    /// two halves are combined.
     private var embeddedWarning: String {
-        let names = pendingFiles.filter(\.embedded).map(\.displayName)
-        return "\(names.joined(separator: ", ")): nested git "
-            + (names.count == 1 ? "repository" : "repositories")
-            + " commit as a pointer (gitlink), not as files. Their contents stay out of this repository."
+        let repos = embeddedRepos
+        let many = repos.count > 1
+        let names = repos.map(\.displayName).joined(separator: ", ")
+        let subject = many
+            ? "These folders are their own Git repositories"
+            : "This folder is its own Git repository"
+        return """
+            \(names)
+
+            \(subject). \(many ? "They’ll" : "It’ll") be committed as a link to the current \
+            commit — the \(many ? "folders’" : "folder’s") files won’t be copied into \
+            \(outerRepoName).
+
+            Anyone cloning \(outerRepoName) won’t get those files unless \
+            \(many ? "each is" : "it’s") set up as a submodule.
+            """
+    }
+
+    private var outerRepoName: String {
+        let name = URL(fileURLWithPath: repoPath, isDirectory: true).lastPathComponent
+        return name.isEmpty ? "this repository" : name
     }
 }

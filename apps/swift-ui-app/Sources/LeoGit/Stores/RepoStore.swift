@@ -81,6 +81,13 @@ final class RepoStore {
     /// never silently swept away by a background tick.
     private var errorSurfacedByPoll = false
 
+    /// Whether the banner may offer a ✕.
+    ///
+    /// The poll's own banner has none: its recovery retires it, and a ✕ would
+    /// hide a repository that is still unreadable. Nothing retires the other
+    /// kind, so it needs one — the Tauri strip splits on the same line.
+    var canDismissError: Bool { errorMessage != nil && !errorSurfacedByPoll }
+
     var isRepoOpen: Bool { repoPath != nil }
 
     /// Everyone suspended in `awaitLoadSettled()`. Main-actor-isolated, so
@@ -113,10 +120,23 @@ final class RepoStore {
         await withCheckedContinuation { loadWaiters.append($0) }
     }
 
+    /// Whether any explicit read is in flight — the *lock*, as distinct from
+    /// `isLoading`, which is the progress bar.
+    ///
+    /// The status poll and ⌘R both refuse to run while one is, and they have to
+    /// keep refusing for a read that deliberately shows no progress: a poll
+    /// that starts before an action's own re-read and resolves after it lands
+    /// its pre-action snapshot on top, which on a slow `git status` puts
+    /// discarded files back in the list.
+    var isBusy: Bool { loadDepth > 0 }
+
     /// Claim a load. Paired with `finishLoad()` on every exit path.
-    private func beginLoad() {
+    ///
+    /// `showsProgress: false` claims the lock without the bar, for a read the
+    /// user did not ask to watch — see `refreshWorkingTree()`.
+    private func beginLoad(showsProgress: Bool = true) {
         loadDepth += 1
-        isLoading = true
+        if showsProgress { isLoading = true }
     }
 
     /// Release the claim, and — once the last one is gone — everyone waiting
@@ -160,6 +180,59 @@ final class RepoStore {
         beginLoad()
         defer { finishLoad() }
         await loadRepoData(repoPath, historyLimit: currentHistoryLimit)
+    }
+
+    /// Re-read *only* the status, after an action that changed the working tree
+    /// but cannot have moved `HEAD` — discarding a file, adding one to
+    /// `.gitignore`.
+    ///
+    /// The full `refresh()` would re-run `git log` at up to 500 commits and
+    /// flash the progress bar for an answer that is already on screen: history
+    /// is what a working-tree edit does not touch. The Tauri client has always
+    /// done a status-only refresh here.
+    ///
+    /// Not `refreshQuietly()`: this *is* the user's action completing, so a
+    /// failure to re-read is theirs to see rather than one tick of a streak,
+    /// and a successful read bumps the epoch whether or not the status value
+    /// moved — the file the discard rewrote may be the one the diff pane is
+    /// showing, and a status row that reads the same before and after says
+    /// nothing about its contents.
+    ///
+    /// **A moved `HEAD` hands over to the full reload.** This action cannot
+    /// have moved it, but a commit made in a terminal since the last tick can
+    /// have, and `head_sha` is an *edge* two other things watch — the poll's
+    /// history refetch and the branch reload beside it. Writing the new status
+    /// here would consume that edge without doing either one's work, stranding
+    /// the History list and the branch menu until `HEAD` happened to move
+    /// again. Rare, and the extra `git status` it costs is what a moved `HEAD`
+    /// was going to cost anyway.
+    ///
+    /// Returns whether `HEAD` had moved, because the *branch* list is the third
+    /// thing that edge feeds and it lives in another store — the caller reloads
+    /// it, exactly as the poll does.
+    @discardableResult
+    func refreshWorkingTree() async -> Bool {
+        guard let repoPath else { return false }
+        beginLoad(showsProgress: false)
+        defer { finishLoad() }
+        do {
+            let newStatus = try await GitBridge.status(of: repoPath)
+            guard newStatus.headSha == status?.headSha else {
+                await loadRepoData(repoPath, historyLimit: currentHistoryLimit)
+                return true
+            }
+            if newStatus != status { status = newStatus }
+            workingTreeEpoch += 1
+            errorMessage = nil
+        } catch {
+            errorMessage = error.displayMessage
+        }
+        // The banner now reflects an explicit action, so the poll may not
+        // clear it — and its streak describes a repository this read has just
+        // proved readable (or not) on its own.
+        errorSurfacedByPoll = false
+        quietFailureStreak = 0
+        return false
     }
 
     /// The background poll's tick — the silent counterpart of `refresh()`,

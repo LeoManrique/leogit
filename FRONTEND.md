@@ -491,12 +491,25 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    renamed away. Two consecutive misses cannot be one unlucky read, at any cadence.
    Both counters advance on **every** tick rather than on a changed file list — a path is
    dropped for having been *absent* long enough, which an unchanged list keeps being true
-   of — and a single reappearance resets both. The
-   list is keyboard-navigable: arrows move the active row and load its diff. Staging is
-   **whole-file** today (partial-hunk staging is scaffolded but inactive). How far the
-   keyboard and the pointer go beyond that — range selection, a Space toggle, Home/End —
-   is platform policy (§8): the shared floor is one row active at a time, reachable by
-   arrow keys.
+   of — and a single reappearance resets both.
+   **Selection and inclusion are different things, in both clients**: the checkbox column
+   is what the next commit will contain, the highlight is what the pointer and keyboard
+   are pointing at, and either moves without the other. The highlight is a **set** —
+   arrows move it one row and load that row's diff, shift extends it — because discard
+   acts on all of it, and because Space toggles inclusion for the whole selection. The
+   rule Space follows is the select-all checkbox's own sentence, deliberately: *any
+   excluded → include them all, otherwise exclude them all*, so pressing it twice over a
+   sweep leaves exactly that sweep included whatever state its rows were in. The
+   select-all control is therefore **tri-state**; a two-state one reads "off" over a list
+   that is mostly on, and this is the control people use to answer *what is going in?* at
+   a glance. Right-clicking inside a multi-row selection acts on the whole selection;
+   right-clicking outside it re-selects that one row first, so the menu and the diff pane
+   always describe the same files. Staging is **whole-file** today (partial-hunk staging
+   is scaffolded but inactive).
+   **The diff pane follows a single-row selection and holds still for a multi-row one.**
+   Extending a selection is choosing a group to act on, and the diff being read while a
+   discard selection is built around it is the one thing that must not move. Which row an
+   extension leaves open is where the two clients differ (§8).
 5. **Connectivity circuit-breaker** — after consecutive failures, back off
    (30s→5min) and gate background git ops on connectivity; recover on reconnect.
 6. **Tiered background refresh** — repos refresh in tiers (2/5/10 min) with staggered
@@ -656,15 +669,21 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    that raises the app's own). The classification lives in one function per client rather
    than at each call site, because a `report the failure` shape copied from the site next
    door is how *every* failure in the Tauri client, down to "couldn't reveal the file in
-   Finder", ended up seizing the window. Native still routes discard, checkout and undo
-   failures to its strip where this rule puts them in the modal — the parity plan's WS-N
-   and WS-Q close that.
+   Finder", ended up seizing the window. Each client has exactly one: the Tauri store's
+   `reportActionError` / `reportNotice` pair, and native's `ActionFailure` +
+   `.actionFailureAlert` beside `ErrorBanner`. Native still routes checkout and undo
+   failures to its strip where this rule puts them in the modal — the parity plan's WS-Q
+   closes that.
    **One refinement, in both clients: a failure raised from inside a dialog stays in
    that dialog**, under its fields, with everything typed intact. The dialog is
-   already the retry surface the modal would be offering — a rejected publish name
-   and a refused force-push lease are both fixed and re-submitted right there — so
-   stacking a second window over it costs two dismissals to change one character,
-   and leaves the dialog underneath still holding the input that failed.
+   already the retry surface the modal would be offering — a rejected publish name,
+   a refused force-push lease and a discard that lost an `index.lock` race are all
+   fixed and re-submitted right there — so stacking a second window over it costs two
+   dismissals to change one character, and leaves the dialog underneath still holding
+   the input that failed. This is why a discard confirmation is a **sheet** in the
+   native client rather than a system confirmation: a confirmation dismisses on the
+   click, so it can neither hold a failure nor say it is still working, and a
+   thirty-file discard is not instant.
 14. **Branch actions are one menu, re-read at the moment of intent.** Switch, create,
    merge (regular or squash), abort and delete live together behind the branch control
    in both clients, and `list_branches` runs on **every** open: the status poll notices
@@ -833,9 +852,8 @@ every deliberate difference here.
 | Window frame persistence | `tauri-plugin-window-state` saves size and position on exit and restores them at launch; the `tauri.conf.json` size is the first-run default | AppKit frame autosave on the `WindowGroup`, with `.defaultSize` as the first-run default |
 | Settings surface (§6.15) | a modal overlay inside the one window, with a header ✕ and a footer **Close** — there is nothing to save, so the button only dismisses | the stock SwiftUI `Settings` scene, a separate window with ⌘, and the standard title-bar close and no content buttons at all; a text field also commits on `.onDisappear` |
 | Settings field coverage (§6.15) | every `Config` field the app reads has a control | no control for `theme` (a permanent exemption, above), `side_by_side_diff` (awaiting the layout, above), or the two AI timeouts — so a timeout set in the Tauri client bounds native's requests but cannot be changed there. Closing the timeout gap is the parity plan's WS-R |
-| Context-menu scope (§6.10) | multi-row selection, so discard also acts on a whole selection | single-selection lists, so every item acts on the right-clicked row |
 | Background-cadence enforcement (§6.1) | the ladder is a self-scheduling `setTimeout` chain, so a WebView free to throttle a backgrounded document can only make the hidden rung *slower* than 30 s; the wake-up resync is what guarantees a current screen | an App Nap assertion is held while a repo is open, so the same ladder's timers are not coalesced away, and the hidden rung is exactly 30 s (`AppNapSuppressor`) |
-| File-list selection & keyboard (§6.4) | shift-click extends a multi-row selection (a separate anchor for the checkbox column, Finder/Gmail semantics), Space toggles the focused row's checkbox and bulk-toggles a multi-selection, Home/End jump to first/last | single-selection `List`: arrow keys move the active row, and there is no range selection, Space toggle, or Home/End |
+| File-list selection & keyboard (§6.4) | two anchors and hand-rolled key handling: shift-click on the row body extends from a sticky row anchor, shift-click on a checkbox range-toggles from a second one that *does* move, and Home/End jump to first/last. Plain click and ⌘-click both collapse to one row. An extension **activates the shift-clicked row**, so the diff follows the far end | one `List(selection: Set<String>)`, so the range and multi-row gestures are AppKit's own and behave like every other macOS list, and the checkbox column has no separate anchor. The gesture that produced a selection is not recoverable from a `Set`, so an extension leaves the diff on the row it was already showing rather than guessing which row was clicked |
 | Relative-date ticking (§6.12) | a 10 s tick re-renders the visible rows, skipped while the History pane is hidden or the window is backgrounded, so an open list never goes stale | formatted once per republish and not re-ticked, so an idle repository's labels stop ageing until something in its status moves |
 | Side-by-side diff (`side_by_side_diff`) | split layout toggle, honoured by `DiffViewer` | not implemented — unified only; a layout feature awaiting its own design pass (ROADMAP), the config field crosses saves untouched |
 | Pending-count placement (§6.2) | `↓N` / `↑N` capsules on the sync button's trailing edge, each with its own arrow | plain `↑N ↓N` text in its own toolbar item left of the button: macOS renders a toolbar control's label as text and icon only, so no custom view can ride the face, and no system API badges a toolbar item |

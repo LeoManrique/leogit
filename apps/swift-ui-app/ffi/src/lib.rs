@@ -690,9 +690,6 @@ pub fn commit(
 // wrappers' `@concurrent` hop is enough to keep them off the main actor —
 // `spawn_blocking` stays reserved for the calls that block for many seconds by
 // design (`repo_sync_status`, `discover_repos`).
-//
-// `os::open_url` is deliberately NOT exported: SwiftUI opens URLs itself
-// (`Link` / `openURL`), so the native client has no caller for it.
 
 /// What [`discard_files`] would do to each of `files`, path by path — the
 /// confirmation dialog's copy, decided by the same code that performs the
