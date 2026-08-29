@@ -52,6 +52,16 @@ struct DiffPalette {
         isDark ? Color(0xFFFFFF, alpha: 0.06) : Color(0x000000, alpha: 0.04)
     }
 
+    /// The wash over the rows the reader has picked out in the gutter.
+    ///
+    /// The system's own selection colour, translucent and laid *over* the row
+    /// tint rather than replacing it, so a selected added line still reads as
+    /// added and its syntax colour still shows through. It is the accent
+    /// because that is what a selection is on macOS — not a fourth diff state.
+    var lineSelection: Color {
+        Color.accentColor.opacity(isDark ? 0.28 : 0.22)
+    }
+
     // MARK: Syntax tokens
 
     /// Foreground for a token class, or `nil` for classes that take the line's

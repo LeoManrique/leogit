@@ -25,8 +25,8 @@ export interface FileEntry {
   /**
    * Opaque content-change stamp (mtime + size) for the working-tree side, so
    * a status comparison can see content edits; absent when nothing is on disk
-   * (deletions) and in commit-file lists. This client doesn't read it yet —
-   * the native client keys its open-diff reload on it. Compare, never parse.
+   * (deletions) and in commit-file lists. Both clients key the open diff's
+   * reload on it. Compare, never parse.
    */
   stat_stamp?: string
 }

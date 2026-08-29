@@ -164,7 +164,7 @@ tracks a `phase` (`idle` / `loading(slow:)` / `failed`) beside the published
 racing the load under the same `generation` guard — `.task(id:)` cancelling the load must not
 cancel the escalation for a blocking FFI call still running), and publishes nothing when the
 fresh parse equals what's shown (`DiffPayload: Equatable`), so rows, scroll position, and
-tokens survive an epoch bump untouched; tokens still refresh in the background on an equal
+tokens survive a re-read untouched; tokens still refresh in the background on an equal
 payload — context lines can recolour when blob content changed without the diff text changing
 — and swap in only when different. `DiffView`'s content rule mirrors it: last-shown state
 stays during a reload, and a fast first load stays blank rather than flashing a
@@ -176,6 +176,25 @@ above was preserving something nothing could see. `content`'s first branch is th
 submodule, decided before the read: `git diff` answers a submodule that changed inside with
 a bare `Subproject commit <sha>-dirty` line, so the pane explains and the subprocess is
 never spawned (the `.task` guards on the same flag).
+**Phase two is debounced 80 ms** (`highlightDebounce`, the Tauri `HIGHLIGHT_DEBOUNCE_MS`),
+so arrowing down a file list tokenizes only the file the reader stopped on while phase one
+still paints on the frame its rows land. A cancelled sleep resumes rather than throwing, so
+the guard after it is what stops the work: `generation` catches the reader moving on, and
+`Task.isCancelled` catches the pane going away entirely — a tab change moves no generation.
+**Scroll resets on a different diff and holds on the same one.** `DiffStore` publishes
+`rendered`, the `DiffIdentity` (source + path) of the payload on screen, which the view
+watches with a bound `ScrollPosition` and answers with `scrollTo(edge: .top)`; every
+re-read of the same diff — a layout toggle, a whitespace change, an edit landing, a `HEAD`
+move — leaves the offset alone, which is FRONTEND §6.3's contract. It is set outside the
+equality skip, because two *different* files can parse to an equal payload. The watcher
+sits outside `content`, not inside it: a binary file or an empty state takes the scroller
+out of the hierarchy, and a modifier that is not there cannot notice the diff that replaces
+it. `rendered` is also what the header's own chrome asks: a reload is seamless, so between
+the click and the answer the payload still describes the file that was open *before* while
+the name beside it does not, and the `+N −N` totals and the rename arrow are shown only when
+the payload is a diff of the file being named. The layout control deliberately does not ask
+— it arranges what is on screen, which during a switch is still the previous diff and is
+still arrangeable.
 Token `start`/`end` and `IntraLineRange` are code-point indices, which in Swift is the
 `AttributedString.unicodeScalars` view — never `characters`, whose grapheme clusters can span
 several code points.
@@ -187,6 +206,17 @@ screen (the Tauri `if (!sh) return` after the plain render). Both flags live in 
 `LoadKey`, so a Settings toggle re-keys the open diff through the seamless path above, where
 the equality skip keeps scroll when nothing textual changed. `side_by_side` is the third:
 core builds the pairing only for the layout that asked, so a layout change is a re-read too.
+
+**`LoadKey` is everything the diff on screen is a function of, and nothing else** — it is
+what makes the read happen exactly when it has to. Three groups: *which* diff (the path and
+the `DiffTarget`), *whether that diff is still what was read* — the file's own
+`stat_stamp`, its `xy`, and the `head_sha` carried in `.workingTree(head:)` — and *how* it
+is read (the three settings above). Tab size stays out: it re-renders without reloading.
+The freshness half is per-file, the Tauri client's DF-1 shape: a whole-status signal made an
+unrelated edit anywhere in the tree re-read and re-tokenize whatever was open, for an answer
+that could not have changed. `head_sha` covers the half `stat_stamp` cannot see — the
+working-tree diff is HEAD against disk, so a `--mixed` reset changes it while leaving both
+the bytes and the status letters exactly as they were.
 
 **The split layout is an arrangement of one row model, not a second renderer.**
 `DiffStore` holds `rows` (the flat line list, keyed by the flat index every parallel array
@@ -211,6 +241,35 @@ SwiftUI `Text` honours no paragraph-style attributes, so `DiffLineText` expands 
 spaces with CSS `tab-size` stop math (next multiple of N columns) and remaps every token and
 intra-line range through the expansion — a no-tab line pays one `contains` scan and nothing
 else. Long lines always wrap, in both clients — the GitHub Desktop model.
+
+**Copying is a range over the row model, not a scrape of the view** — and that expansion is
+one of the four reasons why (the others: the gutter, the `+`/`−` column, and the split
+layout's filler cells). `copy_text` drops `\ No newline at end of file` for a fifth: the
+pairing gives that marker no row, so a side-by-side selection would carry a line the reader
+was never shown. A `@@` header is kept, being a row they can see in both arrangements. `DiffLineSelection` is an anchor and a focus over flat row indices,
+which is exactly `copy_diff_text`'s `[start, end)`; `GitBridge.diffText(of:in:)` joins the
+bridge's pure helpers rather than its `@concurrent` reads, because a Copy has to answer
+inside the event that asked for it — the cost is one lower-and-lift of the model UniFFI
+takes by value, bounded by the diff already on screen and paid once per Copy.
+`DiffStore` owns the selection rather than the view, for the reason it owns `rows`: the
+selection *is* a range into them, so clearing it lives in the one place the row model is
+rebuilt — deliberately not on a layout change, which moves no line, so the reader keeps
+their run across it as they keep their scroll. The gutter is the handle (a tap gesture and
+a `.modifiers(.shift)` high-priority one on the number column, plus its own context menu),
+and they sit on an invisible `Color.clear` pad overlaid on the number rather than on the
+number itself, so the interactive layer and the drawn text stay independent.
+`.textSelection(.enabled)` is granted to the row stack and the numbers and `+`/`−` glyph opt
+back out, which keeps a drag begun on them off the clipboard. What that grant does **not**
+buy is a multi-line drag: a SwiftUI text selection cannot leave the `Text` it began in, and
+this pane draws one `Text` per line, so the reader's drag is confined to a single line
+whatever the grant is attached to (**D-22**, deferred — it takes an `NSTextView`-backed pane
+or a selection this client owns outright). That is the whole reason the line run exists:
+selecting several lines has to be *asked for* here, so the gutter is where it is asked, and
+the copy comes from the model instead of from what was drawn. The pane is `.focusable()` because Copy is a responder-chain command, and `onCopyCommand` returns
+**nil** when no run is selected, so with no run the character selection answers ⌘C exactly
+as it always did. Where both could exist the precedence is stated rather than guessed: the
+run wins — it is drawn as a full-row wash, and a visible selection that Copy ignored would
+be the worse surprise — and Escape is what gives it up.
 
 Committing crosses as the same two calls the Svelte client makes — `format_commit_message`,
 then `commit` — and needed no new type mirrors: core's `commit` owns the whole staging story
@@ -336,9 +395,9 @@ have moved `HEAD` — a discard, an ignore. It re-reads only the status: `refres
 re-run `git log` at up to 500 commits and flash the progress bar for an answer already on
 screen, which is what a whole-list discard used to cost per row. It is not the poll's path
 either — this *is* the user's action completing, so a failed read is theirs to see rather
-than one tick of a streak, and a successful read bumps the epoch whether or not the status
-value moved, since the file a discard rewrote may be the one on screen and its status row
-can read the same before and after. The Tauri client has always done a silent status refresh
+than one tick of a streak. The file a discard rewrote may be the one on screen and its
+status *letters* read the same before and after; what tells the pane to look again is the
+`stat_stamp` the rewrite moved. The Tauri client has always done a silent status refresh
 here.
 
 Two things about it are load-bearing and neither is obvious. **`head_sha` is an edge, and
@@ -355,17 +414,15 @@ resolves after it lands a pre-action snapshot on top, putting discarded files ba
 list. `beginLoad(showsProgress:)` separates the two, and `isBusy` (the depth count) is what
 the poll and ⌘R now guard on. The poll's
 `RepoStore.refreshQuietly` never touches either, refetches history only when
-`head_sha` moved, and bumps `workingTreeEpoch` (the diff-reload key; one meaning — "the
-working tree may differ from what any derived view shows, re-derive if you care") when the
-status value changed — plus unconditionally on app re-activation
-(`NSApplication.didBecomeActiveNotification`, the native `resyncOnActive`). Content edits
-count as a status change: porcelain v2 carries no worktree hash, so a same-row edit
-(modified → still modified) would be invisible to the comparison and leave the open diff
-stale until reselect — core's `FileEntry.stat_stamp` (an opaque mtime+size string,
-`get_status`-only, `None` off-disk; pinned by `stat_stamp_sees_content_edits_and_absence`)
-is what makes the comparison see them. The epoch is deliberately not narrower than that:
-`RepoStore` signals possibility, and `DiffStore`'s equality skip is where reality is
-checked, so a bump for an unchanged file costs one subprocess and zero repaints. A `ConnectivityBreaker` (Tauri's
+`head_sha` moved, and publishes the status only when it changed — so an idle tick repaints
+nothing. It is also the app-re-activation path
+(`NSApplication.didBecomeActiveNotification`, the native `resyncOnActive`) and needs no
+forcing flag there: content edits count as a status change on their own. Porcelain v2
+carries no worktree hash, so a same-row edit (modified → still modified) would be invisible
+to the comparison and leave the open diff stale until reselect — core's
+`FileEntry.stat_stamp` (an opaque mtime+size string, `get_status`-only, `None` off-disk;
+pinned by `stat_stamp_sees_content_edits_and_absence`) is what makes the comparison see
+them, whether the edit happened while the app was frontmost or while it was away. A `ConnectivityBreaker` (Tauri's
 numbers: 2 failures → 30 s backoff doubling to a 5 min cap) composes with
 `Services/NetworkPathObserver.swift` — one `NWPathMonitor` publishing `isOnline`, the
 analogue of the Tauri `navigator.onLine` half the breaker originally shipped without — as
@@ -689,7 +746,7 @@ actually contains.
 The History detail crosses as two reads: `get_commit_detail` on selecting a commit —
 metadata never loads, it rides in the `CommitInfo` the list already holds — and per selected
 file `get_parsed_commit_diff`, which feeds the *same* pipeline as the working tree. That reuse is structural on the Swift side: `DiffStore`/`DiffView` take a
-`DiffTarget` (`.workingTree(epoch:)` or `.commit(sha:)`) that picks both the raw-diff read and
+`DiffTarget` (`.workingTree(head:)` or `.commit(sha:)`) that picks both the raw-diff read and
 the tokenizer's `BlobSource` in one value, so the two can never disagree, and the commit case
 reads blobs at the commit's own trees — a file later rewritten still colours as it was then.
 `CommitDetailStore` gets the file list and the +/− totals from that one read, so the header
@@ -1066,13 +1123,13 @@ Three background loops run while a repository is open, and they share one policy
 
 - **Status poll** — the ladder above. Every status write in this client goes through the one `refreshStatus` in `MainLayout`, including the header's post-transfer reload (which takes it as a prop) and `Ctrl+R`, because a status write is more than storing what `get_status` returns: it ages the exclusion set, drops the open diff when its file leaves the working tree, and feeds `repoSync`'s badge for this repo. A second implementation forgets some of those, which is how the `MERGING` chip used to outlive an abort — the chip now reads `RepoStatus.merging`, so that particular omission is no longer expressible. HEAD is compared against `RepoStatus.head_sha` from the read that just landed; when it moved, the commit log is refreshed in place keeping the same loaded count (so the user doesn't lose scroll position) and the branch list reloads with it, since a checkout made in the terminal moves the menu's checkmark too. Each publishing run also pushes the active repo's ahead/behind + dirty flag into `repoSync` via `setRepoSync`, so the picker badges and dot for the open repo stay live without a dedicated fetch. The poll pauses entirely while `activeNetworkOp` is set.
   - **A tick that changes nothing publishes nothing.** `refreshStatus` compares `JSON.stringify(status)` against the previous reply and returns without touching the store when they match — whole-value, like the native client's `Equatable` compare, rather than a hand-picked list of fields that a later field would silently fall out of. `stat_stamp` rides inside it, which is the only reason an idle repository is recognizable at all: porcelain v2 carries no worktree hash, so a file that was modified and still is reads identically without it. Only *silent* refreshes take the shortcut — an explicit one also clears the error modal on success, which is a change even when the status is not — and a standing poll banner still retires on a skipped tick, because a successful read is what disproves it.
-  - **The open diff reloads from the same stamp.** A `$derived` key of the active file's `path`, `xy` and `stat_stamp` feeds an `untrack`ed effect that re-fetches the diff when the *same* path's stamp moves; a different path means the selection changed and its own load is already in flight. Per-file, which is narrower than the native client's whole-status epoch — an unrelated edit elsewhere in the tree re-tokenizes nothing.
+  - **The open diff reloads from the same stamp.** A `$derived` key of the active file's `path`, `xy` and `stat_stamp` plus the status's `head_sha` feeds an `untrack`ed effect that re-fetches the diff when the *same* path's key moves; a different path means the selection changed and its own load is already in flight. Per-file, so an unrelated edit elsewhere in the tree re-tokenizes nothing. `head_sha` covers the half a stamp cannot see: the diff is HEAD against the working tree, so a `--mixed` reset changes it while leaving the bytes on disk and the status letters exactly as they were.
 - **Auto-fetch** — `fetch_interval_ms` (default 30 000) through the policy's multiplier, rescheduled by an effect watching those two config fields, so a Settings change applies at once and one made in the native client applies on the next wake-up (which re-reads the config). Switched off, the loop parks rather than idling; switching it on reschedules against the last fetch, so it runs as soon as the configured interval says it is due. The first run carries a once-per-session 0–30 s skew so two windows started together don't stay in lockstep on the same repositories. Skipped while a network op is in flight or **text has the keyboard** — asked at the tick through `isTextInputFocused()` rather than latched, since a latch set from `focusin` is only cleared by another one and closing a focused terminal panel used to strand it at `true`, leaving auto-fetch dead for the session. That predicate is `document.hasFocus() && isTextInputElement(document.activeElement)`, and the first half is not decoration: `activeElement` does **not** clear when the window loses focus, so asking about the element alone would answer "still typing" for the entire time the user was away in another app and hold back every fetch the ladder is stretching rather than pausing. The native client gets the same answer for free — `NSApp.keyWindow` is nil while the app is inactive, so its first responder is nil. Calls `fetchActiveRemote` (`git fetch --prune --recurse-submodules=on-demand` against the first remote) then a silent `get_status`. `fetchActiveRemote` self-skips when offline / backing off and reports its outcome to the connectivity breaker (see *Network resilience*).
 - **Tiered repo-sync scheduler** ([repoSyncScheduler.ts](apps/tauri-app/src/lib/services/repoSyncScheduler.ts)) — **one loop, three deadlines** (2 / 5 / 10 min) with staggered startup kicks, sleeping until the nearest. Each pass slices the `recentRepos` list (active excluded) into tiers — next 4, next 5, next 10 — and refreshes the due ones via `repo_sync_status` sequentially, across tiers as well as within them. Three independent timers came due together on their common multiple and walked all three lists at once, which is precisely what the sequential fan-out is meant to avoid. Tier syncs are tagged `background`, so while offline / backing off each `syncRepo` consults the breaker and downgrades to a **fetch-less local recompute** instead of grinding through dead fetches — the network goes quiet but the dirty dot keeps tracking local edits, since it needs no remote. `canRunRepoSweeps()` is re-checked before every repository, so a transfer starting or the window going away abandons the rest of the tier; the deadline is already re-armed, so it simply retries. The loop parks on the *activity* half of that predicate only — a network op has nothing that would un-park it, and a tick during one costs nothing. The tiers cover only the ~19 most recent repos, so the dropdown additionally calls `syncVisibleRepos` whenever its list is on screen: a sequential fetch-less sweep that always fills rows with no cached entry and, at most once per 30 s, re-checks the whole visible list. Started in `initialize` (after `hydrateReposState` resolves, so recents are seeded) and stopped on unmount.
 
 When the window **wakes up** — a rise in the activity ladder, so focus returning or the window coming back on screen — `MainLayout` runs a one-shot **resync**: `refreshConfig` *first*, then `fetchActiveRemote` (so a moved upstream surfaces immediately), a silent `get_status`, the HEAD comparison, and `repoSyncScheduler.kickTopTier()` (the throttled top-tier catch-up, since the tier loop was parked while we were away). The config re-read leads because `config.toml` is shared with the native client and editable outside this process: without it a save made anywhere else never reached a running window, so theme, diff settings, provider and auto-fetch stayed at their launch values for the lifetime of the app. Reading it before the refreshes means they already see the new values. A `resyncing` guard collapses a two-step wake-up (hidden → visible → focused, common under tiling WMs) into a single run. Every loop and listener tears down on unmount.
 
-The open diff is deliberately **not** re-read here. It used to be, unconditionally, because there was no way to tell whether the file had changed while the window was away; the per-file stamp effect above is that way, and it fires off the very status read the resync awaits. Keeping both meant two `git diff`s of the same file racing on every activation with nothing deciding which answer won — and one wasted read on every activation where nothing had changed at all. The native client still re-reads unconditionally (`refreshQuietly(forceDiffReload: true)`), which is E-9 and is the parity plan's WS-P.
+The open diff is deliberately **not** re-read here. It used to be, unconditionally, because there was no way to tell whether the file had changed while the window was away; the per-file stamp effect above is that way, and it fires off the very status read the resync awaits. Keeping both meant two `git diff`s of the same file racing on every activation with nothing deciding which answer won — and one wasted read on every activation where nothing had changed at all. The native client follows the same rule, off the same stamp: its wake-up is a plain `refreshQuietly()`, and the open diff re-keys only if the file it is showing actually moved.
 
 **The one thing this cannot enforce is the hidden rung.** A WebView is free to throttle timers in a backgrounded document, so 30 s is a floor rather than a guarantee — which only ever makes hidden work cheaper, and the wake-up resync is what actually guarantees a current screen. The native client pins the same ladder exactly by holding an App Nap assertion; pinning it here would mean moving the tick to a Rust-side ticker and adding a backend event nothing else needs.
 
@@ -1177,7 +1234,7 @@ second `git diff` runs only on the path where the pane would otherwise be blank.
 
 `DiffOptions` decides what is built alongside the parse. The phase-1 HTML array exists for a `WebView` host; the native host renders from the line model and never asks for it, so it is never built, marshalled, or dropped at the bridge. The side-by-side pairing is asked for by whichever host is about to render the split layout and by neither in the unified one, so a pairing per line is built only when something reads it. `show_anyway` is the escape from the size guard below.
 
-**Size guard.** A patch over 4 MiB, or one containing a line over 5 000 bytes, is *withheld* rather than parsed: `ParsedDiff.size_guard` carries the measurements and the viewer offers to render it anyway. The long-line limit earns its place separately from the byte total — a minified bundle or a base64 blob is slow at a size the total waves through. This withholds, it never refuses; the escape re-asks with `show_anyway`. Each client remembers **which diff** was revealed — the file, plus the commit where there is one, and deliberately not the working-tree epoch — so every re-read of that diff keeps it (a layout change, a whitespace toggle, a poll that finds the file rewritten) while a different one gets the guard back. A per-request flag instead would re-arm the guard under the reader on any of those, and since the layout control lives inside the viewer, taking the diff away also takes away the control that got them past it.
+**Size guard.** A patch over 4 MiB, or one containing a line over 5 000 bytes, is *withheld* rather than parsed: `ParsedDiff.size_guard` carries the measurements and the viewer offers to render it anyway. The long-line limit earns its place separately from the byte total — a minified bundle or a base64 blob is slow at a size the total waves through. This withholds, it never refuses; the escape re-asks with `show_anyway`. Each client remembers **which diff** was revealed — the file, plus the commit where there is one, and deliberately not what makes that diff *stale* — so every re-read of that diff keeps it (a layout change, a whitespace toggle, a poll that finds the file rewritten) while a different one gets the guard back. A per-request flag instead would re-arm the guard under the reader on any of those, and since the layout control lives inside the viewer, taking the diff away also takes away the control that got them past it.
 
 **Empty is not one thing.** `EmptyDiffReason` separates `NoChanges` (the file matches its committed state), `WhitespaceOnly` (the change is there and the setting is hiding it), and `NoTextualChanges` (a mode change or a pure rename — a header with zero hunks). A *failed* read is none of these: it is an `Err`, which is what lets a viewer clear a stale diff instead of captioning it.
 

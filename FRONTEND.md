@@ -402,6 +402,15 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    re-render the window every cadence — and the comparison is of the *whole*
    `RepoStatus`, not a hand-picked list of fields that a later field would silently fall
    out of. `stat_stamp` is what makes that comparison see content edits at all (§5.2).
+   **The open diff re-reads when — and only when — the open diff moved.** Both clients key
+   it to that one file: its `stat_stamp`, its `xy` (staging it changes which side is being
+   compared), and the status's `head_sha`, which is the half a stamp cannot see because the
+   working-tree diff is `HEAD` against disk — a `--mixed` reset changes it while leaving
+   both the bytes and the status letters exactly as they were. Keyed to the whole status
+   instead, an unrelated edit anywhere in the tree re-read and re-tokenized whatever was
+   open, for an answer that could not have changed. A key that moved because the *path*
+   changed is not this rule's business: the user changed the selection, and that
+   selection's own load is already in flight.
    Automatic fetches are additionally
    gated on `RepoStatus.has_remote`: `get_remote` answers `"origin"` for a repo with no
    remote (§ *Notable invariants*), so an ungated tick spawns a doomed `git fetch` whose
@@ -457,9 +466,17 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    pane past it. The native client additionally skips publishing a result equal to
    what's shown, so scroll and tokens survive; a permitted refinement, not a divergence
    (the observable rule — no flash under the threshold — is shared).
-   **Scroll**: a reload of the *same* file keeps the user's scroll offset; a *different*
-   file resets to the top. Both clients key that on the rendered diff's own paths, so a
-   forced re-read (a focus return, a whitespace-setting toggle) counts as the same file.
+   **Scroll**: a reload of the *same* diff keeps the user's scroll offset; a *different*
+   diff resets to the top. Both clients key that on the **rendered** diff's identity — its
+   paths *and* the commit it belongs to, since one path in two commits is two different
+   diffs — so every forced re-read of that diff (a focus return, a whitespace or layout
+   toggle, an edit landing, a `HEAD` move) counts as the same one, and the jump happens as
+   the replacement lands rather than throwing the outgoing rows to the top first.
+   **The header describes the diff below it**, and only that diff: a rename reads
+   `old → new` rather than only the destination, the `+N` / `−N` totals render each side
+   only when it is non-zero (so a binary file, which core counts as zero on both sides,
+   says nothing rather than `+0 −0`), and neither is shown while the payload on screen is
+   still the previously open file's — the name beside them is already the new one.
    A diff with **nothing to render** is a state of its own, and the pane must say so rather
    than fall through to the nothing-is-selected copy — the user did select a file. It must
    also say *which* nothing it is: `empty_reason` distinguishes "this file matches its
@@ -825,6 +842,11 @@ as `ParsedDiff.html`/`highlight_diff` spans for the Svelte `{@html}` renderer.
   (the exact HTML it gets today, unchanged) or built in Svelte from the structured layer.
 - **SwiftUI**: maps `TokenClass` → colour/traits (the mirror of `css_class`) into an
   `AttributedString`.
+- **Two phases, and only the second one waits.** The parsed structure paints the frame it
+  lands; the syntax pass behind it is debounced **80 ms** (`HIGHLIGHT_DEBOUNCE_MS` /
+  `DiffStore.highlightDebounce`) and re-checks its generation after the wait *and* after
+  the call, so arrowing down a file list tokenizes only the file the reader stopped on and
+  a result nobody is waiting for is dropped rather than painted.
 - **Who pays for what**: `DiffOptions` decides. The HTML array is built only
   for the `WebView` host, so the phase-1 collapse no longer runs on a path that
   discards it; the side-by-side pairing is built only for the layout about to
@@ -846,6 +868,17 @@ as `ParsedDiff.html`/`highlight_diff` spans for the Svelte `{@html}` renderer.
 - **Copying comes from the model**, never from the rendered view:
   `copy_diff_text` over a flat line range, so a copy can't pick up gutters,
   `+`/`−` prefixes, side-by-side filler cells or a viewer's tab expansion.
+  The rule a viewer implements is **within a line, the characters the reader
+  selected; across lines, those lines from the model** — a multi-line copy is
+  a copy of *lines*, and the only faithful source for one is the parsed diff.
+  Which gesture picks the lines is per-platform (§8); what lands on the
+  clipboard is not. A `@@` header inside the range is copied — it is a row the
+  reader can see and select in either arrangement — and
+  `\ No newline at end of file` is dropped, because it is git's note *about* a
+  line rather than a line, and the side-by-side pairing gives it no row at all,
+  so copying it would paste something that was never on screen. ✅ native; the Tauri viewer keeps gutters and prefixes out
+  of an ordinary drag-select, which is the same text for a unified diff and
+  still interleaves a side-by-side one.
 - **Open decision** (parity plan, DF-3): whether the *phase-2* wire becomes the
   structured layer for Tauri too, or the HTML collapse stays on the Tauri host.
 
@@ -864,6 +897,7 @@ every deliberate difference here.
 | Launch target / second instance | a cold start resolves argv in `main` and parks it for the frontend to claim; a second invocation is intercepted by `plugin-single-instance`, which focuses the window and forwards an `open-repo` event | LaunchServices does both: `CFBundleDocumentTypes` declares `public.folder`, so `open -a LeoGit <dir>` activates the running instance and delivers the folder to `NSApplicationDelegate.application(_:open:)` — cold and warm through one callback, with Finder's *Open With* and a drop on the Dock icon coming free. Same resolution rule (`resolve_launch_target`), same precedence, same init prompt |
 | Opening the branch surface | ⌘B toggles the branch popover | no equivalent: AppKit matches a key equivalent by walking *into* submenus, so a menu-bar menu cannot be opened by a chord, and binding ⌘B to one of its items would give the same chord different meanings in the two clients. The Branch menu itself is the discovery surface, and macOS's own ⌃F2 focuses the menu bar |
 | Diff rendering | HTML spans (`{@html}`) | structured runs → `AttributedString` |
+| Picking lines to copy (§7) | the browser's own selection spans rows, so there is nothing to pick: `user-select: none` on the gutter and the prefix is what keeps a drag-copy to the file's lines. The model-based copy for a *multi-line* selection is the half still to come, and it hangs off the `copy` event rather than a gesture | the gutter is a line handle — click a number, ⇧-click to extend, right-click for *Copy N Lines* / *Select All Lines*, Escape to drop it — because SwiftUI hands back neither the extent of a `Text` selection nor a hook on the copy, so the only way to know which lines were meant is to be asked. Dragging the content selects characters **within one line only** — a native text selection cannot leave the `Text` it began in and the pane draws one per line, so a multi-line drag is not available to this client at all. Precedence is stated, not guessed: while a run exists Copy answers with the run, and Escape gives it up |
 | Terminal widget | `xterm.js` | SwiftTerm (PTY backend reused) |
 | Virtualized lists | hand-rolled windowing | native `List`/`LazyVStack`/`Table` |
 | Pane geometry persistence | `localStorage` (sidebar width, composer height, commit-files width) | `UserDefaults` (composer height, `commitComposerHeight`); sidebar and commit-files widths are per-session |

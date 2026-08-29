@@ -365,6 +365,13 @@ pub fn get_parsed_commit_diff(
 /// flat across every hunk's `lines`, `@@` headers included. Out-of-range
 /// indices clamp rather than panic; the viewer's selection and the model can
 /// briefly disagree while a new diff loads.
+///
+/// `\ No newline at end of file` is dropped. It is git's annotation *about* a
+/// line rather than a line, it belongs to one side of the diff and so has no
+/// row at all in the side-by-side pairing — a reader selecting a block there
+/// would paste a line they were never shown — and pasting it into source is
+/// never what was meant. A `@@` header is kept, because it is a row the reader
+/// can see and select in both arrangements.
 #[must_use]
 pub fn copy_text(file_diff: &FileDiff, start: usize, end: usize) -> String {
     file_diff
@@ -373,8 +380,9 @@ pub fn copy_text(file_diff: &FileDiff, start: usize, end: usize) -> String {
         .flat_map(|h| &h.lines)
         .skip(start)
         .take(end.saturating_sub(start))
-        // A hunk header and a no-newline marker *are* their text; every other
-        // row's content is the file's own line, prefix already stripped.
+        .filter(|l| l.line_type != LineType::NoNewline)
+        // A hunk header *is* its text; every other row's content is the file's
+        // own line, prefix already stripped.
         .map(|l| l.text.as_ref().unwrap_or(&l.content).as_str())
         .collect::<Vec<_>>()
         .join("\n")
@@ -385,7 +393,13 @@ fn parse_file_diff(raw: &str) -> Option<FileDiff> {
         return None;
     }
 
-    let lines: Vec<&str> = raw.split('\n').collect();
+    // The patch's own trailing newline is a terminator, not a line. Splitting
+    // without dropping it yields a final `""`, which the hunk body reads as an
+    // empty context line — a blank, numbered row at the foot of every diff, and
+    // one more line than the file has in anything copied from it. A *genuinely*
+    // blank context line still arrives here as `""` when a tool has stripped
+    // the trailing space git writes, which is why only the last one goes.
+    let lines: Vec<&str> = raw.strip_suffix('\n').unwrap_or(raw).split('\n').collect();
 
     let mut old_path = String::new();
     let mut new_path = String::new();
@@ -771,12 +785,30 @@ fn parse_binary_marker(line: &str) -> Option<(String, String)> {
     Some((old, new))
 }
 
+/// One `---`/`+++` header line: the prefixed path, or `/dev/null` for the side
+/// a creation or a deletion does not have.
+fn format_patch_path(marker: &str, prefix: &str, path: &str) -> String {
+    if path.is_empty() {
+        format!("{marker} /dev/null\n")
+    } else {
+        format!("{marker} {prefix}{path}\n")
+    }
+}
+
 /// Strips the `--- `/`+++ ` argument down to a repo-relative path.
 /// Removes the conventional `a/` or `b/` prefix git uses, and trims an
 /// optional trailing timestamp (tab-separated) found in some diff outputs.
 fn strip_path_prefix(rest: &str, prefix: &str) -> String {
     // Drop trailing timestamp if present (git's --raw format separates with TAB).
     let mut path = rest.split('\t').next().unwrap_or("").to_string();
+    // `/dev/null` is git's way of saying *this side does not exist* — an added
+    // file has no old path and a deleted one has no new path. It is not a path,
+    // so it is answered as absence, the same as `parse_binary_marker` already
+    // does: a viewer comparing the two sides to spot a rename would otherwise
+    // read every add as `/dev/null → <file>`.
+    if path == "/dev/null" {
+        return String::new();
+    }
     if let Some(stripped) = path.strip_prefix(prefix) {
         path = stripped.to_string();
     }
@@ -881,13 +913,12 @@ fn build_patch(
             patch.push('\n');
         }
     } else {
-        // Fallback: synthesise minimal headers so plain edits still apply.
-        if !file_diff.old_path.is_empty() {
-            patch.push_str(&format!("--- a/{}\n", file_diff.old_path));
-        }
-        if !file_diff.new_path.is_empty() {
-            patch.push_str(&format!("+++ b/{}\n", file_diff.new_path));
-        }
+        // Fallback: synthesise minimal headers so plain edits still apply. An
+        // absent side is written back as `/dev/null`, which is what it was
+        // parsed from and what `git apply` needs to recognise a creation or a
+        // deletion — an omitted `---` line makes the patch unparseable.
+        patch.push_str(&format_patch_path("---", "a/", &file_diff.old_path));
+        patch.push_str(&format_patch_path("+++", "b/", &file_diff.new_path));
     }
 
     let mut flat_idx: usize = 0;
@@ -1110,9 +1141,8 @@ mod tests {
             .iter()
             .map(|p| (p.left, p.right, p.is_hunk_header))
             .collect();
-        // Flat lines: 0=@@ 1=ctx 2=-old1 3=-old2 4=+new1 5=tail, plus 6 = the
-        // empty context line the parser materialises from the diff's trailing
-        // newline (split('\n') yields a final "").
+        // Flat lines: 0=@@ 1=ctx 2=-old1 3=-old2 4=+new1 5=tail. The patch's
+        // own trailing newline is a terminator, not a sixth row.
         assert_eq!(
             rows,
             [
@@ -1121,7 +1151,6 @@ mod tests {
                 (Some(2), Some(4), false),
                 (Some(3), None, false),
                 (Some(5), Some(5), false),
-                (Some(6), Some(6), false),
             ]
         );
         assert_eq!((parsed.additions, parsed.deletions), (1, 2));
@@ -1131,15 +1160,15 @@ mod tests {
     /// slot) but gets no side-by-side row of its own.
     #[test]
     fn no_newline_marker_gets_no_side_by_side_row() {
-        // Flat lines: 0=@@ 1=-old 2=+new 3=NoNewline 4=trailing empty context.
+        // Flat lines: 0=@@ 1=-old 2=+new 3=NoNewline.
         let raw = format!("{HEADER}@@ -1 +1 @@\n-old\n+new\n\\ No newline at end of file\n");
         let parsed = parse(&raw);
         assert_eq!(
             parsed.sbs_pairs.len(),
-            3,
-            "header row + one zipped pair + trailing context; no NoNewline row"
+            2,
+            "header row + one zipped pair; no NoNewline row"
         );
-        assert_eq!(parsed.html.len(), 5, "html stays 1:1 with flattened lines");
+        assert_eq!(parsed.html.len(), 4, "html stays 1:1 with flattened lines");
     }
 
     /// The phase-1 HTML is escaped and carries the intra-line backplate the
@@ -1344,6 +1373,83 @@ mod tests {
             copy_text(&parsed.file_diff, 1, flat)
         );
         assert!(copy_text(&parsed.file_diff, flat + 1, flat + 2).is_empty());
+    }
+
+    /// The no-newline marker is git's annotation about a line, not a line: it
+    /// has no row at all in the side-by-side pairing, so a reader selecting a
+    /// block there would paste something they were never shown.
+    #[test]
+    fn copy_text_drops_the_no_newline_marker() {
+        let raw = format!(
+            "{HEADER}@@ -1,3 +1,3 @@\n ctx\n-old\n\\ No newline at end of file\n+new\n tail\n"
+        );
+        let parsed = parse_diff_with(&raw, DiffOptions::default());
+        let flat = parsed.file_diff.hunks[0].lines.len();
+        assert_eq!(
+            parsed.file_diff.hunks[0].lines[3].line_type,
+            LineType::NoNewline,
+            "the marker sits mid-hunk, not at the end"
+        );
+        assert_eq!(flat, 6, "@@, ctx, -old, marker, +new, tail");
+        assert_eq!(copy_text(&parsed.file_diff, 1, flat), "ctx\nold\nnew\ntail");
+    }
+
+    /// `/dev/null` is git saying *this side does not exist*, not a path. A
+    /// viewer comparing the two sides to spot a rename read every added file as
+    /// `/dev/null → <file>` while it survived the parse.
+    #[test]
+    fn an_absent_side_parses_as_no_path_at_all() {
+        let added = concat!(
+            "diff --git a/new.txt b/new.txt\n",
+            "new file mode 100644\n",
+            "index 0000000..e69de29\n",
+            "--- /dev/null\n",
+            "+++ b/new.txt\n",
+            "@@ -0,0 +1 @@\n",
+            "+hello\n"
+        );
+        let parsed = parse_diff_with(added, DiffOptions::default());
+        assert_eq!(parsed.file_diff.old_path, "");
+        assert_eq!(parsed.file_diff.new_path, "new.txt");
+
+        let deleted = concat!(
+            "diff --git a/gone.txt b/gone.txt\n",
+            "deleted file mode 100644\n",
+            "index e69de29..0000000\n",
+            "--- a/gone.txt\n",
+            "+++ /dev/null\n",
+            "@@ -1 +0,0 @@\n",
+            "-bye\n"
+        );
+        let parsed = parse_diff_with(deleted, DiffOptions::default());
+        assert_eq!(parsed.file_diff.old_path, "gone.txt");
+        assert_eq!(parsed.file_diff.new_path, "");
+    }
+
+    /// A synthesised header has to write the absent side back as `/dev/null`,
+    /// which is what `git apply` reads as a creation or a deletion. Omitting
+    /// the line makes the patch unparseable.
+    #[test]
+    fn a_synthesised_patch_header_names_the_absent_side_dev_null() {
+        let added = concat!(
+            "diff --git a/new.txt b/new.txt\n",
+            "--- /dev/null\n",
+            "+++ b/new.txt\n",
+            "@@ -0,0 +1 @@\n",
+            "+hello\n"
+        );
+        let mut parsed = parse_diff_with(added, DiffOptions::default());
+        // Drop the captured header so the fallback path is the one under test.
+        parsed.file_diff.file_header = String::new();
+        let selection = DiffSelection {
+            default_selected: true,
+            diverging_lines: HashMap::new(),
+        };
+        let patch = build_patch(&parsed.file_diff, &selection, false).expect("a patch");
+        assert!(
+            patch.starts_with("--- /dev/null\n+++ b/new.txt\n"),
+            "{patch}"
+        );
     }
 
     // -----------------------------------------------------------------------

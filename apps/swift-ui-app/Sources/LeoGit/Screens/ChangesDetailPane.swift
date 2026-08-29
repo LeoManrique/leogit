@@ -8,15 +8,15 @@ struct ChangesDetailPane: View {
     let repoPath: String
     let files: [FileEntry]
     let selectedPath: String?
-    /// `RepoStore.workingTreeEpoch` — "the working tree may have changed";
-    /// re-keys the diff load, whose equality skip decides whether anything
-    /// on screen actually moves.
-    let workingTreeEpoch: Int
+    /// The commit the working tree is diffed against — `RepoStatus.headSha`,
+    /// `nil` until the first status lands. Part of the diff's target, because
+    /// a `HEAD` that moved under an untouched file changed that file's diff.
+    let headSha: String?
 
     var body: some View {
         Group {
             if let file = files.first(where: { $0.path == selectedPath }) {
-                DiffView(repoPath: repoPath, file: file, target: .workingTree(epoch: workingTreeEpoch))
+                DiffView(repoPath: repoPath, file: file, target: .workingTree(head: headSha))
             } else if files.isEmpty {
                 ContentUnavailableView(
                     "No Changes",

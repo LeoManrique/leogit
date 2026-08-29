@@ -465,7 +465,7 @@ struct ContentView: View {
                     repoPath: repoPath,
                     files: store.status?.files ?? [],
                     selectedPath: selectedPath,
-                    workingTreeEpoch: store.workingTreeEpoch
+                    headSha: store.status?.headSha
                 )
             case .history:
                 HistoryDetailPane(
@@ -720,7 +720,7 @@ struct ContentView: View {
                 directoryStore.breaker.record(success: reached)
             }
         }
-        await store.refreshQuietly(forceDiffReload: true)
+        await store.refreshQuietly()
         // A branch created or deleted outside the app moves no HEAD, so the
         // poll's HEAD compare never notices it. Returning to the app is when
         // that is most likely to have just happened — and the menu bar's

@@ -112,6 +112,31 @@ enum GitBridge {
         tokenizeDiff(fileDiff: fileDiff, source: source)
     }
 
+    /// The file's own text for a flat row range, rebuilt from the line model.
+    ///
+    /// What lands on the clipboard, and the reason it is not scraped off the
+    /// rendered view: the model carries the lines without the gutters, the
+    /// `+`/`−` prefixes, the split layout's filler cells, or the tab expansion
+    /// `DiffLineText` bakes into the string because SwiftUI `Text` honours no
+    /// tab stops. `content` keeps the file's real tabs.
+    ///
+    /// Synchronous, like the other pure helpers here and unlike anything that
+    /// reads a repository: there is no subprocess and no I/O behind it, and a
+    /// Copy has to answer inside the event that asked for it. It is not free —
+    /// UniFFI takes `FileDiff` by value, so the model on screen is lowered into
+    /// a buffer and lifted back on the Rust side to slice N lines out of it —
+    /// but the cost is bounded by the diff already rendered, and it is paid
+    /// once per Copy rather than per repaint. Indices clamp in core rather than
+    /// trapping, so a selection that has briefly outlived its rows yields less
+    /// text instead of crashing.
+    static func diffText(of fileDiff: FileDiff, in range: Range<Int>) -> String {
+        copyDiffText(
+            fileDiff: fileDiff,
+            start: UInt32(clamping: range.lowerBound),
+            end: UInt32(clamping: range.upperBound)
+        )
+    }
+
     // MARK: - Commit history detail
 
     /// The files a commit changed and its line totals, from one `git log`.

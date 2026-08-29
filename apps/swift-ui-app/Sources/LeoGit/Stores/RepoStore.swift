@@ -51,19 +51,6 @@ final class RepoStore {
     /// from a file check that costs the poll nothing.
     var isMerging: Bool { status?.merging ?? false }
 
-    /// One meaning, exactly: *the working tree may differ from what any
-    /// derived view shows — re-derive if you care.* Bumped when the status
-    /// changed, on explicit refresh, and on refocus (`forceDiffReload`) —
-    /// deliberately not narrower: `git status` cannot tell whether an open
-    /// file's *diff content* changed when its row looks identical
-    /// (modified → still modified), and any row-comparison heuristic here
-    /// would reintroduce the Tauri client's staleness bug (its poll never
-    /// reloads the open diff, so terminal edits go stale until reselect).
-    /// This store signals possibility; `DiffStore`'s equality skip is where
-    /// reality is checked, so a bump for an unchanged file costs one
-    /// subprocess and zero repaints.
-    private(set) var workingTreeEpoch = 0
-
     /// Set when the last operation failed; surfaced as a banner and cleared on
     /// the next successful load.
     var errorMessage: String?
@@ -192,11 +179,10 @@ final class RepoStore {
     /// done a status-only refresh here.
     ///
     /// Not `refreshQuietly()`: this *is* the user's action completing, so a
-    /// failure to re-read is theirs to see rather than one tick of a streak,
-    /// and a successful read bumps the epoch whether or not the status value
-    /// moved — the file the discard rewrote may be the one the diff pane is
-    /// showing, and a status row that reads the same before and after says
-    /// nothing about its contents.
+    /// failure to re-read is theirs to see rather than one tick of a streak.
+    /// The file a discard rewrote may be the one the diff pane is showing, and
+    /// its status *letters* read the same before and after — what tells the
+    /// pane to look again is `FileEntry.statStamp`, which the rewrite moved.
     ///
     /// **A moved `HEAD` hands over to the full reload.** This action cannot
     /// have moved it, but a commit made in a terminal since the last tick can
@@ -222,7 +208,6 @@ final class RepoStore {
                 return true
             }
             if newStatus != status { status = newStatus }
-            workingTreeEpoch += 1
             errorMessage = nil
         } catch {
             errorMessage = error.displayMessage
@@ -241,15 +226,14 @@ final class RepoStore {
     /// (`errorMessage` stays whatever the last real action left — only a
     /// failure *streak* surfaces a banner, and only the poll's recovery
     /// clears it), history refetched only when HEAD actually moved (how
-    /// commits made in an outside terminal appear), and `workingTreeEpoch` bumped
-    /// only when the status changed — so an idle tick never makes the open
-    /// diff reload.
+    /// commits made in an outside terminal appear), and the status published
+    /// only when it changed — so an idle tick repaints nothing.
     ///
-    /// `forceDiffReload` is the refocus path: files may have been edited on
-    /// disk without their status rows changing, so coming back to the app
-    /// re-reads the open diff unconditionally, like the Tauri client's
-    /// `reloadActiveDiff` on focus.
-    func refreshQuietly(forceDiffReload: Bool = false) async {
+    /// This is also the refocus path, and it needs no forcing flag: a file
+    /// edited on disk while the app was away comes back with a moved
+    /// `FileEntry.statStamp`, which makes the status differ and re-keys the
+    /// open diff on its own.
+    func refreshQuietly() async {
         guard let repoPath else { return }
         let newStatus: RepoStatus
         do {
@@ -270,12 +254,8 @@ final class RepoStore {
         }
 
         let headMoved = newStatus.headSha != status?.headSha
-        let statusChanged = newStatus != status
-        if statusChanged {
+        if newStatus != status {
             status = newStatus
-        }
-        if statusChanged || forceDiffReload {
-            workingTreeEpoch += 1
         }
         if headMoved {
             let limit = currentHistoryLimit
@@ -330,7 +310,6 @@ final class RepoStore {
             status = newStatus
             commits = newCommits
             hasMoreHistory = newCommits.count == Int(historyLimit)
-            workingTreeEpoch += 1
             errorMessage = nil
         } catch {
             errorMessage = error.displayMessage

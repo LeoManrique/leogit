@@ -1186,20 +1186,31 @@
     unstaging the file reloads it as well: the bytes didn't move, but the diff
     being shown is against a different side.
 
-    Keyed per file, which is narrower than the native client's whole-status
-    epoch — an unrelated edit elsewhere in the tree re-tokenizes nothing here.
-    Same shape as the auto-select rule above: a `$derived` string settles before
-    the effect sees it, and the effect reloads only when the *same* path's stamp
-    moved. A different path means the user changed the selection, and that
-    selection's own load is already in flight. NUL joins the key's parts because
-    it is the one byte a git path cannot contain, so "is this the same file?"
-    can't be fooled by a filename with a space in it.
+    `head_sha` rides in the key too, for the half `stat_stamp` cannot see: the
+    diff is HEAD against the working tree, so moving HEAD changes it even when
+    the file is untouched. A `--mixed` reset is the case that proves it — the
+    bytes on disk and the status letters both stay exactly as they were while
+    the diff grows by everything the reset commit contained.
+
+    Keyed per file, so an unrelated edit elsewhere in the tree re-tokenizes
+    nothing here. Same shape as the auto-select rule above: a `$derived` string
+    settles before the effect sees it, and the effect reloads only when the
+    *same* path's key moved. A different path means the user changed the
+    selection, and that selection's own load is already in flight. NUL joins the
+    key's parts because it is the one byte a git path cannot contain, so "is
+    this the same file?" can't be fooled by a filename with a space in it.
   */
   const activeFileStamp = $derived.by(() => {
     const active = $repoState.activeFile
     if (!active) return ''
     const entry = $repoState.status.files.find((f) => f.path === active.path)
-    return entry ? `${entry.path}\u0000${entry.xy}\u0000${entry.stat_stamp ?? ''}` : ''
+    if (!entry) return ''
+    return [
+      entry.path,
+      entry.xy,
+      entry.stat_stamp ?? '',
+      $repoState.status.headSha,
+    ].join('\u0000')
   })
   let lastFileStamp = ''
   $effect(() => {
@@ -2260,6 +2271,7 @@
               diff={$repoState.activeFileDiff!}
               selection={null}
               blobSource={{ kind: 'workingTree', repoPath: $appState.repoPath }}
+              origPath={$repoState.activeFile?.orig_path ?? null}
               showSelection={false}
               syntaxHighlighting={$config?.syntax_highlighting ?? true}
               sideBySide={$config?.side_by_side_diff ?? false}
@@ -2347,6 +2359,7 @@
                         sha: $repoState.activeCommit.sha,
                       }
                     : null}
+                  origPath={$repoState.activeCommitFile?.orig_path ?? null}
                   showSelection={false}
                   syntaxHighlighting={$config?.syntax_highlighting ?? true}
                   sideBySide={$config?.side_by_side_diff ?? false}

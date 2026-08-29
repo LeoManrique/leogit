@@ -1,6 +1,6 @@
 # Plan — Cross-client feature parity (SwiftUI ⇄ Tauri)
 
-> Status: **in progress — WS-A…WS-E shipped 2026-08-27, WS-F through WS-J and WS-L…WS-N 2026-08-28, WS-O 2026-08-29. WS-P is next; WS-K is unblocked but needs a Linux machine (§6's sequencing note), so it is taken whenever that machine is available. WS-T is the deliberate last one.**
+> Status: **in progress — WS-A…WS-E shipped 2026-08-27, WS-F through WS-J and WS-L…WS-N 2026-08-28, WS-O and WS-P 2026-08-29. WS-Q is next. One named half is deliberately outstanding: the Tauri client's multi-line diff copy (DF-6), whose design is written out in that item. WS-K is unblocked but needs a Linux machine (§6's sequencing note), so it is taken whenever that machine is available. WS-T is the deliberate last one.**
 > The remaining work was re-cut into seventeen smaller workstreams (C…S) on
 > 2026-08-27 after WS-B proved too large to review as one piece — see §6.
 > Accepted 2026-08-27 with every open decision resolved. Per-workstream state
@@ -83,10 +83,10 @@ in code. "Make the current features work well" starts here (workstream A).
 
 ### 3.1 Defects — fixed
 
-Seventeen of the twenty are closed: twelve in WS-A, D-5 / D-7 / D-17's
-structural half with their hoists in WS-B, D-6 in WS-C, D-20 in WS-E and D-4 in
-WS-I. Kept as a register (IDs are referenced from §4) and trimmed to what each
-fix *is*, since the code now carries the reasoning.
+Nineteen of the twenty are closed: twelve in WS-A, D-5 / D-7 / D-17's
+structural half with their hoists in WS-B, D-6 in WS-C, D-20 in WS-E, D-4 in
+WS-I, and D-14 with D-15 in WS-P. Kept as a register (IDs are referenced from
+§4) and trimmed to what each fix *is*, since the code now carries the reasoning.
 
 | ID | Client | Fixed | Left over |
 |---|---|---|---|
@@ -99,6 +99,8 @@ fix *is*, since the code now carries the reasoning.
 | D-11 | Tauri | The HEAD-move reset was read as a backward slide and scrolled to the bottom of the fresh page, paging again. `log.resetSeq` marked the replacement. ✅ *WS-E* finished it: HI-2's append model deleted the slide, so `resetSeq` now means only "go to row 0" and the `skip > 0` hole it kept (a new commit while parked at offset 0 bumped nothing) has no case left to miss. | — |
 | D-12 | Tauri | An empty parse fell through to "Select a file to view its diff" with a file selected. Both diff panes now have an explicit "No Textual Changes" state, blank while the fetch is in flight. The test is `hasRenderableDiff`, not `!== null`: `parse_diff` returns null only for empty input, while a mode change or pure rename parse into a header with zero hunks — a blank pane, the same dead end one layer along. | — (WS-B: H-9 supplies the reason, and a failed load is an `Err` rather than an empty parse; WS-E: DF-10's presentation half). |
 | D-13 | Tauri | The header hand-rolled a status write that skipped `is_merging`, the `userDeselected` reconciliation, and the badge feed. It now takes the one refresh path as a prop: **one status writer in the client**. Checkout and undo also reload branches. | — (WS-F: post-op became status **+ log**, extracted as `reloadAfterHeadMove`). |
+| D-14 | Native | **Stale-diff scroll: no reset on file switch.** The pane had no scroll control at all, so switching files landed the reader at the previous file's offset, often past the end of the new one. ✅ *WS-P*: `DiffStore` publishes `rendered` — the identity of the diff *on screen*, its path plus the commit where there is one — and a bound `ScrollPosition` answers a change to it with `scrollTo(edge: .top)`. Every re-read of the same diff keeps the offset, which is §6.3's contract; the Tauri reset key gained the commit in the same pass, since one path in two commits is two different diffs. | — |
+| D-15 | Native | **Copying from a diff yielded garbage.** `.textSelection(.enabled)` sat on the whole row stack, so a drag beginning in the gutter pulled line numbers and `+`/`−` glyphs into the copy, and the tab expansion the pane needs (SwiftUI `Text` honours no tab stops) put spaces where the file has tabs. ✅ *WS-P*, and it is what finally consumed **H-16**: the gutter is a line handle (click, ⇧-click, a context menu, ⌘C, Escape) and the copy is `copy_diff_text` over the run's flat range, so it can contain neither the chrome nor a rendered tab. The gutter and glyph opt out with `.textSelection(.disabled)`, so a drag begun on them puts nothing on the clipboard. `onCopyCommand` returns nil when no run exists, so a within-line character selection answers ⌘C exactly as before — and *within-line* is all a native drag can ever be (**D-22**, deferred). | The Tauri half of the *multi-line* copy: its drag-select is already the file's lines for a unified diff and still interleaves a side-by-side one (DF-6). |
 | D-16 | Tauri | `Ctrl+P` reached the shell *and* pushed; ⌃` could not leave a focused terminal; Escape closed overlays instead of reaching `vim`. One rule now (FRONTEND §6.11): `attachCustomKeyEventHandler` releases only the toggle, and the window handlers test the event's origin. | — (WS-I narrowed the toggle to ⌃`; TE-1's remaining half is the app's *other* chords, deferred to ROADMAP). |
 | D-17 | Tauri | `tab_size: 999` and emptied fields persisted (and the emptied ones failed the save with a raw serde error). WS-B replaced the form's own clamp with `Config::normalized()`, which every writer passes through — including ones that never see this form — and whose bounds the controls now read (`config_bounds`) instead of restating. | — |
 | D-18 | Native | The warm-up fetch ran offline, and against remote-less repos, discarding its outcome. Now gated on the breaker *and* `status.hasRemote`, and reports to the breaker (RM-10). Waits on the new `RepoStore.awaitLoadSettled()` so the gate reads a real status. | — |
@@ -110,11 +112,13 @@ fix *is*, since the code now carries the reasoning.
 
 ### 3.2 Defects still open
 
+One of the original twenty, plus two this plan's own work uncovered (D-21, D-22).
+
 | ID | Client | Defect | Severity |
 |---|---|---|---|
+| D-21 | Both | **A directory-backed entry has no content stamp, so its open diff can go stale.** `FileEntry.stat_stamp` is `symlink_metadata` mtime + size (`core/src/git.rs:708-724`), which for a *directory* describes its top-level entry list and not what is inside. Two entries are directories: a **submodule whose recorded pointer moved** (`SC..`, which `is_dirty_submodule` lets through, so a diff *is* read and renders `-Subproject commit A` / `+Subproject commit B`) and an untracked directory or embedded repo. Move that submodule to another commit in a terminal without changing its top-level entries and nothing in the diff's key moves — the pane keeps showing the old target indefinitely, and the poll can't catch it either, since `parse_ordinary_entry` discards porcelain v2's `hH`/`hI` gitlink shas so `RepoStatus` compares equal too. The fix is to keep those two fields and let a submodule entry's stamp be them: they are exactly what the diff renders, they cost nothing (they are already on the line being parsed), and `stat_stamp` is opaque by contract. Narrow — before WS-P narrowed the key, only the native client's unconditional refocus reload caught it, and the Tauri client never did. | Low |
+| D-22 | Native | **A drag through the diff cannot select more than one line.** `.textSelection` makes a `Text` selectable; it does not join separate `Text` views into one selection domain, and the pane draws one `Text` per line, so a drag is confined to the line it began in no matter where the grant is attached. **Deferred by decision — see §10.** Multi-line copying is served by the gutter run instead (click, ⇧-click, *Select All Lines*, ⌘C), which is strictly more faithful than a drag would be, so what is actually missing is only the *gesture*. | Low |
 | D-9 | Native | **Collapsing the terminal reflows the emulator to one row.** The zero-height frame is full-width, so SwiftTerm's degenerate-size bail (width *and* height zero) doesn't fire; the buffer reflows to `MINIMUM_ROWS = 1` and each collapse/expand cycle sends a spurious `SIGWINCH` (TerminalDock's `.frame(height: 0)` + SwiftTerm `AppleTerminalView.swift:353-356`). | Medium |
-| D-14 | Native | **Stale-diff scroll: no reset on file switch.** No `ScrollViewReader` exists; `DiffRow.id` is a flat index, so switching files lands at the previous file's scroll offset (verified — no `scrollPosition`/`scrollTo` anywhere in `Sources/LeoGit`). Both Tauri and GitHub Desktop reset on file change. | Medium |
-| D-15 | Native | **Copying from a diff yields garbage.** `.textSelection(.enabled)` spans the gutters, so a copy includes line numbers and `+`/`−` glyphs; tab expansion means tabs come out as spaces (`DiffView.swift`; `DiffLineText.swift:86-88`). GitHub Desktop rebuilds clipboard text from the model. WS-E took the Tauri half of the interim (`user-select: none` on the gutter and prefix); native's `.textSelection` is still pane-wide. | Medium |
 
 ### 3.3 Standing efficiency wastes (quantified)
 
@@ -131,7 +135,7 @@ behavior change the user would notice — except battery.
 | E-6 | ✅ *WS-J* with BG-4. An idle repository publishes nothing. The same pass fixed the native mirror of it: `RepoDirectoryStore.noteActiveStatus` wrote an identical `RepoSync` into an observed dictionary on every tick, invalidating every switcher row. | was continuous idle re-render, both clients |
 | E-7 | ✅ *WS-N.* `RepoStore.refreshWorkingTree()` re-reads the status only, for the actions that cannot move `HEAD`. Not `refreshQuietly` either: this *is* the user's action completing, so a failed read is theirs to see rather than one tick of a streak, and the epoch is bumped unconditionally since the file a discard rewrote may be the one on screen. The 30-file case also stopped being 30 calls — CH-1's bulk discard is one. | was one `git log`@500 per row action |
 | E-8 | ✅ *WS-B.* `DiffOptions` makes the render artifacts opt-in, so the native path no longer builds HTML for the bridge to drop (H-8). `DiffLine.text` became `Option` in the same pass, dropping a duplicate of every line's content from both wires. *WS-O* finished the pairing half in the other direction: it is asked for by whichever host is about to render the split layout and by neither in the unified one, where the Tauri client had been building and serializing it unconditionally. | was ~40 k allocations per 20 k-line diff load |
-| E-9 | Native | Whole-status epoch re-tokenizes the open diff when *any* file changes (~19–140 ms + 2 `git show` per unrelated edit); a per-file `stat_stamp` compare would gate it. No phase-2 debounce either (Tauri: 80 ms). | up to ~140 ms background CPU per unrelated edit |
+| E-9 | ✅ *WS-P.* `DiffView`'s `LoadKey` carries the open file's own `stat_stamp` and `xy` plus the status's `head_sha`, so an unrelated edit anywhere in the tree re-reads nothing — the Tauri client's DF-1 shape, which also closed a hole in *both*: the working-tree diff is `HEAD` against disk, so a `--mixed` reset changes it while leaving the bytes and the status letters untouched. `workingTreeEpoch` and the refocus `forceDiffReload` went with it; a file edited while the app was away comes back with a moved stamp on its own. Phase two picked up the 80 ms debounce beside it. | was up to ~140 ms background CPU per unrelated edit |
 | E-10 | ✅ *WS-N.* The fit is held in `@State` and re-derived from one `.onChange` over its three inputs (path, measured width, faces), so a hover, a selection change or a checkbox click no longer re-measures every visible row. TECHNICAL.md now describes what the code does. | was ~350 text measurements per interaction |
 | E-11 | Tauri | Diff viewer mounts every row (no virtualization) and phase 2 re-parses N `innerHTML`s in one tick. **Terminal half closed**: the size guard landed in core (H-15), output coalesces under back-pressure instead of crossing once per 4 KiB read (H-14), and each delivery is now one channel send rather than a window broadcast (WS-I). Virtualization is the ROADMAP item DF-4 defers. | terminal half closed; virtualization deferred to ROADMAP |
 | E-12 | ✅ *WS-I.* `start` / `resize` / `close` are `#[tauri::command(async)]`, off the main thread. `write` deliberately stayed sync — a sync command runs inline in IPC arrival order, and that order *is* the keystroke-ordering guarantee. | was a ~250 ms hitch on every teardown |
@@ -501,8 +505,9 @@ and matched, not that it was skipped.
 - **CH-5 · Rename display.** ✅ *WS-N* for both file lists (they share
   `ChangedFileList`): `orig_path → path`, the from-side fully muted, both sides
   greedy so they split the row evenly and truncate filename-first independently.
-  The native **diff header** is still destination-only — DF-8's remaining half,
-  WS-P.
+  ✅ *WS-P* gave the native **diff header** the same treatment (DF-8), sourced
+  from the parsed diff rather than from the entry — see that item for why the
+  two sources differ.
 - **CH-6 · Embedded/submodule row treatment.** ✅ *WS-N.* The ↪ replaces the
   status letter (blue for an embedded repo, muted for a dirty submodule) rather
   than sitting beside it, because the letter is the part that would be wrong. The
@@ -598,8 +603,11 @@ and matched, not that it was skipped.
   `path`, `xy` and `stat_stamp`, read by an `untrack`ed effect that reloads
   only when the *same* path's key moved — a different path means the selection
   changed and its own load is already in flight. The §8 staleness row retired
-  with it. The native gate (E-9) is still WS-P's, and this is the shape to
-  copy. → WS-P (native gate)
+  with it. ✅ *WS-P* for the native gate (E-9), copying that shape into
+  `DiffView`'s `LoadKey` — and adding `head_sha` to **both** clients' keys,
+  which neither had: the working-tree diff is `HEAD` against disk, so a
+  `--mixed` reset changes it while leaving the bytes and the status letters
+  exactly as they were.
 - **DF-2 · Side-by-side.** ✅ *WS-O, both clients.* The native split layout is an
   arrangement of one row model rather than a second renderer — `DiffStore`
   holds the flat line list either way and a pair carries indices into it, so
@@ -653,12 +661,30 @@ and matched, not that it was skipped.
   prefixes, wrapping, side-by-side interleaving, and native's tab expansion,
   since `line.content` keeps real tabs). ✅ *WS-E* for the Tauri interim —
   `user-select: none` on the prefix, joining the gutter that already had it, so
-  an ordinary drag-select yields the file's own lines. Native's interim (scope
-  `.textSelection` to the content text) is open. The core helper that keeps the
+  an ordinary drag-select yields the file's own lines. Native has no interim, and needs none: no
+  arrangement of `.textSelection` gives it a drag that spans lines at all
+  (**D-22**), so the model-based run *is* the native answer rather than a
+  refinement of one. The core helper that keeps the
   two byte-identical landed in WS-B (`copy_text`, exported as `copy_diff_text`)
-  and is still deliberately unconsumed — the workstream's one exception to the
-  no-dead-surface rule, and the only thing that closes D-15 rather than
-  narrowing it. → WS-P
+  and ✅ *WS-P* gave it its consumer, natively. The rule both clients
+  implement: **within a line, the characters the reader selected; across lines,
+  those lines from the model** — a multi-line copy is a copy of *lines*, and
+  the parsed diff is the only faithful source for one. Which gesture picks the
+  lines is per-platform (FRONTEND §8), because SwiftUI hands back neither the
+  extent of a `Text` selection nor a hook on the copy: natively the **gutter**
+  is the line handle (click, ⇧-click, a context menu, ⌘C, Escape) while the
+  content keeps its character selection, and the pane claims the Copy command
+  only while a run exists. **The half left is Tauri's**, where the browser's
+  own selection already spans rows: hang a `copy` listener off `.diff-body`,
+  map the anchor and focus nodes to their rows' flat indices through a
+  `data-line-index` attribute, and when they differ call `copy_diff_text` for
+  that range instead of letting the browser answer. Two things to know going
+  in: a `copy` handler must set `clipboardData` **synchronously** and the shim
+  is `#[tauri::command(async)]`, so either `preventDefault` and write through
+  the clipboard plugin after the await (the OSC 52 path already does exactly
+  that, and a ⌘C is the user gesture WebKit wants), or keep a synchronous
+  command for it; and a selection *inside* one line must be left to the
+  browser, or copying two words would yield the whole line. → Tauri half open
 - **DF-7 · Empty-parse reason** (D-12) — ✅ *WS-B.* `EmptyDiffReason` names the
   three situations one caption used to cover, and both clients render each
   honestly. The whitespace case needed the fused call to exist at all: when the
@@ -669,20 +695,27 @@ and matched, not that it was skipped.
 - **DF-8 · Header details.** ✅ *WS-E* for the minus sign: Tauri renders `−`
   (U+2212) in the file header's `−N`, the commit card's totals and the removed-line
   prefix, so both clients now use one glyph and STYLE.md carries the header
-  rule it only had for rows. Still open, both native: `old → new` for renames
-  (source it from the parsed diff, which describes what is rendered) and
-  suppressing `+0 −0`, which native shows on binary diffs. D-19's doubled
-  `NoNewline` row was the fourth alignment; fixed in WS-A. → WS-P
+  rule it only had for rows. ✅ *WS-P*, and it corrected the Tauri half as well:
+  a rename reads `old → new` under the file's name, sourced from
+  `FileEntry.orig_path` and **not** from the parsed diff, because the diff
+  cannot answer it — both reads pathspec-limit to the file's current path, so
+  git never pairs it with the deleted counterpart and reports a rename as a
+  plain add. Sourcing it from the diff also rendered `/dev/null → <file>` for
+  every added file, which the Tauri header had been doing; core now answers an
+  absent side as absence. Each count is drawn only when non-zero, so a binary
+  file says nothing rather than `+0 −0`, and the counts are gated on the
+  payload being a diff **of the file the header is naming**, which a seamless
+  reload makes a real distinction. D-19's doubled `NoNewline` row was the
+  fourth alignment; fixed in WS-A.
 - **DF-9 · Slow-load presentation** (D-20). ✅ *WS-E, both clients.* Neither
   unmounts the old diff any more: it dims and takes a spinner overlay. Tauri
   through a `SeamlessDiffPane` wrapper shared by the two panes that had the rule
   written twice; native by making the threshold a modifier on `content` rather
   than a branch beside it — a branch was what destroyed the `ScrollView`'s
   identity, which is why the store's equality skip preserved nothing visible.
-  FRONTEND §6.3 now also carries the scroll contract (*same file → keep scroll;
-  different file → reset*), which both clients already keyed on the rendered
-  diff's own paths. D-14 (native's scroll reset on file switch) is the half
-  left. → WS-P
+  FRONTEND §6.3 now also carries the scroll contract (*same diff → keep scroll;
+  different diff → reset*), keyed on the rendered diff's own identity. ✅ *WS-P*
+  took the half that was left, D-14.
 - **DF-10 · Failure surface.** ✅ *WS-E.* Tauri clears the stale payload and
   states the failure inline in the pane, matching native. **The retry WS-D put
   on these two loads was dropped deliberately**, not lost: native has none, a
@@ -696,10 +729,12 @@ and matched, not that it was skipped.
   which had no branch at all and rendered git's raw `Subproject commit …-dirty`
   line, against STYLE.md's explicit rule — gained the pane and the skipped
   subprocess together.
-- **DF-12 · Phase-2 debounce.** Tauri debounces highlighting 80 ms; native
-  starts a tokenize per file survived while arrowing. Add the same 80 ms +
-  generation re-check natively; promote the constant next to
-  `slowLoadThreshold`. → WS-P
+- **DF-12 · Phase-2 debounce.** ✅ *WS-P.* `DiffStore.highlightDebounce` (80 ms,
+  beside `slowLoadThreshold`) sits between the plain render and the tokenize, so
+  arrowing down a file list tokenizes only the file the reader stopped on. A
+  cancelled sleep resumes rather than throwing, so the guard after it is what
+  stops the work: `generation` catches the reader moving on, `Task.isCancelled`
+  catches the pane leaving the hierarchy — a tab change moves no generation.
 - **DF-13 · Wrap break policy.** ✅ *WS-O — checked, and the risk is not real.*
   SwiftUI `Text` uses `byWordWrapping`, which Apple documents as wrapping "at
   word boundaries, unless the word doesn't fit on a single line" — so a
@@ -1167,7 +1202,7 @@ rather than keeping it beside the field.
 | H-13 | ✅ `FileStatus::letter()` / `label()` + the `file_status_styles()` table both hosts read once | three-way glyph drift (CH-4) | shipped |
 | H-14 | ✅ Terminal reader→emitter split with a bounded channel (flow control) and back-pressure-driven coalescing; `resize_terminal` ignores `< 2×2` | E-11/E-12 transport waste, native's unbounded relay, the FitAddon-internals dependency (TE-2/TE-3) | shipped |
 | H-15 | ✅ `DiffSizeGuard` (4 MiB total / 5 000 bytes per line) with a `show_anyway` escape | the missing size guard in both (DF-4) | shipped |
-| H-16 | ✅ `copy_text(file_diff, start, end)` | byte-identical clipboard in both (DF-6) | shipped |
+| H-16 | ✅ `copy_text(file_diff, start, end)`, consumed natively in WS-P | byte-identical clipboard in both (DF-6) | shipped; Tauri's caller outstanding |
 | H-17 | `core::net` connectivity observer emitting online/offline over the event seam — Linux netlink backend first, then macOS/Windows | Tauri's hard-wired `navigator.onLine` on WebKitGTK; eventually native's separate `NetworkPathObserver` (BG-3) | WS-K |
 | H-18 | ✅ `gh_clone` through the `git clone` streaming seam (`gh repo clone … -- --progress`) | the progress-less gh clone in both clients (CL-6) | shipped |
 | H-19 | ✅ `fetch(.., background)` picks the 8/8/12 s budget for automatic fetches | an automatic fetch holding the single slot on the 15/30/600 s user budget (BG-8) | shipped |
@@ -1241,9 +1276,11 @@ is mostly adoption of already-proven native behavior.
      harmless (WS-R may simplify it).
    - **`resize_terminal` ignores a `< 2×2` grid itself**, so D-9 (WS-R) is purely
      the native inner-frame pin.
-   - **H-16 still has no consumer.** `copy_text` / `copy_diff_text` are this
-     plan's one deliberate dead surface, waiting on DF-6's native half. Wire it
-     in WS-P or delete it.
+   - **H-16 had no consumer for six workstreams.** `copy_text` /
+     `copy_diff_text` were this plan's one deliberate dead surface; WS-P wired
+     the native side to them (DF-6), and the Tauri `copy` listener is what
+     finishes the job. A hoist landed ahead of its caller is survivable exactly
+     as long as the workstream that owes the caller is named.
 3. ✅ **WS-C — Tauri repo switcher & clone. Shipped 2026-08-27.** RM-3's
    remainder, RM-4, RM-7(T), RM-8, RM-9, CL-1/2/3/5/7(T) and **D-6**; RM-2 was
    decided against instead, in *both* clients. Clone reached the startup picker,
@@ -1894,125 +1931,217 @@ is mostly adoption of already-proven native behavior.
       `UpdateChip` keeps its own alert on purpose — its title names the thing
       that failed ("Could not open the release page"), which is better than
       "Error".
-15. **WS-O — Native split diff (M).** ✅ **Shipped 2026-08-29.**
-    **DF-2 on both clients**, plus **DF-13** (checked, no change needed) —
-    per-item state in §4.6. The native split layout is an arrangement of one
-    row model rather than a second renderer: `DiffStore` holds the flat line
-    list either way and, when the layout asked for it, `pairs` — core's
-    `SbsPair`s carrying *indices* into those rows, so both columns read the
-    same lines, each side indexes its own token row, and one `DiffLineCell`
-    draws a cell for both arrangements. The pairing stays core's
-    (`build_sbs_pairs`) and crosses the bridge only while the split layout is
-    on screen, which is now true of the **Tauri** client as well. The toggle
-    moved out of Settings into the diff header in both clients, still persisted
-    in the shared `side_by_side_diff`. New native file:
-    `Design/DiffLineRow.swift`. The FFI gained an `SbsPair` record and a
-    `sbs_pairs` field on `DiffPayload` (67 exports, unchanged — a record is not
-    one). Gates: `pnpm check` 0/0 over 153 files, prettier clean,
-    `pnpm tauri build` bundled, zero-warning `just mac-build`, 178 core + 24
-    bridge + 2 host tests, clippy-pedantic 165 core with `leogit` /
-    `leogit-ffi` at zero.
+15. **WS-O — Native split diff (M).** ✅ **Shipped 2026-08-29.** DF-2 on both
+    clients, plus DF-13 (checked, no change needed) — per-item state in §4.6.
+    The native split layout is an arrangement of one row model rather than a
+    second renderer: `DiffStore` holds the flat line list either way and, when
+    the layout asked for it, `pairs` — core's `SbsPair`s carrying *indices* into
+    those rows. Both arrangements are branches inside one `ScrollView`, and the
+    branch reads the loaded pairing rather than the setting, so the pane changes
+    on the frame its data arrives instead of blanking for the length of a
+    re-read. The toggle moved out of Settings into the diff header in both
+    clients, still persisted in the shared `side_by_side_diff`. New native file:
+    `Design/DiffLineRow.swift`. Also fixed here, in the **Tauri** client,
+    because this work depended on it: the *hide whitespace* reload called
+    `loadDiffForFile` without `force`, so the loader's "already open"
+    short-circuit returned before reading and the setting only took effect on
+    the next file clicked — and it never touched the History pane at all.
 
-    **One defect found on the way, in the Tauri client, and fixed here because
-    this work depended on it.** The *hide whitespace* reload called
-    `loadDiffForFile(activeFile)` **without `force`**, so the loader's "this
-    file is already open" short-circuit returned before reading: the setting
-    only took effect on the next file the user clicked. It also never touched
-    the History pane. Both panes now re-read on either diff-read setting, from
-    one `$derived` key read by an `untrack`ed effect — the shape WS-D's finding
-    prescribes, and the old effect was not using it, so it re-ran on every
-    status tick to do nothing.
-
-    Findings for WS-P and the native block after it:
-    - **Split the equality skip along what each artifact is a function of.** A
-      layout change returns an *identical* `file_diff` with a pairing that
-      appeared or vanished, so comparing the payload whole would rebuild the
-      rows and drop the syntax colour every time the reader switched
-      arrangement. `modelMoved` / `pairingMoved` are compared separately.
-      **Any second artifact on a payload wants this**, and the general rule is:
-      compare at the granularity of what you would rebuild, not at the
-      granularity of the reply.
-    - **Two arrangements are branches *inside* one `ScrollView`, never two
-      scroll views** — WS-N's identity rule again (a branch is a different view;
-      a modifier is not). And the branch reads the **loaded pairing**, not the
-      setting, so the pane changes on the frame its data arrives instead of
-      blanking for the length of a re-read. `store.pairs.isEmpty` ⟺ the unified
-      layout is what was asked for, which makes the branch self-describing.
-    - **D-14's fix must not reset scroll on a layout change.** WS-P adds the
-      `ScrollViewReader` that resets scroll on a *file* switch; the key it
-      resets on has to be the file, not the rendered payload, or it will undo
-      what this workstream deliberately preserves — FRONTEND §6.3's same-file
-      rule covers a layout change, and the Tauri client's own reset key was
-      trimmed to match.
+    Findings still live for the workstreams after it:
+    - **Compare at the granularity of what you would rebuild, not at the
+      granularity of the reply.** A layout change returns an *identical*
+      `file_diff` with a pairing that appeared or vanished, so comparing the
+      payload whole would drop the rows and the syntax colour every time the
+      reader switched arrangement — hence `modelMoved` / `pairingMoved`. Any
+      second artifact on a payload wants the same treatment.
+    - **`usize` does not cross the bridge.** Core's `SbsPair` indexes with it,
+      so the mirror is purpose-built at `u32` and saturates rather than
+      wrapping. Any future core type with a `usize` field needs the same.
+    - **Anything that adds a re-read to a surface has to check what the old
+      read was silently clearing.** The size guard's *Show diff anyway* was a
+      per-call flag, so the moment the layout control made the diff re-read from
+      inside its own header, revealing a large diff and then switching
+      arrangement re-armed the guard and removed the control that had got the
+      reader past it. Both clients now remember *which diff* was revealed.
+    - **A config field can belong to a surface other than Settings.** The layout
+      is patched from the diff header, which is why the Settings patch must keep
+      *not* naming it — naming it would revert whatever the header last wrote
+      while that window stood open. **WS-R rewrites that patch field-wise and
+      must not "complete" it by adding `sideBySideDiff`.**
+    - **A control the user clicks must write synchronously, and a shared file
+      needs a queue rather than only a lock.** A SwiftUI control re-reads its
+      `Binding` in the same layout pass and a `Task` does not start there, so a
+      deferred write leaves the pressed segment snapping back for a frame.
+      Core's `patch_config` lock keeps the file coherent but decides *nothing*
+      about order: two writes in flight are two patches whose winner is the
+      scheduler's. Both clients chain their writes in the store, and a store
+      that reads the same file needs the other half — `AppConfigStore.reload()`
+      drops a read a write overtook. **All three matter directly to WS-R.**
     - **DF-13 is closed by the platform, and both candidate fixes were worse.**
       SwiftUI `Text` uses `byWordWrapping`, documented as breaking a word that
-      cannot fit a line on its own, so a minified or base64 run folds rather
-      than overflows. `.byCharWrapping` is not reachable from `Text`, and
-      zero-width break insertion in the tab-expansion pass would put U+200B
-      into every copy taken from the pane — which is what **DF-6** (WS-P)
-      exists to prevent. Do not reopen it there.
-    - **`usize` does not cross the bridge.** Core's `SbsPair` indexes with it,
-      so the mirror is purpose-built at `u32` — the width the flat index
-      already crosses at in `copy_diff_text` — and saturates rather than
-      wrapping, which degrades to a filler cell because `u32::MAX` indexes no
-      row. The size guard makes it unreachable anyway. Any future core type
-      with a `usize` field needs the same treatment.
-    - **A config field can belong to a surface other than Settings.** The
-      layout is patched from the diff header, which is why the Settings patch
-      must keep *not* naming it — naming it would revert whatever the header
-      last wrote while that window stood open. WS-R rewrites that patch
-      field-wise and must not "complete" it by adding `sideBySideDiff`.
-    - **A second config writer makes the write chain a store concern.** Tauri's
-      chained `patchConfig` moved from `SettingsOverlay` into
-      `stores/config.ts`, so ordering holds across surfaces; the form keeps
-      only what a form needs (the error line, the `formSeq` rebuild, the
-      discovery walk). Natively the equivalent is
-      `AppConfigStore.setSideBySideDiff`, whose `pendingSideBySide` shadow is
-      what makes the control answer on the click **and** makes a refused write
-      an observable change back — a setter that left the store untouched would
-      leave the pressed segment showing a layout that never took.
-    - **A control that cannot act is worse than no control.** The layout
-      segments are absent on a binary diff, an empty state, a failure and a
-      dirty submodule — which also exposed that the header's `+N −N` had been
-      describing the *previously open* file on a dirty submodule, since that
-      row is answered before the read and so never clears the store.
-    - **A "just this once" escape has to know what *once* means, and it is not
-      one request.** The size guard's *Show diff anyway* was a per-call flag in
-      both clients, so the moment the layout control made the diff re-read from
-      inside its own header, revealing a 4 MiB diff and then switching
-      arrangement re-armed the guard, threw the diff away **and** removed the
-      control that had got the reader past it — unrecoverable from where the
-      click was made. Both clients now remember *which diff* was revealed (the
-      file, plus the commit where there is one, and deliberately not the
-      working-tree epoch), so every re-read of that diff keeps it and a
-      different one gets the guard back. **Anything that adds a re-read to a
-      surface has to check what the old read was silently clearing.**
-    - **A control the user clicks must write synchronously.** A SwiftUI control
-      writes through its `Binding` and re-reads it in the same layout pass, and
-      a `Task` does not start there — so wrapping the write in one leaves the
-      segment snapping back for a frame, defeating the shadow whose whole job
-      is to answer on the click. `setSideBySideDiff` is `nonisolated`-free and
-      synchronous; the `await` lives inside the `Task` it owns.
-    - **Anything that writes a shared file needs a queue, not just a lock.**
-      Core's `patch_config` lock keeps the file coherent, but it decides
-      *nothing* about order: two clicks in flight against it are two patches
-      whose winner is the scheduler's, and the loser is what persists. The
-      native writer chains on the previous write's `Task` and only clears the
-      pending slot if it is still the one that set it; the Tauri writer chains
-      in `stores/config.ts`. A store that reads the same file needs the other
-      half — `AppConfigStore.reload()` drops a read that a write overtook,
-      since the read holds the file from *before* it.
-16. **WS-P — Native diff polish (S/M).** Smaller than it was: WS-E took DF-9
-    (with D-20) and DF-11 on both clients rather than leaving native behind.
-    What is left: **D-14** (no scroll reset on file switch — no `ScrollViewReader`
-    exists, and FRONTEND §6.3 now states the contract this has to meet).
-    DF-6 + D-15 (rebuild clipboard text from the line model — **this is where
-    WS-B's `copy_text` gets its consumer, or gets deleted**; it is the plan's
-    one standing dead surface, and the Tauri interim WS-E shipped narrows the
-    damage without closing it). DF-8's remaining native half (rename header from
-    the parsed diff, suppress `+0 −0`). DF-12 + E-9 (the 80 ms debounce and the
-    per-file `stat_stamp` gate — DF-1's native half, which is what stops a
-    whole-status epoch re-tokenizing the open diff on an unrelated edit).
+      cannot fit a line on its own. `.byCharWrapping` is not reachable from
+      `Text`, and zero-width break insertion in the tab-expansion pass would put
+      U+200B into every copy taken from the pane — which is precisely what
+      **DF-6** exists to prevent, and a live constraint on how DF-6 is closed.
+16. **WS-P — Native diff polish (S/M).** ✅ **Shipped 2026-08-29.** D-14, D-15,
+    DF-6's native half, DF-8's two native halves and DF-12 + E-9; per-item state
+    in §3 and §4.6. One half is deliberately left and named: the Tauri client's
+    *multi-line* copy, whose design is written out in DF-6.
+
+    Four defects, three of which came from the pane deriving something from the
+    wrong source. **D-14, the reader's place in the file:** `DiffStore` publishes
+    `rendered`, the `DiffIdentity` (source + path) of the payload *on screen*,
+    and `DiffView` binds a `ScrollPosition` that answers a change to it with
+    `scrollTo(edge: .top)`. Every re-read of the same diff keeps the offset.
+    **DF-8, what the header says:** a rename reads `old → new` under the file's
+    name, and each of `+N` / `−N` is drawn only when non-zero. **DF-12 + E-9,
+    what makes it re-read:** `LoadKey` carries the open file's own `stat_stamp`
+    and `xy` plus the status's `head_sha`, and phase two waits out
+    `highlightDebounce` (80 ms). `RepoStore.workingTreeEpoch` and the refocus
+    `forceDiffReload` were deleted with the last thing that read them.
+
+    Two one-line fixes went into the **Tauri** client to keep the contracts
+    honest in both: its scroll-reset key gained the commit (one path in two
+    commits is two different diffs, and stepping through History with a file
+    selected kept the previous commit's offset), and its freshness key gained
+    `head_sha`.
+
+    **DF-6 / D-15, what a copy is a copy of.** `copy_diff_text` had sat unused
+    in core, the bridge and the Tauri shims since WS-B. It has a consumer: the
+    native gutter is a **line handle** — click a number, ⇧-click to extend,
+    right-click for *Copy N Lines* / *Select All Lines*, ⌘C, Escape — and the
+    clipboard text is `copy_diff_text` over the run's flat range, so it carries
+    none of what the pane drew around the code and keeps the file's real tabs.
+    Dragging the content still selects characters and copies exactly that:
+    `onCopyCommand` returns **nil** when no run exists, so the two selections
+    never contend for ⌘C. That character selection is confined to one line and
+    always was — **D-22**, deferred by decision after two failed attempts to
+    treat it as a bug; §10 carries the analysis and the ways out.
+
+    Gates: zero-warning `just mac-build`, `pnpm check` 0/0 over 153 files,
+    prettier clean, `pnpm tauri build` bundled, **181** core (three new: the
+    absent-side parse, the synthesised header, the dropped marker) + 24 bridge
+    + 2 host tests, `cargo fmt --check` clean, clippy-pedantic 161/163 core —
+    two below the standing baseline, from extracting `format_patch_path` — with
+    `leogit` and `leogit-ffi` at zero. The FFI surface is unchanged at 67
+    exports: the copy consumes a function that was already there.
+
+    Findings for WS-Q and the workstreams after it:
+    - **A store that a view reads should publish what it *is showing*, not only
+      what it holds.** `payload` describes a diff without naming it, and under a
+      seamless reload the diff it describes is the *previously* open file's for
+      the length of the load. One published identity answered three separate
+      questions — when to reset scroll, whether the `+N −N` totals belong beside
+      the name in the header, and whether the rename arrow does. Any pane that
+      keeps stale content on purpose needs the same distinction, and WS-Q's
+      commit detail is the next one that will.
+    - **Publish that identity outside the equality skip.** Two *different* files
+      can parse to an equal payload — an identical one-line change in two files
+      — and a skip that also skipped the identity would leave the header
+      captioning the wrong file and the reader scrolled into the middle of a
+      diff they just opened.
+    - **A key that gates a read must name everything the answer is a function
+      of.** Narrowing native's whole-status signal to the open file was the
+      point of E-9, but `stat_stamp` and `xy` alone would have *lost* coverage
+      the coarse signal had: the working-tree diff is `HEAD` against disk, so a
+      `--mixed` reset changes it while leaving the bytes and the status letters
+      untouched. Both clients were missing `head_sha`; both have it now.
+    - **Prefer the platform's own scroll state over an imperative reader.**
+      `ScrollPosition` (macOS 15+) with `scrollTo(edge: .top)` needs no
+      `scrollTargetLayout` and no row to exist yet, and Apple documents an edge
+      as *stable across content-size changes* — so the jump survives the rows
+      landing after it, and clears itself the moment the user scrolls. A
+      `ScrollViewReader` keyed on a row id would have had to wait for that row.
+    - **Watch the scroll from outside the branch that owns the scroller.** A
+      binary file, an empty state or a failure takes the `ScrollView` out of the
+      hierarchy, and a modifier that is not there cannot notice the diff that
+      replaces it.
+    - **A cancelled `Task.sleep` resumes; it does not throw out of the
+      function.** With `try?` in front of it, the guard *after* the sleep is the
+      only thing that stops the work — and `generation` alone is not enough,
+      because a pane leaving the hierarchy (a tab change) cancels the task
+      without starting a new load. `Task.isCancelled` is the other half.
+    - **A trailing newline is a terminator, not a line.** `raw.split('\n')`
+      yields a final `""`, which the hunk body read as an empty context row —
+      a blank numbered line at the foot of every diff in both clients, carried
+      into `html`, `sbs_pairs` and anything copied. Only the *last* one goes:
+      a genuinely blank context line also arrives as `""` when a tool has
+      stripped the trailing space git writes.
+    - **`FileDiff` cannot answer "renamed from what?", and looked as if it
+      could.** The parser fills `old_path`/`new_path` from git's `--- a/` and
+      `+++ b/` lines and ignores `rename from`/`rename to` entirely — but the
+      deeper problem is upstream of the parser: `diff_args_for_file` and
+      `get_commit_diff` both pathspec-limit to the file's *current* path, so
+      git's rename detection never sees the counterpart and emits a plain add.
+      A pair that differs therefore means an add or a delete, never a rename.
+      `FileEntry.orig_path` is the answer, in both panes, and core drops it for
+      a copy — which has a source but took nothing from it. **A field being
+      present is not the same as it being answerable; check what the command
+      was actually asked before sourcing a fact from its output.**
+    - **`FileEntry.stat_stamp` is `None` for commit files by design** (immutable
+      history), so the freshness gate is a working-tree concern only and the
+      History pane needs no equivalent.
+
+    **Three defects the copy work exposed in core, all fixed here.**
+    `strip_path_prefix` left `/dev/null` intact, so `old_path` was `/dev/null`
+    for every added file and `new_path` was for every deleted one — a header
+    comparing the two sides to spot a rename read every add as
+    `/dev/null → <file>`, which the **Tauri** client had been rendering for as
+    long as that header has existed. It is answered as absence now, the way
+    `parse_binary_marker` already answered it, and `build_patch` writes it back
+    as `/dev/null` so a synthesised header still applies. `copy_text` emitted
+    `\ No newline at end of file` as if it were a line. And the parser
+    materialised the patch's own trailing newline into an **empty context row**
+    at the foot of every diff — a blank numbered line in both clients, and one
+    line too many in anything copied. Three tests pin the three (181 core now).
+
+    **The rename arrow comes from the entry, not the diff, in both clients.**
+    Both reads pathspec-limit to the file's current path (`git diff HEAD --
+    <path>`), so git never sees the deleted counterpart and reports a rename as
+    a plain add: `FileDiff`'s two paths cannot answer "renamed from what?" at
+    all. `FileEntry.orig_path` can, in the working tree and in commit detail
+    alike, and it is what the file lists already read. The Tauri viewer takes it
+    as a prop now. **This reverses what §4.6's DF-8 line used to prescribe** —
+    "source it from the parsed diff" was written before anyone checked whether
+    the parsed diff *had* the answer.
+
+    Findings on the copy half specifically:
+    - **Two selections can coexist if they live on different surfaces.** The
+      gutter addresses lines, the content addresses text, and neither gesture
+      can reach the other's target — which is what let the character selection
+      survive a change that was originally framed as replacing it. GitHub's own
+      diff splits it the same way. The corollary is the ⌘C rule: the pane must
+      be able to *decline* the Copy command, or whichever selection is wired
+      wins even when the reader meant the other.
+    - **`onCopyCommand(perform:)` takes an optional closure, and the optional is
+      the whole design.** Passing `nil` opts the view out and the command
+      continues down the responder chain to the text selection. Anything that
+      wants to conditionally claim a system command should look for this shape
+      before hand-rolling a precedence rule.
+    - **A responder-chain command needs a responder.** The pane is
+      `.focusable()` with the focus effect disabled, and the gutter's own
+      actions take focus, or Copy is never offered to it at all.
+    - **Own a selection where you own what it indexes.** `DiffLineSelection`
+      lives in `DiffStore` beside `rows`, so it is cleared in the one place the
+      row model is rebuilt and cannot address lines of a diff replaced under it
+      — and deliberately *not* on a layout change, which moves no line, so the
+      run survives it exactly as the scroll position does.
+    - **A selection cue has to cover the rows that cannot be clicked.** The
+      `@@` band and the no-newline marker have no line number, but core copies
+      a hunk header as its own text, so a run that spans them carries them —
+      and they have to carry the wash too, or the highlight has a hole in the
+      middle of what was copied.
+    - **`.textSelection` does not give a diff a text selection** (**D-22**,
+      deferred — §10 carries the analysis). It marks a `Text` selectable; it
+      does not make a stack of them behave as one document. A row-per-`Text`
+      pane therefore has no multi-line drag available to it at any price, which
+      is *why* the gutter run exists rather than merely a reason it is nice.
+      The chrome opts out with `.textSelection(.disabled)`, which costs nothing
+      now that there is no cross-row run for it to interrupt, and the gutter's
+      gestures sit on a `Color.clear` pad overlaid on the number rather than on
+      the number itself, keeping the interactive layer and the drawn text
+      independent.
+
 17. **WS-Q — Native history & sync polish (M).** All small, one screen each.
     HI-4's native half (gate "No commits yet" on
     the first load), HI-5 (a visibility-gated 10 s tick reusing
@@ -2170,12 +2299,17 @@ written as each chunk lands, no duplication between documents:
   closes is deleted rather than annotated, and each divergence this plan keeps
   gets a row (WS-S). FRONTEND §3's command tables lose every deleted wrapper;
   FRONTEND §5.2 tracks the diff wire as DF-3 changes it, and FRONTEND §7's
-  open decision closes with it.
+  open decision closes with it. §6.1 and §6.3 gained WS-P's two shared rules —
+  the per-file diff-freshness key (`stat_stamp` + `xy` + `head_sha`) and the
+  scroll contract restated around the rendered diff's *identity* rather than
+  its paths alone — and §7 gained the 80 ms phase-two debounce and the copy
+  rule (within a line the characters, across lines the model's lines), with the
+  per-platform gesture recorded as an §8 row.
 - **TECHNICAL.md** — new mechanics paragraphs only for genuinely new machinery
   (the core hoists, the Tauri channel transport, the native launch path, WS-N's
   `Set` selection + `FileListSelection` + held `PathText` fit, WS-O's one-row-
-  model split layout and the `AppConfigStore` writer), plus the claims WS-S
-  lists as their areas land.
+  model split layout and the `AppConfigStore` writer, WS-P's `LoadKey` and
+  `rendered`-identity rules), plus the claims WS-S lists as their areas land.
 - **DESIGN.md** — flow 1 is shared end to end since WS-M, `leogit <dir>` and
   the *Create a repository here?* prompt included, and flow 11 (the update
   chip) is now both clients'. The per-flow client hedges retire as parity
@@ -2189,7 +2323,10 @@ written as each chunk lands, no duplication between documents:
   (the checkbox anchor, and an extension activating the shift-clicked row)
   called out rather than described as everyone's. Flow 3's diff paragraph is
   shared since WS-O — one arrangement control, in the diff's own header, on
-  both clients.
+  both clients — and WS-P added the three rules that were only ever written for
+  one: where a diff switch leaves the reader's scroll, what the header is
+  allowed to say about the file it is naming, and what a copy taken from the
+  pane actually contains.
 - **STYLE.md** — the status-letter row settled on `U` + the purple token with
   H-13 (done); WS-C added the *Repo pickers* section (the two lists are one
   component family, with the shared footer and empty state) and the
@@ -2212,7 +2349,11 @@ written as each chunk lands, no duplication between documents:
   the platform's field can reserve room for it; WS-O gave the *Diff viewer*
   section the header arrangement control and rewrote the side-by-side bullet
   around per-cell tints, the filler wash and the spanning hunk header, pointing
-  at *Forms*' segmented-control treatment rather than restating it.
+  at *Forms*' segmented-control treatment rather than restating it; WS-P added
+  the file header's rename rule beside the totals rule that was already there,
+  the gutter-is-the-line-handle rule, and rewrote the selected-line bullet
+  around the wash a run draws (the staging cue it used to describe has to be a
+  control when it lands, not a second wash).
 - **ROADMAP.md** — items close as their workstreams land; the deferrals this
   plan makes (per-line staging, diff virtualization, branch rename +
   delete-on-remote) are already filed there. WS-L closed the two WS-B and the
@@ -2222,6 +2363,69 @@ written as each chunk lands, no duplication between documents:
   merge scoping gone with WS-G.
 
 ## 10. Findings log (out of scope here, worth keeping)
+
+**D-22 — a native diff cannot be drag-selected across lines. Deferred 2026-08-29
+by decision, after two failed attempts.** Worth writing down in full, because
+the failure mode is expensive: nothing about it shows up at compile time, in
+clippy, or in any gate this plan runs, so it costs a build-and-look each time.
+
+*What is actually true.* SwiftUI's `.textSelection(_:)` sets a **selectability
+trait** on the text it is applied to. It does not compose separate `Text` views
+into a single selection domain, and a selection begun in one `Text` cannot
+extend into the next — regardless of whether the grant sits on each `Text`, on
+their `HStack`, on the `LazyVStack`, or on the `ScrollView`. The diff pane draws
+one `Text` per line (it has to: each line carries its own tint, its own gutter
+columns, its own intra-line backplate, and the list is lazy over tens of
+thousands of rows), so the reader's drag is confined to one line. This is a
+property of the framework, not of anything this pane does wrong.
+
+*What was tried, and why each looked plausible.*
+
+1. Scoping the grant to the content `Text` alone, so a drag could not begin on
+   the chrome. Reverted on review as "this will break the cross-row drag" —
+   a correct-sounding objection to a drag that did not exist.
+2. Keeping the grant on the row stack and opting the numbers and glyph out with
+   `.textSelection(.disabled)`, plus a `simultaneousGesture` on the content to
+   drop the line run on a click. Shipped, and the reader reported the selection
+   confined to one line. Diagnosed as the `.disabled` neighbours cutting a
+   selection "run" into per-row islands — a mechanism that does not exist.
+3. Removing both, restoring the rows to bare `Text`s. Rebuilt, and the
+   selection was **still** confined to one line — which is the observation that
+   settles it. Configuration was never the variable.
+
+The chrome exclusion from (2) is back in place, since with no cross-line
+selection to interrupt it is free and it does keep a drag begun on a line number
+off the clipboard.
+
+*The three ways out, none of them small.*
+
+- **`NSTextView`-backed pane.** A real text view over the whole diff: selection
+  across lines, Find, native Copy and Services, accessibility, and the system's
+  own text behaviours for free. Per-line tints and the gutter become drawing
+  concerns (a background layout callback and a ruler view) rather than view
+  composition, and the lazy row list is replaced by the text system's own
+  layout. The most capability, the most work, and it would take
+  `DiffLineCell`'s single-definition-of-a-row property with it — which is what
+  currently keeps the two arrangements from ever describing a line differently.
+- **Own the selection outright.** Drop `.textSelection` from the diff, put a
+  `DragGesture` on the rows in a named coordinate space, and resolve a
+  y-position to a flat row index against a map each visible row publishes via
+  `onGeometryChange`. Dragging anywhere then extends the existing
+  `DiffLineSelection`, so copying stays `copy_diff_text` and stays exact, and
+  the gutter's click / ⇧-click / menu keep working unchanged. Costs character
+  selection *within* a line, and needs care where a drag leaves the viewport
+  (only laid-out rows are in the map, so it clamps). Moderate work, and the
+  `Color.clear` pad the gutter's gestures already live on is where it would
+  attach. **Recommended if this is picked up**: it is the smallest change that
+  makes the natural gesture do the right thing, and the copy is model-based
+  either way.
+- **Leave it.** The gutter run already copies any number of lines, exactly, in
+  both arrangements. What is missing is one gesture, and its absence is
+  discoverable (the numbers carry a tooltip). This is the current decision.
+
+*The rule to keep either way:* a multi-line copy must be rebuilt from the parsed
+diff, never harvested from what was drawn. Every option above preserves that;
+it is the reason `copy_diff_text` exists.
 
 - GH Desktop's `BackgroundFetchMinimumInterval` idea (don't re-fetch a repo
   fetched < 30 min ago): neither client tracks last-fetched-per-repo;

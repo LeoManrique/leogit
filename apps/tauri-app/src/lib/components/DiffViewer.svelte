@@ -16,6 +16,12 @@
      *  line 1. Without it, highlighting falls back to a diff-only parse that is
      *  only correct when the first hunk starts in the file's top-level context. */
     blobSource?: BlobSource | null
+    /** The path this file was renamed from, from the status entry rather than
+     *  from the diff: both reads pathspec-limit to the file's current path, so
+     *  git never sees the deleted counterpart and reports a rename as a plain
+     *  add. `file_diff`'s two paths describe the same file twice, or carry an
+     *  absent side, and can't answer this. */
+    origPath?: string | null
     showSelection?: boolean
     syntaxHighlighting?: boolean
     /** Which segment the header's layout control shows as pressed — the
@@ -37,6 +43,7 @@
     diff = null,
     selection = null,
     blobSource = null,
+    origPath = null,
     showSelection = false,
     syntaxHighlighting = true,
     sideBySide = false,
@@ -204,15 +211,36 @@
     return diff.sbs_pairs.map((p, i) => ({ pair: p, key: `S-${i}` }))
   })
 
-  // Reset scroll position when the user opens a different file — leaving
-  // scrollTop pinned to the previous diff's offset would land them mid-file in
-  // the new one (often past its end). Deliberately *not* on a layout change:
-  // that is the same file, and FRONTEND §6.3's contract keeps the reader's
-  // offset for the same file however the diff was re-read — which is also why
-  // the two arrangements share one scroll container below.
+  /*
+    Which diff is on screen: its paths *and* where it was read from. The commit
+    is part of the identity because one path in two commits is two different
+    diffs — stepping through History with the same file selected would
+    otherwise keep the reader's offset from the previous commit's version of
+    it. NUL joins the parts, the one byte a git path cannot contain.
+
+    A `$derived` rather than a read inside the effect: the parent rebuilds
+    `blobSource` inline on every status poll, and a derived string that comes
+    back equal stops there instead of waking the effect.
+  */
+  const renderedDiffKey = $derived(
+    fileDiff
+      ? [
+          blobSource?.kind === 'commit' ? blobSource.sha : '',
+          fileDiff.old_path,
+          fileDiff.new_path,
+        ].join('\u0000')
+      : null
+  )
+
+  // Reset scroll position when the user opens a different diff — leaving
+  // scrollTop pinned to the previous one's offset would land them mid-file in
+  // the new one (often past its end). Deliberately *not* on a layout change,
+  // a whitespace toggle or an edit landing: those are the same diff, and
+  // FRONTEND §6.3's contract keeps the reader's offset however it was re-read
+  // — which is also why the two arrangements share one scroll container below.
   let lastDiffKey = $state<string | null>(null)
   $effect(() => {
-    const key = fileDiff ? `${fileDiff.old_path}|${fileDiff.new_path}` : null
+    const key = renderedDiffKey
     if (key !== lastDiffKey) {
       lastDiffKey = key
       if (scrollContainer) scrollContainer.scrollTop = 0
@@ -223,8 +251,8 @@
 {#if fileDiff}
   <div class="diff-viewer" style="--tab-size: {tabSize}">
     <div class="file-header">
-      {#if fileDiff.old_path && fileDiff.old_path !== fileDiff.new_path}
-        <span class="old-path">{fileDiff.old_path}</span>
+      {#if origPath && origPath !== fileDiff.new_path}
+        <span class="old-path">{origPath}</span>
         <span class="arrow">→</span>
       {/if}
       <span class="new-path">{fileDiff.new_path || fileDiff.old_path}</span>
