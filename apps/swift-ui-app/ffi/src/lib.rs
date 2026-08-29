@@ -323,10 +323,11 @@ pub struct DiffSizeGuard {
 
 /// Mirrors [`leogit_core::diff::DiffOptions`].
 ///
-/// The native client renders from the line model, so it asks for neither
-/// `html` nor `side_by_side` — the fields exist because core serves a
-/// `WebView` host too, and declaring them keeps this record honest about the
-/// shared type rather than hiding the choice.
+/// The native client renders from the line model, so it never asks for
+/// `html` — that field exists because core serves a `WebView` host too, and
+/// declaring it keeps this record honest about the shared type rather than
+/// hiding the choice. `side_by_side` it asks for only while the split layout
+/// is on screen: the pairing is an index list this renderer reads directly.
 #[uniffi::remote(Record)]
 pub struct DiffOptions {
     pub html: bool,
@@ -406,16 +407,57 @@ pub struct UpdateInfo {
     pub install_command: Option<String>,
 }
 
+/// One row of the side-by-side layout: which flat line index each column
+/// shows, and whether the row is a hunk header spanning both.
+///
+/// A purpose-built record rather than a mirror of core's [`diff::SbsPair`],
+/// whose indices are `usize` — a Rust-only width the bridge does not carry.
+/// `u32` is the width the flat index already crosses at in `copy_diff_text`,
+/// and saturating it would take a patch of several gigabytes held in memory,
+/// so no diff this app can have parsed reaches it. Deliberately not "the size
+/// guard caps it at 4 MiB": `DiffOptions::show_anyway` lifts that bound, which
+/// is the one thing a reason resting on it would miss. A saturated index
+/// degrades to a filler cell anyway, since `u32::MAX` indexes no row.
+#[derive(uniffi::Record)]
+pub struct SbsPair {
+    /// Flat index of the line in the left (old) column, or `None` for filler.
+    pub left: Option<u32>,
+    /// Flat index of the line in the right (new) column, or `None` for filler.
+    pub right: Option<u32>,
+    /// A `@@` header, which spans both columns rather than pairing two lines.
+    pub is_hunk_header: bool,
+}
+
+/// A flat line index at the bridge's width. See [`SbsPair`] for why the
+/// saturating case cannot be reached by a diff this app renders.
+fn narrow_index(index: usize) -> u32 {
+    u32::try_from(index).unwrap_or(u32::MAX)
+}
+
+impl From<diff::SbsPair> for SbsPair {
+    fn from(pair: diff::SbsPair) -> Self {
+        Self {
+            left: pair.left.map(narrow_index),
+            right: pair.right.map(narrow_index),
+            is_hunk_header: pair.is_hunk_header,
+        }
+    }
+}
+
 /// The structured result of parsing one file's raw diff.
 ///
 /// A purpose-built record rather than a `#[uniffi::remote]` mirror of core's
-/// [`diff::ParsedDiff`]: that struct also carries phase-1 HTML strings and
-/// side-by-side row pairs — `WebView` presentation the native client neither
-/// needs nor should pay to marshal. `file_diff` is still the real core type.
+/// [`diff::ParsedDiff`]: that struct also carries the phase-1 HTML strings,
+/// `WebView` presentation the native client neither needs nor should pay to
+/// marshal. `file_diff` is still the real core type.
 #[derive(uniffi::Record)]
 pub struct DiffPayload {
     /// The parsed diff: hunks of typed lines plus file-level metadata.
     pub file_diff: FileDiff,
+    /// Row pairing for the split layout, empty unless `DiffOptions`
+    /// asked for it — which this client does only while that layout is on
+    /// screen, so the unified reader marshals nothing.
+    pub sbs_pairs: Vec<SbsPair>,
     /// Added-line total for the header badge (0 for binary diffs).
     pub additions: u32,
     /// Deleted-line total for the header badge (0 for binary diffs).
@@ -432,6 +474,7 @@ impl From<diff::ParsedDiff> for DiffPayload {
     fn from(parsed: diff::ParsedDiff) -> Self {
         Self {
             file_diff: parsed.file_diff,
+            sbs_pairs: parsed.sbs_pairs.into_iter().map(SbsPair::from).collect(),
             additions: parsed.additions,
             deletions: parsed.deletions,
             empty_reason: parsed.empty_reason,

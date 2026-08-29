@@ -623,11 +623,18 @@ export const terminalApi = {
   close: (pid: number) => invoke<void>('close_terminal', { pid }),
 }
 
-/** What this client asks core to build: everything a WebView renders from. */
-export const WEBVIEW_DIFF_OPTIONS: DiffOptions = {
-  html: true,
-  side_by_side: true,
-  show_anyway: false,
+/**
+ * What this client asks core to build alongside a parse: the phase-1 HTML a
+ * WebView paints from, plus the split layout's row pairing while that layout
+ * is the one on screen — a pairing per line is work and wire the unified
+ * reader never looks at.
+ *
+ * There is no default: a caller that reads a diff knows which layout it is
+ * about to render, and guessing on its behalf is how the ask drifts from the
+ * arrangement.
+ */
+export function webviewDiffOptions(sideBySide: boolean, showAnyway: boolean): DiffOptions {
+  return { html: true, side_by_side: sideBySide, show_anyway: showAnyway }
 }
 
 export const diffApi = {
@@ -640,15 +647,11 @@ export const diffApi = {
     repoPath: string,
     file: FileEntry,
     hideWhitespace: boolean,
-    options: DiffOptions = WEBVIEW_DIFF_OPTIONS
+    options: DiffOptions
   ) => invoke<ParsedDiff>('get_parsed_diff', { repoPath, file, hideWhitespace, options }),
   /** The same, for one file within a commit. Empty `filePath` = whole commit. */
-  getParsedCommitDiff: (
-    repoPath: string,
-    sha: string,
-    filePath: string,
-    options: DiffOptions = WEBVIEW_DIFF_OPTIONS
-  ) => invoke<ParsedDiff>('get_parsed_commit_diff', { repoPath, sha, filePath, options }),
+  getParsedCommitDiff: (repoPath: string, sha: string, filePath: string, options: DiffOptions) =>
+    invoke<ParsedDiff>('get_parsed_commit_diff', { repoPath, sha, filePath, options }),
   /** Plain text of a flat line range, rebuilt from the model — immune to
    *  gutters, `+`/`−` prefixes and side-by-side filler cells. */
   copyDiffText: (fileDiff: FileDiff, start: number, end: number) =>

@@ -44,6 +44,14 @@ struct DiffPalette {
         isDark ? Color(0xEF4444, alpha: 0.34) : Color(0xDC2626, alpha: 0.30)
     }
 
+    /// A split-layout cell with no line on its side — the other column added
+    /// or removed one here. The Tauri client's `--surface-hover`: a plain
+    /// wash, not a tint, so it reads as "nothing on this side" rather than as
+    /// a fourth kind of change.
+    var fillerBackground: Color {
+        isDark ? Color(0xFFFFFF, alpha: 0.06) : Color(0x000000, alpha: 0.04)
+    }
+
     // MARK: Syntax tokens
 
     /// Foreground for a token class, or `nil` for classes that take the line's

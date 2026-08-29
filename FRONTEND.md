@@ -236,9 +236,11 @@ button's disable condition, so the preview and the button always agree.
 A **failure** is a rejected promise; **nothing to show** is a resolved one with
 `empty_reason` set. Those are different events and a viewer must not merge
 them: a stale diff behind an error is the one thing the pane must never show.
-`DiffOptions` says what to build alongside the parse — a `WebView` host asks
-for `html` and, in the split layout, `sbs_pairs`; the native host asks for
-neither and pays for neither.
+`DiffOptions` says what to build alongside the parse: `html` for the `WebView`
+host only, and `sbs_pairs` for whichever host is about to render the split
+layout — so a reader in the unified layout pays for no pairing on either
+client, and a caller must say which arrangement it is reading rather than
+taking a default.
 
 ### 3.11 Highlight — 1
 | Command | Args | Returns |
@@ -356,8 +358,10 @@ codegen decision is open (plan §10.7).
 >
 > `ParsedDiff.html`/`highlight_diff` return **pre-rendered HTML** — a web-shaped
 > payload SwiftUI cannot use, which is why `DiffOptions.html` exists: the
-> native host asks for neither the HTML nor the side-by-side pairs and core
-> builds neither. The structured layer under it already exists
+> native host never asks for it and core never builds it. `sbs_pairs` is not
+> web-shaped — it is a list of flat line indices — so both hosts ask for it,
+> and both only while the split layout is the one on screen. The structured
+> layer under it already exists
 > (`Token`/`TokenClass`, plus each line's `intra_line_diff`), and `render.rs`
 > is a pure structured→HTML collapse. Whether the *phase-2* wire becomes that
 > structured layer for Tauri too is still open (§7); when resolved, update this
@@ -728,6 +732,11 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    takes effect without a restart — the diff settings through the config the viewers
    already read, `auto_fetch` and `fetch_interval_ms` by re-arming the timer when either
    moves, including when the *other* client moved it.
+   **Settings is not the only writer**: the diff layout is patched from the diff header
+   (§7). That is why the rule is *a surface patches the fields it owns* rather than *the
+   Settings form owns the file* — two surfaces writing one field-wise config cannot
+   revert each other, and each client serializes its own writes so two quick changes
+   land in the order they were made.
    Native's three remaining drifts, all owned by the parity plan's WS-R: its patch names
    every field the window holds rather than the one that changed (D-5's lost update at
    form scale — a `tab_size` written by the other client while the Settings window
@@ -816,9 +825,18 @@ as `ParsedDiff.html`/`highlight_diff` spans for the Svelte `{@html}` renderer.
   (the exact HTML it gets today, unchanged) or built in Svelte from the structured layer.
 - **SwiftUI**: maps `TokenClass` → colour/traits (the mirror of `css_class`) into an
   `AttributedString`.
-- **Who pays for what**: `DiffOptions` decides. The HTML array and the
-  side-by-side pairs are built only for a host that asked; the native host asks
-  for neither, so the phase-1 collapse no longer runs on a path that discards it.
+- **Who pays for what**: `DiffOptions` decides. The HTML array is built only
+  for the `WebView` host, so the phase-1 collapse no longer runs on a path that
+  discards it; the side-by-side pairing is built only for the layout about to
+  render it, on either host.
+- **The arrangement is a property of the diff, not a setting to go and find.**
+  Unified ⇄ split is chosen from the diff's own header in both clients — GitHub
+  Desktop's placement — and persists in the shared `side_by_side_diff`, so it
+  outlives the file, the repository, the app and the client. Changing it
+  **re-reads** the diff, because core builds the pairing only for the layout
+  that asked; the read goes through the seamless path, so the rows on screen
+  stay put until the replacement lands, and the reader keeps their scroll
+  offset (§6.3's same-file rule — a layout change is the same file).
 - **Nothing to render is not one situation.** A viewer must distinguish four
   outcomes and say which: a rejected call (the load failed — never leave a stale
   diff on screen behind it), `empty_reason` (`NoChanges` /
@@ -851,15 +869,15 @@ every deliberate difference here.
 | Pane geometry persistence | `localStorage` (sidebar width, composer height, commit-files width) | `UserDefaults` (composer height, `commitComposerHeight`); sidebar and commit-files widths are per-session |
 | Window frame persistence | `tauri-plugin-window-state` saves size and position on exit and restores them at launch; the `tauri.conf.json` size is the first-run default | AppKit frame autosave on the `WindowGroup`, with `.defaultSize` as the first-run default |
 | Settings surface (§6.15) | a modal overlay inside the one window, with a header ✕ and a footer **Close** — there is nothing to save, so the button only dismisses | the stock SwiftUI `Settings` scene, a separate window with ⌘, and the standard title-bar close and no content buttons at all; a text field also commits on `.onDisappear` |
-| Settings field coverage (§6.15) | every `Config` field the app reads has a control | no control for `theme` (a permanent exemption, above), `side_by_side_diff` (awaiting the layout, above), or the two AI timeouts — so a timeout set in the Tauri client bounds native's requests but cannot be changed there. Closing the timeout gap is the parity plan's WS-R |
+| Settings field coverage (§6.15) | every `Config` field the app reads has a control, except `side_by_side_diff` — the diff header owns it in both clients | no control for `theme` (a permanent exemption, above) or the two AI timeouts — so a timeout set in the Tauri client bounds native's requests but cannot be changed there. Closing the timeout gap is the parity plan's WS-R |
 | Background-cadence enforcement (§6.1) | the ladder is a self-scheduling `setTimeout` chain, so a WebView free to throttle a backgrounded document can only make the hidden rung *slower* than 30 s; the wake-up resync is what guarantees a current screen | an App Nap assertion is held while a repo is open, so the same ladder's timers are not coalesced away, and the hidden rung is exactly 30 s (`AppNapSuppressor`) |
 | File-list selection & keyboard (§6.4) | two anchors and hand-rolled key handling: shift-click on the row body extends from a sticky row anchor, shift-click on a checkbox range-toggles from a second one that *does* move, and Home/End jump to first/last. Plain click and ⌘-click both collapse to one row. An extension **activates the shift-clicked row**, so the diff follows the far end | one `List(selection: Set<String>)`, so the range and multi-row gestures are AppKit's own and behave like every other macOS list, and the checkbox column has no separate anchor. The gesture that produced a selection is not recoverable from a `Set`, so an extension leaves the diff on the row it was already showing rather than guessing which row was clicked |
 | Relative-date ticking (§6.12) | a 10 s tick re-renders the visible rows, skipped while the History pane is hidden or the window is backgrounded, so an open list never goes stale | formatted once per republish and not re-ticked, so an idle repository's labels stop ageing until something in its status moves |
-| Side-by-side diff (`side_by_side_diff`) | split layout toggle, honoured by `DiffViewer` | not implemented — unified only; a layout feature awaiting its own design pass (ROADMAP), the config field crosses saves untouched |
 | Pending-count placement (§6.2) | `↓N` / `↑N` capsules on the sync button's trailing edge, each with its own arrow | plain `↑N ↓N` text in its own toolbar item left of the button: macOS renders a toolbar control's label as text and icon only, so no custom view can ride the face, and no system API badges a toolbar item |
 | Transfer progress surface | inside the control that started it — a fill wiping across the sync button, sweeping where git reports no percentage | a full-width strip under the toolbar with a real indeterminate state, plus git's line verbatim |
 | Shortcut discovery | no menu bar, so the chords are documented by a `?` overlay listing them | the menu bar is the documentation: File ▸ Clone Repository… (⇧⌘O), View ▸ Changes/History (⌘1/⌘2), View ▸ Show/Hide Terminal (⌃`), View ▸ Refresh (⌘R), Branch ▸ the same items the toolbar control offers (⇧⌘N on New Branch), Repository ▸ the sync ladder's proposal (⌘P). A menu equivalent is also matched ahead of the responder chain, which is what makes ⌃` work from inside the terminal |
 | Update-chip placement (§6.20) | in the header's trailing cluster, outside the repo-scoped controls, so it shows in the pre-main phases too | a toolbar item on the repository screen and a control beneath the list on the picker — the native picker has no toolbar to put it in, and both native surfaces render the one `UpdateChip` |
+| Diff layout control (§7) | two joined icon buttons in the diff header, `aria-pressed` on the active one — the client draws its own segmented group | a stock segmented `Picker` in the same place, so it is the control macOS uses everywhere else for a two-state view choice |
 | Branch-menu shape (§6.14) | a popover: filter input, keyboard cursor over the rows, the four actions as a footer, and the two that need a branch narrowing the same list under a header that states the question | a stock `Menu`: an inline `Picker` for locals, a plain-button section for remotes, and the same four actions with `Merge into “…”` and `Delete Branch` as submenus. AppKit supplies the scrolling, type-select and cursor the popover hand-rolls |
 
 Neither client offers a per-folder open action anywhere, deliberately: a repo

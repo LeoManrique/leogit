@@ -74,11 +74,17 @@ enum GitBridge {
         coreVersion()
     }
 
-    /// What this client asks core to build alongside a parse: the line model
-    /// and nothing else. The HTML and side-by-side artifacts exist for a
-    /// `WebView` host; asking for them here would only pay to marshal strings
-    /// this renderer never looks at.
-    static let lineModelOnly = DiffOptions(html: false, sideBySide: false, showAnyway: false)
+    /// What this client asks core to build alongside a parse: the line model,
+    /// plus the split layout's row pairing while that layout is the one on
+    /// screen. The HTML array exists for a `WebView` host; asking for it here
+    /// would only pay to marshal strings this renderer never looks at, and the
+    /// pairing costs the same for a reader who is looking at the unified rows.
+    /// There is no default — a caller that reads a diff knows which layout it
+    /// is about to render, and guessing on its behalf is how the ask drifts
+    /// from the arrangement.
+    static func diffOptions(sideBySide: Bool, showAnyway: Bool) -> DiffOptions {
+        DiffOptions(html: false, sideBySide: sideBySide, showAnyway: showAnyway)
+    }
 
     /// Read and parse one working-tree file's diff: `HEAD` against the working
     /// tree, staged and unstaged combined. Untracked files diff against
@@ -92,7 +98,7 @@ enum GitBridge {
         of repoPath: String,
         for file: FileEntry,
         hideWhitespace: Bool,
-        options: DiffOptions = lineModelOnly
+        options: DiffOptions
     ) async throws -> DiffPayload {
         try getParsedDiff(
             repoPath: repoPath, file: file, hideWhitespace: hideWhitespace, options: options)
@@ -126,7 +132,7 @@ enum GitBridge {
         in repoPath: String,
         sha: String,
         filePath: String,
-        options: DiffOptions = lineModelOnly
+        options: DiffOptions
     ) async throws -> DiffPayload {
         try getParsedCommitDiff(
             repoPath: repoPath, sha: sha, filePath: filePath, options: options)

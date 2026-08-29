@@ -1,6 +1,6 @@
 # Plan — Cross-client feature parity (SwiftUI ⇄ Tauri)
 
-> Status: **in progress — WS-A…WS-E shipped 2026-08-27, WS-F through WS-J and WS-L…WS-N 2026-08-28. WS-O is next; WS-K is unblocked but needs a Linux machine (§6's sequencing note), so it is taken whenever that machine is available. WS-T is the deliberate last one.**
+> Status: **in progress — WS-A…WS-E shipped 2026-08-27, WS-F through WS-J and WS-L…WS-N 2026-08-28, WS-O 2026-08-29. WS-P is next; WS-K is unblocked but needs a Linux machine (§6's sequencing note), so it is taken whenever that machine is available. WS-T is the deliberate last one.**
 > The remaining work was re-cut into seventeen smaller workstreams (C…S) on
 > 2026-08-27 after WS-B proved too large to review as one piece — see §6.
 > Accepted 2026-08-27 with every open decision resolved. Per-workstream state
@@ -130,7 +130,7 @@ behavior change the user would notice — except battery.
 | E-5 | ✅ *WS-C* (RM-4's MRU sort deleted the `get_last_commit_timestamp` call with the store that made it) and *WS-J*: `ensureRepoIdentifiers` queues its paths and drains them four at a time, so opening the switcher on a machine with fifty repositories no longer spawns fifty `git remote get-url` processes in one turn. | was 2N at once, now ≤4 |
 | E-6 | ✅ *WS-J* with BG-4. An idle repository publishes nothing. The same pass fixed the native mirror of it: `RepoDirectoryStore.noteActiveStatus` wrote an identical `RepoSync` into an observed dictionary on every tick, invalidating every switcher row. | was continuous idle re-render, both clients |
 | E-7 | ✅ *WS-N.* `RepoStore.refreshWorkingTree()` re-reads the status only, for the actions that cannot move `HEAD`. Not `refreshQuietly` either: this *is* the user's action completing, so a failed read is theirs to see rather than one tick of a streak, and the epoch is bumped unconditionally since the file a discard rewrote may be the one on screen. The 30-file case also stopped being 30 calls — CH-1's bulk discard is one. | was one `git log`@500 per row action |
-| E-8 | ✅ *WS-B.* `DiffOptions` makes the render artifacts opt-in, so the native path no longer builds HTML and pairings for the bridge to drop (H-8). `DiffLine.text` became `Option` in the same pass, dropping a duplicate of every line's content from both wires. | was ~40 k allocations per 20 k-line diff load |
+| E-8 | ✅ *WS-B.* `DiffOptions` makes the render artifacts opt-in, so the native path no longer builds HTML for the bridge to drop (H-8). `DiffLine.text` became `Option` in the same pass, dropping a duplicate of every line's content from both wires. *WS-O* finished the pairing half in the other direction: it is asked for by whichever host is about to render the split layout and by neither in the unified one, where the Tauri client had been building and serializing it unconditionally. | was ~40 k allocations per 20 k-line diff load |
 | E-9 | Native | Whole-status epoch re-tokenizes the open diff when *any* file changes (~19–140 ms + 2 `git show` per unrelated edit); a per-file `stat_stamp` compare would gate it. No phase-2 debounce either (Tauri: 80 ms). | up to ~140 ms background CPU per unrelated edit |
 | E-10 | ✅ *WS-N.* The fit is held in `@State` and re-derived from one `.onChange` over its three inputs (path, measured width, faces), so a hover, a selection change or a checkbox click no longer re-measures every visible row. TECHNICAL.md now describes what the code does. | was ~350 text measurements per interaction |
 | E-11 | Tauri | Diff viewer mounts every row (no virtualization) and phase 2 re-parses N `innerHTML`s in one tick. **Terminal half closed**: the size guard landed in core (H-15), output coalesces under back-pressure instead of crossing once per 4 KiB read (H-14), and each delivery is now one channel send rather than a window broadcast (WS-I). Virtualization is the ROADMAP item DF-4 defers. | terminal half closed; virtualization deferred to ROADMAP |
@@ -600,16 +600,17 @@ and matched, not that it was skipped.
   changed and its own load is already in flight. The §8 staleness row retired
   with it. The native gate (E-9) is still WS-P's, and this is the shape to
   copy. → WS-P (native gate)
-- **DF-2 · Side-by-side.** Tauri-only (sanctioned FRONTEND §8 row). Two facts change
-  the calculus: core already computes `sbs_pairs` on the native path and the
-  bridge throws them away (E-8), and GitHub Desktop treats split/unified as a
-  **per-diff header control, not a Settings preference**. **Decided: build the
-  native split view now, cleanly** — parity is meant literally and the data is
-  already being computed, but the build must not fork the renderer: one row
-  model feeds both arrangements, the pairs cross the bridge only when the
-  split layout is active (H-8 stops producing them otherwise), and the toggle
-  moves into the diff header in both clients. It is the largest single piece
-  of new native UI in the plan, and is a workstream of its own. → WS-O
+- **DF-2 · Side-by-side.** ✅ *WS-O, both clients.* The native split layout is an
+  arrangement of one row model rather than a second renderer — `DiffStore`
+  holds the flat line list either way and a pair carries indices into it, so
+  both columns read the same lines, each side indexes its own tokens, and one
+  `DiffLineCell` draws a cell for both layouts. Core's `build_sbs_pairs` stays
+  the only pairing, crossing the bridge as a `u32`-indexed record and only
+  while the split layout is on screen — now true of the Tauri client too,
+  which had been building and serializing pairs for every read. The toggle is
+  a two-segment control in the diff header on both clients (GitHub Desktop's
+  placement), still persisted in the shared `side_by_side_diff`; the Settings
+  checkbox is gone. FRONTEND §8's row retired with it.
 - **DF-3 · Structured wire.** FRONTEND §7's open decision (where the HTML
   collapse lives) should close **toward the structured token wire for both**
   — that is GitHub Desktop's own shape (worker tokens, view-side collapse),
@@ -699,12 +700,16 @@ and matched, not that it was skipped.
   starts a tokenize per file survived while arrowing. Add the same 80 ms +
   generation re-check natively; promote the constant next to
   `slowLoadThreshold`. → WS-P
-- **DF-13 · Wrap break policy (risk, unverified).** Both Tauri
-  (`overflow-wrap: anywhere`) and GH Desktop (`word-break: break-all`) force
-  character-level breaking; native relies on SwiftUI `Text` defaults — a
-  minified/base64 line may overflow the pane with no horizontal scroll to
-  reach it. Needs one visual check; fix via `.byCharWrapping` or zero-width
-  break insertion in the existing tab-expansion pass. → WS-O (check first)
+- **DF-13 · Wrap break policy.** ✅ *WS-O — checked, and the risk is not real.*
+  SwiftUI `Text` uses `byWordWrapping`, which Apple documents as wrapping "at
+  word boundaries, unless the word doesn't fit on a single line" — so a
+  minified or base64 run is broken by the platform rather than overflowed, the
+  same outcome Tauri buys with `overflow-wrap: anywhere`. No code change, and
+  deliberately none: the two candidate fixes were both worse. `.byCharWrapping`
+  is not reachable from SwiftUI `Text`, and zero-width break insertion in the
+  tab-expansion pass would put U+200B into every copy taken from the pane,
+  which is exactly what DF-6 exists to prevent. Left as a visual check in the
+  workstream's own testing list.
 
 ### 4.7 History (HI)
 
@@ -1823,98 +1828,180 @@ is mostly adoption of already-proven native behavior.
       the depth-count machinery a guard would build on.
 14. **WS-N — Native file list & composer (M).** ✅ **Shipped 2026-08-28.**
     CH-1, CH-2, CH-3's native half, CH-5, CH-6, CH-8's, CH-9's, CH-10's and
-    CH-11's, plus **E-7** and **E-10** — per-item state in §4.5 and §3.3. The list
-    is `List(selection: Set<String>)`, so the range gestures are AppKit's rather
-    than hand-tracked anchors and `contextMenu(forSelectionType:)` already hands
-    the menu the whole selection; Space is an `.onKeyPress` on the *list*; the
-    select-all checkbox is `Toggle(sources:isOn:)`, the only route to a mixed
-    checkbox in SwiftUI. Discard became a **sheet** (in-flight state and an
-    in-dialog refusal, neither of which a system confirmation can hold), one bulk
-    call, and a status-only refresh. New native files:
-    `Design/ActionFailureAlert.swift`, `Screens/DiscardSheet.swift`,
-    `Services/FileListSelection.swift`. No FFI change — every core function this
-    needed (`discard_files`, `ignore_paths`, `classify_discard`) already took a
-    whole list. Gates: `pnpm check` 0/0 over 153 files, prettier clean,
-    `pnpm tauri build` bundled, zero-warning `just mac-build`, 178 core + 24
-    bridge + 2 host tests, clippy-pedantic 165 core with `leogit` / `leogit-ffi`
-    at zero.
+    CH-11's, plus **E-7** and **E-10** — per-item state in §4.5 and §3.3. The
+    native changed-file list became `List(selection: Set<String>)` with a Space
+    inclusion toggle, a tri-state select-all (`Toggle(sources:isOn:)`), `old →
+    new` renames, the ↪ badge, a discard **sheet** carrying its own in-flight
+    state and refusal, one bulk discard call and a status-only refresh. New
+    files: `Design/ActionFailureAlert.swift`, `Screens/DiscardSheet.swift`,
+    `Services/FileListSelection.swift`. No FFI change.
 
     **Two follow-ups for WS-S, both one line, both closing a gap this opened in
-    the *other* direction.** Native's discard now keeps its refusal inside the
-    dialog, which is what §6.13's refinement asks for; Tauri's `DiscardConfirm`
-    still closes and raises the modal. And native's ignore failure offers a
-    retry; Tauri's `reportActionError` call site passes none, though the
-    parameter has been there since WS-D.
+    the *other* direction:** Tauri's `DiscardConfirm` still closes into the
+    modal where native now keeps the refusal in the dialog (§6.13's
+    refinement), and its discard / ignore `reportActionError` call sites pass
+    no `retry` though the parameter has been there since WS-D.
 
-    Findings for WS-O and the native block after it:
-    - **`head_sha` is an edge, and more than one thing is triggered off it.**
-      A cheaper refresh that writes the status without doing the history and
+    Findings still live for the native block:
+    - **`head_sha` is an edge, and more than one thing is triggered off it.** A
+      cheaper refresh that writes the status without doing the history and
       branch reloads *consumes* that edge: both consumers compare against the
-      value it just advanced, see no move, and stay stale indefinitely. The
-      review caught this in `refreshWorkingTree`, which now hands over to the
-      full reload on a moved `HEAD` and returns that it did so the caller can
-      reload branches. **Any future "cheaper path" past a shared refresh has to
-      account for every edge the full one was feeding.**
+      value it just advanced, see no move, and stay stale indefinitely.
+      `refreshWorkingTree` hands over to the full reload on a moved `HEAD` and
+      returns that it did so the caller can reload branches. **Any future
+      "cheaper path" past a shared refresh has to account for every edge the
+      full one was feeding.**
     - **`isLoading` was doing double duty**: the progress bar *and* the status
-      poll's mutual exclusion. A read that skipped `beginLoad` to avoid the bar
-      also stopped blocking the poll, so a tick starting before it and resolving
-      after it would land a pre-action snapshot on top. `beginLoad(showsProgress:)`
-      and `isBusy` separate them; anything else that wants a quiet read wants the
-      lock too.
-    - **A macOS menu item is clickable while a sheet is up.** ⇧⌘O reached
-      `sheet = .clone` over a running discard. Every request site now checks the
-      slot is free and **drops** rather than replaces — the sheet standing there
-      was opened deliberately and may be mid-write. WS-O adds no sheet, but
-      anything that does inherits the rule.
-    - **A failure raised in a subtree is presented at the root.** The alert
-      belongs beside the sheet slot for the same reason the sheet does, and the
-      root is also where a repo switch can retire the retry closure before its
-      captured `repoPath` names the wrong repository.
-    - **A conditional modifier rebuilds everything inside it.** `PathText`'s
-      tooltip is one, so it is applied *innermost*: with it outermost, the flip
-      from "not truncated" to "truncated" on the first measured frame tore down
-      the `.onChange(initial: true)` above it and re-ran the whole binary search
-      with nothing changed, once per truncated row per appearance.
-    - **A `Set` selection cannot say which row a gesture landed on.** That is the
-      one thing the Tauri list gets for free from its own click handler, and it
-      is why "which file does the detail pane show" became a rule of its own
-      (`Services/FileListSelection.swift`) rather than a read of the selection:
-      one row selected is the choice, several leaves the pane where it was, and a
-      fallback picks the first in **list** order — never `Set.first`, which is a
-      hash order and lands differently from one launch to the next. **Any native
-      surface deriving a single thing from a multi-selection wants this.**
+      poll's mutual exclusion, so a read that skipped `beginLoad` to avoid the
+      bar also stopped blocking the poll. `beginLoad(showsProgress:)` and
+      `isBusy` separate them; anything that wants a quiet read wants the lock
+      too.
+    - **A macOS menu item is clickable while a sheet is up.** Every sheet
+      request checks the slot is free and **drops** rather than replaces — the
+      sheet standing there was opened deliberately and may be mid-write.
+    - **A failure raised in a subtree is presented at the root**, beside the
+      sheet slot, which is also where a repo switch can retire a retry closure
+      before its captured `repoPath` names the wrong repository.
+    - **A conditional modifier rebuilds everything inside it**, so `PathText`'s
+      tooltip is applied *innermost*. The same identity rule is why WS-O put
+      its two arrangements inside one `ScrollView` rather than beside it.
+    - **A `Set` selection cannot say which row a gesture landed on**, which is
+      why "which file does the detail pane show" is a rule of its own
+      (`Services/FileListSelection.swift`): one row selected is the choice,
+      several leaves the pane where it was, and a fallback picks the first in
+      **list** order — never `Set.first`, a hash order that lands differently
+      each launch. **Any native surface deriving a single thing from a
+      multi-selection wants this.**
     - **Both file lists are one view, so a change to it lands in History too.**
-      `ChangedFileList` is shared, which is what made renames and the ↪ badge
-      free on the commit-detail list — and what made `CommitDetailStore` need a
-      selection `Set` it has no other use for. WS-O's split diff is reached from
-      both lists for the same reason.
+      `ChangedFileList` is shared, which made renames and the ↪ badge free on
+      the commit-detail list — and made `CommitDetailStore` need a selection
+      `Set` it has no other use for. `DiffView` is shared the same way, which
+      is how WS-O's split layout reached both tabs at once.
     - **Measure every face you draw.** `PathText` binary-searches a character
-      budget against rendered width; the included-row weight cue changes the
-      filename's face, so the search had to measure the two halves separately or
-      the fit would overflow the row it had just promised to fit. **DF-2's split
-      layout measures too**, and the same rule applies to anything that styles a
-      run differently from the face it was measured in.
+      budget against rendered width, and the included-row weight cue changes
+      the filename's face, so the search measures the two halves separately or
+      overflows the row it just promised to fit.
     - **Hold a derived layout answer in state; do not re-derive it in `body`.**
-      E-10 was not a slow algorithm, it was a correct one run on every repaint.
-      The fix is one `.onChange` over an `Equatable` struct of *all* the inputs,
-      so adding an input cannot silently stop invalidating.
-    - **`.borderedProminent` + `.tint(.red)` is the destructive button**, and the
-      sheet gives the default key to nothing — Return must not run a discard.
-      `.cancelAction` on Cancel is what Escape gets.
-    - **One `ActionFailure` modifier is now the client's only `.alert("Error")`.**
-      WS-Q's checkout and undo failures should move onto it rather than growing a
-      fourth copy, and it already carries the retry closure §6.13 asks for.
+      E-10 was a correct algorithm run on every repaint. One `.onChange` over
+      an `Equatable` struct of *all* the inputs, so adding an input cannot
+      silently stop invalidating.
+    - **`.borderedProminent` + `.tint(.red)` is the destructive button**, and a
+      sheet that runs one gives the default key to nothing — Return must not
+      discard. `.cancelAction` on Cancel is what Escape gets.
+    - **One `ActionFailure` modifier is the client's only `.alert("Error")`.**
+      WS-Q's checkout and undo failures should move onto it rather than growing
+      a fourth copy; it already carries the retry closure §6.13 asks for.
       `UpdateChip` keeps its own alert on purpose — its title names the thing
       that failed ("Could not open the release page"), which is better than
-      "Error", and it should not be genericized to share a modifier.
-15. **WS-O — Native split diff (M).** DF-2 alone, the largest single piece of
-    new native UI in the plan. The constraint is that it must not fork the
-    renderer: one row model feeds both arrangements, the pairs cross the bridge
-    only when the split layout is active (WS-B's `DiffOptions` already stops
-    producing them otherwise), and the toggle moves into the diff header on
-    both clients — GH Desktop treats split/unified as a per-diff control, not a
-    Settings preference. DF-13's wrap check rides here rather than in the polish
-    pass, because rebuilding the row model is when the break policy is decided.
+      "Error".
+15. **WS-O — Native split diff (M).** ✅ **Shipped 2026-08-29.**
+    **DF-2 on both clients**, plus **DF-13** (checked, no change needed) —
+    per-item state in §4.6. The native split layout is an arrangement of one
+    row model rather than a second renderer: `DiffStore` holds the flat line
+    list either way and, when the layout asked for it, `pairs` — core's
+    `SbsPair`s carrying *indices* into those rows, so both columns read the
+    same lines, each side indexes its own token row, and one `DiffLineCell`
+    draws a cell for both arrangements. The pairing stays core's
+    (`build_sbs_pairs`) and crosses the bridge only while the split layout is
+    on screen, which is now true of the **Tauri** client as well. The toggle
+    moved out of Settings into the diff header in both clients, still persisted
+    in the shared `side_by_side_diff`. New native file:
+    `Design/DiffLineRow.swift`. The FFI gained an `SbsPair` record and a
+    `sbs_pairs` field on `DiffPayload` (67 exports, unchanged — a record is not
+    one). Gates: `pnpm check` 0/0 over 153 files, prettier clean,
+    `pnpm tauri build` bundled, zero-warning `just mac-build`, 178 core + 24
+    bridge + 2 host tests, clippy-pedantic 165 core with `leogit` /
+    `leogit-ffi` at zero.
+
+    **One defect found on the way, in the Tauri client, and fixed here because
+    this work depended on it.** The *hide whitespace* reload called
+    `loadDiffForFile(activeFile)` **without `force`**, so the loader's "this
+    file is already open" short-circuit returned before reading: the setting
+    only took effect on the next file the user clicked. It also never touched
+    the History pane. Both panes now re-read on either diff-read setting, from
+    one `$derived` key read by an `untrack`ed effect — the shape WS-D's finding
+    prescribes, and the old effect was not using it, so it re-ran on every
+    status tick to do nothing.
+
+    Findings for WS-P and the native block after it:
+    - **Split the equality skip along what each artifact is a function of.** A
+      layout change returns an *identical* `file_diff` with a pairing that
+      appeared or vanished, so comparing the payload whole would rebuild the
+      rows and drop the syntax colour every time the reader switched
+      arrangement. `modelMoved` / `pairingMoved` are compared separately.
+      **Any second artifact on a payload wants this**, and the general rule is:
+      compare at the granularity of what you would rebuild, not at the
+      granularity of the reply.
+    - **Two arrangements are branches *inside* one `ScrollView`, never two
+      scroll views** — WS-N's identity rule again (a branch is a different view;
+      a modifier is not). And the branch reads the **loaded pairing**, not the
+      setting, so the pane changes on the frame its data arrives instead of
+      blanking for the length of a re-read. `store.pairs.isEmpty` ⟺ the unified
+      layout is what was asked for, which makes the branch self-describing.
+    - **D-14's fix must not reset scroll on a layout change.** WS-P adds the
+      `ScrollViewReader` that resets scroll on a *file* switch; the key it
+      resets on has to be the file, not the rendered payload, or it will undo
+      what this workstream deliberately preserves — FRONTEND §6.3's same-file
+      rule covers a layout change, and the Tauri client's own reset key was
+      trimmed to match.
+    - **DF-13 is closed by the platform, and both candidate fixes were worse.**
+      SwiftUI `Text` uses `byWordWrapping`, documented as breaking a word that
+      cannot fit a line on its own, so a minified or base64 run folds rather
+      than overflows. `.byCharWrapping` is not reachable from `Text`, and
+      zero-width break insertion in the tab-expansion pass would put U+200B
+      into every copy taken from the pane — which is what **DF-6** (WS-P)
+      exists to prevent. Do not reopen it there.
+    - **`usize` does not cross the bridge.** Core's `SbsPair` indexes with it,
+      so the mirror is purpose-built at `u32` — the width the flat index
+      already crosses at in `copy_diff_text` — and saturates rather than
+      wrapping, which degrades to a filler cell because `u32::MAX` indexes no
+      row. The size guard makes it unreachable anyway. Any future core type
+      with a `usize` field needs the same treatment.
+    - **A config field can belong to a surface other than Settings.** The
+      layout is patched from the diff header, which is why the Settings patch
+      must keep *not* naming it — naming it would revert whatever the header
+      last wrote while that window stood open. WS-R rewrites that patch
+      field-wise and must not "complete" it by adding `sideBySideDiff`.
+    - **A second config writer makes the write chain a store concern.** Tauri's
+      chained `patchConfig` moved from `SettingsOverlay` into
+      `stores/config.ts`, so ordering holds across surfaces; the form keeps
+      only what a form needs (the error line, the `formSeq` rebuild, the
+      discovery walk). Natively the equivalent is
+      `AppConfigStore.setSideBySideDiff`, whose `pendingSideBySide` shadow is
+      what makes the control answer on the click **and** makes a refused write
+      an observable change back — a setter that left the store untouched would
+      leave the pressed segment showing a layout that never took.
+    - **A control that cannot act is worse than no control.** The layout
+      segments are absent on a binary diff, an empty state, a failure and a
+      dirty submodule — which also exposed that the header's `+N −N` had been
+      describing the *previously open* file on a dirty submodule, since that
+      row is answered before the read and so never clears the store.
+    - **A "just this once" escape has to know what *once* means, and it is not
+      one request.** The size guard's *Show diff anyway* was a per-call flag in
+      both clients, so the moment the layout control made the diff re-read from
+      inside its own header, revealing a 4 MiB diff and then switching
+      arrangement re-armed the guard, threw the diff away **and** removed the
+      control that had got the reader past it — unrecoverable from where the
+      click was made. Both clients now remember *which diff* was revealed (the
+      file, plus the commit where there is one, and deliberately not the
+      working-tree epoch), so every re-read of that diff keeps it and a
+      different one gets the guard back. **Anything that adds a re-read to a
+      surface has to check what the old read was silently clearing.**
+    - **A control the user clicks must write synchronously.** A SwiftUI control
+      writes through its `Binding` and re-reads it in the same layout pass, and
+      a `Task` does not start there — so wrapping the write in one leaves the
+      segment snapping back for a frame, defeating the shadow whose whole job
+      is to answer on the click. `setSideBySideDiff` is `nonisolated`-free and
+      synchronous; the `await` lives inside the `Task` it owns.
+    - **Anything that writes a shared file needs a queue, not just a lock.**
+      Core's `patch_config` lock keeps the file coherent, but it decides
+      *nothing* about order: two clicks in flight against it are two patches
+      whose winner is the scheduler's, and the loser is what persists. The
+      native writer chains on the previous write's `Task` and only clears the
+      pending slot if it is still the one that set it; the Tauri writer chains
+      in `stores/config.ts`. A store that reads the same file needs the other
+      half — `AppConfigStore.reload()` drops a read that a write overtook,
+      since the read holds the file from *before* it.
 16. **WS-P — Native diff polish (S/M).** Smaller than it was: WS-E took DF-9
     (with D-20) and DF-11 on both clients rather than leaving native behind.
     What is left: **D-14** (no scroll reset on file switch — no `ScrollViewReader`
@@ -2086,8 +2173,9 @@ written as each chunk lands, no duplication between documents:
   open decision closes with it.
 - **TECHNICAL.md** — new mechanics paragraphs only for genuinely new machinery
   (the core hoists, the Tauri channel transport, the native launch path, WS-N's
-  `Set` selection + `FileListSelection` + held `PathText` fit), plus the claims
-  WS-S lists as their areas land.
+  `Set` selection + `FileListSelection` + held `PathText` fit, WS-O's one-row-
+  model split layout and the `AppConfigStore` writer), plus the claims WS-S
+  lists as their areas land.
 - **DESIGN.md** — flow 1 is shared end to end since WS-M, `leogit <dir>` and
   the *Create a repository here?* prompt included, and flow 11 (the update
   chip) is now both clients'. The per-flow client hedges retire as parity
@@ -2099,7 +2187,9 @@ written as each chunk lands, no duplication between documents:
   and flipping Tauri to one press is the two-line change WS-C flagged. Flow 3's
   selection paragraph is shared since WS-N, with the two Tauri-only gestures
   (the checkbox anchor, and an extension activating the shift-clicked row)
-  called out rather than described as everyone's.
+  called out rather than described as everyone's. Flow 3's diff paragraph is
+  shared since WS-O — one arrangement control, in the diff's own header, on
+  both clients.
 - **STYLE.md** — the status-letter row settled on `U` + the purple token with
   H-13 (done); WS-C added the *Repo pickers* section (the two lists are one
   component family, with the shared footer and empty state) and the
@@ -2119,7 +2209,10 @@ written as each chunk lands, no duplication between documents:
   there for `Tab`; WS-N rewrote the *File list* selection, inclusion-cue and
   select-all bullets around the set selection and the tri-state checkbox, and
   noted that the composer's character counter sits inside the field only where
-  the platform's field can reserve room for it.
+  the platform's field can reserve room for it; WS-O gave the *Diff viewer*
+  section the header arrangement control and rewrote the side-by-side bullet
+  around per-cell tints, the filler wash and the spanning hunk header, pointing
+  at *Forms*' segmented-control treatment rather than restating it.
 - **ROADMAP.md** — items close as their workstreams land; the deferrals this
   plan makes (per-line staging, diff virtualization, branch rename +
   delete-on-remote) are already filed there. WS-L closed the two WS-B and the

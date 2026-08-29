@@ -1,5 +1,5 @@
 import { get, writable } from 'svelte/store'
-import { configApi, gitApi, type Config, type FileEntry } from '$lib/api/commands'
+import { configApi, gitApi, type Config, type ConfigPatch, type FileEntry } from '$lib/api/commands'
 
 export const config = writable<Config | null>(null)
 
@@ -64,6 +64,42 @@ export async function applyConfig(cfg: Config): Promise<void> {
 
 function sameStrings(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((value, i) => value === b[i])
+}
+
+/**
+ * Writes in flight, chained. Two quick edits must land in the order they were
+ * made, and that has to hold *across* surfaces now that the diff header writes
+ * its layout while the Settings dialog can be standing open on the same file.
+ * A failed write must not strand the ones behind it, so the chain is kept on
+ * the swallowed copy.
+ */
+let writes: Promise<unknown> = Promise.resolve()
+
+/**
+ * Apply a field-wise patch and publish the config core hands back.
+ *
+ * The one writer. A surface patches the fields it owns and nothing else, so it
+ * cannot revert what another surface — or the other client — changed while it
+ * was open. The returned config is normalized, which is what lets a caller
+ * re-seed its control from the answer rather than from what it asked for.
+ *
+ * Resolves with `before` as well, read **inside** the chain: it is what this
+ * write replaced, not what was on screen when the caller asked. A form that
+ * compares the two to decide whether anything moved has to compare against the
+ * config immediately preceding its own write, or an earlier queued patch shows
+ * up as the difference and the comparison silently stops being about this one.
+ */
+export function patchConfig(
+  fields: ConfigPatch
+): Promise<{ before: Config | null; updated: Config }> {
+  const write = writes.then(async () => {
+    const before = get(config)
+    const updated = await configApi.patchConfig(fields)
+    await applyConfig(updated)
+    return { before, updated }
+  })
+  writes = write.catch(() => {})
+  return write
 }
 
 export async function refreshConfig(): Promise<Config | null> {

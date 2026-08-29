@@ -13,7 +13,7 @@
   } from '$lib/stores/repo'
   import { appState } from '$lib/stores/app'
   import { dismissTopOverlay, overlayDepth } from '$lib/actions/overlayStack'
-  import { config, refreshConfig } from '$lib/stores/config'
+  import { config, patchConfig, refreshConfig } from '$lib/stores/config'
   import { hydrateReposState, patchReposState, recordRecentRepo } from '$lib/stores/reposState'
   import { setRepoSync } from '$lib/stores/repoSync'
   import { activeNetworkOp } from '$lib/stores/networkOps'
@@ -29,7 +29,7 @@
     gitApi,
     diffApi,
     exclusionsApi,
-    WEBVIEW_DIFF_OPTIONS,
+    webviewDiffOptions,
     type Exclusion,
     type FileEntry,
     type CommitInfo,
@@ -712,6 +712,11 @@
       diffLoadingTimer = null
     }
 
+    // Claim or release the size-guard reveal before the read, so the request
+    // below can simply ask whether *this* file is the revealed one.
+    if (opts.showAnyway) revealedDiffPath = file?.path ?? null
+    else if (revealedDiffPath !== (file?.path ?? null)) revealedDiffPath = null
+
     // A submodule that is dirty inside but whose recorded commit hasn't moved
     // has no diff worth reading: git answers with an opaque
     // `Subproject commit …-dirty` line, which the pane replaces with an
@@ -757,10 +762,12 @@
       // One call: core reads and parses, and — when hide-whitespace left
       // nothing to show — checks the unfiltered diff so the pane can say the
       // change is there and the setting is hiding it.
-      const parsed = await diffApi.getParsedDiff(repoPath, file, cfg?.hide_whitespace ?? false, {
-        ...WEBVIEW_DIFF_OPTIONS,
-        show_anyway: opts.showAnyway ?? false,
-      })
+      const parsed = await diffApi.getParsedDiff(
+        repoPath,
+        file,
+        cfg?.hide_whitespace ?? false,
+        webviewDiffOptions(cfg?.side_by_side_diff ?? false, revealedDiffPath === file.path),
+      )
       // Drop the result if the user moved on to a different file mid-fetch.
       if (get(repoState).activeFile?.path !== file.path) return
       if (diffLoadingTimer) {
@@ -794,6 +801,40 @@
         isDiffLoadingSlow: false,
       }))
     }
+  }
+
+  /*
+    What the reader asked to see past the size guard, per pane — the file for
+    the changes pane, `sha|path` for the commit pane, since the same path in
+    two commits is two different diffs.
+
+    Kept as an identity rather than as a per-call flag, because the decision has
+    to survive one thing and not the other: every re-read of the *same* diff
+    keeps it — a layout change, a whitespace toggle, a poll that found the file
+    rewritten — where re-arming the guard would silently take back what was
+    asked for and, since the header lives inside the viewer, remove the control
+    that got them past it. A different diff clears it, which is what makes the
+    guard withhold rather than refuse.
+  */
+  let revealedDiffPath = $state<string | null>(null)
+  let revealedCommitDiff = $state<string | null>(null)
+
+  /**
+   * Persist the diff layout the header just asked for.
+   *
+   * The choice outlives the file, the repository and the app, which is why it
+   * is a config field and not component state — and why it is shared with the
+   * native client rather than kept in `localStorage`. Publishing the config
+   * moves `diffReadKey` below, which is what re-reads the open diffs with the
+   * pairing the new arrangement needs.
+   */
+  function setDiffLayout(sideBySide: boolean): void {
+    if (sideBySide === ($config?.side_by_side_diff ?? false)) return
+    void patchConfig({ side_by_side_diff: sideBySide }).catch((e: unknown) => {
+      // Nothing landed, so nothing changes on screen — the control renders
+      // from the config and simply stays where it was.
+      console.error('[config] could not save the diff layout', e)
+    })
   }
 
   // Re-fetch the diff for the file currently open in the changes pane, because
@@ -891,6 +932,12 @@
       return
     }
 
+    // Same rule as the changes pane, keyed on the commit as well: the same path
+    // in two commits is two different diffs, so a reveal must not carry across.
+    const revealKey = `${commit.sha}|${file.path}`
+    if (opts.showAnyway) revealedCommitDiff = revealKey
+    else if (revealedCommitDiff !== revealKey) revealedCommitDiff = null
+
     commitDiffLoadingTimer = setTimeout(() => {
       commitDiffLoadingTimer = null
       const s = get(repoState)
@@ -901,10 +948,12 @@
     }, SLOW_DIFF_THRESHOLD_MS)
 
     try {
-      const parsed = await diffApi.getParsedCommitDiff(repoPath, commit.sha, file.path, {
-        ...WEBVIEW_DIFF_OPTIONS,
-        show_anyway: opts.showAnyway ?? false,
-      })
+      const parsed = await diffApi.getParsedCommitDiff(
+        repoPath,
+        commit.sha,
+        file.path,
+        webviewDiffOptions($config?.side_by_side_diff ?? false, revealedCommitDiff === revealKey),
+      )
       if (get(repoState).activeCommitFile?.path !== file.path) return
       if (commitDiffLoadingTimer) {
         clearTimeout(commitDiffLoadingTimer)
@@ -1969,19 +2018,39 @@
     untrack(() => fetchLoop.reschedule())
   })
 
-  // When hide_whitespace toggles in settings, reload the active diff
-  let lastHideWhitespace = $state<boolean | undefined>(undefined)
+  /*
+    Re-read the open diffs when a setting the *read* depends on changes.
+
+    `hide_whitespace` picks a different `git diff`; `side_by_side_diff` decides
+    whether core builds the row pairing at all, so the layout the diff header
+    just switched to has no rows of its own until this lands. Both panes
+    reload, not only the changes one: whitespace hiding applies to working-tree
+    diffs alone, but the layout applies to a commit's diff just the same.
+
+    `force`, because the file has not changed — without it the loaders'
+    "already open" short-circuit returns before reading, which is precisely the
+    case this exists for.
+
+    Derived key read by an `untrack`ed effect (the rule this client applies to
+    anything reacting to a polled store): reading `repoState` inside the branch
+    would re-run this on every status tick.
+  */
+  const diffReadKey = $derived(
+    `${$config?.hide_whitespace ?? false}:${$config?.side_by_side_diff ?? false}`,
+  )
+  let lastDiffReadKey = $state<string | null>(null)
   $effect(() => {
-    const cfg = $config
-    if (!cfg) return
-    if (lastHideWhitespace === undefined) {
-      lastHideWhitespace = cfg.hide_whitespace
-      return
-    }
-    if (cfg.hide_whitespace !== lastHideWhitespace) {
-      lastHideWhitespace = cfg.hide_whitespace
-      if ($repoState.activeFile) loadDiffForFile($repoState.activeFile)
-    }
+    const key = diffReadKey
+    untrack(() => {
+      if (lastDiffReadKey === null || key === lastDiffReadKey) {
+        lastDiffReadKey = key
+        return
+      }
+      lastDiffReadKey = key
+      const open = get(repoState)
+      if (open.activeFile) void loadDiffForFile(open.activeFile, { force: true })
+      if (open.activeCommitFile) void loadCommitFileDiff(open.activeCommitFile, { force: true })
+    })
   })
 
   // Kill terminal PTY on project change so we don't leak shells from prior repos.
@@ -2194,6 +2263,7 @@
               showSelection={false}
               syntaxHighlighting={$config?.syntax_highlighting ?? true}
               sideBySide={$config?.side_by_side_diff ?? false}
+              onLayoutChange={setDiffLayout}
               tabSize={$config?.tab_size ?? 4}
             />
           {:else if $repoState.activeFileDiff?.size_guard}
@@ -2280,6 +2350,7 @@
                   showSelection={false}
                   syntaxHighlighting={$config?.syntax_highlighting ?? true}
                   sideBySide={$config?.side_by_side_diff ?? false}
+                  onLayoutChange={setDiffLayout}
                   tabSize={$config?.tab_size ?? 4}
                 />
               {:else if $repoState.activeCommitFileDiff?.size_guard}

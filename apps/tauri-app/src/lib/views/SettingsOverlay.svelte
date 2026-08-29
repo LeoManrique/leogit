@@ -30,7 +30,7 @@
     type ConfigPatch,
     type ShellOption,
   } from '$lib/api/commands'
-  import { applyConfig, config as configStore, refreshConfig } from '$lib/stores/config'
+  import { config as configStore, patchConfig, refreshConfig } from '$lib/stores/config'
   import { rediscoverRepos } from '$lib/services/repoDiscovery'
   import { dismissOnEscape } from '$lib/actions/overlayStack'
 
@@ -117,13 +117,6 @@
   }
 
   /**
-   * Writes in flight, chained. Two quick edits must land in the order they were
-   * made — `patch_config` is a read-modify-write, so overlapping calls would
-   * race on the file each of them just read.
-   */
-  let writes: Promise<void> = Promise.resolve()
-
-  /**
    * Bumped to rebuild every control from the config on disk.
    *
    * The controls render from `config`, so they repaint whenever it changes —
@@ -135,12 +128,14 @@
    */
   let formSeq = $state(0)
 
+  /**
+   * This form's writer: the shared chained one, plus what only a form needs —
+   * an error line, a rebuild of the control that asked, and the discovery walk
+   * a scan-path edit implies.
+   */
   function patch(fields: ConfigPatch): void {
-    writes = writes.then(async () => {
-      const before = $configStore
-      try {
-        const updated = await configApi.patchConfig(fields)
-        await applyConfig(updated)
+    void patchConfig(fields).then(
+      ({ before, updated }) => {
         error = ''
         if (before && JSON.stringify(before) === JSON.stringify(updated)) formSeq += 1
         // The scan paths are what discovery walks and the depth is how far, so
@@ -149,12 +144,13 @@
         if (fields.scan_paths !== undefined || fields.scan_depth !== undefined) {
           void rediscoverRepos()
         }
-      } catch (e) {
+      },
+      (e: unknown) => {
         // Nothing landed, so the control must stop claiming it did.
         error = String(e)
         formSeq += 1
-      }
-    })
+      },
+    )
   }
 
   /**
@@ -263,16 +259,6 @@
           </p>
 
           <h3>Diff</h3>
-          <div class="setting-group">
-            <label class="checkbox-label">
-              <input
-                type="checkbox"
-                checked={config.side_by_side_diff}
-                onchange={(e) => patch({ side_by_side_diff: e.currentTarget.checked })}
-              />
-              Side-by-side diff view
-            </label>
-          </div>
           <div class="setting-group">
             <label class="checkbox-label">
               <input

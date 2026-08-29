@@ -8,11 +8,11 @@ import Foundation
 /// the diff rendering settings, repo discovery, the terminal shell, and the
 /// AI knobs. `save()` sends a *patch* naming exactly those, so every field
 /// this window doesn't manage survives untouched by construction rather than
-/// by remembering to reload first. Two are exempt deliberately
-/// (FRONTEND.md §8): `theme` permanently, because the native app follows the
-/// system appearance and a stored theme is a web-only concept;
-/// `side_by_side_diff` until the split layout gets its own design pass
-/// (tracked in ROADMAP).
+/// by remembering to reload first. Two are absent deliberately: `theme`,
+/// because the native app follows the system appearance and a stored theme is
+/// a web-only concept (FRONTEND.md §8); and `side_by_side_diff`, which is
+/// written from the diff's own header in both clients — the arrangement is a
+/// property of the diff you are reading, not a preference you go and find.
 ///
 /// Saves are debounced a moment and fired by the controls themselves (via
 /// `scheduleSave()`), never by `load()` — so opening the window writes
@@ -208,7 +208,9 @@ final class SettingsStore {
     private var currentPatch: ConfigPatch {
         // `theme`, `sideBySideDiff` and the two timeouts are absent on
         // purpose: this window has no control for them, and a patch that
-        // named them would be claiming an opinion it doesn't have.
+        // named them would be claiming an opinion it doesn't have — which for
+        // the layout would mean reverting whatever the diff header last wrote
+        // while this window stood open.
         ConfigPatch(
             fetchIntervalMs: UInt32(
                 fetchIntervalSeconds.clamped(to: Self.fetchIntervalRange) * 1000),

@@ -100,7 +100,7 @@ leogit/
 │           ├── Stores/RepoStore.swift  # @MainActor @Observable state for the open repo
 │           ├── Screens/             # ContentView, WelcomeView, the tab panes (Changes/History × Sidebar/DetailPane)
 │           ├── Services/            # Host-free rules: list navigation, selection, collation, connectivity
-│           └── Design/              # Date formatting, FileStatus, path + shared file list, failure alert
+│           └── Design/              # Date formatting, FileStatus, path + shared file list, diff rows, failure alert
 ├── justfile                         # install / dev / build / check / format / mac-*
 └── DESIGN.md / TECHNICAL.md / STYLE.md / FRONTEND.md / ROADMAP.md / README.md
 ```
@@ -149,9 +149,11 @@ only, one `#[uniffi::export]` per core function. Two decisions shape it:
 
 The exported surface tracks the ported flows and stays 1:1 with core, with one deliberate
 exception: the parsed diff crosses as a purpose-built `DiffPayload` record rather than
-mirroring core's `ParsedDiff`, whose HTML array and side-by-side pairs are `WebView`
-presentation the native client should not even be able to read. It asks for neither
-(`DiffOptions { html: false, side_by_side: false }`), so core builds neither. The diff view
+mirroring core's `ParsedDiff`, whose HTML array is `WebView` presentation the native
+client should not even be able to read — it never asks for it (`DiffOptions.html:
+false`), so core never builds it. The side-by-side pairing does cross, as a `SbsPair`
+record with `u32` indices (core's are `usize`, a width the bridge does not carry), and
+only while the split layout is on screen. The diff view
 keeps the two-phase shape, now over one call: `get_parsed_diff` reads and parses in a single
 crossing and paints the structure immediately; `tokenize_diff`, blob-backed so multi-line
 constructs highlight correctly, recolours in place.
@@ -183,7 +185,28 @@ The diff settings feed this path from `AppConfigStore` (below): `DiffStore.load`
 client — and `highlight`, whose off state skips the tokenize phase and drops any tokens on
 screen (the Tauri `if (!sh) return` after the plain render). Both flags live in `DiffView`'s
 `LoadKey`, so a Settings toggle re-keys the open diff through the seamless path above, where
-the equality skip keeps scroll when nothing textual changed. `tab_size` is presentation:
+the equality skip keeps scroll when nothing textual changed. `side_by_side` is the third:
+core builds the pairing only for the layout that asked, so a layout change is a re-read too.
+
+**The split layout is an arrangement of one row model, not a second renderer.**
+`DiffStore` holds `rows` (the flat line list, keyed by the flat index every parallel array
+in core shares) and, when the split layout asked for it, `pairs` — core's `SbsPair`s with a
+row identity. A pair carries *indices*, so both columns read the same `rows` and each side
+looks its own tokens up by its own flat index with no bookkeeping; `DiffLineCell` draws a
+cell for either arrangement, taking both line numbers in the unified layout and one in a
+split column, so the glyphs, the row tints, the tab expansion and the token styling are
+written once. The publish step compares the line model and the pairing **separately**
+(`modelMoved` / `pairingMoved`): a layout change returns an identical `file_diff` with a
+pairing that appeared or vanished, and comparing the payload as a whole would rebuild the
+rows and drop the syntax colour every time the reader switched arrangement. The two
+arrangements are branches *inside* one `ScrollView`, never two scroll views, for the same
+identity reason the slow-load dim is a modifier — and the branch reads the loaded pairing
+rather than the setting, so the pane changes on the frame its data arrives instead of
+blanking for the length of a re-read. **The Svelte viewer follows both rules too**: one
+`.diff-body` wrapping an `{#if}` rather than one per branch (swapping the branch destroys
+the element `scrollTop` lives on), and a `showSplit` derived off `diff.sbs_pairs.length`
+rather than off the `sideBySide` prop — the prop is what the *control* shows as pressed,
+which answers on the click, a re-read ahead of the rows it asked for. `tab_size` is presentation:
 SwiftUI `Text` honours no paragraph-style attributes, so `DiffLineText` expands tabs to
 spaces with CSS `tab-size` stop math (next multiple of N columns) and remaps every token and
 intra-line range through the expansion — a no-tab line pays one `contains` scan and nothing
@@ -279,8 +302,9 @@ travels with it), the Tauri `main` now calls it from there, and the bridge expor
 
 The repo switcher and background refresh cross as the picker/scheduler surface the Tauri
 client already had: `load_config` / `patch_config` / `config_bounds` (full `Config`,
-`ConfigPatch` and `ConfigBounds` mirrors — `theme` and `side_by_side_diff` are the recorded
-native exemptions (FRONTEND.md §8) and simply go unpatched, which is what a patch makes
+`ConfigPatch` and `ConfigBounds` mirrors — `theme` is the recorded native exemption
+(FRONTEND.md §8) and `side_by_side_diff` belongs to the diff header rather than to the
+Settings window, so both go unpatched by that window, which is what a patch makes
 expressible), `load_state`/`patch_state`/`record_recent_repo` over
 `ReposState`/`ReposStatePatch` mirrors — the shared `repos-state.json`, where
 `last_opened_repo` is patched on every switch and restored at launch by *either* client,
@@ -851,11 +875,11 @@ Settings scene (`Settings { }` in `LeoGitApp`, which is what binds ⌘, and the 
 item) exposes only fields with native consumers — auto-fetch cadence, the Diff section
 (hide whitespace, syntax highlighting, tab size 1–16), scan paths/depth, the terminal
 shell (via the newly exported `list_shells` + `ShellOption` mirror, with a
-stored-but-uninstalled id rendering as Automatic), and the AI knobs. Exactly two fields
-cross untouched as documented exemptions (FRONTEND.md §8): `theme` permanently — the
-native app follows the system appearance — and `side_by_side_diff` until the split
-layout gets its own design pass (ROADMAP) — both simply go unnamed by the patch, which is
-what a patch makes expressible. `SettingsStore.save()` sends a `ConfigPatch` of the fields
+stored-but-uninstalled id rendering as Automatic), and the AI knobs. Two fields
+go unnamed by the patch, which is what a patch makes expressible: `theme`, a permanent
+exemption because the native app follows the system appearance (FRONTEND.md §8), and
+`side_by_side_diff`, which the diff header owns in both clients — naming it here would
+revert whatever that header last wrote while this window stood open. `SettingsStore.save()` sends a `ConfigPatch` of the fields
 this window owns; the load-fresh-then-overlay discipline it used to hand-roll now lives
 inside core, under a lock. Discrete controls save through a 300 ms debounce; text fields
 commit on focus-loss/Return, and travel blank (core reads blank as absent). Closing the
@@ -878,6 +902,16 @@ auto-fetch loop reads the store each tick, so interval and toggle changes apply 
 one interval — the live re-arm the
 Tauri client still lacks (its ROADMAP entry) — and `DiffView`'s `LoadKey` reads it so the
 diff toggles re-key the open diff the moment a save lands.
+It is also a **writer**, for the one field the Settings window does not own:
+`setSideBySideDiff` patches `side_by_side_diff` for the diff header's layout control.
+The value is read through a `pendingSideBySide` shadow that is cleared when the write
+lands, success or not — which makes the control answer on the click rather than after a
+file write, and makes a *refused* write an observable change back, where a setter that
+left the store untouched would leave the segment the reader pressed showing a layout that
+never took. The Tauri client reaches the same place from the other side: its chained
+`patchConfig` moved out of `SettingsOverlay` into `stores/config.ts`, so the "two quick
+edits land in the order they were made" guarantee now holds across surfaces rather than
+within one form.
 
 Publish closed the gh surface. `gh_publish_repo` crossed like `gh_clone` (already
 core-async over the blocking pool; no listener — `gh repo create` streams nothing parseable,
@@ -1141,9 +1175,9 @@ second `git diff` runs only on the path where the pane would otherwise be blank.
 
 `parse_diff_with` is a hand-rolled unified-diff parser (no `regex` crate). It captures the full file header (`diff --git`, `index ...`, `--- a/...`, `+++ b/...`) into `file_header` because `git apply` requires it for new/deleted/renamed files. Each hunk stores its own `@@` header line as the first entry in `lines` so flat/global line indexing stays consistent across the frontend and backend. `DiffLine.text` — the raw patch line — is filled only for `Hunk` and `NoNewline` rows, the only two whose meaning *is* their text; every other row's `text` duplicated `content` byte for byte, once per line of every diff, on both wires.
 
-`DiffOptions` decides what is built alongside the parse. The phase-1 HTML array and the side-by-side pairing exist for a `WebView` host; the native host renders from the line model and asks for neither, so neither is built, marshalled, or dropped at the bridge. `show_anyway` is the escape from the size guard below.
+`DiffOptions` decides what is built alongside the parse. The phase-1 HTML array exists for a `WebView` host; the native host renders from the line model and never asks for it, so it is never built, marshalled, or dropped at the bridge. The side-by-side pairing is asked for by whichever host is about to render the split layout and by neither in the unified one, so a pairing per line is built only when something reads it. `show_anyway` is the escape from the size guard below.
 
-**Size guard.** A patch over 4 MiB, or one containing a line over 5 000 bytes, is *withheld* rather than parsed: `ParsedDiff.size_guard` carries the measurements and the viewer offers to render it anyway. The long-line limit earns its place separately from the byte total — a minified bundle or a base64 blob is slow at a size the total waves through. This withholds, it never refuses; the escape re-asks with `show_anyway` and applies to that one request, so moving to another file gets the guard back.
+**Size guard.** A patch over 4 MiB, or one containing a line over 5 000 bytes, is *withheld* rather than parsed: `ParsedDiff.size_guard` carries the measurements and the viewer offers to render it anyway. The long-line limit earns its place separately from the byte total — a minified bundle or a base64 blob is slow at a size the total waves through. This withholds, it never refuses; the escape re-asks with `show_anyway`. Each client remembers **which diff** was revealed — the file, plus the commit where there is one, and deliberately not the working-tree epoch — so every re-read of that diff keeps it (a layout change, a whitespace toggle, a poll that finds the file rewritten) while a different one gets the guard back. A per-request flag instead would re-arm the guard under the reader on any of those, and since the layout control lives inside the viewer, taking the diff away also takes away the control that got them past it.
 
 **Empty is not one thing.** `EmptyDiffReason` separates `NoChanges` (the file matches its committed state), `WhitespaceOnly` (the change is there and the setting is hiding it), and `NoTextualChanges` (a mode change or a pure rename — a header with zero hunks). A *failed* read is none of these: it is an `Err`, which is what lets a viewer clear a stale diff instead of captioning it.
 
@@ -1491,7 +1525,7 @@ Guards: lines over `MAX_HIGHLIGHT_LINE_LEN = 1024` chars are still *parsed* (sta
 
 DiffViewer's debounced (80 ms) phase 2 and its `lastDiff` guard (which keeps the status poll from re-tokenising) mean each file switch costs one tokenise, off the UI thread, after plain text has already painted — so there is no token cache yet.
 
-**`parse_diff` returns a `ParsedDiff` wrapper, not a bare `FileDiff`.** Alongside `file_diff` it carries everything else the viewer would otherwise re-derive per render: `html` (the phase-1 lines above), `sbs_pairs` (the side-by-side pairing — context/header rows spanning both columns, each delete run zipped against the following add run, `NoNewline` markers rowless), and `additions`/`deletions` for the header badge. The pairs reference lines by **flat/global index** — the same indexing the per-line HTML and the selection map use — and the viewer resolves them through a trivial `flatLines` flatten, so the pairing algorithm itself lives only in [diff.rs:build_sbs_pairs](core/src/diff.rs). `FileDiff` itself deliberately stays lean and wire-identical to before, because the frontend round-trips it back into `highlight_diff` / `generate_patch` — putting the derived artifacts on it would echo them over IPC on every highlight. Covered by the `diff::tests` (run zipping, `NoNewline`, backplate HTML).
+**`parse_diff` returns a `ParsedDiff` wrapper, not a bare `FileDiff`.** Alongside `file_diff` it carries everything else the viewer would otherwise re-derive per render: `html` (the phase-1 lines above), `sbs_pairs` (the side-by-side pairing — context/header rows spanning both columns, each delete run zipped against the following add run, `NoNewline` markers rowless), and `additions`/`deletions` for the header badge. The pairs reference lines by **flat/global index** — the same indexing the per-line HTML, the token lines and the selection map use — and each viewer resolves them against its own flat line list (`flatLines` in Svelte, `DiffStore.rows` natively), so the pairing algorithm itself lives only in [diff.rs:build_sbs_pairs](core/src/diff.rs) and the two clients cannot arrange one diff differently. `FileDiff` itself deliberately stays lean and wire-identical to before, because the frontend round-trips it back into `highlight_diff` / `generate_patch` — putting the derived artifacts on it would echo them over IPC on every highlight. Covered by the `diff::tests` (run zipping, `NoNewline`, backplate HTML).
 
 ## Accessibility patterns
 

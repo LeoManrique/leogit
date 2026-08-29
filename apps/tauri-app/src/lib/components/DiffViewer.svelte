@@ -18,8 +18,17 @@
     blobSource?: BlobSource | null
     showSelection?: boolean
     syntaxHighlighting?: boolean
+    /** Which segment the header's layout control shows as pressed — the
+     *  choice, which answers on the click. What the *body* renders is decided
+     *  by the loaded pairing (`showSplit` below), a re-read later, so the rows
+     *  on screen stay put until their replacement lands. */
     sideBySide?: boolean
     tabSize?: number
+    /** Chosen from this header rather than from Settings — the arrangement is
+     *  a property of the diff being read, so the control belongs on it. The
+     *  owner persists it; core builds the pairing only for the layout that
+     *  asked, so the answer arrives with the re-read. */
+    onLayoutChange?: (sideBySide: boolean) => void
     onLineToggle?: (lineIndex: number) => void
     onHunkToggle?: (hunkIndex: number) => void
   }
@@ -32,6 +41,7 @@
     syntaxHighlighting = true,
     sideBySide = false,
     tabSize = 4,
+    onLayoutChange = () => {},
     onLineToggle = () => {},
     onHunkToggle = () => {},
   }: Props = $props()
@@ -152,8 +162,20 @@
     key: string
   }
 
+  /*
+    Which arrangement is on screen is decided by the *loaded pairing*, not by
+    the setting: core builds `sbs_pairs` only for the layout that asked, so a
+    freshly toggled setting arrives a whole re-read before its rows do. Reading
+    the setting here would empty the pane for the length of that read, where the
+    contract (FRONTEND §6.3, §7) is that what is showing stays until the
+    replacement lands. A pairing is empty exactly when the unified layout was
+    what was asked for — a diff with hunks always yields at least one pair, and
+    one without hunks is binary or empty, both handled before this point.
+  */
+  const showSplit = $derived(!!diff && diff.sbs_pairs.length > 0)
+
   const rows = $derived.by((): DiffRow[] => {
-    if (!fileDiff || sideBySide || fileDiff.is_binary) return []
+    if (!fileDiff || showSplit || fileDiff.is_binary) return []
     const out: DiffRow[] = []
     let g = 0
     for (let h = 0; h < fileDiff.hunks.length; h++) {
@@ -178,21 +200,21 @@
   type SbsRow = { pair: SbsPair; key: string }
 
   const sbsRows = $derived.by((): SbsRow[] => {
-    if (!sideBySide || !diff) return []
+    if (!showSplit || !diff) return []
     return diff.sbs_pairs.map((p, i) => ({ pair: p, key: `S-${i}` }))
   })
 
-  // Reset scroll position when the user opens a different file or toggles the
-  // layout — leaving scrollTop pinned to the previous diff's offset would land
-  // them mid-file in the new diff (often past its end).
+  // Reset scroll position when the user opens a different file — leaving
+  // scrollTop pinned to the previous diff's offset would land them mid-file in
+  // the new one (often past its end). Deliberately *not* on a layout change:
+  // that is the same file, and FRONTEND §6.3's contract keeps the reader's
+  // offset for the same file however the diff was re-read — which is also why
+  // the two arrangements share one scroll container below.
   let lastDiffKey = $state<string | null>(null)
-  let lastSideBySide = $state<boolean | null>(null)
   $effect(() => {
     const key = fileDiff ? `${fileDiff.old_path}|${fileDiff.new_path}` : null
-    const sbs = sideBySide
-    if (key !== lastDiffKey || sbs !== lastSideBySide) {
+    if (key !== lastDiffKey) {
       lastDiffKey = key
-      lastSideBySide = sbs
       if (scrollContainer) scrollContainer.scrollTop = 0
     }
   })
@@ -206,107 +228,165 @@
         <span class="arrow">→</span>
       {/if}
       <span class="new-path">{fileDiff.new_path || fileDiff.old_path}</span>
-      {#if diff && (diff.additions > 0 || diff.deletions > 0)}
-        <span class="line-counts">
-          {#if diff.additions > 0}<span class="add-count">+{diff.additions}</span>{/if}
-          {#if diff.deletions > 0}<span class="del-count">−{diff.deletions}</span>{/if}
-        </span>
-      {/if}
+      <div class="header-trailing">
+        {#if diff && (diff.additions > 0 || diff.deletions > 0)}
+          <span class="line-counts">
+            {#if diff.additions > 0}<span class="add-count">+{diff.additions}</span>{/if}
+            {#if diff.deletions > 0}<span class="del-count">−{diff.deletions}</span>{/if}
+          </span>
+        {/if}
+        {#if !fileDiff.is_binary}
+          <!-- A binary file has no lines to arrange, and a control that does
+               nothing is worse than no control. -->
+          <div class="layout-toggle" role="group" aria-label="Diff layout">
+            <button
+              class="layout-btn"
+              class:active={!sideBySide}
+              aria-pressed={!sideBySide}
+              title="Unified — one column of changes"
+              aria-label="Unified"
+              onclick={() => onLayoutChange(false)}
+            >
+              <svg
+                width="15"
+                height="15"
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.3"
+                stroke-linecap="round"
+                aria-hidden="true"
+              >
+                <rect x="2" y="2.5" width="12" height="11" rx="1.5" />
+                <path d="M4.5 6h7M4.5 8.5h7M4.5 11h4" />
+              </svg>
+            </button>
+            <button
+              class="layout-btn"
+              class:active={sideBySide}
+              aria-pressed={sideBySide}
+              title="Split — old and new side by side"
+              aria-label="Split"
+              onclick={() => onLayoutChange(true)}
+            >
+              <svg
+                width="15"
+                height="15"
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.3"
+                stroke-linecap="round"
+                aria-hidden="true"
+              >
+                <rect x="2" y="2.5" width="12" height="11" rx="1.5" />
+                <path d="M8 2.5v11" />
+              </svg>
+            </button>
+          </div>
+        {/if}
+      </div>
     </div>
 
     {#if fileDiff.is_binary}
       <div class="binary-state">
         <p>This binary file has changed.</p>
       </div>
-    {:else if sideBySide}
-      <div class="diff-body" bind:this={scrollContainer}>
-        {#each sbsRows as row (row.key)}
-          {@const left = row.pair.left !== null ? flatLines[row.pair.left] : null}
-          {@const right = row.pair.right !== null ? flatLines[row.pair.right] : null}
-          {#if row.pair.is_hunk_header && left}
-            <div class="hunk-header sbs-hunk-header">
-              <span class="hunk-text">{left.text ?? left.content}</span>
-            </div>
-          {:else}
-            <div class="sbs-row">
-              <div class="sbs-side sbs-left {left ? lineTypeClass(left.line_type) : 'sbs-empty'}">
-                <span class="line-number">{left?.old_line_no ?? ''}</span>
-                <span class="line-prefix">{left ? linePrefix(left) : ' '}</span>
-                <span class="line-content">
-                  {#if left && row.pair.left !== null && highlightedHtml[row.pair.left]}
-                    {@html highlightedHtml[row.pair.left]}
-                  {:else if left}
-                    {left.content}
-                  {/if}
-                </span>
-              </div>
-              <div class="sbs-side sbs-right {right ? lineTypeClass(right.line_type) : 'sbs-empty'}">
-                <span class="line-number">{right?.new_line_no ?? ''}</span>
-                <span class="line-prefix">{right ? linePrefix(right) : ' '}</span>
-                <span class="line-content">
-                  {#if right && row.pair.right !== null && highlightedHtml[row.pair.right]}
-                    {@html highlightedHtml[row.pair.right]}
-                  {:else if right}
-                    {right.content}
-                  {/if}
-                </span>
-              </div>
-            </div>
-          {/if}
-        {/each}
-      </div>
     {:else}
+      <!--
+        One scroll container for both arrangements, never one per branch:
+        swapping the branch would destroy the element the offset lives on
+        and drop the reader at the top of the file every time they changed
+        the layout, which is the same file (FRONTEND §6.3).
+      -->
       <div class="diff-body" bind:this={scrollContainer}>
-        {#each rows as row (row.key)}
-          {#if row.kind === 'header'}
-            <!--
-              Two headers, not one with conditional attributes: while per-line
-              staging is unwired, `showSelection` is false everywhere and the
-              interactive form costs real usability — a focusable no-op button
-              per hunk, one tab stop each on an unvirtualized list, whose text
-              could not be selected because a control does not select. The
-              scaffolding stays for when staging is finished; its cost does not.
-            -->
-            {#if showSelection}
-              <div
-                class="hunk-header interactive"
-                onclick={(e) => { if (e.shiftKey) onHunkToggle(row.hunkIdx) }}
-                onkeydown={(e) => { if ((e.key === 'Enter' || e.key === ' ') && e.shiftKey) { e.preventDefault(); onHunkToggle(row.hunkIdx) } }}
-                role="button"
-                tabindex="0"
-              >
-                <span class="hunk-text">{row.line.text ?? row.line.content}</span>
-                <span class="hunk-hint">Shift+click for hunk</span>
+        {#if showSplit}
+          {#each sbsRows as row (row.key)}
+            {@const left = row.pair.left !== null ? flatLines[row.pair.left] : null}
+            {@const right = row.pair.right !== null ? flatLines[row.pair.right] : null}
+            {#if row.pair.is_hunk_header && left}
+              <div class="hunk-header sbs-hunk-header">
+                <span class="hunk-text">{left.text ?? left.content}</span>
               </div>
             {:else}
-              <div class="hunk-header">
-                <span class="hunk-text">{row.line.text ?? row.line.content}</span>
+              <div class="sbs-row">
+                <div class="sbs-side sbs-left {left ? lineTypeClass(left.line_type) : 'sbs-empty'}">
+                  <span class="line-number">{left?.old_line_no ?? ''}</span>
+                  <span class="line-prefix">{left ? linePrefix(left) : ' '}</span>
+                  <span class="line-content">
+                    {#if left && row.pair.left !== null && highlightedHtml[row.pair.left]}
+                      {@html highlightedHtml[row.pair.left]}
+                    {:else if left}
+                      {left.content}
+                    {/if}
+                  </span>
+                </div>
+                <div class="sbs-side sbs-right {right ? lineTypeClass(right.line_type) : 'sbs-empty'}">
+                  <span class="line-number">{right?.new_line_no ?? ''}</span>
+                  <span class="line-prefix">{right ? linePrefix(right) : ' '}</span>
+                  <span class="line-content">
+                    {#if right && row.pair.right !== null && highlightedHtml[row.pair.right]}
+                      {@html highlightedHtml[row.pair.right]}
+                    {:else if right}
+                      {right.content}
+                    {/if}
+                  </span>
+                </div>
               </div>
             {/if}
-          {:else}
-            <div class="diff-line {lineTypeClass(row.line.line_type)}">
-              <span class="line-number old">{row.line.old_line_no ?? ''}</span>
-              <span class="line-number new">{row.line.new_line_no ?? ''}</span>
-              <span class="line-prefix">{linePrefix(row.line)}</span>
-              <span class="line-content">
-                {#if highlightedHtml[row.globalIdx]}
-                  {@html highlightedHtml[row.globalIdx]}
-                {:else}
-                  {row.line.content}
-                {/if}
-              </span>
-              {#if showSelection && (row.line.line_type === 'Add' || row.line.line_type === 'Delete')}
-                <button
-                  class="selection-dot"
-                  class:selected={isLineSelected(row.globalIdx)}
-                  onclick={() => onLineToggle(row.globalIdx)}
-                  title="Toggle line selection"
-                  aria-label="Toggle line selection"
-                ></button>
+          {/each}
+        {:else}
+          {#each rows as row (row.key)}
+            {#if row.kind === 'header'}
+              <!--
+                Two headers, not one with conditional attributes: while per-line
+                staging is unwired, `showSelection` is false everywhere and the
+                interactive form costs real usability — a focusable no-op button
+                per hunk, one tab stop each on an unvirtualized list, whose text
+                could not be selected because a control does not select. The
+                scaffolding stays for when staging is finished; its cost does not.
+              -->
+              {#if showSelection}
+                <div
+                  class="hunk-header interactive"
+                  onclick={(e) => { if (e.shiftKey) onHunkToggle(row.hunkIdx) }}
+                  onkeydown={(e) => { if ((e.key === 'Enter' || e.key === ' ') && e.shiftKey) { e.preventDefault(); onHunkToggle(row.hunkIdx) } }}
+                  role="button"
+                  tabindex="0"
+                >
+                  <span class="hunk-text">{row.line.text ?? row.line.content}</span>
+                  <span class="hunk-hint">Shift+click for hunk</span>
+                </div>
+              {:else}
+                <div class="hunk-header">
+                  <span class="hunk-text">{row.line.text ?? row.line.content}</span>
+                </div>
               {/if}
-            </div>
-          {/if}
-        {/each}
+            {:else}
+              <div class="diff-line {lineTypeClass(row.line.line_type)}">
+                <span class="line-number old">{row.line.old_line_no ?? ''}</span>
+                <span class="line-number new">{row.line.new_line_no ?? ''}</span>
+                <span class="line-prefix">{linePrefix(row.line)}</span>
+                <span class="line-content">
+                  {#if highlightedHtml[row.globalIdx]}
+                    {@html highlightedHtml[row.globalIdx]}
+                  {:else}
+                    {row.line.content}
+                  {/if}
+                </span>
+                {#if showSelection && (row.line.line_type === 'Add' || row.line.line_type === 'Delete')}
+                  <button
+                    class="selection-dot"
+                    class:selected={isLineSelected(row.globalIdx)}
+                    onclick={() => onLineToggle(row.globalIdx)}
+                    title="Toggle line selection"
+                    aria-label="Toggle line selection"
+                  ></button>
+                {/if}
+              </div>
+            {/if}
+          {/each}
+        {/if}
       </div>
     {/if}
   </div>
@@ -372,9 +452,17 @@
   .arrow { color: var(--text-muted); }
   .new-path { color: var(--text-primary); }
 
-  /* Per-file +adds/-dels totals, pushed to the right edge of the header. */
-  .line-counts {
+  /* The header's trailing cluster: the totals, then the layout control. One
+     `margin-left: auto` for the pair, so neither pushes the other around. */
+  .header-trailing {
     margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  /* Per-file +adds/-dels totals. */
+  .line-counts {
     display: inline-flex;
     align-items: center;
     gap: 8px;
@@ -384,6 +472,47 @@
 
   .add-count { color: var(--diff-add-fg); }
   .del-count { color: var(--diff-remove-fg); }
+
+  /* Two joined segments rather than one toggling glyph: the arrangement has
+     two named states, and a control that shows only the one you are in leaves
+     the reader working out whether the icon is where they are or where they
+     would go. STYLE.md's *Segmented controls* treatment, at icon size. */
+  .layout-toggle {
+    display: inline-flex;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+
+  .layout-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 22px;
+    padding: 0;
+    background: transparent;
+    color: var(--text-muted);
+    border: 0;
+    cursor: pointer;
+    transition:
+      color 100ms ease,
+      background 100ms ease;
+  }
+
+  .layout-btn + .layout-btn {
+    border-left: 1px solid var(--border-strong);
+  }
+
+  .layout-btn:hover {
+    color: var(--text-primary);
+    background: var(--surface-hover);
+  }
+
+  .layout-btn.active {
+    color: var(--text-primary);
+    background: var(--bg-elevated);
+  }
 
   /*
     .diff-body is the scroll container. Vertical only: long lines wrap
