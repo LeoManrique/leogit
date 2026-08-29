@@ -43,6 +43,19 @@ final class RepoStore {
     private(set) var hasMoreHistory = true
     private var isLoadingMoreHistory = false
 
+    /// Whether this repository's first `git log` has landed.
+    ///
+    /// `commits.isEmpty` cannot answer *"has this repository no commits?"* on
+    /// its own, because it is equally true of a repository whose log is still
+    /// in flight — and the History pane asserts one of those two out loud. So
+    /// the empty views wait for this rather than reading the array, and a repo
+    /// that does have history never flashes *No commits yet* on the way in.
+    ///
+    /// Reset by `open()` alone: a `refresh()` re-reads a repository whose log
+    /// has already been answered once, and blanking the flag there would put
+    /// the flash back on every ⌘R.
+    private(set) var historyLoaded = false
+
     /// Whether a merge is in progress (`MERGE_HEAD` exists) — drives the
     /// subtitle badge and the branch menu's Abort Merge item.
     ///
@@ -151,6 +164,17 @@ final class RepoStore {
             repoPath = root
             repoName = await GitBridge.name(of: root)
             errorMessage = nil
+            // Drop the previous repository's history *with* its path, not when
+            // the new log happens to land. `repoPath` is published above and
+            // the History pane re-seeds its selection from `commits`, so
+            // leaving the old array in place hands the detail pane a sha from
+            // one repository to load against another's path — and a new repo
+            // whose log then fails would keep showing the old one's commits
+            // indefinitely. Cleared here, the pane reads "still loading"
+            // (`historyLoaded`) for exactly the window it is true.
+            commits = []
+            hasMoreHistory = true
+            historyLoaded = false
             // A fresh repository starts at page one, whatever depth the
             // previous one had been scrolled to.
             await loadRepoData(root, historyLimit: Self.historyPageSize)
@@ -310,6 +334,7 @@ final class RepoStore {
             status = newStatus
             commits = newCommits
             hasMoreHistory = newCommits.count == Int(historyLimit)
+            historyLoaded = true
             errorMessage = nil
         } catch {
             errorMessage = error.displayMessage

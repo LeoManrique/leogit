@@ -11,33 +11,64 @@ struct HistorySidebar: View {
     /// whether the last commit is still safely local.
     let status: RepoStatus?
 
+    /// Whether this repository's first `git log` has landed. An empty list
+    /// says nothing on its own until it has (`RepoStore.historyLoaded`), so
+    /// the placeholder below waits for it rather than asserting *no commits*
+    /// over a read that is still in flight.
+    let historyLoaded: Bool
+
     /// The commit whose detail the main content shows, keyed by sha so it
     /// survives a log refresh that replaces every row value (same idea as
     /// the Changes tab's path selection). Owned by the repository screen:
     /// the detail lives on the far side of the split.
     @Binding var selectedSha: String?
 
-    /// Ask the owner for another page when the list reaches its last row.
+    /// Ask the owner for another page when the list nears its last row.
     let onReachEnd: () -> Void
+
+    /// The one answer to "may background work run right now?" — the date tick
+    /// names its predicate here rather than composing its own visibility
+    /// check, which is the whole point of the policy existing.
+    let policy: BackgroundSchedulingPolicy
 
     /// Put the composer into amend mode for this commit and show it.
     let onAmend: (CommitInfo) -> Void
     /// Drop this commit, keeping its changes and message for a new one.
     let onUndo: (CommitInfo) -> Void
-    /// Check the commit out, detaching HEAD.
-    let onCheckout: (CommitInfo) -> Void
+    /// Check the commit out, detaching HEAD. Answers with core's error text,
+    /// or `nil` once HEAD is actually on the commit — the sheet stays up for
+    /// the length of the call and keeps a refusal inside itself.
+    let onCheckout: (CommitInfo) async -> String?
 
     /// The commit the checkout confirmation is about; `nil` when it's closed.
     @State private var commitToCheckout: CommitInfo?
 
+    /// "Now", as the relative dates read it — bumped on a tick so the visible
+    /// labels keep ageing. See `relativeDateClock`.
+    @State private var now = Date.now
+
     private var unpushedShas: Set<String> { Set(status?.unpushedShas ?? []) }
+
+    /// The last few shas, so scrolling *near* the end asks for the next page
+    /// rather than scrolling *to* it. With the trigger on the final row the
+    /// request only went out once the user had already run out of list, and
+    /// the page landed under a scroller that had stopped; five rows of margin
+    /// is the same overscan the Tauri virtualizer keeps.
+    private var prefetchTriggerShas: Set<String> {
+        Set(commits.suffix(Self.prefetchMargin).map(\.sha))
+    }
+
+    private static let prefetchMargin = 5
 
     var body: some View {
         Group {
-            if commits.isEmpty {
-                EmptyListPlaceholder(text: "No commits")
-            } else {
+            if !commits.isEmpty {
                 commitList
+            } else if historyLoaded {
+                EmptyListPlaceholder(text: "No commits yet")
+            } else {
+                // Neither claim is safe yet, so the pane makes neither.
+                EmptyListPlaceholder(text: "Loading history…")
             }
         }
         .onChange(of: commits.map(\.sha), initial: true) {
@@ -47,37 +78,70 @@ struct HistorySidebar: View {
                 selectedSha = commits.first?.sha
             }
         }
-        .confirmationDialog(
-            "Check Out This Commit?",
-            isPresented: checkoutConfirmationBinding,
-            presenting: commitToCheckout
-        ) { commit in
-            Button("Check Out") { onCheckout(commit) }
-            Button("Cancel", role: .cancel) {}
-        } message: { commit in
-            Text(
-                "\(commit.shortSha) — \(commit.summary)\n\n"
-                    + "This detaches HEAD: you'll be on no branch until you pick one from the "
-                    + "branch menu. Commits made meanwhile are easy to lose."
-            )
+        .sheet(item: $commitToCheckout) { commit in
+            CheckoutCommitSheet(commit: commit) { await onCheckout(commit) }
         }
     }
 
     private var commitList: some View {
-        List(commits, selection: $selectedSha) { commit in
-            CommitRow(commit: commit, isUnpushed: unpushedShas.contains(commit.sha))
+        // Restores the reader's place after a tab round trip, which takes this
+        // whole subtree out of the hierarchy and rebuilds it scrolled to the
+        // top. The anchor is the hoisted selection rather than a saved offset:
+        // `selectedSha` already survives the trip, and a row id is a stable
+        // thing to scroll back to where a pixel offset is not — the list can
+        // have grown a page or lost the rewritten commit in between. The trade
+        // is that it restores the *selection*, so a deep scroll made without
+        // selecting anything still comes back at the top.
+        ScrollViewReader { proxy in
+            List(commits, selection: $selectedSha) { commit in
+                CommitRow(
+                    commit: commit,
+                    isUnpushed: unpushedShas.contains(commit.sha),
+                    now: now
+                )
                 .onAppear {
-                    // Rows materialise lazily, so the last one appearing
-                    // means the user scrolled to the end of what we have.
-                    if commit.sha == commits.last?.sha { onReachEnd() }
+                    // Rows materialise lazily, so one of the last few
+                    // appearing means the end of what we have is in sight.
+                    if prefetchTriggerShas.contains(commit.sha) { onReachEnd() }
                 }
-        }
-        .listStyle(.inset)
-        .alternatingRowBackgrounds()
-        .contextMenu(forSelectionType: String.self) { shas in
-            if let sha = shas.first, let commit = commits.first(where: { $0.sha == sha }) {
-                rowMenu(for: commit)
             }
+            .listStyle(.inset)
+            .alternatingRowBackgrounds()
+            .contextMenu(forSelectionType: String.self) { shas in
+                if let sha = shas.first, let commit = commits.first(where: { $0.sha == sha }) {
+                    rowMenu(for: commit)
+                }
+            }
+            .onAppear {
+                // Not animated and not in `.task`: this is a restore, so it
+                // should look like the list was never away.
+                if let selectedSha { proxy.scrollTo(selectedSha) }
+            }
+        }
+        .task(id: policy.canTickRelativeDates) { await relativeDateClock() }
+    }
+
+    /// Re-render the visible rows' ages every 10 s, so an open History tab
+    /// never goes stale (FRONTEND §6.12).
+    ///
+    /// Keyed on the policy's predicate rather than looping over it: a hidden
+    /// window re-runs this with `false` and the task simply returns, so there
+    /// is no timer left running to check a flag. Coming back re-keys it and
+    /// starts a fresh one — which also bumps `now` immediately, so a window
+    /// that was away for an hour is current the moment it is on screen again
+    /// rather than up to 10 s later.
+    ///
+    /// Its cost is bounded by the list being lazy: only the mounted rows
+    /// re-render, however deep the history has been paged.
+    private func relativeDateClock() async {
+        guard policy.canTickRelativeDates else { return }
+        now = .now
+        while !Task.isCancelled {
+            // `try?` swallows the cancellation, so the loop condition above is
+            // what actually ends this — see WS-P's finding on cancelled sleeps.
+            try? await Task.sleep(for: .seconds(10))
+            guard !Task.isCancelled else { return }
+            now = .now
         }
     }
 
@@ -115,16 +179,6 @@ struct HistorySidebar: View {
         let hasResolvedUpstream = !(status?.upstream ?? "").isEmpty
         return !hasResolvedUpstream || unpushedShas.contains(commit.sha)
     }
-
-    /// `presenting:` needs the value to outlive the dismissal animation, so
-    /// the dialog's own binding clears it rather than the buttons doing so.
-    private var checkoutConfirmationBinding: Binding<Bool> {
-        Binding {
-            commitToCheckout != nil
-        } set: { isPresented in
-            if !isPresented { commitToCheckout = nil }
-        }
-    }
 }
 
 /// One commit in the list: summary with tag chips and the unpushed badge,
@@ -132,6 +186,9 @@ struct HistorySidebar: View {
 private struct CommitRow: View {
     let commit: CommitInfo
     let isUnpushed: Bool
+    /// The list's ticking clock, passed in rather than read here so every row
+    /// ages against the same instant and one tick re-renders them together.
+    let now: Date
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -154,9 +211,9 @@ private struct CommitRow: View {
 
                 if isUnpushed {
                     // A 16×16 plate rather than a bare glyph — the Tauri
-                    // list's unpushed badge, which shares the tag chips'
-                    // height and corner radius so the row's indicator
-                    // cluster reads as one family.
+                    // list's unpushed badge, sharing the tag chips' fill and
+                    // corner radius so the row's indicator cluster reads as
+                    // one family.
                     Image(systemName: "arrow.up")
                         .font(.system(size: 9, weight: .bold))
                         .foregroundStyle(.secondary)
@@ -166,7 +223,7 @@ private struct CommitRow: View {
                 }
             }
 
-            Text("\(commit.authorName) · \(CommitDate.relative(commit.authorDate))")
+            Text("\(commit.authorName) · \(CommitDate.relative(commit.authorDate, now: now))")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -175,12 +232,20 @@ private struct CommitRow: View {
         .help(CommitDate.absolute(commit.authorDate))
     }
 
+    /// A tag's chip: STYLE.md's neutral badge, not an accent one.
+    ///
+    /// The accent it used to wear made a tag read as the row's most important
+    /// thing and, worse, made it the *only* indicator with a colour — sitting
+    /// a few points from the unpushed plate, which is the one that actually
+    /// asks something of the user. Both are labels about the commit, so both
+    /// take the same quaternary plate at the same radius.
     private func chip(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 10, design: .monospaced))
+            .font(.system(size: 10.5, design: .monospaced))
+            .foregroundStyle(.secondary)
             .padding(.horizontal, 5)
-            .padding(.vertical, 1)
-            .background(.tint.opacity(0.15), in: .capsule)
+            .frame(height: 16)
+            .background(.quaternary, in: .rect(cornerRadius: 5))
             .fixedSize()
     }
 }

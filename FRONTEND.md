@@ -675,10 +675,25 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    and is filed in ROADMAP with the chords it affects.
 12. **Relative dates** — commit timestamps arrive as ISO-8601 strings
    (`author_date`/`committer_date`, e.g. `2026-08-12T14:03:11+0200`; the core is
-   deliberately chrono-free) and each frontend renders them as relative ("5 minutes
-   ago"), recomputed whenever the list is republished — which, under §6.1's equality
-   gate, an idle repository never is. Whether an idle list also re-ticks on its own is
-   platform policy (§8), and it is the only thing that keeps such a list honest.
+   deliberately chrono-free) and each frontend renders the **author** date as relative
+   in the commit list. **One vocabulary, spelled out in both clients**, GitHub
+   Desktop's tiering: `just now` under a minute, then `N minutes ago`, `N hours ago`,
+   `N days ago` under 30 days, `N months ago` under a year, then `N years ago` —
+   singular at 1 (`1 day ago`, never `1 days ago`), a month approximated at 30 days
+   and a year at 365, and a future timestamp reading `just now` rather than a negative
+   count. Deliberately *not* each platform's own relative formatter: Foundation's
+   `.relative(presentation: .named)` renders the near tiers as *yesterday* and *last
+   week*, and the same commit reading two ways in the two clients is the divergence
+   this row exists to close. A duration is also the right answer here — *5 months ago*
+   is what a history list is read for, where *last week* is a landmark. The cost is
+   that these strings are English in both clients, as every other string already is.
+   Both lists **re-tick every 10 s** so an open History tab never goes stale — a
+   republish alone cannot do it, since under §6.1's equality gate an idle repository
+   never republishes — and both gate the tick on the pane being visible, so a hidden
+   History tab and a backgrounded window cost nothing. The commit **detail** card
+   shows the same date absolute, in the abbreviated form (`Aug 12, 2026 at 10:30 AM`):
+   a card the user opened deliberately answers *when*, and the seconds a commit landed
+   on are noise the list's relative age already covers.
 13. **Failure surfacing is classified, not uniform.** Every failure lands in one of two
    places, and which one is decided by *whether the user is waiting on it*, never by how
    severe it looks. An operation the user asked for and is waiting on — a transfer, a
@@ -692,9 +707,20 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    door is how *every* failure in the Tauri client, down to "couldn't reveal the file in
    Finder", ended up seizing the window. Each client has exactly one: the Tauri store's
    `reportActionError` / `reportNotice` pair, and native's `ActionFailure` +
-   `.actionFailureAlert` beside `ErrorBanner`. Native still routes checkout and undo
-   failures to its strip where this rule puts them in the modal — the parity plan's WS-Q
-   closes that.
+   `.actionFailureSheet` beside `ErrorBanner`.
+   **What lands in that modal is git's own text, so the modal is built to carry it**:
+   monospaced, selectable, capped in height and scrollable, in both clients (the Tauri
+   `ErrorModal`'s `<pre>`, native's `ActionFailureSheet`). Git's refusals are
+   multi-line — a `! [rejected]` line, the ref it was about, then the `hint:` lines
+   naming the fix — and a system alert is the wrong container for them: `NSAlert`
+   reflows its informative text into one paragraph and lets nothing select it, which
+   destroys the shape of the message and makes the ref names uncopyable on the one
+   class of failure whose text is meant to be acted on. No modifier fixes that, so
+   native presents this class as a sheet rather than an `.alert`.
+   **A view reports its failure; the repository screen presents it.** One window shows
+   one modal at a time, and a view can already be behind a sheet of its own when the
+   answer arrives — most sharply for a *toolbar item*, which is where the sync and
+   branch controls live.
    **One refinement, in both clients: a failure raised from inside a dialog stays in
    that dialog**, under its fields, with everything typed intact. The dialog is
    already the retry surface the modal would be offering — a rejected publish name,
@@ -900,13 +926,15 @@ every deliberate difference here.
 | Picking lines to copy (§7) | the browser's own selection spans rows, so there is nothing to pick: `user-select: none` on the gutter and the prefix is what keeps a drag-copy to the file's lines. The model-based copy for a *multi-line* selection is the half still to come, and it hangs off the `copy` event rather than a gesture | the gutter is a line handle — click a number, ⇧-click to extend, right-click for *Copy N Lines* / *Select All Lines*, Escape to drop it — because SwiftUI hands back neither the extent of a `Text` selection nor a hook on the copy, so the only way to know which lines were meant is to be asked. Dragging the content selects characters **within one line only** — a native text selection cannot leave the `Text` it began in and the pane draws one per line, so a multi-line drag is not available to this client at all. Precedence is stated, not guessed: while a run exists Copy answers with the run, and Escape gives it up |
 | Terminal widget | `xterm.js` | SwiftTerm (PTY backend reused) |
 | Virtualized lists | hand-rolled windowing | native `List`/`LazyVStack`/`Table` |
+| Commit-list place across a tab round trip (§6.8) | both panes stay mounted behind the tab bar, so the scroller keeps its exact offset — paid for with two live subtrees and a tick that must test its own visibility | the pane is removed and rebuilt, and a `ScrollViewReader` scrolls back to the hoisted selected sha. A row id survives a log refresh where a pixel offset does not — the list may have grown a page or lost the selected commit meanwhile — but it restores the *selection*, so a deep scroll made without selecting anything still returns to the top |
+| Detached / merging markers (§6.14) | an icon swap plus two badges beside the branch chip | both ride the branch chip's own label, since the toolbar has no room for a second control: `Detached at <sha>`, and a `· merging` suffix in the conflicted-file colour, which is also the first thing macOS truncates when the toolbar narrows |
 | Pane geometry persistence | `localStorage` (sidebar width, composer height, commit-files width) | `UserDefaults` (composer height, `commitComposerHeight`); sidebar and commit-files widths are per-session |
 | Window frame persistence | `tauri-plugin-window-state` saves size and position on exit and restores them at launch; the `tauri.conf.json` size is the first-run default | AppKit frame autosave on the `WindowGroup`, with `.defaultSize` as the first-run default |
 | Settings surface (§6.15) | a modal overlay inside the one window, with a header ✕ and a footer **Close** — there is nothing to save, so the button only dismisses | the stock SwiftUI `Settings` scene, a separate window with ⌘, and the standard title-bar close and no content buttons at all; a text field also commits on `.onDisappear` |
 | Settings field coverage (§6.15) | every `Config` field the app reads has a control, except `side_by_side_diff` — the diff header owns it in both clients | no control for `theme` (a permanent exemption, above) or the two AI timeouts — so a timeout set in the Tauri client bounds native's requests but cannot be changed there. Closing the timeout gap is the parity plan's WS-R |
 | Background-cadence enforcement (§6.1) | the ladder is a self-scheduling `setTimeout` chain, so a WebView free to throttle a backgrounded document can only make the hidden rung *slower* than 30 s; the wake-up resync is what guarantees a current screen | an App Nap assertion is held while a repo is open, so the same ladder's timers are not coalesced away, and the hidden rung is exactly 30 s (`AppNapSuppressor`) |
 | File-list selection & keyboard (§6.4) | two anchors and hand-rolled key handling: shift-click on the row body extends from a sticky row anchor, shift-click on a checkbox range-toggles from a second one that *does* move, and Home/End jump to first/last. Plain click and ⌘-click both collapse to one row. An extension **activates the shift-clicked row**, so the diff follows the far end | one `List(selection: Set<String>)`, so the range and multi-row gestures are AppKit's own and behave like every other macOS list, and the checkbox column has no separate anchor. The gesture that produced a selection is not recoverable from a `Set`, so an extension leaves the diff on the row it was already showing rather than guessing which row was clicked |
-| Relative-date ticking (§6.12) | a 10 s tick re-renders the visible rows, skipped while the History pane is hidden or the window is backgrounded, so an open list never goes stale | formatted once per republish and not re-ticked, so an idle repository's labels stop ageing until something in its status moves |
+| Relative-date tick gating (§6.12) | one `setInterval` that skips its own body while `document.hidden` or the pane has no height — the pane stays mounted behind the other tab, so the tick has to test for it | a `.task` keyed on `BackgroundSchedulingPolicy.canTickRelativeDates`, torn down and rebuilt with the predicate; the History pane is *removed* from the hierarchy on a tab change, so "is the pane showing?" needs no test at all. Rebuilding also re-reads the clock at once, so a window returning from an hour hidden is current immediately |
 | Pending-count placement (§6.2) | `↓N` / `↑N` capsules on the sync button's trailing edge, each with its own arrow | plain `↑N ↓N` text in its own toolbar item left of the button: macOS renders a toolbar control's label as text and icon only, so no custom view can ride the face, and no system API badges a toolbar item |
 | Transfer progress surface | inside the control that started it — a fill wiping across the sync button, sweeping where git reports no percentage | a full-width strip under the toolbar with a real indeterminate state, plus git's line verbatim |
 | Shortcut discovery | no menu bar, so the chords are documented by a `?` overlay listing them | the menu bar is the documentation: File ▸ Clone Repository… (⇧⌘O), View ▸ Changes/History (⌘1/⌘2), View ▸ Show/Hide Terminal (⌃`), View ▸ Refresh (⌘R), Branch ▸ the same items the toolbar control offers (⇧⌘N on New Branch), Repository ▸ the sync ladder's proposal (⌘P). A menu equivalent is also matched ahead of the responder chain, which is what makes ⌃` work from inside the terminal |

@@ -23,9 +23,14 @@ struct SyncControls: View {
     /// tree, push/fetch move the ahead/behind counts.
     let onWorkingTreeChanged: () async -> Void
 
-    /// Failure from a finished operation, shown as §6.13's modal — git's own
-    /// message, verbatim, like the Tauri error modal.
-    @State private var failure: ActionFailure?
+    /// A transfer the user was waiting on that failed — §6.13's first class,
+    /// git's own message verbatim. Reported rather than presented, for the
+    /// reason `ChangesSidebar` reports its own: the repository screen shows
+    /// one at a time, and this control is a *toolbar item*, which is the worst
+    /// place in the window to own a modal — it can already be behind the
+    /// publish or force-push sheet when the answer arrives.
+    let onFailure: (ActionFailure) -> Void
+
     @State private var isConfirmingForcePush = false
     @State private var isPublishSheetPresented = false
 
@@ -85,22 +90,11 @@ struct SyncControls: View {
                 onPublished: onWorkingTreeChanged
             )
         }
-        .confirmationDialog(
-            "Force Push with Lease?",
-            isPresented: $isConfirmingForcePush
-        ) {
-            Button("Force Push", role: .destructive) { push(forceWithLease: true) }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(
-                """
-                This will overwrite “\(status?.upstream ?? "the remote branch")” with your local branch. \
-                With-lease refuses the push if someone else has pushed since your last fetch — \
-                safer than plain force, but it cannot be undone once it succeeds.
-                """
-            )
+        .sheet(isPresented: $isConfirmingForcePush) {
+            ForcePushSheet(upstream: status?.upstream ?? "the remote branch") {
+                await forcePush()
+            }
         }
-        .actionFailureAlert($failure)
     }
 
     /// The states with no meaningful secondary action — GitHub Desktop's
@@ -197,36 +191,58 @@ struct SyncControls: View {
     }
 
     private func pull() {
-        Task {
-            let message = await store.pull(repoPath: repoPath)
-            await onWorkingTreeChanged()
-            if let message { failure = ActionFailure(message) }
-        }
-    }
-
-    private func push(forceWithLease: Bool = false) {
-        guard !branch.isEmpty else { return }
-        // Derived at click time from real tracking configuration, never
-        // synthesised: this is what makes a first push `--set-upstream`.
-        let setUpstream = !hasUpstream
-        Task {
-            let message = await store.push(
-                repoPath: repoPath,
-                branch: branch,
-                setUpstream: setUpstream,
-                forceWithLease: forceWithLease
-            )
-            await onWorkingTreeChanged()
-            if let message { failure = ActionFailure(message) }
-        }
+        Task { await settle(await store.pull(repoPath: repoPath)) }
     }
 
     private func fetch() {
-        Task {
-            let message = await store.fetch(repoPath: repoPath)
-            await onWorkingTreeChanged()
-            if let message { failure = ActionFailure(message) }
+        Task { await settle(await store.fetch(repoPath: repoPath)) }
+    }
+
+    private func push() {
+        Task { await settle(await runPush(forceWithLease: false)) }
+    }
+
+    /// The force push's own caller: it re-reads like the others but *reports*
+    /// nothing, because the sheet that asked is still on screen and keeps git's
+    /// refusal inside itself (§6.13). It hands the outcome back so the sheet
+    /// can tell "pushed" from "the slot was busy" — closing on the second would
+    /// claim a push that never ran.
+    private func forcePush() async -> OpOutcome {
+        let outcome = await runPush(forceWithLease: true)
+        await refresh(after: outcome)
+        return outcome
+    }
+
+    /// Issue the push. Neither re-reads nor reports: its two callers differ on
+    /// both.
+    private func runPush(forceWithLease: Bool) async -> OpOutcome {
+        guard !branch.isEmpty else { return .refusedBusy }
+        // Derived at call time from real tracking configuration, never
+        // synthesised: this is what makes a first push `--set-upstream`.
+        let setUpstream = !hasUpstream
+        return await store.push(
+            repoPath: repoPath,
+            branch: branch,
+            setUpstream: setUpstream,
+            forceWithLease: forceWithLease
+        )
+    }
+
+    /// A finished transfer: re-read, then state any failure in the window's
+    /// modal.
+    private func settle(_ outcome: OpOutcome) async {
+        await refresh(after: outcome)
+        if case let .failed(message) = outcome {
+            onFailure(ActionFailure(message))
         }
+    }
+
+    /// A refusal reaches here whenever the slot changed hands between the
+    /// button enabling and the tap landing — a background auto-fetch is the
+    /// usual one. It attempted nothing, so there is nothing to re-read.
+    private func refresh(after outcome: OpOutcome) async {
+        if case .refusedBusy = outcome { return }
+        await onWorkingTreeChanged()
     }
 }
 

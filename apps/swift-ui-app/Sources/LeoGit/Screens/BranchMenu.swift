@@ -17,13 +17,19 @@ struct BranchMenu: View {
     /// tree (switch, create, merge, abort) — the owner reloads status/log.
     let onWorkingTreeChanged: () async -> Void
 
+    /// A branch operation the user was waiting on that failed — §6.13's first
+    /// class. Reported rather than presented, for the reason `ChangesSidebar`
+    /// reports its own: the repository screen shows one at a time, and this
+    /// control is a *toolbar item*, which is the worst place in the window to
+    /// own a modal — it can already be behind one of its own sheets when the
+    /// answer arrives.
+    let onFailure: (ActionFailure) -> Void
+
     @State private var isCreating = false
     @State private var mergeSource: MergeSource?
     @State private var pendingDelete: String?
     @State private var isConfirmingDelete = false
     @State private var isConfirmingAbort = false
-    /// Failure from a menu-launched operation, shown as §6.13's modal.
-    @State private var failure: ActionFailure?
 
     /// Current branch by name comparison against status, like the Tauri
     /// client — empty while detached, so no row gets the checkmark.
@@ -58,7 +64,11 @@ struct BranchMenu: View {
                 Task { await store.load(repoPath: repoPath) }
             }
         } label: {
-            Label(menuLabel, systemImage: "arrow.triangle.branch")
+            Label {
+                Text(menuLabel)
+            } icon: {
+                Image(systemName: "arrow.triangle.branch")
+            }
         }
         // macOS toolbars render Labels icon-only by default; the branch name
         // is this control's whole value.
@@ -82,7 +92,7 @@ struct BranchMenu: View {
             ) { message in
                 await onWorkingTreeChanged()
                 if let message {
-                    failure = ActionFailure(message)
+                    onFailure(ActionFailure(message))
                 }
             }
         }
@@ -105,7 +115,6 @@ struct BranchMenu: View {
         } message: {
             Text("Conflict resolutions are discarded and the working tree returns to its pre-merge state.")
         }
-        .actionFailureAlert($failure)
         // The same items chosen from the menu bar. They arrive as requests
         // rather than as calls because `BranchCommands` lives on the scene,
         // while every sheet and confirmation an action opens lives here.
@@ -140,45 +149,77 @@ struct BranchMenu: View {
     /// The exceptional states ride the label too — the window subtitle that
     /// used to carry them is gone, since the toolbar title area no longer
     /// renders (the repo name lives on the switcher chip).
-    private var menuLabel: String {
+    ///
+    /// An `AttributedString` rather than a `String` for one reason: the
+    /// `· merging` suffix carries the merge colour, so the one state that
+    /// changes what half this menu's items *do* stops reading as more of the
+    /// branch name. It is still the first thing macOS truncates — a toolbar
+    /// label has the width it has — but a coloured run survives being clipped
+    /// far better than a grey one, and the conflicted files in the Changes
+    /// tab wear the same colour.
+    private var menuLabel: AttributedString {
         if isDetached {
             if let sha = status?.headSha, !sha.isEmpty {
-                return "Detached at \(String(sha.prefix(7)))"
+                return AttributedString("Detached at \(String(sha.prefix(7)))")
             }
-            return "Detached"
+            return AttributedString("Detached")
         }
-        guard !currentBranch.isEmpty else { return "Branches" }
-        return isMerging ? "\(currentBranch) · merging" : currentBranch
+        guard !currentBranch.isEmpty else { return AttributedString("Branches") }
+        var label = AttributedString(currentBranch)
+        guard isMerging else { return label }
+        var suffix = AttributedString(" · merging")
+        suffix.foregroundColor = .merging
+        label.append(suffix)
+        return label
     }
 
     private func switchTo(_ branch: String) {
         Task {
-            if let message = await store.switchTo(branch, repoPath: repoPath) {
-                failure = ActionFailure(message)
-            } else {
+            switch await store.switchTo(branch, repoPath: repoPath) {
+            case .succeeded:
                 await onWorkingTreeChanged()
+            case let .failed(message):
+                onFailure(ActionFailure(message))
+            // Nothing was attempted, so there is nothing to report and
+            // nothing to re-read — the branch the user asked for is simply
+            // still not checked out, and the menu is still there to ask again.
+            case .refusedBusy:
+                break
             }
         }
     }
 
     private func delete(_ name: String) {
-        pendingDelete = nil
         Task {
-            if let message = await store.delete(name, repoPath: repoPath) {
-                failure = ActionFailure(message)
+            switch await store.delete(name, repoPath: repoPath) {
+            case .succeeded:
+                pendingDelete = nil
+            case let .failed(message):
+                pendingDelete = nil
+                onFailure(ActionFailure(message))
+            // The branch is still there, so the confirmation it was asked
+            // about stays too: clearing it here would take the question away
+            // and leave the answer unchanged, with nothing on screen saying so.
+            case .refusedBusy:
+                isConfirmingDelete = true
             }
         }
     }
 
     private func abortMerge() {
         Task {
-            let message = await store.abortMerge(repoPath: repoPath)
-            // Success or not, MERGE_HEAD and the working tree may have
-            // changed — reload before surfacing any failure.
-            await onWorkingTreeChanged()
-            if let message {
-                failure = ActionFailure(message)
+            let outcome = await store.abortMerge(repoPath: repoPath)
+            guard case .refusedBusy = outcome else {
+                // Success or not, MERGE_HEAD and the working tree may have
+                // changed — reload before surfacing any failure.
+                await onWorkingTreeChanged()
+                if case let .failed(message) = outcome {
+                    onFailure(ActionFailure(message))
+                }
+                return
             }
+            // A refused abort touched neither, so there is nothing to re-read.
+            isConfirmingAbort = true
         }
     }
 }
@@ -392,11 +433,16 @@ private struct CreateBranchSheet: View {
         guard !branchName.isEmpty, !store.isBusy else { return }
         failureText = nil
         Task {
-            if let failure = await store.createAndSwitch(named: branchName, repoPath: repoPath) {
-                failureText = failure
-            } else {
+            switch await store.createAndSwitch(named: branchName, repoPath: repoPath) {
+            case .succeeded:
                 dismiss()
                 await onCreated()
+            case let .failed(message):
+                failureText = message
+            // No branch was created, so the sheet stays open with the typed
+            // name intact — it used to dismiss here and report success.
+            case .refusedBusy:
+                break
             }
         }
     }
@@ -470,9 +516,18 @@ private struct MergeSheet: View {
 
     private func run(squash: Bool) {
         Task {
-            let failure = await store.merge(source, squash: squash, repoPath: repoPath)
-            dismiss()
-            await onFinished(failure)
+            switch await store.merge(source, squash: squash, repoPath: repoPath) {
+            case .succeeded:
+                dismiss()
+                await onFinished(nil)
+            case let .failed(message):
+                dismiss()
+                await onFinished(message)
+            // Nothing was merged, so the sheet stays up still offering the
+            // merge — it used to dismiss and report the merge as done.
+            case .refusedBusy:
+                break
+            }
         }
     }
 }

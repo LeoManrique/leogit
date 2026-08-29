@@ -11,6 +11,7 @@ import SwiftUI
 /// | Status poll (active repo, local)       | yes                  | no — slows 2 s → 10 s    | no — slows to 30 s             |
 /// | Auto-fetch loop (active repo, network) | yes                  | no                       | no — interval stretched ×3     |
 /// | Tier scheduler + sweeps (other repos)  | yes                  | yes                      | yes                            |
+/// | Relative-date tick (History list)      | no — reads no git    | no                       | yes                            |
 ///
 /// Rationale: a visible-but-not-key window keeps telling the truth (the
 /// audit's "stale in plain sight" case — the web clients never had this
@@ -100,6 +101,24 @@ final class BackgroundSchedulingPolicy {
     func autoFetchInterval(configured: Duration) -> Duration {
         isWindowVisible ? configured : configured * 3
     }
+
+    /// The History list's relative-date tick (FRONTEND §6.12).
+    ///
+    /// Visibility alone, and deliberately *not* `isAppActive`: this is the
+    /// same "stale in plain sight" case the status poll's ladder exists for —
+    /// a visible window that is merely not frontmost is being read, so its
+    /// labels have to keep ageing. A hidden window has no labels to age.
+    ///
+    /// The third gate the Tauri client needs — *is the History pane even
+    /// showing?* — is structural here and needs no predicate: the tab switch
+    /// takes `HistorySidebar` out of the hierarchy, which tears its ticking
+    /// task down with it.
+    ///
+    /// It reads no git state and spawns nothing, so unlike every predicate
+    /// above it ignores `networkOpInFlight`, and it is left out of the App
+    /// Nap assertion: a repaint of rows already on screen is not work worth
+    /// keeping a sleeping Mac awake for.
+    var canTickRelativeDates: Bool { isWindowVisible }
 
     // MARK: Wiring
 

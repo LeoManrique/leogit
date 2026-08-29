@@ -9,12 +9,11 @@ extension BranchInfo: Identifiable {
 /// Observable state for branch management: the branch list plus every
 /// mutation the branch menu offers (switch, create, delete, merge, abort).
 ///
-/// Mutations return core's error text (`nil` on success) instead of storing
-/// it, because different surfaces present failures differently — the menu
-/// raises an alert, the create sheet shows the text inline and stays open.
-/// After any successful mutation the list is reloaded here; refreshing the
-/// *working tree* (status, history) is the caller's job, since only it knows
-/// whether HEAD moved.
+/// Mutations return their outcome instead of storing it, because different
+/// surfaces present failures differently — the menu raises an alert, the
+/// create sheet shows the text inline and stays open. After any successful
+/// mutation the list is reloaded here; refreshing the *working tree* (status,
+/// history) is the caller's job, since only it knows whether HEAD moved.
 @MainActor
 @Observable
 final class BranchStore {
@@ -42,14 +41,14 @@ final class BranchStore {
     }
 
     /// Check out `branch` (a remote-only name becomes a tracking branch).
-    func switchTo(_ branch: String, repoPath: String) async -> String? {
+    func switchTo(_ branch: String, repoPath: String) async -> OpOutcome {
         await run(repoPath: repoPath) {
             try await GitBridge.checkout(in: repoPath, branch: branch)
         }
     }
 
     /// The two-call "New Branch" flow: create off `HEAD`, then land on it.
-    func createAndSwitch(named name: String, repoPath: String) async -> String? {
+    func createAndSwitch(named name: String, repoPath: String) async -> OpOutcome {
         await run(repoPath: repoPath) {
             try await GitBridge.newBranch(in: repoPath, named: name)
             try await GitBridge.checkout(in: repoPath, branch: name)
@@ -57,14 +56,14 @@ final class BranchStore {
     }
 
     /// Force-delete a local branch; the confirmation already happened.
-    func delete(_ name: String, repoPath: String) async -> String? {
+    func delete(_ name: String, repoPath: String) async -> OpOutcome {
         await run(repoPath: repoPath) {
             try await GitBridge.removeBranch(in: repoPath, named: name)
         }
     }
 
     /// Abort an in-progress merge, restoring the pre-merge working tree.
-    func abortMerge(repoPath: String) async -> String? {
+    func abortMerge(repoPath: String) async -> OpOutcome {
         await run(repoPath: repoPath) {
             try await GitBridge.abortMerge(in: repoPath)
         }
@@ -74,7 +73,7 @@ final class BranchStore {
     /// sequence as the Tauri handler: stage via `merge --squash`, then commit
     /// with git's generated message. A conflicted merge reports its text here
     /// while the conflicted files land in the ordinary changes list.
-    func merge(_ source: String, squash: Bool, repoPath: String) async -> String? {
+    func merge(_ source: String, squash: Bool, repoPath: String) async -> OpOutcome {
         await run(repoPath: repoPath) {
             let result = squash
                 ? try await GitBridge.squashMerge(in: repoPath, branch: source)
@@ -88,21 +87,29 @@ final class BranchStore {
         }
     }
 
-    /// Busy-guard one mutation, reload the branch list, and map any failure
-    /// to its display text.
-    private func run(repoPath: String, _ body: () async throws -> Void) async -> String? {
-        guard !isBusy else { return nil }
+    /// Busy-guard one mutation, reload the branch list, and report which of
+    /// the three things happened.
+    ///
+    /// The guard answers `refusedBusy` rather than `succeeded`'s old `nil`:
+    /// serializing the operations is what stops two checkouts contending on
+    /// `index.lock`, but a guard that lies about what it did just moves the
+    /// damage from git to the UI.
+    private func run(
+        repoPath: String,
+        _ body: () async throws -> Void
+    ) async -> OpOutcome {
+        guard !isBusy else { return .refusedBusy }
         isBusy = true
         defer { isBusy = false }
         do {
             try await body()
             await load(repoPath: repoPath)
-            return nil
+            return .succeeded
         } catch {
             // A failed merge still changed the world (MERGE_HEAD, conflicted
             // index), so reload here too; the caller refreshes status.
             await load(repoPath: repoPath)
-            return error.displayMessage
+            return .failed(error.displayMessage)
         }
     }
 }

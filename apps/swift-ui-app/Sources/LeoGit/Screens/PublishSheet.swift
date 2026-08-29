@@ -108,18 +108,23 @@ struct PublishSheet: View {
         guard canPublish else { return }
         errorMessage = nil
         Task {
-            let failure = await store.publish(
+            let outcome = await store.publish(
                 repoPath: repoPath,
                 name: name.trimmingCharacters(in: .whitespaces),
                 description: repoDescription.trimmingCharacters(in: .whitespaces),
                 isPrivate: isPrivate
             )
-            if let failure {
-                // The sheet stays up with the fields intact for a retry.
-                errorMessage = failure
-            } else {
+            switch outcome {
+            case .succeeded:
                 dismiss()
                 await onPublished()
+            case let .failed(message):
+                // The sheet stays up with the fields intact for a retry.
+                errorMessage = message
+            // Nothing was published, so the sheet stays exactly as it is — it
+            // used to dismiss here and report a repository that never existed.
+            case .refusedBusy:
+                break
             }
         }
     }

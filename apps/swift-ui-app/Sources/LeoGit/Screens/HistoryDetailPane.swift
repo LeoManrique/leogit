@@ -8,15 +8,26 @@ import SwiftUI
 struct HistoryDetailPane: View {
     let repoPath: String
     let commits: [CommitInfo]
+
+    /// Whether this repository's first `git log` has landed — the same gate
+    /// the sidebar's placeholder takes. Without it this pane states *has no
+    /// commit history yet* about every repository for the length of its
+    /// first read, which is both wrong and the most confident thing on screen.
+    let historyLoaded: Bool
+
     let selectedSha: String?
 
     var body: some View {
         Group {
             if let commit = commits.first(where: { $0.sha == selectedSha }) {
                 CommitDetailView(repoPath: repoPath, commit: commit)
+            } else if !historyLoaded {
+                ContentUnavailableView {
+                    Label("Loading History…", systemImage: "clock")
+                }
             } else if commits.isEmpty {
                 ContentUnavailableView(
-                    "No Commits",
+                    "No Commits Yet",
                     systemImage: "clock",
                     description: Text("This repository has no commit history yet.")
                 )
@@ -39,6 +50,15 @@ private struct CommitDetailView: View {
     let repoPath: String
     let commit: CommitInfo
 
+    /// Everything `store.load` is a function of. A commit is immutable, so
+    /// unlike the diff pane's key this one carries no freshness terms —
+    /// `FileEntry.statStamp` is `nil` for commit files by design, and there is
+    /// nothing about a commit that a second read could answer differently.
+    private struct LoadKey: Equatable {
+        let repoPath: String
+        let sha: String
+    }
+
     @State private var store = CommitDetailStore()
 
     var body: some View {
@@ -47,7 +67,13 @@ private struct CommitDetailView: View {
             Divider()
             content
         }
-        .task(id: commit.sha) {
+        // Both halves of what the read is a function of, not just the sha —
+        // the WS-P `LoadKey` rule one file over. `repoPath` is published
+        // before the new repository's log lands, so a switch between two
+        // repositories that share a sha (a fork, a clone, the same repo opened
+        // by two paths) would leave this task un-refired and the pane showing
+        // the previous repository's files under the new one's path.
+        .task(id: LoadKey(repoPath: repoPath, sha: commit.sha)) {
             await store.load(repoPath: repoPath, sha: commit.sha)
         }
     }

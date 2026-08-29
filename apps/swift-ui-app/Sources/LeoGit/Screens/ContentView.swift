@@ -178,7 +178,7 @@ struct ContentView: View {
             guard target != nil, let claimed = launch.claim() else { return }
             open(launchTarget: claimed)
         }
-        .actionFailureAlert($actionFailure)
+        .actionFailureSheet($actionFailure)
         .sheet(item: $sheet) { presented in
             switch presented {
             case .clone:
@@ -333,7 +333,8 @@ struct ContentView: View {
                     repoPath: repoPath,
                     status: store.status,
                     isMerging: store.isMerging,
-                    onWorkingTreeChanged: { await store.refresh() }
+                    onWorkingTreeChanged: { await store.refresh() },
+                    onFailure: { actionFailure = $0 }
                 )
             }
 
@@ -372,7 +373,8 @@ struct ContentView: View {
                     store: syncStore,
                     repoPath: repoPath,
                     status: store.status,
-                    onWorkingTreeChanged: { await store.refresh() }
+                    onWorkingTreeChanged: { await store.refresh() },
+                    onFailure: { actionFailure = $0 }
                 )
             }
         }
@@ -447,11 +449,13 @@ struct ContentView: View {
                 HistorySidebar(
                     commits: store.commits,
                     status: store.status,
+                    historyLoaded: store.historyLoaded,
                     selectedSha: $selectedSha,
                     onReachEnd: { Task { await store.loadMoreHistory() } },
+                    policy: schedulingPolicy,
                     onAmend: startAmending,
                     onUndo: { undoCommit($0, in: repoPath) },
-                    onCheckout: { checkoutCommit($0, in: repoPath) }
+                    onCheckout: { await checkoutCommit($0, in: repoPath) }
                 )
             }
         }
@@ -471,6 +475,7 @@ struct ContentView: View {
                 HistoryDetailPane(
                     repoPath: repoPath,
                     commits: store.commits,
+                    historyLoaded: store.historyLoaded,
                     selectedSha: selectedSha
                 )
             }
@@ -769,6 +774,16 @@ struct ContentView: View {
     /// changes it left in the working tree can be re-committed without
     /// retyping. Runs immediately: nothing is lost that the composer and the
     /// working tree don't now hold.
+    ///
+    /// **No branch reload.** Undo is a `--mixed` reset, which moves `HEAD`
+    /// *within* the branch it is on: it creates and deletes nothing, and does
+    /// not change which branch is checked out, so `list_branches` would answer
+    /// exactly what the menu already holds. `refresh()` re-reads the status,
+    /// which is what the branch chip's own label reads.
+    ///
+    /// That refresh is also the `HEAD` re-seed: it writes the post-undo status
+    /// into the store, so the next poll compares against the new `head_sha`
+    /// and doesn't refetch a log this call has just read.
     @MainActor
     private func undoCommit(_ commit: CommitInfo, in repoPath: String) {
         Task {
@@ -777,26 +792,33 @@ struct ContentView: View {
                 commitStore.restoreDraft(from: commit)
                 tab = .changes
                 await store.refresh()
-                await branchStore.load(repoPath: repoPath)
             } catch {
-                store.errorMessage = error.displayMessage
+                // The user asked for this and was waiting on it, so it is
+                // FRONTEND §6.13's *first* class — the modal, not the strip
+                // the strip was showing it in. Undo is raised from a menu
+                // item rather than a dialog, so there is no surface of its
+                // own for it to stay in.
+                actionFailure = ActionFailure(error.displayMessage)
             }
         }
     }
 
     /// Check out a past commit. HEAD detaches, so the branch menu's checkmark
     /// and the sync ladder both change — hence the branch reload alongside
-    /// the status refresh.
+    /// the status refresh, which undo above deliberately does without.
+    ///
+    /// Answers with core's error text rather than presenting it: the sheet
+    /// that asked is still on screen, still naming the commit, and §6.13's
+    /// refinement keeps a dialog's own failure inside it.
     @MainActor
-    private func checkoutCommit(_ commit: CommitInfo, in repoPath: String) {
-        Task {
-            do {
-                try await GitBridge.checkout(in: repoPath, commit: commit.sha)
-                await store.refresh()
-                await branchStore.load(repoPath: repoPath)
-            } catch {
-                store.errorMessage = error.displayMessage
-            }
+    private func checkoutCommit(_ commit: CommitInfo, in repoPath: String) async -> String? {
+        do {
+            try await GitBridge.checkout(in: repoPath, commit: commit.sha)
+            await store.refresh()
+            await branchStore.load(repoPath: repoPath)
+            return nil
+        } catch {
+            return error.displayMessage
         }
     }
 

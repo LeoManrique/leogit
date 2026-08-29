@@ -415,7 +415,24 @@ list. `beginLoad(showsProgress:)` separates the two, and `isBusy` (the depth cou
 the poll and ⌘R now guard on. The poll's
 `RepoStore.refreshQuietly` never touches either, refetches history only when
 `head_sha` moved, and publishes the status only when it changed — so an idle tick repaints
-nothing. It is also the app-re-activation path
+nothing. Undo is the one rewrite that deliberately refreshes *less*: it is a
+`--mixed` reset, so it moves `HEAD` within the branch it is on without creating, deleting or
+switching one, and reloading `list_branches` after it would re-ask a question whose answer is
+already in the menu. Checkout keeps its branch reload, because detaching `HEAD` is exactly
+what does change that answer.
+
+**`historyLoaded` is the log's counterpart to the Tauri client's `statusLoaded`.** An empty
+`commits` array is equally true of a repository with no commits and one whose first `git log`
+is still in flight, and the History pane asserts one of those out loud in two places — the
+sidebar placeholder and the detail pane's `ContentUnavailableView`. Both read the flag instead
+of the array, so *No commits yet* is only ever said once it has been established. `open()`
+resets it, and clears `commits` in the same breath, at the moment it publishes the new
+`repoPath` rather than when the new log lands: the sidebar re-seeds its selection from
+`commits`, so leaving the previous repository's rows in place handed the detail pane a sha
+from one repository to load against another's path, and a new repository whose log then failed
+kept showing the old one's history indefinitely. `refresh()` deliberately does not reset it —
+the question has been answered for this repository, and blanking it per ⌘R would put the flash
+back. It is also the app-re-activation path
 (`NSApplication.didBecomeActiveNotification`, the native `resyncOnActive`) and needs no
 forcing flag there: content edits count as a status change on their own. Porcelain v2
 carries no worktree hash, so a same-row edit (modified → still modified) would be invisible
@@ -457,7 +474,18 @@ zero-sized `NSViewRepresentable` accessor reports from `viewDidMoveToWindow` —
 not `NSApp.keyWindow`, which is nil exactly while the app is inactive) — and exposes named
 predicates each guard cites: `canPollStatus`/`canAutoFetch` (block only on the network op)
 and `canRunRepoSweeps` (also requires active + visible; the deferrable multi-repo fan-out,
-caught up by the wake-up resync). The active repo's work never stops: the status poll runs
+caught up by the wake-up resync). A fourth, `canTickRelativeDates`, gates the History
+list's 10 s clock on visibility alone: it reads no git state and spawns nothing, so unlike
+the three above it ignores the network op and stays out of the App Nap assertion — a repaint
+of rows already on screen is not worth keeping a sleeping Mac awake for. `HistorySidebar`
+takes it as a `.task(id:)` key rather than a flag tested inside a loop, so a hidden window has
+no timer left running at all, and coming back rebuilds the task, which re-reads the clock
+immediately: a window away for an hour is current the moment it returns instead of up to 10 s
+later. The third gate the Tauri client needs — *is the History pane even showing?* — costs
+nothing here, because a tab change removes the pane from the hierarchy and cancels the task
+with it. That same removal is why the list restores its place through a `ScrollViewReader`
+scrolled to the hoisted `selectedSha`: a rebuilt `List` starts at the top, and a row id
+survives a log refresh where a pixel offset would not. The active repo's work never stops: the status poll runs
 a cadence ladder (2 s frontmost / 10 s visible-unfocused / 30 s hidden,
 `statusPollInterval`, re-read per tick) and auto-fetch stretches its configured interval ×3
 while the window is hidden (`autoFetchInterval(configured:)`) — fresher than pausing,
@@ -496,7 +524,29 @@ poll's own recovery clears it (an explicit action's failure text is never swept 
 background tick), and the branch list stays fresh because `BranchMenu`'s content reloads
 on open (menu content is built when the menu opens) while the status poll reloads it whenever
 `head_sha` moved — both through `BranchStore.load`, which never touches `isBusy`, so an
-open menu doesn't flicker. The split button is the stock `Menu`+`primaryAction` control
+open menu doesn't flicker.
+
+**`BranchStore.run` answers a three-case `OpOutcome`, not `String?`.** Every mutation is
+serialized behind one `isBusy` flag so a double-click cannot put two checkouts on the same
+`index.lock`, but the guard used to return the same `nil` that meant success — so a refused
+start was indistinguishable from a completed one, and the surface that asked acted on it: the
+create sheet dismissed and reported a branch that was never created, the merge sheet reported
+a merge that never ran, and a refused delete cleared its own confirmation while leaving the
+branch. `succeeded` / `refusedBusy` / `failed(String)` separates them, and `refusedBusy` is
+deliberately **not** an error to show: nothing went wrong and nothing changed, so the surface
+simply stays open for the user to ask again. The UI's `.disabled(store.isBusy)` checks remain,
+but they are a `Bool` read before an `await` and therefore always a race — the enum is what
+makes the outcome correct rather than merely unlikely to be wrong.
+
+`SyncStore.run` shares the type, guarding the single network slot the same way. It had the
+same collapse and no symptom, because every caller only refreshed afterwards — until the
+force-push confirmation became a sheet that *waits* for the answer, at which point a
+background auto-fetch claiming the slot mid-dialog would have closed it reporting a push that
+never ran. `PublishSheet` was one step behind the same edge. Hence one `OpOutcome` in
+[Stores/OpOutcome.swift](apps/swift-ui-app/Sources/LeoGit/Stores/OpOutcome.swift) rather than
+one enum per store: the third serializer should inherit the vocabulary instead of re-deciding
+it. It is deliberately not a `Result` — the third state is neither success nor failure, and
+rendering it as either is exactly the bug. The split button is the stock `Menu`+`primaryAction` control
 with `.labelStyle(.titleAndIcon)` (macOS toolbars render labels icon-only by default), and
 it deliberately carries **no count pill**: macOS bridges a toolbar menu's or button's
 label to a system control that renders only its text and icon, silently dropping any other
@@ -802,21 +852,37 @@ has two states, and a two-state select-all reads *off* over a list that is mostl
 **Where a row action's failure goes is a choice of function, not a shape copied from the site
 next door** — the native counterpart of the Tauri store's `reportActionError` / `reportNotice`
 pair, and for the same reason (that is how *couldn't reveal the file in Finder* came to seize
-the Tauri window). `Design/ActionFailureAlert.swift` holds one `ActionFailure` value and one
-`.actionFailureAlert(_:)` modifier; `ChangesSidebar` exposes `write` and `handOff`, and every
+the Tauri window). `Design/ActionFailureSheet.swift` holds one `ActionFailure` value and one
+`.actionFailureSheet(_:)` modifier; `ChangesSidebar` exposes `write` and `handOff`, and every
 call site picks one. `write` — both ignore actions — takes the window and carries a retry
 closure, because these fail on a write race far more often than on anything the user would
 have to change first. `handOff` — reveal, open-with — goes to `ErrorBanner`, which grew a ✕
 for exactly this class: nothing else can ever retire it, where the poll's own banner is
-retired by its own recovery (`RepoStore.canDismissError` is that split). `SyncControls` and
-`BranchMenu` route through the same modifier rather than each declaring its own `.alert`.
-**The sidebar raises its failure but does not present it** — `ContentView` does, beside the
-sheet slot, so the window's modal surfaces are decided in one place and a sidebar already
-behind a sheet is not trying to put an alert in front of it. That is also where the retry
-closure is retired: a repo switch clears it, before the `repoPath` it captured at menu-build
-time names the wrong repository. The discard confirmation is the documented exception: it is a
-**sheet**, so it stays up saying *Discarding…* and keeps its own refusal, which §6.13's
-refinement puts inside the dialog that raised it rather than in a second window over it.
+retired by its own recovery (`RepoStore.canDismissError` is that split).
+
+**It is a sheet and not an `.alert`, because what it carries is git's own text.** Git refuses
+in paragraphs — a `! [rejected]` line, the ref, then `hint:` lines naming the fix — and
+`NSAlert` reflows its informative text into one unselectable block, which destroyed the shape
+of the message and made the ref names uncopyable on the one class of failure whose text exists
+to be acted on. Nothing reaches that label: a SwiftUI `.alert`'s `message:` is bridged to it,
+so neither `.font` nor `.textSelection` applies. The sheet renders the message monospaced and
+selectable inside a height-capped `ScrollView`, which is what STYLE.md had always specified for
+this class and what the Tauri `ErrorModal`'s `<pre>` had always done.
+
+**A view raises its failure; `ContentView` presents it.** The sidebar does, and `SyncControls`
+and `BranchMenu` now do too, through an `onFailure` closure rather than each mounting the
+modifier itself. The window's modal surfaces are decided in one place, and a view already
+behind a sheet is not trying to put another in front of it — sharpest for those two, which are
+**toolbar items** that own the publish, force-push, create-branch and merge sheets. That is
+also where the retry closure is retired: a repo switch clears it, before the `repoPath` it
+captured at menu-build time names the wrong repository. The confirmations that
+front a slow write are sheets for the same reason and keep their own refusals, which §6.13's
+refinement puts inside the dialog that raised them rather than in a second window over it:
+`DiscardSheet` (*Discarding…*), `CheckoutCommitSheet` (*Checking out…*, which is also what
+stops a second checkout racing the first on `index.lock`) and `ForcePushSheet`
+(*Force-pushing…*, where a refused lease is answered by fetching and pressing the same button
+again). A `confirmationDialog` can host none of them: it dismisses on the click, so it can
+neither say it is still working nor hold what came back.
 
 Amend mode lives in `CommitStore` (`amendTarget` plus the commit's `co_authors`, which the
 composer has no field for and simply re-attaches to the next message). Two behaviours are

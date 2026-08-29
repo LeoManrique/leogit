@@ -11,9 +11,14 @@
 
   let copied = $state(false)
 
+  // The card's absolute date, in the same abbreviated shape the native card
+  // uses. A bare `toLocaleString()` spells the month out in full and carries
+  // seconds, which is precision this line never wanted: it exists so the
+  // reader can place the commit on a calendar, and the seconds a commit landed
+  // on are noise beside the relative age the list already gives.
   function formatDate(dateStr: string): string {
     const date = new Date(dateStr)
-    return date.toLocaleString()
+    return date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
   }
 
   async function copySha() {

@@ -14,7 +14,7 @@ enum NetworkOperation {
 /// Observable state for the sync flow: which network operation is in flight
 /// plus its latest progress tick.
 ///
-/// Mutations return core's error text (`nil` on success) instead of storing
+/// Mutations answer an `OpOutcome` instead of storing their failure
 /// it, the same contract as `BranchStore` — the toolbar raises an alert.
 /// Refreshing the working tree afterwards is the caller's job; there is no
 /// completion event from core, so "done" is simply the mutation returning
@@ -65,7 +65,7 @@ final class SyncStore {
 
     /// `git fetch` the repository's remote, updating ahead/behind counts
     /// without touching the working tree.
-    func fetch(repoPath: String) async -> String? {
+    func fetch(repoPath: String) async -> OpOutcome {
         await run(.fetch) {
             guard let remote = try await GitBridge.remoteName(in: repoPath) else {
                 throw GitError.Failed(message: "This repository has no remote to fetch from.")
@@ -102,7 +102,7 @@ final class SyncStore {
     }
 
     /// `git pull --ff` from the repository's remote, streaming progress.
-    func pull(repoPath: String) async -> String? {
+    func pull(repoPath: String) async -> OpOutcome {
         await run(.pull) {
             guard let remote = try await GitBridge.remoteName(in: repoPath) else {
                 throw GitError.Failed(message: "This repository has no remote to pull from.")
@@ -123,7 +123,7 @@ final class SyncStore {
         branch: String,
         setUpstream: Bool,
         forceWithLease: Bool = false
-    ) async -> String? {
+    ) async -> OpOutcome {
         await run(.push) {
             // Unreachable through the UI — the ladder offers Publish, not
             // Push, for a repo with no remote — but saying so beats inventing
@@ -152,7 +152,7 @@ final class SyncStore {
         name: String,
         description: String,
         isPrivate: Bool
-    ) async -> String? {
+    ) async -> OpOutcome {
         await run(.publish) {
             try await GitBridge.publishToGitHub(
                 repoPath: repoPath,
@@ -185,8 +185,8 @@ final class SyncStore {
     private func run(
         _ operation: NetworkOperation,
         _ body: () async throws -> Void
-    ) async -> String? {
-        guard activeOperation == nil else { return nil }
+    ) async -> OpOutcome {
+        guard activeOperation == nil else { return .refusedBusy }
         activeOperation = operation
         progressPercent = nil
         progressText = nil
@@ -198,9 +198,9 @@ final class SyncStore {
         }
         do {
             try await body()
-            return nil
+            return .succeeded
         } catch {
-            return error.displayMessage
+            return .failed(error.displayMessage)
         }
     }
 }
