@@ -57,15 +57,25 @@ final class RepoStore {
     private(set) var historyLoaded = false
 
     /// Whether a merge is in progress (`MERGE_HEAD` exists) — drives the
-    /// subtitle badge and the branch menu's Abort Merge item.
+    /// branch chip's `· merging` suffix and the branch menu's Abort Merge item.
     ///
     /// Read straight off the status rather than asked for separately: every
     /// refresh path needs it, one of them used to forget, and core answers it
     /// from a file check that costs the poll nothing.
     var isMerging: Bool { status?.merging ?? false }
 
-    /// Set when the last operation failed; surfaced as a banner and cleared on
-    /// the next successful load.
+    /// The dismissable banner line: an explicit read that failed, or something
+    /// the app handed to the OS that didn't take. Cleared by its ✕ and by the
+    /// next explicit load.
+    ///
+    /// A separate field from `pollFailure`, and not one slot shared with it:
+    /// the two answer different questions, and multiplexing them let whichever
+    /// arrived first silence the other. It was the wrong way round, too — the
+    /// poll only ever wrote into a *free* slot, so a dismissable "couldn't
+    /// reveal the file" suppressed "this repository has stopped being
+    /// readable" for as long as it stood, which is the more urgent of the two
+    /// and the one the user cannot make go away by fixing anything. The Tauri
+    /// client keeps `notice` and `pollError` apart for the same reason.
     var errorMessage: String?
 
     /// Consecutive silent-refresh failures. One is usually a transient lock
@@ -76,17 +86,13 @@ final class RepoStore {
     private var quietFailureStreak = 0
     private static let quietFailureThreshold = 3
 
-    /// Whether the current `errorMessage` came from the poll, so only the
-    /// poll's own recovery clears it — an explicit action's failure text is
-    /// never silently swept away by a background tick.
-    private var errorSurfacedByPoll = false
-
-    /// Whether the banner may offer a ✕.
+    /// The poll's own banner: this repository has stopped being readable.
     ///
-    /// The poll's own banner has none: its recovery retires it, and a ✕ would
-    /// hide a repository that is still unreadable. Nothing retires the other
-    /// kind, so it needs one — the Tauri strip splits on the same line.
-    var canDismissError: Bool { errorMessage != nil && !errorSurfacedByPoll }
+    /// No ✕, and `private(set)` so nothing outside can fake one: its recovery
+    /// retires it, and a dismissal would hide a repository that is still
+    /// unreadable. Shown above `errorMessage` when both stand, which is the
+    /// order the Tauri strip stacks them in.
+    private(set) var pollFailure: String?
 
     var isRepoOpen: Bool { repoPath != nil }
 
@@ -101,6 +107,18 @@ final class RepoStore {
     /// its path straight to `open` — and a Bool would let the inner one's exit
     /// release everyone while the outer load still has no status.
     private var loadDepth = 0
+
+    /// Bumped by every `open(at:)`, at the moment it is *asked for*.
+    ///
+    /// `loadDepth` counts how many reads are running; this says which
+    /// repository the app is trying to be on, which is the different question
+    /// two overlapping opens need answered. Every publish below is gated on
+    /// it, so a read that started before a switch stands down instead of
+    /// landing one repository's status and history against another's path —
+    /// and because it is claimed on entry rather than when a read resolves,
+    /// the repository that wins is the one the user asked for last, not the
+    /// one whose `git log` happened to finish first.
+    private var openGeneration = 0
 
     /// Suspend until no explicit load is in flight.
     ///
@@ -155,14 +173,28 @@ final class RepoStore {
     ///
     /// Accepts a subdirectory as well as a repository root, matching the
     /// `leogit <path>` CLI behaviour.
-    func open(at url: URL) async {
+    ///
+    /// The outcome distinguishes the three ways this ends, because a caller
+    /// acts on them differently: `.superseded` is not a failure and has no
+    /// message, and treating it as one would report an error about a
+    /// repository the user has already navigated away from.
+    @discardableResult
+    func open(at url: URL) async -> OpenOutcome {
+        openGeneration += 1
+        let generation = openGeneration
         beginLoad()
         defer { finishLoad() }
 
         do {
             let root = try await GitBridge.repoRoot(of: url.path(percentEncoded: false))
+            // Read the name before publishing anything rather than after
+            // `repoPath`: it is a basename, so it costs nothing to wait for,
+            // and it means this open's first write is also its first
+            // observable effect — everything above the guard can be abandoned.
+            let name = await GitBridge.name(of: root)
+            guard generation == openGeneration else { return .superseded }
             repoPath = root
-            repoName = await GitBridge.name(of: root)
+            repoName = name
             errorMessage = nil
             // Drop the previous repository's history *with* its path, not when
             // the new log happens to land. `repoPath` is published above and
@@ -178,10 +210,13 @@ final class RepoStore {
             // A fresh repository starts at page one, whatever depth the
             // previous one had been scrolled to.
             await loadRepoData(root, historyLimit: Self.historyPageSize)
+            return generation == openGeneration ? .opened : .superseded
         } catch {
+            guard generation == openGeneration else { return .superseded }
             // Leave any previously open repo intact — a failed open should not
             // blank out what the user was already looking at.
             errorMessage = error.displayMessage
+            return .failed
         }
     }
 
@@ -236,11 +271,12 @@ final class RepoStore {
         } catch {
             errorMessage = error.displayMessage
         }
-        // The banner now reflects an explicit action, so the poll may not
-        // clear it — and its streak describes a repository this read has just
-        // proved readable (or not) on its own.
-        errorSurfacedByPoll = false
+        // This read has just asked the repository directly, so the poll's
+        // streak and its banner both describe a question already answered —
+        // either it succeeded, or `errorMessage` above now carries the same
+        // news in the same place and two lines would say one thing twice.
         quietFailureStreak = 0
+        pollFailure = nil
         return false
     }
 
@@ -264,18 +300,14 @@ final class RepoStore {
             newStatus = try await GitBridge.status(of: repoPath)
         } catch {
             quietFailureStreak += 1
-            if quietFailureStreak >= Self.quietFailureThreshold, errorMessage == nil {
-                errorMessage = error.displayMessage
-                errorSurfacedByPoll = true
+            if quietFailureStreak >= Self.quietFailureThreshold {
+                pollFailure = error.displayMessage
             }
             return
         }
         quietFailureStreak = 0
-        if errorSurfacedByPoll {
-            // The repo is readable again; retire the poll's own banner.
-            errorMessage = nil
-            errorSurfacedByPoll = false
-        }
+        // The repo is readable again; retire the poll's own banner.
+        pollFailure = nil
 
         let headMoved = newStatus.headSha != status?.headSha
         if newStatus != status {
@@ -326,25 +358,33 @@ final class RepoStore {
     /// Status and history are independent reads, so run them concurrently and
     /// let each report its own failure.
     private func loadRepoData(_ path: String, historyLimit: Int32) async {
+        let generation = openGeneration
         async let statusResult = GitBridge.status(of: path)
         async let logResult = GitBridge.log(of: path, limit: historyLimit)
 
         do {
             let (newStatus, newCommits) = try await (statusResult, logResult)
+            // A repository switch started while these two reads were in
+            // flight, so `path` is no longer the open repository and this
+            // answer belongs to nobody. The switch runs its own load; leaving
+            // the tail below unrun is deliberate, since that load owns the
+            // banner and the failure streak now.
+            guard generation == openGeneration else { return }
             status = newStatus
             commits = newCommits
             hasMoreHistory = newCommits.count == Int(historyLimit)
             historyLoaded = true
             errorMessage = nil
         } catch {
+            guard generation == openGeneration else { return }
             errorMessage = error.displayMessage
         }
-        // Whatever the outcome, the banner now reflects an explicit load,
-        // not the poll — the poll must not clear another action's failure.
-        errorSurfacedByPoll = false
-        // The streak describes one repository's readability, and this load may
-        // be a different repository: carrying it over would let two failures on
-        // the previous repo plus one here raise a banner about this one.
+        // The streak and the poll's banner describe one repository's
+        // readability, and this load may be a *different* repository: carrying
+        // either over would let the previous repo's failures speak for this
+        // one. Retired whatever the outcome — on a failure `errorMessage`
+        // above already says so, in the same place.
         quietFailureStreak = 0
+        pollFailure = nil
     }
 }

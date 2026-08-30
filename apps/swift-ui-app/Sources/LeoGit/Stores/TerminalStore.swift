@@ -57,7 +57,7 @@ final class TerminalStore {
         pendingCommand = nil
     }
 
-    /// ⌘` and the header buttons. The PTY is lazy: none exists until the
+    /// ⌃` and the header buttons. The PTY is lazy: none exists until the
     /// first expand asks for one.
     func toggle() {
         if !isExpanded, generation == 0 {

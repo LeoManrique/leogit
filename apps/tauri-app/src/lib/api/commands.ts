@@ -135,11 +135,6 @@ export interface MergeResult {
   error_message?: string
 }
 
-export interface AheadBehind {
-  ahead: number
-  behind: number
-}
-
 /** Lightweight per-repo sync summary for the picker's pull/push badges. */
 export interface RepoSync {
   ahead: number
@@ -471,14 +466,9 @@ export const gitApi = {
     invoke<void>('checkout_commit', { repoPath, sha }),
   deleteBranch: (repoPath: string, name: string) =>
     invoke<void>('delete_branch', { repoPath, name }),
-  deleteRemoteBranch: (repoPath: string, remote: string, branch: string) =>
-    invoke<void>('delete_remote_branch', { repoPath, remote, branch }),
-  renameBranch: (repoPath: string, oldName: string, newName: string) =>
-    invoke<void>('rename_branch', { repoPath, oldName, newName }),
   commit: (repoPath: string, message: string, files: FileEntry[], amend: boolean = false) =>
     invoke<void>('commit', { repoPath, message, files, amend }),
   undoLastCommit: (repoPath: string) => invoke<void>('undo_last_commit', { repoPath }),
-  hasStagedChanges: (repoPath: string) => invoke<boolean>('has_staged_changes', { repoPath }),
   /** What a discard would do per path — the confirmation dialog's copy,
    *  decided by the same code that performs it. */
   classifyDiscard: (repoPath: string, files: FileEntry[]) =>
@@ -509,8 +499,6 @@ export const gitApi = {
     setUpstream: boolean,
     forceWithLease: boolean
   ) => invoke<void>('push', { repoPath, remote, branch, setUpstream, forceWithLease }),
-  getAheadBehind: (repoPath: string, upstream: string) =>
-    invoke<AheadBehind>('get_ahead_behind', { repoPath, upstream }),
   /** The first remote's name, or `null` when the repo has none — never an
    *  invented "origin", which made every no-remote guard unfireable. */
   getRemote: (repoPath: string) => invoke<string | null>('get_remote', { repoPath }),
@@ -537,7 +525,6 @@ export const gitApi = {
    * Idempotent — a folder already inside a repo returns that repo's root.
    */
   initRepo: (path: string) => invoke<string>('init_repo', { path }),
-  getRepoName: (path: string) => invoke<string>('get_repo_name', { path }),
   cloneRepo: (url: string, targetPath: string) => invoke<string>('clone_repo', { url, targetPath }),
 }
 

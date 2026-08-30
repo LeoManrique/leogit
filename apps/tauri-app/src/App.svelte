@@ -6,7 +6,7 @@
   import { appState } from '$lib/stores/app'
   import { basename } from '$lib/utils/path'
   import { loadFileStatusStyles, refreshConfig, scanFolders } from '$lib/stores/config'
-  import { ghApi, gitApi, configApi, appApi, reposApi, type LaunchTarget } from '$lib/api/commands'
+  import { gitApi, configApi, appApi, reposApi, type LaunchTarget } from '$lib/api/commands'
   import {
     hydrateReposState,
     patchReposState,
@@ -122,10 +122,13 @@
 
   async function initializeApp() {
     try {
-      // Check gh auth in background — non-blocking. PR features will gate themselves.
-      ghApi.checkAuth().then((authed) => {
-        appState.update((s) => ({ ...s, ghAuthed: authed }))
-      }).catch(() => {})
+      // No gh auth probe here. `ghApi.checkAuth` stays wired for a surface that
+      // needs to gate on the answer, but the answer belongs at the point of use
+      // rather than at launch: signing in happens outside this app, so one read
+      // at startup is stale for the whole session. The gh surfaces there are
+      // today — the clone list, publish — deliberately don't probe at all and
+      // let gh's own "Run `gh auth login`" carry the failure, which names the
+      // fix better than a disabled control would.
 
       // Load config + state (shared store so settings updates propagate).
       // Scan-path resolution (~ expansion, stock folders when the list is

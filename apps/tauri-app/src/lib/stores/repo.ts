@@ -256,19 +256,3 @@ export function dismissNotice() {
 export const canCommit = derived(repoState, ($state) => {
   return $state.selectedFiles.size > 0
 })
-
-export const hasMergeConflicts = derived(repoState, ($state) => {
-  return $state.status.files.some((f) => f.status === 'Conflicted')
-})
-
-export const currentBranch = derived(repoState, ($state) => {
-  return $state.status.branch
-})
-
-export const remoteBranches = derived(repoState, ($state) => {
-  return $state.branches.filter((b) => b.is_remote)
-})
-
-export const localBranches = derived(repoState, ($state) => {
-  return $state.branches.filter((b) => !b.is_remote)
-})

@@ -1443,6 +1443,9 @@
   // the action then doesn't do. Null until the answer arrives.
   let discardPlan = $state<DiscardPlan | null>(null)
   let isDiscarding = $state(false)
+  // Why the last attempt was refused, kept in the dialog that raised it rather
+  // than sent to the action modal — see `DiscardConfirm`'s `error` prop.
+  let discardError = $state<string | undefined>(undefined)
 
   // Run a side-effect-only file action (copy / reveal / open). These hand the
   // file to another program and change nothing here, so a failure is reported
@@ -1464,7 +1467,10 @@
       // The newly-ignored untracked file drops out of the changes list.
       await refreshStatus({ silent: true })
     } catch (error) {
-      reportActionError(error)
+      // Retryable: an append to `.gitignore` that lost an `index.lock` race
+      // wants exactly the same call again, and the closure still holds which
+      // file or extension it was for.
+      reportActionError(error, () => void ignoreFiles(append))
     }
   }
 
@@ -1472,15 +1478,22 @@
     if (files.length === 0) return
     discardTarget = files
     discardPlan = null
+    discardError = undefined
+    void classifyDiscard(files)
+  }
+
+  /** Ask core what discarding `files` would do, ignoring the answer if the
+   *  dialog it was for has since been dismissed or re-aimed. */
+  async function classifyDiscard(files: FileEntry[]): Promise<void> {
     const repoPath = $appState.repoPath
     if (!repoPath) return
-    gitApi
-      .classifyDiscard(repoPath, files)
-      .then((plan) => {
-        // Ignore an answer about a dialog the user already dismissed.
-        if (discardTarget === files) discardPlan = plan
-      })
-      .catch(() => {})
+    try {
+      const plan = await gitApi.classifyDiscard(repoPath, files)
+      if (discardTarget === files) discardPlan = plan
+    } catch {
+      // No outcome line beats a wrong one; the dialog says it is still working
+      // it out, and the discard itself runs on core's decision either way.
+    }
   }
 
   async function confirmDiscard(): Promise<void> {
@@ -1488,6 +1501,7 @@
     const files = discardTarget
     if (!repoPath || !files) return
     isDiscarding = true
+    discardError = undefined
     try {
       await gitApi.discardFiles(repoPath, files)
       discardTarget = null
@@ -1495,7 +1509,14 @@
       // refreshStatus prunes the discarded files from the list / active diff.
       await refreshStatus({ silent: true })
     } catch (error) {
-      reportActionError(error)
+      discardError = String(error)
+      // A refusal is not proof that nothing happened: core restores from HEAD
+      // and trashes in separate steps, so the first can land and the second
+      // fail. Re-read the tree either way, and re-ask what a retry would now
+      // do — an outcome line describing a tree that no longer exists is worse
+      // than none.
+      await refreshStatus({ silent: true })
+      await classifyDiscard(files)
     } finally {
       isDiscarding = false
     }
@@ -1505,6 +1526,7 @@
     if (isDiscarding) return
     discardTarget = null
     discardPlan = null
+    discardError = undefined
   }
 
   // Intents raised by FileList's right-click menu. Repo path + refresh + the
@@ -2603,6 +2625,7 @@
       files={discardTarget}
       plan={discardPlan}
       {isDiscarding}
+      error={discardError}
       onConfirm={confirmDiscard}
       onCancel={cancelDiscard}
     />

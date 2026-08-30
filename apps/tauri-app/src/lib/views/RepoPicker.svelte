@@ -10,6 +10,7 @@
     repoSearchLabels,
   } from '$lib/stores/repoIdentifiers'
   import { discoveringRepos } from '$lib/services/repoDiscovery'
+  import RepoDiscoveryFailure from '$lib/components/RepoDiscoveryFailure.svelte'
   import RepoListEmptyState from '$lib/components/RepoListEmptyState.svelte'
   import RepoSortToggle from '$lib/components/RepoSortToggle.svelte'
   import { recentRepos, repoSortMode } from '$lib/stores/reposState'
@@ -146,6 +147,8 @@
       />
       <RepoSortToggle />
     </div>
+
+    <RepoDiscoveryFailure />
 
     <div class="repos-list">
       {#if filteredRepos.length === 0}

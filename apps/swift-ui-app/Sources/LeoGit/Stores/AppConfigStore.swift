@@ -19,8 +19,8 @@ import Foundation
 /// - launch (`LeoGitApp`) — the first read every consumer starts from;
 /// - the Settings window opening (`SettingsStore.load`) — the other client may
 ///   have written the file since this process last looked at it;
-/// - the activation resync (`ContentView.resyncOnActivate`) — edits made from
-///   the *Tauri* client are picked up on return to the app, the same moment
+/// - the wake-up resync (`ContentView.resyncOnWake`) — edits made from the
+///   *Tauri* client are picked up when the window comes back, the same moment
 ///   everything else catches up.
 ///
 /// A write needs no reload of its own: `patch_config` hands back the whole

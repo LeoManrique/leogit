@@ -1,3 +1,5 @@
 /dist
 # Cargo workspace build output (relocated here from tauri-app/src-tauri/target).
 /target
+
+.DS_Store

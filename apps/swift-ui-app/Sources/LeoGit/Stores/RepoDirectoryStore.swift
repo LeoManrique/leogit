@@ -254,12 +254,18 @@ final class RepoDirectoryStore {
     /// Local-only, so it works offline and costs no network. Obeys
     /// `canRunRepoSweeps` — the other-repos row of the policy table.
     func sweepVisible(activePath: String?, policy: BackgroundSchedulingPolicy) async {
-        guard policy.canRunRepoSweeps else { return }
         let full = Date.now.timeIntervalSince(lastFullSweep) >= Self.sweepThrottle
         for path in repos where path != activePath {
             // The caller keys this on the row list, so a walk publishing new
             // rows replaces the pass rather than racing it.
             if Task.isCancelled { return }
+            // Re-asked per row rather than once at entry, like `run(tier:)`
+            // beside it: a network operation taking the slot, or the window
+            // going away, abandons the rest of a fan-out nobody is looking at
+            // instead of finishing it. Bailing here also leaves `lastFullSweep`
+            // unstamped, which is the point — an abandoned pass is not a pass,
+            // and the next open must be allowed to finish it.
+            guard policy.canRunRepoSweeps else { return }
             guard full || syncByPath[path] == nil else { continue }
             await sync(path, fetching: false)
         }

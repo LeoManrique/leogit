@@ -4,7 +4,8 @@ import SwiftUI
 /// The one answer to "may background work run right now?" — every background
 /// loop names the predicate it obeys instead of composing its own boolean
 /// out of scattered state. This table is the policy (the GH-Desktop split,
-/// plus a native improvement — the Tauri client runs everything always):
+/// ported table for table into the Tauri client's `backgroundPolicy.ts`, so
+/// the two clients defer the same work at the same moments):
 ///
 /// | Work                                   | Pauses on network op | Pauses when app inactive | Pauses when window not visible |
 /// |----------------------------------------|----------------------|--------------------------|--------------------------------|
@@ -14,8 +15,9 @@ import SwiftUI
 /// | Relative-date tick (History list)      | no — reads no git    | no                       | yes                            |
 ///
 /// Rationale: a visible-but-not-key window keeps telling the truth (the
-/// audit's "stale in plain sight" case — the web clients never had this
-/// failure mode because DOM timers don't know about key windows), and a
+/// audit's "stale in plain sight" case — a plain DOM timer knows nothing about
+/// key windows, which is why the Tauri client reads `document.hasFocus()`
+/// rather than trusting one), and a
 /// hidden window keeps refreshing slowly so refocusing reveals a current
 /// screen instead of a sudden catch-up — the cadence ladder makes hidden
 /// work cheap rather than absent (GH Desktop fetches at one flat interval
@@ -86,10 +88,11 @@ final class BackgroundSchedulingPolicy {
     /// Desktop's indicator sweep; the refocus resync is its catch-up path.
     var canRunRepoSweeps: Bool { !networkOpInFlight && isWindowVisible && isAppActive }
 
-    /// Status poll cadence ladder (divergence from Tauri's flat 2 s —
-    /// FRONTEND.md §8): 2 s frontmost, 10 s visible-but-inactive, 30 s
-    /// hidden. The hidden tick is what makes refocus reveal a current
-    /// screen; the refocus resync still covers the final seconds.
+    /// Status poll cadence ladder: 2 s frontmost, 10 s visible-but-inactive,
+    /// 30 s hidden. The hidden tick is what makes refocus reveal a current
+    /// screen; the wake-up resync still covers the final seconds. The Tauri
+    /// client runs the same three rungs — what differs is enforcement
+    /// (FRONTEND.md §8): only this side can stop App Nap coalescing them.
     var statusPollInterval: Duration {
         guard isWindowVisible else { return .seconds(30) }
         return isAppActive ? .seconds(2) : .seconds(10)
@@ -119,6 +122,31 @@ final class BackgroundSchedulingPolicy {
     /// Nap assertion: a repaint of rows already on screen is not work worth
     /// keeping a sleeping Mac awake for.
     var canTickRelativeDates: Bool { isWindowVisible }
+
+    // MARK: The wake edge
+
+    /// How awake the window is, as one ordered value rather than two booleans.
+    ///
+    /// The two inputs are independent, but *coming back* is a single question
+    /// with a single answer, and asking it of a rank is what makes "un-occluded
+    /// without being activated" a wake-up rather than a case somebody has to
+    /// remember to handle. The Tauri client's `ActivityState` ladder, rank for
+    /// rank.
+    enum Wakefulness: Int, Comparable {
+        case hidden, inactive, active
+
+        static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
+    }
+
+    /// The rank the two inputs currently place the window at. Observed rather
+    /// than pushed: a consumer compares it against its own previous value, so
+    /// *it* decides what a rise is worth, and the read is ordered after both
+    /// inputs have settled — a notification observer racing this policy's own
+    /// observer for the same notification has no such guarantee.
+    var wakefulness: Wakefulness {
+        guard isWindowVisible else { return .hidden }
+        return isAppActive ? .active : .inactive
+    }
 
     // MARK: Wiring
 

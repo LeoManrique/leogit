@@ -1,6 +1,6 @@
 # Plan — Cross-client feature parity (SwiftUI ⇄ Tauri)
 
-> Status: **in progress — WS-A…WS-E shipped 2026-08-27, WS-F through WS-J and WS-L…WS-N 2026-08-28, WS-O through WS-R 2026-08-29. WS-S is next. One named half is deliberately outstanding: the Tauri client's multi-line diff copy (DF-6), whose design is written out in that item; D-22 is deferred by decision (§10). WS-K is unblocked but needs a Linux machine (§6's sequencing note), so it is taken whenever that machine is available. WS-T is the deliberate last one.**
+> Status: **in progress — WS-A…WS-E shipped 2026-08-27, WS-F through WS-J and WS-L…WS-N 2026-08-28, WS-O through WS-S 2026-08-29/30. WS-T is next. One named half is deliberately outstanding: the Tauri client's multi-line diff copy (DF-6), whose design is written out in that item; D-22 is deferred by decision (§10). WS-K is unblocked but needs a Linux machine (§6's sequencing note), so it is taken whenever that machine is available. WS-T is the deliberate last one.**
 > The remaining work was re-cut into seventeen smaller workstreams (C…S) on
 > 2026-08-27 after WS-B proved too large to review as one piece — see §6.
 > Accepted 2026-08-27 with every open decision resolved. Per-workstream state
@@ -73,8 +73,8 @@ goals, in the user's priority order:
   unreachable controls, four false claims in one DESIGN paragraph. Those
   corrections are already applied, so every document describes today's
   behavior and this plan describes only the work. Two classes could not be
-  reached that way and are carried in WS-S: stale comments in Swift and
-  TypeScript source, and a few doc claims outside the audit's checklist.
+  reached that way — stale comments in Swift and TypeScript source, and doc
+  claims outside the audit's checklist — and both were swept in WS-S.
 
 ## 3. Defect register — fix before parity work
 
@@ -113,12 +113,15 @@ trimmed to what each fix *is*, since the code now carries the reasoning.
 
 ### 3.2 Defects still open
 
-Two, both uncovered by this plan's own work.
+Four, all uncovered by this plan's own work.
 
 | ID | Client | Defect | Severity |
 |---|---|---|---|
 | D-21 | Both | **A directory-backed entry has no content stamp, so its open diff can go stale.** `FileEntry.stat_stamp` is `symlink_metadata` mtime + size (`core/src/git.rs:708-724`), which for a *directory* describes its top-level entry list and not what is inside. Two entries are directories: a **submodule whose recorded pointer moved** (`SC..`, which `is_dirty_submodule` lets through, so a diff *is* read and renders `-Subproject commit A` / `+Subproject commit B`) and an untracked directory or embedded repo. Move that submodule to another commit in a terminal without changing its top-level entries and nothing in the diff's key moves — the pane keeps showing the old target indefinitely, and the poll can't catch it either, since `parse_ordinary_entry` discards porcelain v2's `hH`/`hI` gitlink shas so `RepoStatus` compares equal too. The fix is to keep those two fields and let a submodule entry's stamp be them: they are exactly what the diff renders, they cost nothing (they are already on the line being parsed), and `stat_stamp` is opaque by contract. Narrow — before WS-P narrowed the key, only the native client's unconditional refocus reload caught it, and the Tauri client never did. | Low |
 | D-22 | Native | **A drag through the diff cannot select more than one line.** `.textSelection` makes a `Text` selectable; it does not join separate `Text` views into one selection domain, and the pane draws one `Text` per line, so a drag is confined to the line it began in no matter where the grant is attached. **Deferred by decision — see §10.** Multi-line copying is served by the gutter run instead (click, ⇧-click, *Select All Lines*, ⌘C), which is strictly more faithful than a drag would be, so what is actually missing is only the *gesture*. | Low |
+
+| D-23 | Native | **A failure of an explicit read is not treated as the user's action.** ⌘R, an open that cannot resolve a repository root, and `refreshWorkingTree` all write `errorMessage` and appear as a dismissable banner with no retry, where the Tauri client sends the same failures to its action modal *with* a retry. FRONTEND §6.13 decides this by "is the user waiting on it", and names an explicit refresh in the class that takes the window; STYLE's *What is not a banner* says the same. The native surface already exists — `ActionFailureSheet` carries a retry closure — so the fix is routing, not new machinery, but ⌘R failing would start showing a modal, which is a visible change wanting its own check. Found in WS-S. | Low |
+| D-24 | Native | **The poll's banner does not say what happened, only what git said.** STYLE's *Status indicators* specifies the shape for both banner conditions: a sentence in `--text-primary` naming the condition, then git's own text after it in 11px mono `--text-muted`, ellipsized. The Tauri strip renders exactly that ("Can't read this repository — it may have been moved, deleted, or unmounted." plus the raw detail); `ErrorBanner` renders the raw error alone at `.callout`, so the one banner a user is least equipped to interpret is the one with no explanation. `ErrorBanner` would take a second, optional line. Found in WS-S. | Low |
 
 ### 3.3 Standing efficiency wastes (quantified)
 
@@ -271,10 +274,11 @@ and matched, not that it was skipped.
 - **RM-10 · On-switch breaker feed.** ✅ *WS-A.* The native warm-up fetch now
   reports its outcome to the breaker like every other real attempt, in the
   extracted `ContentView.warmUpFetch` alongside D-18's gating.
-- **RM-11 · Sweep re-check granularity.** Tauri re-checks the network slot
-  between every repo of a sweep and bails mid-list; native's visible sweep
-  checks once at entry (its tier runner *does* re-check — internal
-  inconsistency). **Tauri right**; move the native guard inside the loop. → WS-S
+- **RM-11 · Sweep re-check granularity.** ✅ *WS-S.* `sweepVisible` re-asks
+  `canRunRepoSweeps` before every row rather than once at entry, like the
+  `run(tier:)` beside it and like the Tauri sweep. Bailing mid-list also leaves
+  `lastFullSweep` unstamped, which is the point — an abandoned pass is not a
+  pass, and the next open has to be allowed to finish it.
 
 ### 4.2 Background machinery, connectivity, update checker (BG)
 
@@ -333,10 +337,14 @@ and matched, not that it was skipped.
   matches — but as a decision now rather than a side effect: it is what native
   does deliberately, and a shell is exactly where the file list gets changed
   from.
-- **BG-7 · Un-occlude resync.** Tauri resyncs on visibility *and* focus;
-  native only on app activation (documented — up to one 30 s beat after
-  un-occluding without activating). Cheap to close: fire the existing resync
-  from the policy's occlusion edge. → WS-S
+- **BG-7 · Un-occlude resync.** ✅ *WS-S.* `BackgroundSchedulingPolicy`
+  publishes `wakefulness` — `hidden < inactive < active`, the Tauri
+  `ActivityState` ladder — and `ContentView` resyncs on any *rise*, so a window
+  that comes back from behind another one catches up like an activation does.
+  Reading the rank rather than taking `didBecomeActive` a second time also
+  orders the two: a second observer of one notification has no guarantee the
+  policy has taken it in first, and the sweep the resync ends with is gated on
+  inputs that notification sets.
 - **BG-8 · Auto-fetch budget (shared).** Both clients run auto-fetch under the
   *user* network budget (15/30/600 s), not the 12 s background budget the tier
   fetches use. ✅ *WS-B.* `fetch` takes a `background` flag and both clients'
@@ -484,7 +492,10 @@ and matched, not that it was skipped.
   feature, homed in BR-7's branch-row context menu and backed by the combined
   core `delete_branch(…, include_remote)`. Branch management still reaches a
   reasonable bar inside this plan — BR-1…BR-8 and BR-11 are unaffected by the
-  deferral. → WS-S
+  deferral. ✅ *WS-S* deleted the wrappers, the four other unconsumed derived
+  stores it named, and the two QUICK-WINS recipes that had been written against
+  them; core's `rename_branch` / `delete_remote_branch` stay as the building
+  blocks.
 - **BR-11 · Large branch lists.** ✅ *WS-G.* The Tauri popover gained the filter
   input STYLE.md had already specified, the repo pickers' ↑/↓/Enter cursor
   (`listNavigation`, reused rather than re-written) and a keyed `#each`. Native
@@ -604,9 +615,10 @@ and matched, not that it was skipped.
   `BranchMenu` too, so this client also has one such function rather than a copied
   `.alert` per site. Discard and ignore take the window with a retry (they fail on
   a lock race far more often than on anything the user must change first), reveal
-  and open-with take the strip, and the strip gained its ✕ — split on
-  `RepoStore.canDismissError`, since the poll's own banner is retired by its own
-  recovery. ✅ *WS-Q* for the last two: undo raises the modal, and checkout keeps
+  and open-with take the strip, and the strip gained its ✕ — the poll's own
+  banner has none, since its recovery retires it (✅ *WS-S* made that split two
+  fields rather than one slot with a flag: sharing a slot let the dismissable
+  line silence the undismissable one). ✅ *WS-Q* for the last two: undo raises the modal, and checkout keeps
   its failure inside the sheet that asked (§6.13's refinement). The presenter
   itself became a sheet in the same pass — see SY-10.
 - **CH-12 · Copy File Path.** ✅ *WS-D.* Tauri crossed to the backend and back to
@@ -930,12 +942,16 @@ and matched, not that it was skipped.
   keeps the list and the sort mode — the cache is the point), `NameCollation`
   for a case- and diacritic-blind order with an explicit tiebreak after it, and
   filter-then-sort recomputed on its three inputs rather than per body pass.
-- **CL-8 · `check_auth`.** Tauri spawns `gh auth status` on every launch to
-  write a field with **zero readers** (the PR feature that consumed it was
-  retired); the FFI deliberately doesn't export it and gh's own error text
-  ("Run `gh auth login`") is the better UX. Delete the call + wrapper; drop
-  the command from FRONTEND §3's tables (and its registered count) or record
-  the exemption. → WS-S
+- **CL-8 · `check_auth`.** ✅ *WS-S*, with an amendment. The waste was real —
+  `gh auth status` on every launch to write `appState.ghAuthed`, which has
+  **zero readers** — but the wrapper is not dead: ROADMAP's *Create GitHub
+  Project* item is filed against it. The launch probe and the field are gone;
+  the command and `ghApi.checkAuth` stay, recorded in FRONTEND §1 as reachable
+  but deliberately uncalled, and the answer is to be read at the point of use.
+  That is also the more correct gating — signing in happens outside the app, so
+  one probe at startup is stale for the session — and the gh surfaces that
+  exist today still let gh's own "Run `gh auth login`" carry the failure, which
+  names the fix better than a disabled control would.
 
 ### 4.9 Settings, config, AI (ST)
 
@@ -1591,10 +1607,11 @@ is mostly adoption of already-proven native behavior.
      Welcome a live list without inventing a dismissal hook — the setting
      announces itself, and native carries the announcement across scenes as
      `leogitScanPathsChanged`.
-   - **`git::get_repo_name` is a registered Tauri command with no caller.** The
+   - **`git::get_repo_name`'s Tauri command had no caller** and went in WS-S's
+     dead-wrapper sweep with `rename_branch` and `delete_remote_branch`. The
      window title uses the client's own `basename()` (CH-12's rule: don't cross
-     the IPC boundary for path arithmetic already in hand). One for WS-S's
-     dead-wrapper sweep, alongside `rename_branch` and `delete_remote_branch`.
+     the IPC boundary for path arithmetic already in hand); core's function
+     stays, exported to the native client as `repo_display_name`.
    - **STYLE's *Forms (Settings)* section describes toggle switches and
      segmented controls that only the native form has.** The Tauri form still
      draws a checkbox and a `<select>`, deliberately: that is a visual migration
@@ -1786,12 +1803,12 @@ is mostly adoption of already-proven native behavior.
       deadline to "due now" instead of advancing it — at the cost of re-fetching
       the repos it had already reached, on both clients.
     - **Native carries two efficiency defects of the same family as E-6**, both
-      out of scope here: `RepoStore`'s `workingTreeEpoch` bumps on any status
-      change, so an unrelated edit re-parses the open diff (E-9, WS-P), and
-      `sweepVisible` checks `canRunRepoSweeps` once at entry rather than inside
-      its loop (RM-11, WS-S). The third — `noteActiveStatus` rewriting an
-      identical `RepoSync` every tick — was fixed here because it *is* E-6,
-      one store along.
+      out of scope here, both since closed: `RepoStore`'s `workingTreeEpoch`
+      bumped on any status change, so an unrelated edit re-parsed the open diff
+      (E-9, WS-P), and `sweepVisible` checked `canRunRepoSweeps` once at entry
+      rather than inside its loop (RM-11, WS-S). The third — `noteActiveStatus`
+      rewriting an identical `RepoSync` every tick — was fixed here because it
+      *is* E-6, one store along.
 11. **WS-K — Connectivity observer, both clients (M).** **H-17** and BG-3,
     alone because they are a mini-project on a different machine: three OS
     backends, a new `CoreEvent` variant and a new dependency, none of it
@@ -1869,11 +1886,12 @@ is mostly adoption of already-proven native behavior.
       cancelled does not stop its continuation, and `store.open` has no
       same-path guard, so a rule that fires after a filesystem crawl must re-ask
       what it started from.
-    - **Still pointing the wrong way, for WS-S.** A *re-walk* that fails is an
-      inline row with a Retry natively and a `console.error` in Tauri, whose
-      pickers then show "No repositories found" for a walk that never ran.
-      Tauri's launch-time `phase: 'error'` covers only the first walk. Small,
-      and the native shape is the one to port.
+    - **A re-walk that fails must keep its rows.** ✅ *WS-S* ported the native
+      shape: `discoveryError` beside `discoveringRepos`, rendered by a shared
+      `RepoDiscoveryFailure` row above both Tauri pickers. It had been a
+      `console.error`, so the pickers said "No repositories found" for a walk
+      that never ran. Only the *first* walk, with nothing to preserve, may take
+      the error phase.
 13. **WS-M — Native launch, menus & updater (M).** ✅ **Shipped 2026-08-28.**
     SH-1's app half: `CFBundleDocumentTypes: public.folder` makes LaunchServices
     deliver `open -a LeoGit <dir>` to `application(_:open:)` cold and warm alike,
@@ -1925,12 +1943,12 @@ is mostly adoption of already-proven native behavior.
       thing would have fired the branch reload once per section; it sits on a
       single child instead. `.disabled` propagating the same way is what makes
       the busy state work, so the rule cuts both ways.
-    - **`RepoStore.open` still has no reentrancy guard.** Two overlapping opens
-      interleave `repoPath` with `loadRepoData`, so a fast double switch can
-      leave one repository's path beside another's history. `switchRepo`'s
-      same-path guard does not help, since `repoPath` is published after an
-      `await`. Small; WS-Q or WS-S is the place — `awaitLoadSettled` already has
-      the depth-count machinery a guard would build on.
+    - **`RepoStore.open` had no reentrancy guard.** ✅ *WS-S*: not the
+      depth count `awaitLoadSettled` uses — that answers *how many reads are
+      running*, and the question here is *which repository the app is trying to
+      be on*. `openGeneration` is claimed on entry and re-checked before every
+      publish, so the older of two overlapping opens stands down and reports
+      `OpenOutcome.superseded`.
 14. **WS-N — Native file list & composer (M).** ✅ **Shipped 2026-08-28.**
     CH-1, CH-2, CH-3's native half, CH-5, CH-6, CH-8's, CH-9's, CH-10's and
     CH-11's, plus **E-7** and **E-10** — per-item state in §4.5 and §3.3. The
@@ -1941,11 +1959,13 @@ is mostly adoption of already-proven native behavior.
     files: `Design/ActionFailureAlert.swift`, `Screens/DiscardSheet.swift`,
     `Services/FileListSelection.swift`. No FFI change.
 
-    **Two follow-ups for WS-S, both one line, both closing a gap this opened in
-    the *other* direction:** Tauri's `DiscardConfirm` still closes into the
-    modal where native now keeps the refusal in the dialog (§6.13's
-    refinement), and its discard / ignore `reportActionError` call sites pass
-    no `retry` though the parameter has been there since WS-D.
+    **Two follow-ups closed in WS-S**, both gaps this workstream opened in the
+    *other* direction: `DiscardConfirm` now takes an `error` prop and keeps its
+    refusal (§6.13's refinement, `ForcePushConfirm`'s shape) — re-reading the
+    tree and re-classifying afterwards, since a refused discard may have
+    restored before it failed to trash — and `ignoreFiles` passes the `retry`
+    the reporter has accepted since WS-D. The discard's own
+    `reportActionError` went with the first change rather than gaining one.
 
     Findings still live for the native block:
     - **`head_sha` is an edge, and more than one thing is triggered off it.** A
@@ -2241,130 +2261,140 @@ is mostly adoption of already-proven native behavior.
     TE-4 in both clients, and TE-5's native half by decision; per-item state in
     §4.9, §4.10 and §3.1.
 
-    **The lead item was D-5 at form scale, and the fix could not be a copy of
-    the Tauri form.** `SettingsStore` named the same twelve fields on every
-    save, filled from the load that ran when the window opened. It is now
-    field-wise: `Field` is the unit of the patch, of the debounce, and of one
-    predicate — *does this control still differ from the file?* — that answers
-    whether to write, what closing must flush, and which controls an edit made
-    elsewhere may repaint. Every write re-seeds its own control from the config
-    core hands back, which is ST-7 for free. With it: the two AI timeout
-    controls (ST-1), Edit ▸ Done over a monospaced scan-path field (ST-10), and
-    no form at all when the config cannot be read (ST-3).
+    The native Settings form became field-wise — one `Field` enum is the unit of
+    the patch, the debounce and the dirtiness question, so a control writes only
+    what it owns and re-seeds from what core hands back. `AppConfigStore` became
+    the single writer as well as the single reader, queueing patches in ask
+    order with a pending shadow for the two controls that must answer on the
+    click. The terminal's emulator is pinned and clipped rather than resized to
+    nothing (D-9), resizes coalesce on 80 ms, and scrollback and the link knobs
+    are stated rather than inherited. No Rust changed.
 
-    **`AppConfigStore` became the single writer as well as the single reader**
-    (ST-5). `patch(_:)` queues writes in the order they were asked for, two
-    fields carry a pending shadow so their controls answer on the click
-    (`side_by_side_diff`, and now `ai_provider` — which had two independent
-    owners and could show two different providers with both surfaces open), and
-    the three call sites that read the file behind the store are gone. Every
-    store that needs it is handed it at construction.
-
-    Terminal: the emulator is pinned at panel height and clipped by an outer
-    frame (D-9), `TerminalController.resize` coalesces on 80 ms while the
-    initial push goes straight through, scrollback is stated as 1 000 in both
-    clients, and the link knobs are pinned to the shared contract.
-
-    Gates: zero-warning `just mac-build`, `pnpm check` 0/0 over 153 files,
-    prettier clean, `pnpm tauri build` bundled, 181 core + 24 bridge + 2 host
-    tests, `cargo fmt --check` clean, clippy-pedantic **165 in core** with
-    `leogit` and `leogit-ffi` at zero. No Rust changed, so core is untouched and
-    the FFI surface stays at 67 exports.
-
-    Findings for WS-S and after:
+    Findings still live:
     - **Port the reference client's rules, not its shape.** The Tauri form
-      renders straight from `$config` and has no per-field state at all. That
-      is not available in SwiftUI: a control re-reads its `Binding` in the same
-      layout pass, so a store-driven control whose write is deferred snaps back
-      for a frame — which is why `setSideBySideDiff` is synchronous, and why the
-      native form keeps its own field values and reconciles them instead. Same
-      two rules (field-wise patch, refused write puts its control back), a
-      different mechanism. A WS-S item that says "match the other client" should
-      be read as its contract, not its code.
-    - **One predicate can replace three mechanisms.** `isDirty` retired a
-      `lastPersisted` snapshot, a generation counter and a `pendingSave` slot.
-      The trick that makes it work is recording the baseline *through the
-      outbound normalizer* (`seeded[field] = patch(for: field)`), so a value the
-      form cleans on its way out — a trimmed model name, a re-parsed path list —
-      reads as unchanged rather than rewriting itself on every visit.
-    - **A shared serializer has to be joined synchronously.** `enqueue`
-      registers the write and bumps `writeGeneration` before any `await`; a
-      caller that hopped through a `Task` of its own would join in scheduler
-      order, which is precisely the ordering the queue exists to impose. Any
-      future queue in either client needs the same split between "take my place"
-      and "wait for my turn".
+      renders straight from `$config` and keeps no per-field state. That is not
+      available in SwiftUI: a control re-reads its `Binding` in the same layout
+      pass, so a store-driven control whose write is deferred snaps back for a
+      frame. Same two rules, different mechanism — an item that says "match the
+      other client" means its contract, not its code.
+    - **One predicate can replace three mechanisms**, if the baseline is
+      recorded *through* the outbound normalizer: a value the form cleans on its
+      way out then reads as unchanged rather than rewriting itself on every
+      visit.
+    - **A shared serializer has to be joined synchronously.** Registering the
+      write and bumping the generation happen before any `await`; a caller that
+      hopped through a `Task` would join in scheduler order, which is precisely
+      the ordering the queue exists to impose. Any future queue needs the same
+      split between "take my place" and "wait for my turn" — WS-S's
+      `openGeneration` is the same shape a third time.
     - **Optional dependency injection has a window, and the window is where the
-      first pass runs.** `store.configStore = appConfig` from a `.task` is late
-      for anything that acts on appear — `RepoDirectoryStore`'s first walk in
-      that window would have walked no scan paths at all. `ContentView.init(
-      appConfig:)` + `State(initialValue:)` removes the optional entirely, and
-      is the shape to reach for the next time a store needs a collaborator.
-      **This is directly relevant to WS-S's `RepoStore.open` guard**: the
-      reentrancy fix is about ordering *within* a store, and it should not
-      reintroduce a late-bound dependency to get there.
+      first pass runs.** `ContentView.init(appConfig:)` + `State(initialValue:)`
+      removes the optional entirely, and is the shape to reach for the next time
+      a store needs a collaborator.
     - **A collapsed pane is not a zero-sized pane.** Anything that lays out
-      against its own frame — an emulator, a text view, a canvas — must be
-      pinned and clipped rather than resized to nothing. The corollary bit:
-      a pinned view still occupies space for hit-testing, so the same predicate
-      that hides it has to stop it answering the mouse.
-    - **A library default is not a decision.** Two emulators shipped two
-      scrollback numbers and neither client had chosen either — the same lesson
-      as WS-Q's date formatter, one layer down. Where the two clients are meant
-      to feel like one app, state the number in both.
+      against its own frame must be pinned and clipped rather than resized to
+      nothing — and a pinned view still occupies space for hit-testing, so the
+      predicate that hides it has to stop it answering the mouse too.
+    - **A library default is not a decision.** Where the two clients are meant to
+      feel like one app, state the number in both.
     - **Check what the user actually loses before costing the fix.** TE-5's
       remaining half read as a missing affordance; the API check showed the
-      *behaviour* already matched and the affordance existed in a different
-      form, because the emulator that needs a hint is the one that draws links
-      unconditionally. The gap was smaller than the item implied, and the
-      platform's own answer was better than a hand-built one — see §4.10.
+      *behaviour* already matched and the platform's own answer was better than
+      a hand-built one — see §4.10.
 
-19. **WS-S — Sweep & contract cleanup (S/M).** What genuinely had no home, plus
-    the work that can only land once everything else has:
-    - **Leftover efficiency**: RM-11 (move the native sweep's slot re-check
-      inside the loop — its own tier runner already does), BG-7 (fire the
-      existing resync from the policy's occlusion edge).
-    - **`RepoStore.open` has no reentrancy guard** (WS-N found it; WS-Q was the
-      other candidate and did not take it). Two overlapping opens interleave
-      `repoPath` with `loadRepoData`, so a fast double switch can leave one
-      repository's path beside another's history — and WS-Q's `commits`/
-      `historyLoaded` reset narrows the window without closing it.
-      `awaitLoadSettled` already has the depth-count machinery a guard builds
-      on. **Make the refusal a distinguishable outcome**, the way
-      `BranchOpOutcome` did for branch ops, rather than a silent early return.
-    - **Dead-surface deletions** — CL-8's `check_auth` (spawns `gh auth status`
-      every launch to write a field with zero readers), BR-10's rename and
-      remote-delete wrappers (the feature is deferred to ROADMAP, the wiring
-      goes now), the `has_staged_changes` wrapper, the unconsumed derived
-      stores. DF-5's scaffolding stays and ST-9's probe is wired by then, so
-      neither is deleted. Each deletion also drops a row from FRONTEND §3's
-      command tables.
-    - **FRONTEND.md** — retire each §8 row the parity work closed, and add the
-      divergences this plan keeps that are not yet filed: error surface, loading
-      presentation. (Detached/merging markers and the commit list's place across
-      a tab round trip went in with WS-Q; the settings surface row is already
-      there.) (Counts
-      placement and progress surface went in with WS-F, branch-menu shape with
-      WS-G — each workstream files its own. TE-5 landed in WS-R as both: the
-      modifier-click and OSC 52 rules in §6.17, how the modifier is *taught* as
-      an §8 row.)
-    - **Stale source comments**, all verified: `CommitStore.swift:20-23`,
-      `SyncControls.swift:9-11,131`, `TerminalStore.swift:32`,
-      `CloneSheet.swift:8-10`, `ContentView.swift:154-159`,
-      `TerminalSessionView.swift:124-126`,
-      `BackgroundSchedulingPolicy.swift:7`, `repoSyncScheduler.ts:66-70`.
-      Re-locate each before editing: WS-Q and WS-R rewrote parts of
-      `CommitStore`, `SyncControls`, `ContentView` and `TerminalSessionView`,
-      so the line numbers have moved and some of the comments with them.
-    - **Doc claims outside the audit's checklist**, fixed as their area lands:
-      DESIGN's header-cluster list (ahead/behind are badges *on* the Pull/Push
-      buttons). (The committer-vs-author date this list used to carry was never
-      wrong — WS-Q checked: DESIGN says author, and both clients render it.)
-      (TECHNICAL's width-keyed `PathText` claim became true in WS-N.)
-    - **Two one-line Tauri catch-ups WS-N opened in the other direction**:
-      `DiscardConfirm` should keep its own refusal rather than closing into the
-      modal (§6.13's refinement, which native now follows), and the discard /
-      ignore `reportActionError` call sites should pass the `retry` the function
-      has accepted since WS-D.
+19. **WS-S — Sweep & contract cleanup (S/M).** ✅ **Shipped 2026-08-30.**
+    RM-11, BG-7, `RepoStore.open`'s reentrancy guard, the dead-surface
+    deletions (CL-8, BR-10's wrappers, `has_staged_changes`, `get_repo_name`,
+    the unconsumed derived stores), WS-N's two Tauri catch-ups, eight stale
+    source comments, and the FRONTEND / DESIGN / STYLE claims that had no
+    workstream of their own. Per-item state in §4.1, §4.2, §4.4 and §4.8.
+
+    **Dead surfaces: six commands, not four, and one of the four was not dead.**
+    `rename_branch`, `delete_remote_branch`, `has_staged_changes` and
+    `get_repo_name` went as planned, wrapper + registration + DTO; core keeps
+    every function (`has_staged_changes` is called by `commit`,
+    `get_repo_name` is the native `repo_display_name`). Two amendments,
+    both decided with the user:
+    - **`check_auth` was not dead, and deleting it would have broken a filed
+      ROADMAP item.** The waste CL-8 named was real — a `gh auth status`
+      subprocess on every launch writing `appState.ghAuthed`, which has zero
+      readers — but the *wrapper* is what ROADMAP's "Create GitHub Project"
+      item depends on. The launch probe and the field are gone; the wrapper
+      stays, and the answer is read at the point of use, which is also more
+      correct: signing in happens outside the app, so one probe at startup is
+      stale for the session.
+    - **`get_ahead_behind` was a fifth dead wrapper the plan never named.**
+      Both clients read ahead/behind from `get_status`. Deleted with its
+      `AheadBehind` DTO, per FRONTEND §1's own rule that a registered command
+      with no caller is either being wired by a named item or is deleted.
+
+    Eight derived stores had no importer, not four: `repo.ts`'s
+    `hasMergeConflicts` / `currentBranch` / `remoteBranches` / `localBranches`
+    and `app.ts`'s `isLoading` / `showRepoPicker` / `inMain` /
+    `currentRepoPath`. The Tauri host is at **68** registered commands, from 73.
+
+    **`RepoStore.open` gained a generation, not a lock.** Refusing the second
+    open would have left the user on the repository they were leaving; the fix
+    is that the *older* one stands down. `openGeneration` is claimed
+    synchronously on entry and re-checked before every publish — including
+    inside `loadRepoData`, whose two concurrent reads are the long window — so
+    the repository that wins is the one asked for last rather than the one whose
+    `git log` finished first. A stand-down reports `OpenOutcome.superseded`,
+    which the launch restore now switches on instead of reading `store.repoPath`
+    afterwards — a read that can answer for the open that beat it.
+
+    **BG-7 became a rank rather than a second notification observer.** The
+    policy publishes `wakefulness` (`hidden < inactive < active`, the Tauri
+    `ActivityState` ladder) and `ContentView` resyncs on any rise, so
+    un-occluding without activating catches up like an activation does.
+    RM-11 moved the sweep's slot check inside its loop, where `run(tier:)`
+    beside it already had it.
+
+    **The error surface turned out not to be a §8 divergence** — see the
+    finding below; D-23 and D-24 were filed and the one defect among the three
+    was fixed.
+
+    Gates: zero-warning `just mac-build`, `pnpm check` 0/0 over 153 files,
+    prettier clean, 181 core + 24 bridge + 2 host tests, `cargo fmt --check`
+    clean, clippy-pedantic **165 in core** with `leogit` and `leogit-ffi` at
+    zero. `pnpm tauri build` compiles and bundles `leogit.app` cleanly; its
+    `.dmg` step fails in an agent shell on `Finder got an error: The Finder is
+    busy. (-15260)` from `bundle_dmg.sh`'s cosmetic AppleScript, which needs a
+    real user session — run it once from a terminal to confirm the artifact.
+
+    Findings for WS-T and after:
+    - **"File it as a divergence" is a claim to check, not an instruction to
+      follow.** This workstream was told to file the error surface as a
+      FRONTEND §8 row. §8 is only for differences where *behaviour* is
+      identical, and the two clients differed in behaviour in three places, all
+      against contracts already written down (§6.13, STYLE's *Status
+      indicators*). One was a defect and was fixed; two are filed as D-23 and
+      D-24. A plan entry that presumes a classification is the same kind of
+      hypothesis WS-Q found in SY-10's proposed fix.
+    - **Multiplexing two answers into one slot is a defect even when both are
+      "an error".** Native's single `errorMessage` carried the poll's failure
+      and an OS hand-off notice, and the poll only ever wrote into a *free*
+      slot — so the dismissable line silenced the undismissable one, which is
+      exactly backwards. Two fields, both rendered, is the fix; the general
+      rule is that two things retired by different events are two fields.
+    - **A deletion sweep must read the callers, not the plan's list.** Of five
+      named dead surfaces one was live, and a sixth nobody had named was dead.
+      Both were found by grepping call sites rather than trusting the register,
+      and both changed what got deleted.
+    - **A stale comment's line number is the least reliable thing about it.**
+      Of the eight this workstream carried, two had already been fixed by the
+      workstreams that rewrote their files, one had drifted 28 lines, and three
+      of the eight had a *second* stale claim nearby that the register never
+      recorded (`CloneSheet`'s gh-progress line, `repoSync.ts`'s "skipped
+      entirely", `RepoStore`'s "subtitle badge"). Re-read the surrounding code,
+      not the flagged line.
+    - **A doc paragraph written once as "the native client currently…" ages
+      badly.** DESIGN's native-status paragraph still claimed the AI timeouts
+      had no native control and the settings form wrote every field — both
+      closed by WS-R the day before, because that paragraph is not where WS-R's
+      own doc rows live. Prose that describes *a client's state* rather than *a
+      behaviour* needs re-reading whenever that client changes, and WS-T should
+      expect the same of the `leogit`-opens-the-Tauri-build sentences.
 
 20. **WS-T — `leogit` reaches the native app (S).** ✅ **Decided, deliberately
     last.** `install.sh` writes a `leogit [dir]` shell function pointing at
@@ -2384,8 +2414,9 @@ is mostly adoption of already-proven native behavior.
     or `open -a <path> <dir>`, and every living doc says so plainly.
 
 Suggested order: **A → B → … → S**, then **T**, as lettered. Each workstream
-maintains its own doc rows as it lands (per CLAUDE.md); WS-S carries only what
-needs the whole plan finished, and WS-T needs WS-S.
+maintained its own doc rows as it landed (per CLAUDE.md); WS-S carried only what
+needed the whole plan finished, and WS-T needs WS-S — which has shipped, so
+apart from WS-K's Linux machine and DF-6, WS-T is what is left.
 
 One sequencing note that is not free to reorder: **WS-K needs a Linux machine
 rather than a predecessor** — WS-J, the workstream it waited on, has shipped, so
@@ -2469,16 +2500,29 @@ written as each chunk lands, no duplication between documents:
   either client reads is now settable in both) and added one for how each client
   teaches the terminal's link modifier; §6.15 gained the rule that a
   configuration that cannot be read renders no form, and that a setting with a
-  second owner is read and written through that owner rather than copied.
+  second owner is read and written through that owner rather than copied. WS-S
+  took the counts and the tables down to 68 registered commands, rewrote §1's
+  three command lists around what is left, and added the last two §8 rows —
+  the error surface and the loading presentation — after establishing that the
+  behaviour differences behind them were defects (D-23, D-24) rather than
+  divergences; §6.13 gained the rule that the strip's two conditions are two
+  channels rather than one slot.
 - **TECHNICAL.md** — new mechanics paragraphs only for genuinely new machinery
   (the core hoists, the Tauri channel transport, the native launch path, WS-N's
   `Set` selection + `FileListSelection` + held `PathText` fit, WS-O's one-row-
   model split layout and the `AppConfigStore` writer, WS-P's `LoadKey` and
   `rendered`-identity rules, WS-R's field-wise `SettingsStore` and the config
-  store's write queue), plus the claims WS-S lists as their areas land.
+  store's write queue, WS-S's `openGeneration` guard, the wakefulness ladder and
+  the two banner channels). The claims outside the audit's checklist were swept
+  in WS-S — the `gitApi` roster, `get_ahead_behind`'s status, and DESIGN's
+  native-status paragraph.
 - **DESIGN.md** — flow 1 is shared end to end since WS-M, `leogit <dir>` and
   the *Create a repository here?* prompt included, and flow 11 (the update
-  chip) is now both clients'. The per-flow client hedges retire as parity
+  chip) is now both clients'. WS-S added flow 1's failed-re-walk rule (a row
+  above the list, never a screen instead of it), dropped its launch gh-auth
+  probe step with the probe itself, and made flow 7 record where each client
+  puts the pending counts and the transfer's progress rather than describing
+  one client's placement as everyone's. The per-flow client hedges retire as parity
   closes them. One difference flow 10 now records rather than hides: Return in
   the clone list is two presses in Tauri (its cursor and its selection are
   separate, so the first press makes the destination visible) and one natively
@@ -2521,7 +2565,11 @@ written as each chunk lands, no duplication between documents:
   around the wash a run draws (the staging cue it used to describe has to be a
   control when it lands, not a second wash); WS-Q made the commit row's tag pill
   neutral against the unpushed plate beside it, and extended the conflicted-hue
-  bullet to the branch control's `· merging` suffix, which is the same state.
+  bullet to the branch control's `· merging` suffix, which is the same state;
+  WS-S gave *Repo pickers* the failed-walk row, said in *Status indicators* that
+  the strip's two conditions are two lines rather than one showing whichever
+  came first, and rewrote the transfer-progress rule as *next to what started
+  it* — a macOS toolbar control has no face to fill.
 - **ROADMAP.md** — items close as their workstreams land; the deferrals this
   plan makes (per-line staging, diff virtualization, branch rename +
   delete-on-remote) are already filed there. WS-L closed the two WS-B and the

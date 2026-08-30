@@ -10,6 +10,7 @@
   import { repoSync } from '$lib/stores/repoSync'
   import { repoSyncScheduler } from '$lib/services/repoSyncScheduler'
   import { discoveringRepos } from '$lib/services/repoDiscovery'
+  import RepoDiscoveryFailure from '$lib/components/RepoDiscoveryFailure.svelte'
   import { recentRepos, repoSortMode } from '$lib/stores/reposState'
   import { activeNetworkOp } from '$lib/stores/networkOps'
   import RepoTooltip from '$lib/components/RepoTooltip.svelte'
@@ -209,6 +210,8 @@
     />
     <RepoSortToggle />
   </div>
+
+  <RepoDiscoveryFailure />
 
   <div class="repo-list">
     {#if filteredRepos.length === 0}

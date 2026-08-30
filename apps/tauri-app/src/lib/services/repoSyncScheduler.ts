@@ -67,7 +67,9 @@ function tierMembers(tier: Tier): string[] {
 /**
  * Fetch + recompute each repo in a tier sequentially, to keep the number of
  * concurrent `git fetch` processes low. Marked `background` so the whole tier
- * goes quiet while offline / backing off (each `syncRepo` self-skips).
+ * goes quiet *on the network* while offline / backing off — each `syncRepo`
+ * downgrades to a local recompute rather than bailing, which is what keeps the
+ * dirty dot honest for a tree edited while the link is down.
  *
  * The policy is re-checked before every repo, not once at entry: a push
  * starting, or the window going away, abandons the rest of the tier rather than

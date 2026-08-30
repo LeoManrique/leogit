@@ -35,18 +35,17 @@ static-linking or a local daemon (that decision is open; see the plan).
   Frontends never re-derive git state the core already returns (e.g. file status
   categories, ahead/behind, merge conflicts).
 - Today's surface: **4 events, ~45 DTOs**, and a command catalogue (§3) each host exposes
-  **to the extent it consumes it**. The Tauri host registers **73** `#[tauri::command]`s,
+  **to the extent it consumes it**. The Tauri host registers **68** `#[tauri::command]`s,
   each with a wrapper in `apps/tauri-app/src/lib/api/commands.ts`; the UniFFI bridge
   exports **67** functions. The two sets are deliberately not identical, and a command
   reaching one host does not oblige the other — what is required is that the difference be
   recorded, here or in §8, never left silent.
-  - No native export: `check_auth`, `delete_remote_branch`, `generate_patch`,
-    `generate_inverse_patch`, `get_ahead_behind`, `get_repo_identifier`,
-    `get_repo_name`, `has_staged_changes`, `highlight_diff`, `is_git_repo`,
-    `rename_branch`, `take_pending_launch_target`, `terminal_pty_info`. Four of those the
-    native client reaches under another name (`repo_display_name` for `get_repo_name`,
-    `resolve_repo_root` for `is_git_repo`, the structured `tokenize_diff` for the
-    HTML-shaped `highlight_diff`, and `repo_identifier` for `get_repo_identifier` —
+  - No native export: `check_auth`, `generate_patch`, `generate_inverse_patch`,
+    `get_repo_identifier`, `highlight_diff`, `is_git_repo`,
+    `take_pending_launch_target`, `terminal_pty_info`. Three of those the
+    native client reaches under another name (`resolve_repo_root` for
+    `is_git_repo`, the structured `tokenize_diff` for the HTML-shaped
+    `highlight_diff`, and `repo_identifier` for `get_repo_identifier` —
     async so the picker's per-row `git config` reads never hold a Swift cooperative
     thread). `take_pending_launch_target` is core's process-global slot for a
     cold-start target, which the native client deliberately does not use: it has a
@@ -58,11 +57,15 @@ static-linking or a local daemon (that decision is open; see the plan).
     `repo_identifier`, `resolve_launch_target`, `resolve_repo_root`,
     `tokenize_diff`.
   - Registered Tauri-side but called by nothing in the Svelte client:
-    `copy_diff_text`, `generate_patch`, `generate_inverse_patch`,
-    `get_ahead_behind`, `has_staged_changes`, `rename_branch`,
-    `delete_remote_branch`. Each is a live item in the parity plan — either being
-    wired (DF-5, DF-6) or being deleted (WS-S) — and a command that is neither
-    should not stay on this list.
+    `copy_diff_text` (DF-6's multi-line copy), `generate_patch` and
+    `generate_inverse_patch` (DF-5's per-line staging scaffolding). Each is
+    being wired by a named parity item, which is the only reason a registered
+    command may stand without a caller: one that is neither wired nor claimed
+    is deleted, wrapper and registration together, rather than left on this
+    list. `check_auth` is registered and reachable but deliberately called by
+    nobody *yet* — a gh surface that needs to gate on the answer asks at the
+    point of use, since signing in happens outside the app and one probe at
+    launch is stale for the session.
 
 ## 2. System context & architecture
 
@@ -83,12 +86,12 @@ static-linking or a local daemon (that decision is open; see the plan).
 - **State ownership** — durable state (config, repos MRU, terminal PTY sessions)
   lives in the core. Frontends hold only re-derivable view state.
 
-## 3. Command surface (73)
+## 3. Command surface (68)
 
 Grouped by namespace. `args` are the logical inputs (camelCase on the wire);
 `→` is the return DTO (§5). "async/net" marks network operations that may stream
 progress (§4.1) and can be slow. This is the catalogue of operations core offers a
-frontend — the Tauri host registers all 73; the native bridge exposes the subset it
+frontend — the Tauri host registers all 68; the native bridge exposes the subset it
 consumes, plus seven of its own (§1).
 
 ### 3.1 Config & state — 6
@@ -142,7 +145,7 @@ and fusing them (§3.10) removed a round trip per file selection and gave the
 `file_status_styles` is fetched once, not per row — it is a table of ten short
 strings that a changed-file list draws on every repaint.
 
-### 3.4 Git — branches — 7
+### 3.4 Git — branches — 5
 | Command | Args | Returns |
 |---|---|---|
 | `list_branches` | `repoPath` | `BranchInfo[]` |
@@ -150,15 +153,12 @@ strings that a changed-file list draws on every repaint.
 | `switch_branch` | `repoPath, branch` | `void` |
 | `checkout_commit` | `repoPath, sha` | `void` (detaches HEAD) |
 | `delete_branch` | `repoPath, name` | `void` |
-| `delete_remote_branch` (net) | `repoPath, remote, branch` | `void` |
-| `rename_branch` | `repoPath, oldName, newName` | `void` |
 
-### 3.5 Git — commit & staging — 10
+### 3.5 Git — commit & staging — 9
 | Command | Args | Returns |
 |---|---|---|
 | `commit` | `repoPath, message, files, amend` | `void` |
 | `undo_last_commit` | `repoPath` | `void` |
-| `has_staged_changes` | `repoPath` | `boolean` |
 | `classify_discard` | `repoPath, files` | `DiscardPlan` |
 | `discard_files` | `repoPath, files` | `void` |
 | `append_to_gitignore` | `repoPath, patterns` | `void` |
@@ -176,17 +176,15 @@ also carries a count of consecutive misses, because elapsed time alone is not
 enough in the other direction: at the 30 s rung a single read is charged the
 whole window, and that read is exactly the one that can land mid-rewrite.
 
-### 3.6 Git — sync / remote — 8
+### 3.6 Git — sync / remote — 6
 | Command | Args | Returns |
 |---|---|---|
 | `repo_sync_status` (net) | `repoPath, doFetch` | `RepoSync` |
 | `fetch` (net) | `repoPath, remote, background` | `void` |
 | `pull` (net) | `repoPath, remote` | `void` |
 | `push` (net) | `repoPath, remote, branch, setUpstream, forceWithLease` | `void` |
-| `get_ahead_behind` | `repoPath, upstream` | `AheadBehind` |
 | `get_remote` | `repoPath` | `string \| null` |
 | `get_repo_identifier` | `repoPath` | `RepoIdentifier \| null` |
-| `get_repo_name` | `path` | `string` |
 
 ### 3.7 Git — merge — 5
 | Command | Args | Returns |
@@ -708,6 +706,14 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    Finder", ended up seizing the window. Each client has exactly one: the Tauri store's
    `reportActionError` / `reportNotice` pair, and native's `ActionFailure` +
    `.actionFailureSheet` beside `ErrorBanner`.
+   **The strip's two conditions are two channels, not one slot.** *This repository
+   has stopped being readable* and *something the app handed off didn't take* are
+   answers to different questions, retired by different things — the first by its
+   own recovery, the second only by its ✕ — so each has its own field and both
+   may stand at once, the poll's on top. Sharing one slot lets whichever arrived
+   first silence the other, and it silences it the wrong way round: the
+   dismissable line is the one the user can act on, and the poll's is the one
+   they cannot.
    **What lands in that modal is git's own text, so the modal is built to carry it**:
    monospaced, selectable, capped in height and scrollable, in both clients (the Tauri
    `ErrorModal`'s `<pre>`, native's `ActionFailureSheet`). Git's refusals are
@@ -935,6 +941,8 @@ every deliberate difference here.
 | Settings surface (§6.15) | a modal overlay inside the one window, with a header ✕ and a footer **Close** — there is nothing to save, so the button only dismisses | the stock SwiftUI `Settings` scene, a separate window with ⌘, and the standard title-bar close and no content buttons at all; a text field also commits on `.onDisappear` |
 | Settings field coverage (§6.15) | every `Config` field the app reads has a control, except `side_by_side_diff` — the diff header owns it in both clients | the same, minus `theme` (a permanent exemption, above) |
 | Teaching the terminal's link modifier (§6.17) | a hint follows the pointer onto a link — *Follow link (⌘ + click)*. Not optional here: xterm's link addon cannot make its own underline conditional, so a gated link draws as underlined-and-dead and simply looks broken without something naming the gesture | nothing until ⌘ goes down, at which point SwiftTerm highlights the link under the pointer and floats the URL beside it. Nothing is drawn beforehand, so there is no broken-looking state to explain — the cost is discoverability alone, and it is not paid by a hint: SwiftTerm publishes no hover callback (it resolves the hovered link and notifies nobody), and on macOS 26 it deliberately drops `.mouseMoved` from its tracking area to dodge a WindowServer bug that synthesizes mouse-downs, so a host hover surface would have to re-enter exactly that hazard |
+| Error surface (§6.13) | three shapes off `repoState`: a centred `ErrorModal` with git's text in a scrollable `<pre>` and an optional **Retry**, a one-line tinted strip under the header for a hand-off that didn't take (with ✕) and for the poll's streak (without), and an `error` prop rendered inside whichever dialog raised it | the same three: an `ActionFailureSheet` at a fixed width with the text mono, selectable and capped — an `.alert` cannot keep git's multi-line text legible — an `ErrorBanner` row above the split for the same two banner conditions and the same ✕ rule, and a local `errorMessage` inside the sheet that raised it. The classification is shared; only the widget is per-platform |
+| Loading presentation (§6.3, §6.2) | the diff pane dims to 0.45 over 120 ms and lays a CSS ring 48 px from the top past the 150 ms threshold; a transfer fills the sync button itself, with git's line in the status bar; no global progress indicator for an explicit reload | the same dim, the same 120 ms, the same 48 pt inset past the same threshold, drawn as a `ProgressView`; a transfer is a top-edge material banner over the content, and an explicit load (open, ⌘R) puts a linear bar in that same slot — macOS has no in-control fill to wipe across a toolbar button, and the banner is the one place both can live |
 | Background-cadence enforcement (§6.1) | the ladder is a self-scheduling `setTimeout` chain, so a WebView free to throttle a backgrounded document can only make the hidden rung *slower* than 30 s; the wake-up resync is what guarantees a current screen | an App Nap assertion is held while a repo is open, so the same ladder's timers are not coalesced away, and the hidden rung is exactly 30 s (`AppNapSuppressor`) |
 | File-list selection & keyboard (§6.4) | two anchors and hand-rolled key handling: shift-click on the row body extends from a sticky row anchor, shift-click on a checkbox range-toggles from a second one that *does* move, and Home/End jump to first/last. Plain click and ⌘-click both collapse to one row. An extension **activates the shift-clicked row**, so the diff follows the far end | one `List(selection: Set<String>)`, so the range and multi-row gestures are AppKit's own and behave like every other macOS list, and the checkbox column has no separate anchor. The gesture that produced a selection is not recoverable from a `Set`, so an extension leaves the diff on the row it was already showing rather than guessing which row was clicked |
 | Relative-date tick gating (§6.12) | one `setInterval` that skips its own body while `document.hidden` or the pane has no height — the pane stays mounted behind the other tab, so the tick has to test for it | a `.task` keyed on `BackgroundSchedulingPolicy.canTickRelativeDates`, torn down and rebuilt with the predicate; the History pane is *removed* from the hierarchy on a tab change, so "is the pane showing?" needs no test at all. Rebuilding also re-reads the clock at once, so a window returning from an hour hidden is current immediately |

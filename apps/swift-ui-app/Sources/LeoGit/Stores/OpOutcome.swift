@@ -31,3 +31,26 @@ enum OpOutcome {
     /// Git refused. The text is core's own, never re-worded on the way here.
     case failed(String)
 }
+
+/// How opening a repository ended.
+///
+/// The same three-state shape as `OpOutcome` and for the same reason, one
+/// question along: a caller cannot act on `RepoStore.repoPath` afterwards to
+/// find out, because the answer it would read may belong to a *later* open.
+///
+/// `superseded` is the case that needs the type. The user asked for another
+/// repository while this one was still being read, so this open published
+/// nothing and the newer one is authoritative — nothing failed, nothing is
+/// stale, and there is no message. A caller that reported it as a failure
+/// would raise a banner about a repository the user has already left.
+enum OpenOutcome {
+    /// This repository is now the open one, whatever its status read returned.
+    case opened
+
+    /// The path could not be resolved as a repository. Whatever was open stays
+    /// open, and `errorMessage` says why.
+    case failed
+
+    /// A later `open` claimed the app while this one was reading.
+    case superseded
+}

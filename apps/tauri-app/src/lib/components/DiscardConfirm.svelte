@@ -12,11 +12,17 @@
      */
     plan: DiscardPlan | null
     isDiscarding: boolean
+    /** A refused discard, stated here rather than in a modal over this dialog
+     *  (FRONTEND §6.13, and `ForcePushConfirm`'s shape): this dialog is
+     *  already the retry surface, and it is still naming the files the failure
+     *  was about. The outcome line above is re-read alongside it, so what a
+     *  retry would do describes the tree as it stands after the refusal. */
+    error?: string
     onConfirm: () => void
     onCancel: () => void
   }
 
-  let { files, plan, isDiscarding, onConfirm, onCancel }: Props = $props()
+  let { files, plan, isDiscarding, error, onConfirm, onCancel }: Props = $props()
 
   const single = $derived(files.length === 1 ? files[0] : null)
 
@@ -86,6 +92,9 @@
       <p class="muted">
         {outcome ?? 'Working out what this will do…'}
       </p>
+      {#if error}
+        <p class="error">{error}</p>
+      {/if}
     </div>
     <div class="modal-footer">
       <button class="btn-secondary" onclick={onCancel} disabled={isDiscarding}>Cancel</button>
@@ -148,6 +157,19 @@
   .modal-body .muted {
     font-size: 12px;
     color: var(--text-secondary);
+  }
+
+  /* Git's own refusal, kept selectable and wrapped — it names the path the OS
+     or the index would not let go, which is the part worth copying. */
+  .modal-body .error {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--status-red);
+    white-space: pre-wrap;
+    word-break: break-word;
+    user-select: text;
+    max-height: 120px;
+    overflow-y: auto;
   }
 
   .modal-body code {

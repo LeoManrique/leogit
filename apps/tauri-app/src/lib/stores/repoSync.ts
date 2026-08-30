@@ -58,9 +58,10 @@ export function setRepoSync(path: string, counts: SyncCounts): void {
  * requests for the same path are coalesced.
  *
  * `background` marks automatic, timer-driven syncs (vs. a user opening a repo):
- * a background fetch is skipped entirely while we're offline / backing off, so
- * we don't keep spawning fetches we know will fail. Either way, the fetch's
- * outcome is reported to the connectivity breaker so it can trip or recover.
+ * while offline / backing off such a sync drops its fetch and recomputes
+ * locally instead, so we don't spawn fetches we know will fail without also
+ * blinding the dirty dot. A fetch that does run reports its outcome to the
+ * connectivity breaker so it can trip or recover.
  */
 export async function syncRepo(path: string, doFetch: boolean, background = false): Promise<void> {
   if (inflight.has(path)) return

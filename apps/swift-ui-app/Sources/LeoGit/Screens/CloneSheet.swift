@@ -3,7 +3,8 @@ import SwiftUI
 /// The Clone sheet — the native counterpart of the Tauri `CloneOverlay`:
 /// a GitHub tab listing the signed-in user's repositories via `gh`, a URL
 /// tab for anything git can reach, a shared destination row, and the clone
-/// itself with live progress (URL clones only; `gh` reports none).
+/// itself with live progress on both routes — `gh repo clone` forwards
+/// `--progress` to the `git clone` it runs, so it reports the same meter.
 ///
 /// There is no cancel once a clone starts — dismissing the sheet wouldn't
 /// stop the clone, just orphan its progress and eventual error — so every
@@ -257,9 +258,9 @@ struct CloneSheet: View {
         }
     }
 
-    /// Determinate once git's aggregate percent is known (URL clones);
-    /// indeterminate before the first tick and always for `gh`, which
-    /// streams nothing.
+    /// Determinate once git's aggregate percent is known, indeterminate
+    /// before the first tick. Both clone routes reach it — a bar frozen at
+    /// zero reads as stuck, so "no number yet" is its own state.
     private var progressArea: some View {
         VStack(alignment: .leading, spacing: 4) {
             if let percent = store.progressPercent {

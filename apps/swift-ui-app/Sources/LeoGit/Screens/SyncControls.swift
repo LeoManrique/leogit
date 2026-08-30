@@ -7,8 +7,9 @@ import SwiftUI
 /// now (GitHub Desktop's order, adapted): detached HEAD → publish repository
 /// (no remote) → publish branch (no upstream) → pull (behind) → push (ahead)
 /// → fetch (in sync). Pull outranks push, so a diverged branch proposes the
-/// step that must happen first — the ahead count stays visible in the window
-/// subtitle meanwhile. Force push with lease is menu-only, offered only
+/// step that must happen first — the ahead count stays visible in the toolbar
+/// counts beside this control meanwhile. Force push with lease is menu-only,
+/// offered only
 /// while diverged, and behind a destructive confirmation. Fetch is the
 /// primary action once nothing needs pulling or pushing — the manual "check
 /// the remote" — and a menu item in every split state, which is what let the
@@ -114,8 +115,8 @@ struct SyncControls: View {
     /// control that renders only its text and icon, so no custom view — a
     /// count pill included — can ride the face; and no system API badges a
     /// macOS toolbar item (the 26 SDKs' toolbar badges are iOS-only). The
-    /// pending counts live where the platform can show them: the window
-    /// subtitle, the Changes tab pill, and this button's tooltip.
+    /// pending counts live where the platform can show them: their own toolbar
+    /// item left of this one, and this button's tooltip.
     private func splitButton(primaryAction: @escaping () -> Void) -> some View {
         Menu {
             Button("Fetch", action: fetch)

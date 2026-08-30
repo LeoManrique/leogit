@@ -289,8 +289,10 @@ synchronous `Result<T, String>`. The multi-call sequences belong to the clients:
 `commit_squash_merge` on success, and a *failed merge is data, not an error* —
 `MergeResult { success: false }` with git's text and the conflicted paths, never a thrown
 `GitError`, which is why each client decides for itself whether a refusal is a modal or a
-line under a field. `rename_branch` and `delete_remote_branch` exist in core but stay unexported —
-no client has UI for them yet, and the bridge doesn't carry dead surface.
+line under a field. `rename_branch` and `delete_remote_branch` exist in core and are reachable from
+neither client — no UI has been built for them yet, and neither the bridge nor
+the Tauri host carries dead surface. ROADMAP has them as one feature built on
+both clients at once.
 
 Sync (`get_remote`, `fetch`, `pull`, `push`) is the first flow to cross **async** and the
 first to cross the **callback seam**. The network functions are exported with
@@ -306,9 +308,10 @@ a flat `SyncProgress` record: the core-computed aggregate percent (0–100, weig
 in `core/src/progress.rs`) plus git's raw progress line. Ticks are invoked on core's
 stderr-reader thread, so the Swift side hops to the main actor itself and drops stragglers
 by generation; there is no completion event — an operation is over when its `await` returns.
-`get_ahead_behind` stays unexported: the native client reads ahead/behind from
-`get_status` (`repo_sync_status` later joined the surface with the repo switcher — see
-below, as did `clone_repo` and the gh clone surface with the Clone sheet).
+Core's `get_ahead_behind` reaches neither client: both read ahead/behind from
+`get_status`, which computes them from porcelain v2's branch headers at no extra
+cost (`repo_sync_status` joined the surface with the repo switcher — see below,
+as did `clone_repo` and the gh clone surface with the Clone sheet).
 
 AI commit-message generation crosses as the Tauri composer's own two-step pipeline —
 `get_selected_diff` (the checked files' combined diff) feeding `generate_commit_message`,
@@ -389,7 +392,22 @@ last explicit load exits, success or failure. The claim is a *depth count*, not 
 action's `onWorkingTreeChanged`, a clone handing its path straight to `open`), and a Bool
 would let the inner one's exit release everyone while the outer load still has no status.
 Reading a `nil` status and guessing is how a gate silently stops applying whenever the
-load happens to be slower than its caller. Between the two sits
+load happens to be slower than its caller.
+
+**Which repository the app is trying to be on is a separate question from how many reads
+are running, and `open(at:)` needs the second one.** Two overlapping opens interleave:
+each publishes `repoPath` after its own `await`, so the winner was whichever `git log`
+finished first rather than whichever repository the user asked for last, and one
+repository's history could land beside another's path. `RepoStore.openGeneration` is
+claimed synchronously on entry to `open` and re-checked before every publish — including
+inside `loadRepoData`, whose two concurrent reads are the long window — so a superseded
+open stands down having written nothing. It reports that as `OpenOutcome.superseded`
+rather than an early `return`, the same three-state shape as `OpOutcome` one question
+along: a caller cannot ask `repoPath` afterwards, because the answer it would read may
+belong to the open that beat it, and reporting a supersession as a failure raises a banner
+about a repository the user has already left.
+
+Between the two sits
 `RepoStore.refreshWorkingTree()`, for an action that changed the working tree but cannot
 have moved `HEAD` — a discard, an ignore. It re-reads only the status: `refresh()` would
 re-run `git log` at up to 500 commits and flash the progress bar for an answer already on
@@ -474,7 +492,15 @@ zero-sized `NSViewRepresentable` accessor reports from `viewDidMoveToWindow` —
 not `NSApp.keyWindow`, which is nil exactly while the app is inactive) — and exposes named
 predicates each guard cites: `canPollStatus`/`canAutoFetch` (block only on the network op)
 and `canRunRepoSweeps` (also requires active + visible; the deferrable multi-repo fan-out,
-caught up by the wake-up resync). A fourth, `canTickRelativeDates`, gates the History
+caught up by the wake-up resync, and re-asked before *every* repository of a sweep rather
+than once at entry, so a transfer claiming the slot abandons the rest of a fan-out nobody
+is looking at). The wake-up itself is read off the same type: `wakefulness` ranks the two
+inputs as `hidden < inactive < active` — the Tauri `ActivityState` ladder — and
+`ContentView` runs its resync on any *rise*, so a window un-occluded without the app ever
+leaving the front catches up like an activation does. Observing the rank rather than
+taking the `didBecomeActive` notification a second time also orders the two: a second
+observer of one notification has no guarantee the policy has taken it in first, and the
+sweep the resync ends with is gated on inputs that notification sets. A fourth, `canTickRelativeDates`, gates the History
 list's 10 s clock on visibility alone: it reads no git state and spawns nothing, so unlike
 the three above it ignores the network op and stays out of the App Nap assertion — a repaint
 of rows already on screen is not worth keeping a sleeping Mac awake for. `HistorySidebar`
@@ -858,7 +884,13 @@ call site picks one. `write` — both ignore actions — takes the window and ca
 closure, because these fail on a write race far more often than on anything the user would
 have to change first. `handOff` — reveal, open-with — goes to `ErrorBanner`, which grew a ✕
 for exactly this class: nothing else can ever retire it, where the poll's own banner is
-retired by its own recovery (`RepoStore.canDismissError` is that split).
+retired by its own recovery. That split is two fields rather than one slot with a flag —
+`RepoStore.pollFailure` (`private(set)`, so nothing outside can fake a dismissal) beside
+the writable `errorMessage`, both rendered as their own `ErrorBanner` row with the poll's
+on top. One slot let whichever arrived first silence the other, and the poll only ever
+wrote into a *free* one, so a dismissable hand-off notice suppressed *this repository has
+stopped being readable* for as long as it stood — the more urgent of the two, and the one
+the user cannot make go away by fixing anything.
 
 **It is a sheet and not an `.alert`, because what it carries is git's own text.** Git refuses
 in paragraphs — a `! [rejected]` line, the ref, then `hint:` lines naming the fix — and
@@ -1186,7 +1218,7 @@ Release builds set `windows_subsystem = "windows"` (in `main.rs`), so the app ru
 
 Every remote-touching command is engineered so an unreachable or flaky network degrades a badge — it never freezes the app. Three layers:
 
-1. **Off the main thread.** Every command that spawns a subprocess or touches the filesystem — the whole of `git.rs` (except the pure `format_commit_message`), all of `diff.rs`, and the four `gh` commands — is declared `#[tauri::command(async)]`. A plain synchronous Tauri command runs inline on the **main thread**: a blocking `git` spawn there freezes the window, and the failure mode is sneaky — commands that are normally instant (`get_status`, `rev-parse`) turn slow exactly when a big push/pull saturates the repo's disk, so a synchronous status poll would stall the UI thread every tick for the whole transfer. `(async)` runs them on tokio worker threads instead. One refinement on top: a `(async)` sync fn still pins one of the ~num-cpus *core* workers for its whole duration, so the commands that can legitimately run for minutes (`fetch`, `pull`, `push`, `clone_repo`, `delete_remote_branch`, `gh_publish_repo`, `gh_clone`) are `async fn`s delegating to `process::run_blocking` (tokio's dedicated blocking pool) — a 10-minute push can never starve the worker pool on a low-core machine.
+1. **Off the main thread.** Every command that spawns a subprocess or touches the filesystem — the whole of `git.rs` (except the pure `format_commit_message`), all of `diff.rs`, and the four `gh` commands — is declared `#[tauri::command(async)]`. A plain synchronous Tauri command runs inline on the **main thread**: a blocking `git` spawn there freezes the window, and the failure mode is sneaky — commands that are normally instant (`get_status`, `rev-parse`) turn slow exactly when a big push/pull saturates the repo's disk, so a synchronous status poll would stall the UI thread every tick for the whole transfer. `(async)` runs them on tokio worker threads instead. One refinement on top: a `(async)` sync fn still pins one of the ~num-cpus *core* workers for its whole duration, so the commands that can legitimately run for minutes (`fetch`, `pull`, `push`, `clone_repo`, `gh_publish_repo`, `gh_clone`) are `async fn`s delegating to `process::run_blocking` (tokio's dedicated blocking pool) — a 10-minute push can never starve the worker pool on a low-core machine.
 2. **Time-boxed subprocesses.** `process::run_timed(cmd, label, timeout)` is the single chokepoint: it spawns the child, drains both pipes on helper threads (so a chatty `git --progress` can't pipe-buffer-deadlock), and **kills the child** if it outlives `timeout`, returning a `… timed out …` error. `run_timed_streaming` is the same runner with an incremental stderr reader — each `\r`/`\n`-terminated line is handed to a callback as it arrives (git repaints its meter with bare `\r`), which is how live `--progress` output reaches the UI. `git_net_cmd` additionally bakes transport timeouts into the command — `GIT_SSH_COMMAND="ssh -o ConnectTimeout=N -o BatchMode=yes"` (SSH connect cap + no interactive prompts) and `-c http.lowSpeedLimit=1000 -c http.lowSpeedTime=N` (abort an HTTP transfer that stalls). Budgets: **background** badge fetches are short (8s connect/stall, 12s hard kill — fail fast, keep last-known counts); **user-initiated** transfers are generous (15/30s, 600s hard kill — never kill a real large transfer, only a wedged one). Unit-tested in `process::tests` (`run_timed_kills_a_hung_child_promptly`, `run_timed_streaming_splits_stderr_on_cr_and_lf`).
 3. **Don't keep firing when down.** [services/connectivity.ts](apps/tauri-app/src/lib/services/connectivity.ts) gates *automatic/background* fetches (the auto-fetch timer, the tiered scheduler, the refocus/cold-open resync) on `navigator.onLine` plus a consecutive-failure circuit breaker: after 2 failures it opens with an exponential backoff window (30s → 5min cap), suppressing background fetches until the window lapses, when exactly one probe is allowed through. `repo_sync_status` returns a `fetched` flag so the breaker can tell a real fetch failure from a no-remote repo. User-initiated actions (fetch/pull/push/switch) always attempt (still bounded by the backend timeout) and their outcome feeds the breaker, so a successful manual pull — or the OS `online` event — re-opens background syncing immediately and triggers a resync.
 4. **One transfer at a time.** The [stores/networkOps.ts](apps/tauri-app/src/lib/stores/networkOps.ts) `activeNetworkOp` store marks a user fetch/push/pull/publish as in flight — the *automatic* fetches deliberately claim no slot, since nobody waits on them and taking it would disable the action cluster on a timer. All handlers guard on it (mutual exclusion), and the status poll, auto-fetch, wake-up resync, and the tiered scheduler pause while it's set — polling mid-transfer only spawns git processes that contend with the transfer for the repo's disk, locks, and bandwidth; the op's own completion refresh covers what they would have found.
@@ -1202,7 +1234,7 @@ The frontend never touches Tauri's raw `invoke` API directly; every backend call
 | Namespace | Commands | Backend file |
 |---|---|---|
 | `configApi` | `loadConfig`, `patchConfig`, `configBounds`, `loadState`, `patchState`, `recordRecentRepo` | `core/src/config.rs` |
-| `gitApi` | `getStatus`, `fileStatusStyles`, `getSelectedDiff`, `getLog`, `getCommitDetail`, `listBranches`, `createBranch`, `switchBranch`, `checkoutCommit`, `deleteBranch`, `deleteRemoteBranch`, `renameBranch`, `commit`, `undoLastCommit`, `hasStagedChanges`, `classifyDiscard`, `discardFiles`, `appendToGitignore`, `ignorePaths`, `formatCommitMessage`, `repoSyncStatus`, `fetch`, `pull`, `push`, `getAheadBehind`, `getRemote`, `getRepoIdentifier`, `mergeBranch`, `mergeSquash`, `commitSquashMerge`, `mergeAbort`, `countCommitsToMerge`, `effectiveScanPaths`, `isGitRepo`, `initRepo`, `getRepoName`, `cloneRepo` | `core/src/git.rs` |
+| `gitApi` | `getStatus`, `fileStatusStyles`, `getSelectedDiff`, `getLog`, `getCommitDetail`, `listBranches`, `createBranch`, `switchBranch`, `checkoutCommit`, `deleteBranch`, `commit`, `undoLastCommit`, `classifyDiscard`, `discardFiles`, `appendToGitignore`, `ignorePaths`, `formatCommitMessage`, `repoSyncStatus`, `fetch`, `pull`, `push`, `getRemote`, `getRepoIdentifier`, `mergeBranch`, `mergeSquash`, `commitSquashMerge`, `mergeAbort`, `countCommitsToMerge`, `effectiveScanPaths`, `isGitRepo`, `initRepo`, `cloneRepo` | `core/src/git.rs` |
 | `reposApi` | `knownRepos`, `filterRepos`, `deriveCloneTarget`, `cloneTargetPath` | `core/src/repos.rs` |
 | `exclusionsApi` | `reconcile` | `core/src/exclusions.rs` |
 | `diffApi` | `getParsedDiff`, `getParsedCommitDiff`, `copyDiffText`, `generatePatch`, `generateInversePatch` | `core/src/diff.rs` |

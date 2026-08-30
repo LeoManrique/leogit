@@ -9,8 +9,8 @@
 )]
 
 use leogit_core::git::{
-    self, AheadBehind, BranchInfo, CommitDetail, CommitInfo, DiscardPlan, FileEntry,
-    FileStatusStyle, LogOptions, MergeResult, RepoIdentifier, RepoStatus, RepoSync,
+    self, BranchInfo, CommitDetail, CommitInfo, DiscardPlan, FileEntry, FileStatusStyle,
+    LogOptions, MergeResult, RepoIdentifier, RepoStatus, RepoSync,
 };
 use tauri::AppHandle;
 
@@ -72,20 +72,6 @@ pub fn delete_branch(repo_path: String, name: String) -> Result<(), String> {
     git::delete_branch(repo_path, name)
 }
 
-#[tauri::command]
-pub async fn delete_remote_branch(
-    repo_path: String,
-    remote: String,
-    branch: String,
-) -> Result<(), String> {
-    git::delete_remote_branch(repo_path, remote, branch).await
-}
-
-#[tauri::command(async)]
-pub fn rename_branch(repo_path: String, old_name: String, new_name: String) -> Result<(), String> {
-    git::rename_branch(repo_path, old_name, new_name)
-}
-
 // ── Commits / working tree ─────────────────────────────────────────────────
 
 #[tauri::command(async)]
@@ -101,11 +87,6 @@ pub fn commit(
 #[tauri::command(async)]
 pub fn undo_last_commit(repo_path: String) -> Result<(), String> {
     git::undo_last_commit(repo_path)
-}
-
-#[tauri::command(async)]
-pub fn has_staged_changes(repo_path: String) -> Result<bool, String> {
-    git::has_staged_changes(repo_path)
 }
 
 #[tauri::command(async)]
@@ -175,11 +156,6 @@ pub async fn push(
 }
 
 #[tauri::command(async)]
-pub fn get_ahead_behind(repo_path: String, upstream: String) -> Result<AheadBehind, String> {
-    git::get_ahead_behind(repo_path, upstream)
-}
-
-#[tauri::command(async)]
 pub fn get_remote(repo_path: String) -> Result<Option<String>, String> {
     git::get_remote(repo_path)
 }
@@ -240,9 +216,4 @@ pub fn is_git_repo(path: &str) -> bool {
 #[tauri::command(async)]
 pub fn init_repo(path: &str) -> Result<String, String> {
     git::init_repo(path)
-}
-
-#[tauri::command(async)]
-pub fn get_repo_name(path: &str) -> String {
-    git::get_repo_name(path)
 }

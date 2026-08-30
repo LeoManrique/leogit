@@ -108,7 +108,8 @@ struct ContentView: View {
     /// leaves Welcome up instead of retrying forever.
     @State private var hasResolvedLaunchRepo = false
 
-    /// Dedupes the activate resync — activation notifications can burst.
+    /// Dedupes the wake-up resync: un-occluding and activating are two steps
+    /// up the same ladder and can arrive as two rises.
     @State private var isResyncing = false
 
     /// A once-per-launch 0–30 s offset on the first automatic fetch, so two
@@ -155,9 +156,10 @@ struct ContentView: View {
             updateStore.start(isOnline: isOnline)
         }
         // The policy's two inputs this view owns: which window hosts the UI
-        // (its occlusion gates everything) and whether a repo is open (the
-        // App Nap assertion's other half). Attached to the root so they
-        // survive the welcome ⇄ repository swap.
+        // (its occlusion pauses the multi-repo sweeps and slows the active
+        // repo's cadences, gating no active-repo work outright) and whether a
+        // repo is open (the App Nap assertion's other half). Attached to the
+        // root so they survive the welcome ⇄ repository swap.
         .trackWindowVisibility(with: schedulingPolicy)
         .onChange(of: store.repoPath, initial: true) { _, path in
             schedulingPolicy.isRepoOpen = path != nil
@@ -223,11 +225,14 @@ struct ContentView: View {
     /// rather than under the whole window.
     private func repositoryScreen(repoPath: String) -> some View {
         VStack(spacing: 0) {
+            // Two independent lines, not one slot: the poll's is the more
+            // urgent and the one the user cannot dismiss, so it goes on top
+            // and neither can silence the other.
+            if let pollFailure = store.pollFailure {
+                ErrorBanner(message: pollFailure)
+            }
             if let errorMessage = store.errorMessage {
-                ErrorBanner(
-                    message: errorMessage,
-                    onDismiss: store.canDismissError ? { store.errorMessage = nil } : nil
-                )
+                ErrorBanner(message: errorMessage) { store.errorMessage = nil }
             }
 
             HSplitView {
@@ -290,12 +295,15 @@ struct ContentView: View {
             // opening the repo instead of delaying it.
             await directoryStore.refreshDirectory()
         }
-        .onReceive(
-            NotificationCenter.default.publisher(
-                for: NSApplication.didBecomeActiveNotification
-            )
-        ) { _ in
-            Task { await resyncOnActivate() }
+        // Any rise up the policy's wakefulness ladder, not activation alone:
+        // a window that comes back from behind another one without the app
+        // ever leaving the front is just as stale, and its sweeps were parked
+        // for exactly as long. Reading the rank the policy already publishes
+        // also means this cannot run before the policy has taken the same
+        // notification in, the way two observers of one notification could.
+        .onChange(of: schedulingPolicy.wakefulness) { previous, current in
+            guard current > previous else { return }
+            Task { await resyncOnWake() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .leogitRefreshRequested)) { _ in
             // ⌘R from the View menu — the keyboard-only successor of the
@@ -695,22 +703,26 @@ struct ContentView: View {
         }
     }
 
-    /// Coming back to the app: reload the shared config (Settings edits made
-    /// from the Tauri client land here — the open diff re-keys itself if a
-    /// diff setting changed), fetch, refresh status silently, force the open
-    /// diff to reload (a file can change on disk without its status row
-    /// changing), and give the most-recent repos' badges a throttled
-    /// catch-up — the Tauri client's `resyncOnActive`.
+    /// The window came back — activated, or merely un-occluded. Reload the
+    /// shared config (Settings edits made from the Tauri client land here, and
+    /// the open diff re-keys itself if a diff setting changed), fetch, refresh
+    /// status silently, reload branches, and give the most-recent repos' badges
+    /// a throttled catch-up — the Tauri client's `resyncOnActive`.
+    ///
+    /// The open diff is deliberately *not* re-read: its load key carries the
+    /// file's own `stat_stamp`, so a file edited while the app was away comes
+    /// back with a moved key and reloads itself, while one that did not change
+    /// costs nothing.
     ///
     /// Re-asking the AI provider rides along, but ahead of the guards below:
     /// they exist to keep a network operation from being stomped, and a
-    /// provider probe stomps nothing. Behind them, an activation that happened
-    /// to land during a fetch would leave Generate dead until the user thought
-    /// to leave and come back again.
+    /// provider probe stomps nothing. Behind them, a wake-up that happened to
+    /// land during a fetch would leave Generate dead until the user thought to
+    /// leave and come back again.
     @MainActor
-    private func resyncOnActivate() async {
+    private func resyncOnWake() async {
         // Only while something is blocking, so a ready provider costs nothing
-        // on every activation. This is what makes a *disabled* Generate safe to
+        // on every wake-up. This is what makes a *disabled* Generate safe to
         // ship: every way of fixing an unready provider leaves this app —
         // signing in opens a browser, installing the CLI or starting Ollama
         // happens in a terminal — so coming back is exactly when the answer can
@@ -878,11 +890,20 @@ struct ContentView: View {
         }
 
         if let last = (try? await GitBridge.reposState())?.lastOpenedRepo {
-            await store.open(at: URL(fileURLWithPath: last, isDirectory: true))
-            if store.repoPath != nil { return }
-            // A failed restore is not the user's error; don't greet them
-            // with a banner about a repo they may have deleted on purpose.
-            store.errorMessage = nil
+            // The outcome rather than `store.repoPath`, which by now may be
+            // answering for a *different* open: the user can pick a repository
+            // while this restore is still reading, and the path they picked
+            // would read as this restore having worked.
+            switch await store.open(at: URL(fileURLWithPath: last, isDirectory: true)) {
+            case .opened, .superseded:
+                // Superseded means something the user asked for won, so there
+                // is nothing left for launch to choose.
+                return
+            case .failed:
+                // A failed restore is not the user's error; don't greet them
+                // with a banner about a repo they may have deleted on purpose.
+                store.errorMessage = nil
+            }
         }
 
         await directoryStore.refreshDirectory()
@@ -961,10 +982,15 @@ private enum RootSheet: Identifiable {
 struct ErrorBanner: View {
     let message: String
 
-    /// Retire the banner by hand. `nil` for the status poll's own, whose
+    /// Retire the banner by hand. Omitted for the status poll's own, whose
     /// recovery retires it — a ✕ there would hide a repository that is still
     /// unreadable. Everything else needs one, because nothing else will.
     var onDismiss: (() -> Void)?
+
+    init(message: String, onDismiss: (() -> Void)? = nil) {
+        self.message = message
+        self.onDismiss = onDismiss
+    }
 
     var body: some View {
         HStack(spacing: 8) {
