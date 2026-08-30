@@ -42,9 +42,21 @@ final class CommitStore {
 
     private(set) var isGenerating = false
 
-    /// AI provider driving Generate — mirrors `ai_provider` in the shared
-    /// config file. `"claude"` until `loadAIProvider` reads the real value.
-    private(set) var aiProvider = "claude"
+    /// The app-wide config owner — this store's only route to `ai_provider`.
+    /// A dependency rather than composer state, hence unobserved.
+    @ObservationIgnored private let configStore: AppConfigStore
+
+    init(config: AppConfigStore) {
+        configStore = config
+    }
+
+    /// AI provider driving Generate.
+    ///
+    /// Read from the shared owner rather than mirrored here: the Settings
+    /// window has a picker for the same setting, and two independent copies
+    /// meant the two could disagree while both were on screen — and that a
+    /// Settings write of any unrelated field reverted a change made here.
+    var aiProvider: String { configStore.aiProvider }
 
     /// Why the AI provider can't serve a request, when it can't — see
     /// `providerBlock`.
@@ -286,15 +298,6 @@ final class CommitStore {
 
     // MARK: AI generation
 
-    /// Read the persisted provider so the picker shows the real value.
-    /// Failure keeps the default — the picker still works, and generating
-    /// surfaces any real config problem itself.
-    func loadAIProvider() async {
-        if let config = try? await GitBridge.aiConfig() {
-            aiProvider = config.provider
-        }
-    }
-
     /// Ask whether the selected provider can serve a request, so Generate can
     /// say *why* it is greyed out instead of letting a doomed request report
     /// it. Called when the composer appears, after a provider change, and
@@ -308,7 +311,7 @@ final class CommitStore {
     func refreshProviderStatus() async {
         // The picker's write may still be in flight, and the config read below
         // reads the file it is writing — the same wait `generate` does.
-        await providerWrite?.value
+        await configStore.settle()
         let target = aiProvider
         do {
             let config = try await GitBridge.aiConfig()
@@ -364,29 +367,22 @@ final class CommitStore {
         errorMessage = nil
     }
 
-    /// The in-flight provider write, if any. Generate awaits it: the picker
-    /// fires `setAIProvider` from a detached `Task`, so clicking Generate
-    /// immediately after switching would otherwise read the *previous*
-    /// provider back off disk while the picker already shows the new one.
-    @ObservationIgnored private var providerWrite: Task<Void, Never>?
-
-    /// Persist a provider change. On failure the picker reverts and the
-    /// error shows inline, which keeps it truthful about what Generate will
+    /// Persist a provider change. On failure the picker reverts — the owner
+    /// drops the value it was showing optimistically — and the error shows
+    /// inline, which keeps the control truthful about what Generate will
     /// actually use.
-    func setAIProvider(_ provider: String) async {
-        guard provider != aiProvider else { return }
-        let previous = aiProvider
-        aiProvider = provider
-        let write = Task { @MainActor [weak self] in
+    ///
+    /// Synchronous, so the picker shows the choice in the same layout pass it
+    /// was made in; only the reporting waits.
+    func setAIProvider(_ provider: String) {
+        guard let write = configStore.setAIProvider(provider) else { return }
+        Task {
             do {
-                try await GitBridge.setAIProvider(provider)
+                try await write.value
             } catch {
-                self?.aiProvider = previous
-                self?.errorMessage = "Failed to save provider: \(error.displayMessage)"
+                errorMessage = "Failed to save provider: \(error.displayMessage)"
             }
         }
-        providerWrite = write
-        await write.value
     }
 
     /// Generate a commit message from the checked files' combined diff and
@@ -411,7 +407,7 @@ final class CommitStore {
             // value over a separately-loaded config could not guarantee.
             // `setAIProvider` persists the picker's choice; waiting for that
             // write is what makes this read reflect it.
-            await providerWrite?.value
+            await configStore.settle()
             let config = try await GitBridge.aiConfig()
             let message = try await GitBridge.generateMessage(diff: diff, config: config)
             summary = message.title

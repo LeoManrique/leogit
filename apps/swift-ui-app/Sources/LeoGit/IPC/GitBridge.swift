@@ -513,15 +513,6 @@ enum GitBridge {
         try loadAiConfig()
     }
 
-    /// Persist the provider picker's choice (`"claude"` | `"ollama"`) into
-    /// the shared config file, leaving every other setting untouched. An
-    /// unrecognized name normalizes to claude inside core rather than being
-    /// rejected here, so no writer can persist one.
-    @concurrent
-    static func setAIProvider(_ provider: String) async throws {
-        try await patchAppConfig(ConfigPatch(aiProvider: provider))
-    }
-
     /// Generate a commit message from `diff` via `config.provider` — the
     /// local `claude` CLI or a self-hosted Ollama instance. Plain
     /// request/response bounded by core's 120 s timeout; there is no

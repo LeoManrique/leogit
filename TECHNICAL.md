@@ -922,13 +922,37 @@ remount — and a shell exit nulls the pid *before* anything else, so unmount ne
 double-closes a session core already dropped; a *clean* exit then collapses the dock,
 while a non-zero code or fatal signal instead prints `[Process exited with code N]` in
 red and keeps the dead terminal on screen for reading (✕ and ＋ still work — the pid is
-nil, so their teardown is a no-op against core). Collapsing protects the *shell's* view of the terminal but not the drawn one: the dock
-applies a zero **height** at full width, so SwiftTerm still lays out and reflows its grid to
-that degenerate row count, and only the PTY resize is refused (`cols >= 2, rows >= 2` in
-`TerminalController.resize`) — the child keeps its 80×24-or-whatever geometry, but
-re-expanding does not restore the exact prompt. The Tauri client's collapse is
-`display: none` on the terminal container, which genuinely changes nothing: a hidden element
-reports no box, the debounced `fit()` is a no-op, and re-expanding paints what was there.
+nil, so their teardown is a no-op against core). Collapsing protects the drawn terminal as well as the shell's view of it. The dock pins
+the emulator's frame at the panel height and puts the collapse on an *outer* frame that
+clips it, so SwiftTerm never lays out against a degenerate size. A zero **height** at full
+width was the trap: SwiftTerm's own bail wants width *and* height at zero, so the buffer
+reflowed to one row on every collapse and back on every expand, wrapping the scrollback
+and sending a spurious `SIGWINCH` each way — only the PTY resize was refused (`cols >= 2,
+rows >= 2` in `TerminalController.resize`, plus core's own guard), which kept the child's
+geometry but not the prompt. The pinned view hangs below a collapsed panel rather than
+having no size, so `.allowsHitTesting(store.isExpanded)` stops it answering the mouse as
+well as drawing. The Tauri client's collapse is `display: none` on the terminal container,
+which genuinely changes nothing: a hidden element reports no box, the debounced `fit()` is
+a no-op, and re-expanding paints what was there.
+
+`TerminalController.resize` coalesces on an **80 ms** debounce, matching the Tauri panel's
+`ResizeObserver` and Windows Terminal's reasoning: a divider drag fires `sizeChanged` once
+per column crossed, and every distinct grid is a `SIGWINCH` the shell redraws its whole
+edit buffer for. The debounce is in the controller and not the delegate on purpose — the
+initial `pushCurrentSize` has nothing to coalesce with and goes straight to `pushResize`,
+which is also what `shutdown` cancels against. A degenerate grid is dropped *without*
+cancelling what is pending: the last real size is the one the shell should still hold.
+Scrollback is set explicitly to **1 000 lines** in both clients — SwiftTerm defaults to 500
+and xterm.js to 1 000, so the two were remembering different amounts of the same shell —
+passed through `TerminalOptions` at construction, since SwiftTerm reads its options once.
+Link handling is pinned rather than inherited for the same reason: `linkReporting =
+.implicit` detects bare URLs as well as OSC 8 ones, matching the Tauri link addon, and
+`linkHighlightMode = .hoverWithModifier` is what makes ⌘ required to follow one and leaves
+a plain drag to the selection. SwiftTerm publishes no hover callback — it resolves the
+hovered link and notifies nobody — and on macOS 26 it drops `.mouseMoved` from its
+tracking area to dodge a WindowServer bug that synthesizes mouse-downs, so the native
+client teaches the modifier with SwiftTerm's own ⌘-held highlight and URL preview rather
+than a hint of its own (FRONTEND §8).
 Terminal focus (SwiftTerm's view as first responder) suppresses auto-fetch exactly like the
 field-editor check. Both docks toggle on **⌃`** — VS Code's binding, and deliberately not ⌘`,
 which macOS owns for cycling an app's windows — and both give the *emulator* 280 pt with the
@@ -998,43 +1022,96 @@ Settings scene (`Settings { }` in `LeoGitApp`, which is what binds ⌘, and the 
 item) exposes only fields with native consumers — auto-fetch cadence, the Diff section
 (hide whitespace, syntax highlighting, tab size 1–16), scan paths/depth, the terminal
 shell (via the newly exported `list_shells` + `ShellOption` mirror, with a
-stored-but-uninstalled id rendering as Automatic), and the AI knobs. Two fields
+stored-but-uninstalled id rendering as Automatic), and the AI knobs — provider, and the
+selected provider's own model, server URL and timeout. Two fields
 go unnamed by the patch, which is what a patch makes expressible: `theme`, a permanent
 exemption because the native app follows the system appearance (FRONTEND.md §8), and
 `side_by_side_diff`, which the diff header owns in both clients — naming it here would
-revert whatever that header last wrote while this window stood open. `SettingsStore.save()` sends a `ConfigPatch` of the fields
-this window owns; the load-fresh-then-overlay discipline it used to hand-roll now lives
-inside core, under a lock. Discrete controls save through a 300 ms debounce; text fields
-commit on focus-loss/Return, and travel blank (core reads blank as absent). Closing the
-window is neither a focus-loss nor a Return, so `flushPendingSave()` handles both ways an
-edit can be pending: it fires a debounce still counting down, and — for a field the user
-typed into and never left — compares the current patch against `lastPersisted`, writing
-only if they differ. Without the second case ⌘W silently dropped the typed value, in the one
-surface whose premise is that you never press Save. A debounce that runs to completion also
-clears `pendingSave` (guarded by a generation counter so it can't clear a newer one), or the
-first toggle of a session would leave it set and make every subsequent close save
-unconditionally. The numeric controls' ranges come from `config_bounds()`, so the form
-cannot offer a value the writer clamps away. Config
-consumption has one native owner: `Stores/AppConfigStore.swift` (@MainActor @Observable,
-created in `LeoGitApp` and put in the environment of both the main window and the
-Settings scene) holds the shared `Config` and reloads it at exactly three sites — launch,
-every successful Settings save (`SettingsStore` calls `reload()` after `patch_config`
-lands, which is how an edit reaches the open diff and the auto-fetch loop live), and the
-activation resync (edits made from the Tauri client arrive on return to the app). The
-auto-fetch loop reads the store each tick, so interval and toggle changes apply within
-one interval — the live re-arm the
-Tauri client still lacks (its ROADMAP entry) — and `DiffView`'s `LoadKey` reads it so the
-diff toggles re-key the open diff the moment a save lands.
-It is also a **writer**, for the one field the Settings window does not own:
-`setSideBySideDiff` patches `side_by_side_diff` for the diff header's layout control.
-The value is read through a `pendingSideBySide` shadow that is cleared when the write
-lands, success or not — which makes the control answer on the click rather than after a
-file write, and makes a *refused* write an observable change back, where a setter that
-left the store untouched would leave the segment the reader pressed showing a layout that
-never took. The Tauri client reaches the same place from the other side: its chained
-`patchConfig` moved out of `SettingsOverlay` into `stores/config.ts`, so the "two quick
-edits land in the order they were made" guarantee now holds across surfaces rather than
-within one form.
+revert whatever that header last wrote while this window stood open. Each control patches **only the field it owns**. `SettingsStore.Field` is the unit of
+everything in that window: `patch(for:)` builds a one-field `ConfigPatch` from the
+control, `seed(_:from:)` puts the file's value back into it, and the debounce table is
+keyed by it, so a stepper still counting down never delays the toggle beside it. A patch
+naming every field the form holds is D-5's lost update at form scale — it posts them as
+they looked when the window *opened*, so a `tab_size` the other client wrote meanwhile is
+reverted by an unrelated toggle here, and `patch_config` cannot help a caller that does
+not name fields field-wise.
+
+`seed` records what it wrote as `seeded[field]`, and `isDirty` compares the control's
+current patch against it. That one predicate answers all three of the
+window's bookkeeping questions: whether a write is owed at all, what `flush()` must commit when the
+window closes, and which controls an edit made *elsewhere* may repaint
+(`adoptExternalChanges`, driven by an `onChange` on the shared config — a field with an
+edit of its own outstanding keeps it, because the user's uncommitted change is newer than
+the file). Recording it *through* `patch(for:)` rather than from the `Config` is what
+keeps a value the form normalizes on its way out — a trimmed model name, a re-parsed path
+list — from reading as changed and writing itself back on every visit. `flush()` is then
+one rule covering both ways an edit can be pending on ⌘W, which is neither a focus-loss
+nor a Return: cancel every debounce, write every dirty field. Without the second half,
+⌘W silently drops a value typed into a field the user never left — in the one surface
+whose premise is that you never press Save.
+
+Every write re-seeds its own control from the config core handed back — the clamp on
+success, the untouched previous value on refusal, so a rejected write puts its control
+back instead of leaving it claiming a setting that isn't on disk. It is skipped when the
+form moved while the write was in flight: the user's newer edit wins, and the write it
+schedules carries it. Discrete controls debounce 300 ms; text fields commit on
+focus-loss/Return and travel blank (core reads blank as absent); scan paths sit behind
+Edit ▸ Done, whose Done writes through the same path with no debounce, and whose draft
+lives beside the field so leaving mid-edit discards it. The numeric ranges come from
+`config_bounds()`, the two AI timeouts included, so the form cannot offer a value the
+writer clamps away. When the config cannot be read at all, the form renders the failure
+and **no controls**: struct defaults presented as the user's settings are wrong and
+inert at once.
+
+Config has one native owner, and it is now the one native **writer** too:
+`Stores/AppConfigStore.swift` (@MainActor @Observable, created in `LeoGitApp` and put in
+the environment of both the main window and the Settings scene). It holds the shared
+`Config`, exposes it through accessors carrying the Tauri client's own fallback defaults,
+and reloads at three sites — launch, the Settings window opening, and the activation
+resync (edits from the Tauri client arrive on return to the app). A write needs no reload
+of its own: `patch_config` hands back the whole normalized config, which is newer than
+anything a re-read could produce; `reload()` reports whether the read succeeded, so the
+window that opened on a failure can say so, and drops a read a write overtook. The
+auto-fetch loop reads the store each tick, so interval and toggle changes apply within one
+interval — the live re-arm the Tauri client still lacks (its ROADMAP entry) — and
+`DiffView`'s `LoadKey` reads it so the diff toggles re-key the open diff the moment a
+write lands.
+
+`patch(_:)` is the single writer, and it **queues**: core's lock keeps the file coherent
+but decides nothing about order, so two patches in flight are two patches whose winner is
+the scheduler's. `enqueue` registers each write behind the last one synchronously, before
+any `await` — a caller that hopped through a `Task` of its own would be joining in
+scheduler order instead — and bumps `writeGeneration` there for the same reason, so a
+`reload()` already awaiting learns a write started rather than finding out a hop later.
+Two fields carry a pending shadow because their controls must answer on the click rather
+than after a file write: `side_by_side_diff` for the diff header's layout segment, and
+`ai_provider`, which is why `setSideBySideDiff` is deliberately synchronous. A refused
+write is then an observable change *back*, where a setter that left the store untouched
+would leave the pressed control showing something that never took.
+
+`ai_provider` lives there rather than in `CommitStore` because it has two controls — the
+composer's picker and the Settings window's — and two independent owners meant they could
+disagree while both were on screen (ST-5). `CommitStore.aiProvider` is now a read of the
+store, and `refreshProviderStatus`/`generate` await `AppConfigStore.settle()` before
+asking core to resolve the provider config off disk — that read reaches the file the
+picker's write is still landing in, so clicking Generate straight after switching would
+otherwise resolve the previous provider.
+
+The store is handed to the four stores that need it **at construction** rather than
+assigned after the fact: `ContentView.init(appConfig:)` builds `RepoDirectoryStore`,
+`CloneStore` and `CommitStore` with it, and the Settings scene builds `SettingsStore` the
+same way. An optional assigned from a `.task` has a window in which it is nil, and
+`RepoDirectoryStore`'s first walk falling in that window would run against no scan paths
+at all. No surface reads the config file behind the owner's back either: discovery's
+`scanPaths`/`scanDepth` and the clone sheet's destination seed come from its accessors,
+which is what makes "one observation, one staleness window" true rather than
+aspirational. There is exactly one deliberate exception — a new terminal session takes
+`terminal_shell` in `TerminalController.start`, whose promise is "applies to new terminal
+sessions" and whose cost is one read per spawned shell.
+
+The Tauri client reaches the same place from the other side: its chained `patchConfig`
+moved out of `SettingsOverlay` into `stores/config.ts`, so the "two quick edits land in
+the order they were made" guarantee holds across surfaces rather than within one form.
 
 Publish closed the gh surface. `gh_publish_repo` crossed like `gh_clone` (already
 core-async over the blocking pool; no listener — `gh repo create` streams nothing parseable,

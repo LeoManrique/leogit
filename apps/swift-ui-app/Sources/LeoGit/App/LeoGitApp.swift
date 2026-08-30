@@ -24,7 +24,7 @@ struct LeoGitApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ContentView(appConfig: appConfig)
                 .environment(store)
                 .environment(appConfig)
                 .environment(appDelegate.launch)
@@ -49,7 +49,7 @@ struct LeoGitApp: App {
         // for free; the window edits the same config.toml the Tauri client
         // reads, so a change here applies to both.
         Settings {
-            SettingsView()
+            SettingsView(appConfig: appConfig)
                 .environment(appConfig)
         }
     }

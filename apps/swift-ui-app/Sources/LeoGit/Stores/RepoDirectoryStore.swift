@@ -48,6 +48,14 @@ final class RepoDirectoryStore {
     /// looking" instead of "found nothing" during the first walk.
     private(set) var isRefreshing = false
 
+    /// The app-wide config owner, for the two settings discovery walks by.
+    /// A dependency rather than directory state, hence unobserved.
+    @ObservationIgnored private let configStore: AppConfigStore
+
+    init(config: AppConfigStore) {
+        configStore = config
+    }
+
     /// Whether any pass has finished, successfully or not.
     ///
     /// `isRefreshing` alone cannot answer "is an empty list news?": before the
@@ -150,13 +158,16 @@ final class RepoDirectoryStore {
             }
         }
 
-        let config = try? await GitBridge.appConfig()
-        let scanPaths = config?.scanPaths ?? []
+        // Through the shared owner, not a read of its own: the Settings window
+        // publishes there before it announces a scan-path change, so the walk
+        // this triggers already sees the new folders — and a repo switch stops
+        // costing a config file read.
+        let scanPaths = configStore.scanPaths
         scanFolders = await GitBridge.scanFolders(for: scanPaths)
         do {
             discovered = try await GitBridge.knownRepositories(
                 scanPaths: scanPaths,
-                depth: config?.scanDepth ?? 3
+                depth: configStore.scanDepth
             )
             discoveryError = nil
             publishRepos()

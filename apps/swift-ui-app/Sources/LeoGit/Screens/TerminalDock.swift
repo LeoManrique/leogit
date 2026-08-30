@@ -11,6 +11,11 @@ struct TerminalDock: View {
     let repoPath: String
     let store: TerminalStore
 
+    /// The emulator's height, matching the Tauri panel's. Named because it is
+    /// used twice: once to lay the terminal out and once to decide how much of
+    /// it the collapsed panel shows.
+    private static let panelHeight: CGFloat = 280
+
     /// Drives the label toggle. Reading reports whether the panel is open;
     /// writing routes through `toggle()` rather than assigning, so the lazy
     /// first spawn still happens on the way up.
@@ -43,9 +48,21 @@ struct TerminalDock: View {
                 .padding(.horizontal, 8)
                 .padding(.vertical, 6)
                 .frame(maxWidth: .infinity)
-                .frame(height: store.isExpanded ? 280 : 0)
+                // The emulator is laid out at the panel's full height whether
+                // the panel is showing or not, and collapsing clips it rather
+                // than shrinking it. A zero-height frame is still full *width*,
+                // so SwiftTerm's degenerate-size bail (which wants both to be
+                // zero) never fired: the buffer reflowed to one row on every
+                // collapse and back on every expand, wrapping the scrollback
+                // and sending a spurious SIGWINCH each way.
+                .frame(height: Self.panelHeight)
+                .frame(height: store.isExpanded ? Self.panelHeight : 0, alignment: .top)
                 .background(.black)
                 .clipped()
+                // The pinned view now hangs below a collapsed panel instead of
+                // having no size at all, so it must stop answering the mouse
+                // as well as stop drawing.
+                .allowsHitTesting(store.isExpanded)
             }
         }
     }

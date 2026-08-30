@@ -307,7 +307,7 @@ struct CommitComposer: View {
         Binding {
             store.aiProvider
         } set: { provider in
-            Task { await store.setAIProvider(provider) }
+            store.setAIProvider(provider)
         }
     }
 

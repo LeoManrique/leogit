@@ -164,12 +164,39 @@ final class TerminalController {
         }
     }
 
-    /// The emulator's grid changed; tell the PTY. A collapsed panel reports
-    /// a degenerate grid — skipped, like the Tauri client swallowing
-    /// zero-size fits, so re-expanding restores the exact prompt instead of
-    /// a one-column wrap.
+    /// The emulator's grid changed; tell the PTY, once the drag settles.
+    ///
+    /// A divider drag fires `sizeChanged` once per column crossed, and every
+    /// distinct grid is a `SIGWINCH` the shell redraws its whole edit buffer
+    /// for — so an uncoalesced drag becomes hundreds of repaints and a visibly
+    /// corrupted prompt. The Tauri panel debounces its `ResizeObserver` by the
+    /// same 80 ms, and Windows Terminal does it for the same reason.
+    ///
+    /// Deliberately here rather than in the delegate: the initial push has
+    /// nothing to coalesce with and must not be delayed behind a timer, so it
+    /// goes straight to `pushResize`.
+    ///
+    /// A degenerate grid is dropped without cancelling what is pending —
+    /// core refuses one anyway, and the last real size is the one the shell
+    /// should still be holding.
     func resize(cols: Int, rows: Int) {
-        guard let pid, cols >= 2, rows >= 2 else { return }
+        guard cols >= 2, rows >= 2 else { return }
+        pendingResize?.cancel()
+        pendingResize = Task { [weak self] in
+            try? await Task.sleep(for: Self.resizeDebounce)
+            guard !Task.isCancelled else { return }
+            self?.pushResize(cols: cols, rows: rows)
+        }
+    }
+
+    private static let resizeDebounce = Duration.milliseconds(80)
+
+    /// The resize waiting for the drag to settle, if any.
+    private var pendingResize: Task<Void, Never>?
+
+    /// Announce a grid to the PTY now.
+    private func pushResize(cols: Int, rows: Int) {
+        guard let pid else { return }
         ioQueue.async {
             try? GitBridge.resizeTerminalGrid(
                 pid: pid,
@@ -182,6 +209,8 @@ final class TerminalController {
     /// Kill the child on unmount, queued behind any pending writes. A no-op
     /// when the shell already exited — `sessionDidClose` nulled the pid.
     func shutdown() {
+        pendingResize?.cancel()
+        pendingResize = nil
         guard let pid else { return }
         self.pid = nil
         ioQueue.async { try? GitBridge.killTerminal(pid: pid) }
@@ -225,7 +254,7 @@ final class TerminalController {
     /// session existed and `sizeChanged` therefore never fired.
     private func pushCurrentSize() {
         guard let terminal = terminalView?.getTerminal() else { return }
-        resize(cols: terminal.cols, rows: terminal.rows)
+        pushResize(cols: terminal.cols, rows: terminal.rows)
     }
 
     private func feed(_ bytes: [UInt8]) {
@@ -318,13 +347,34 @@ private struct TerminalHostView: NSViewRepresentable {
         Coordinator(controller: controller)
     }
 
+    /// Lines of scrollback kept above the viewport.
+    ///
+    /// Chosen rather than inherited: SwiftTerm defaults to 500 and xterm.js to
+    /// 1 000, which had the two clients remembering different amounts of the
+    /// same shell. 1 000 is the one that survives a `git log --stat`, and what
+    /// VS Code ships.
+    private static let scrollbackLines = 1000
+
     func makeNSView(context: Context) -> TerminalView {
-        let view = HostedTerminalView(frame: .zero)
+        // Options are read once, at construction — there is no setter for the
+        // startup grid — so the scrollback has to be passed here.
+        let view = HostedTerminalView(
+            frame: .zero,
+            font: .monospacedSystemFont(ofSize: 12, weight: .medium),
+            options: TerminalOptions(scrollback: Self.scrollbackLines)
+        )
         view.onAttach = { [controller] in controller.viewDidAttach() }
         view.terminalDelegate = context.coordinator
-        view.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
         view.nativeBackgroundColor = .black
         view.nativeForegroundColor = NSColor(srgbRed: 0.898, green: 0.898, blue: 0.898, alpha: 1)
+        // Link handling, pinned rather than inherited, because both halves are
+        // a contract with the other client (FRONTEND §6.17):
+        // `.implicit` detects bare URLs as well as OSC 8 ones, which is what
+        // the Tauri client's link addon does; `.hoverWithModifier` is what
+        // makes ⌘ required to follow one, leaving a plain click to the
+        // selection — a drag across a line containing a URL must not navigate.
+        view.linkReporting = .implicit
+        view.linkHighlightMode = .hoverWithModifier
         controller.terminalView = view
         return view
     }

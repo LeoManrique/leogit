@@ -1,6 +1,6 @@
 # Plan — Cross-client feature parity (SwiftUI ⇄ Tauri)
 
-> Status: **in progress — WS-A…WS-E shipped 2026-08-27, WS-F through WS-J and WS-L…WS-N 2026-08-28, WS-O through WS-Q 2026-08-29. WS-R is next. One named half is deliberately outstanding: the Tauri client's multi-line diff copy (DF-6), whose design is written out in that item; D-22 is deferred by decision (§10). WS-K is unblocked but needs a Linux machine (§6's sequencing note), so it is taken whenever that machine is available. WS-T is the deliberate last one.**
+> Status: **in progress — WS-A…WS-E shipped 2026-08-27, WS-F through WS-J and WS-L…WS-N 2026-08-28, WS-O through WS-R 2026-08-29. WS-S is next. One named half is deliberately outstanding: the Tauri client's multi-line diff copy (DF-6), whose design is written out in that item; D-22 is deferred by decision (§10). WS-K is unblocked but needs a Linux machine (§6's sequencing note), so it is taken whenever that machine is available. WS-T is the deliberate last one.**
 > The remaining work was re-cut into seventeen smaller workstreams (C…S) on
 > 2026-08-27 after WS-B proved too large to review as one piece — see §6.
 > Accepted 2026-08-27 with every open decision resolved. Per-workstream state
@@ -83,10 +83,10 @@ in code. "Make the current features work well" starts here (workstream A).
 
 ### 3.1 Defects — fixed
 
-Nineteen of the twenty are closed: twelve in WS-A, D-5 / D-7 / D-17's
-structural half with their hoists in WS-B, D-6 in WS-C, D-20 in WS-E, D-4 in
-WS-I, and D-14 with D-15 in WS-P. Kept as a register (IDs are referenced from
-§4) and trimmed to what each fix *is*, since the code now carries the reasoning.
+All twenty are closed: twelve in WS-A, D-5 / D-7 / D-17's structural half with
+their hoists in WS-B, D-6 in WS-C, D-20 in WS-E, D-4 in WS-I, D-14 with D-15 in
+WS-P, and D-9 in WS-R. Kept as a register (IDs are referenced from §4) and
+trimmed to what each fix *is*, since the code now carries the reasoning.
 
 | ID | Client | Fixed | Left over |
 |---|---|---|---|
@@ -94,11 +94,12 @@ WS-I, and D-14 with D-15 in WS-P. Kept as a register (IDs are referenced from
 | D-2 | Tauri | A remote-less repo's doomed `git fetch origin` opened the breaker against every other repo. `fetchActiveRemote` now gates on `status.hasRemote`, like the tier path already did — and on the new `statusLoaded`, since `hasRemote` defaults to false and an unqualified read would decide "no remote" about a repo nobody has looked at yet. Natively, `silentFetch` returns `Bool?` so a slot conflict or a local `git remote` failure stops being reported as a network failure. | — (WS-B: `get_remote` answers `Option`, so the guard is live rather than dead). |
 | D-3 | Tauri | Silent poll failures vanished forever. Three consecutive **background** failures now raise a non-blocking banner off `repoState.pollError` — native's shape and threshold, and its ownership: `refreshStatus` grew a `background` opt separate from `silent`, because four of the seven silent callers are user actions whose own `index.lock` races would otherwise accuse a healthy repo. Reset per repository in both clients. | — (BG-4's equality gate, the other half of that item, closed in WS-J; a skipped tick still retires the banner). |
 | D-4 | Tauri | **Terminal listener-registration race.** Output and exit listeners were registered two async IPC round trips *after* `start_terminal` returned, while the reader thread was already emitting, and Tauri drops an event with no listener. The session's stream is now a `Channel` built with its handler attached and passed *into* `start_terminal`, mirroring the bridge — the id is minted client-side before any IPC, so the gap cannot exist. | — (the close message can now overtake `start_terminal`'s return, which the panel handles by refusing to adopt the pid afterwards). |
-| D-8 | Native | ⌘W with a text field still focused dropped the typed value. `flushPendingSave` now also writes an edit that never scheduled a save, guarded by a diff against `lastPersisted` — which holds the *normalized* form of the fields, not the raw file, or a config written by the other client would be rewritten on an open-and-close that changed nothing. A completed debounce also clears `pendingSave` now (generation-guarded), which it never did. | — |
+| D-8 | Native | ⌘W with a text field still focused dropped the typed value: ⌘W is neither a focus-loss nor a Return. ✅ *WS-R* rewrote the answer as one rule — closing cancels every debounce and writes every field that still differs from the file — which covers a countdown in flight and an untouched-since-typing field alike. The comparison is against each field's *normalized* patch rather than the raw file, or a config written by the other client would be rewritten on an open-and-close that changed nothing. | — |
 | D-10 | Tauri | A commit could land mid-Generate and have the late result overwrite the cleared composer. `canSubmit` gained `!isGenerating`, and the lockout runs off `isCommitInProgress` — `isCommitting` is still false while the embedded-repo confirmation waits, and its Confirm calls `performCommit` past `canSubmit` entirely, so the composer stayed live behind the dialog. | — |
 | D-11 | Tauri | The HEAD-move reset was read as a backward slide and scrolled to the bottom of the fresh page, paging again. `log.resetSeq` marked the replacement. ✅ *WS-E* finished it: HI-2's append model deleted the slide, so `resetSeq` now means only "go to row 0" and the `skip > 0` hole it kept (a new commit while parked at offset 0 bumped nothing) has no case left to miss. | — |
 | D-12 | Tauri | An empty parse fell through to "Select a file to view its diff" with a file selected. Both diff panes now have an explicit "No Textual Changes" state, blank while the fetch is in flight. The test is `hasRenderableDiff`, not `!== null`: `parse_diff` returns null only for empty input, while a mode change or pure rename parse into a header with zero hunks — a blank pane, the same dead end one layer along. | — (WS-B: H-9 supplies the reason, and a failed load is an `Err` rather than an empty parse; WS-E: DF-10's presentation half). |
 | D-13 | Tauri | The header hand-rolled a status write that skipped `is_merging`, the `userDeselected` reconciliation, and the badge feed. It now takes the one refresh path as a prop: **one status writer in the client**. Checkout and undo also reload branches. | — (WS-F: post-op became status **+ log**, extracted as `reloadAfterHeadMove`). |
+| D-9 | Native | **Collapsing the terminal reflowed the emulator to one row.** The dock applied a zero height at *full width*, so SwiftTerm's degenerate-size bail (which wants both at zero) never fired: the buffer rewrapped on every collapse and again on every expand, with a spurious `SIGWINCH` each way. ✅ *WS-R*: the emulator's frame is pinned at the panel height and an outer frame clips it, so the collapse changes what is drawn and nothing else — plus `.allowsHitTesting` on the same predicate, since the pinned view now hangs below a collapsed panel instead of having no size. | — (WS-B had already made the PTY side safe: `resize_terminal` refuses a `< 2×2` grid itself, so this was only ever the frame). |
 | D-14 | Native | **Stale-diff scroll: no reset on file switch.** The pane had no scroll control at all, so switching files landed the reader at the previous file's offset, often past the end of the new one. ✅ *WS-P*: `DiffStore` publishes `rendered` — the identity of the diff *on screen*, its path plus the commit where there is one — and a bound `ScrollPosition` answers a change to it with `scrollTo(edge: .top)`. Every re-read of the same diff keeps the offset, which is §6.3's contract; the Tauri reset key gained the commit in the same pass, since one path in two commits is two different diffs. | — |
 | D-15 | Native | **Copying from a diff yielded garbage.** `.textSelection(.enabled)` sat on the whole row stack, so a drag beginning in the gutter pulled line numbers and `+`/`−` glyphs into the copy, and the tab expansion the pane needs (SwiftUI `Text` honours no tab stops) put spaces where the file has tabs. ✅ *WS-P*, and it is what finally consumed **H-16**: the gutter is a line handle (click, ⇧-click, a context menu, ⌘C, Escape) and the copy is `copy_diff_text` over the run's flat range, so it can contain neither the chrome nor a rendered tab. The gutter and glyph opt out with `.textSelection(.disabled)`, so a drag begun on them puts nothing on the clipboard. `onCopyCommand` returns nil when no run exists, so a within-line character selection answers ⌘C exactly as before — and *within-line* is all a native drag can ever be (**D-22**, deferred). | The Tauri half of the *multi-line* copy: its drag-select is already the file's lines for a unified diff and still interleaves a side-by-side one (DF-6). |
 | D-16 | Tauri | `Ctrl+P` reached the shell *and* pushed; ⌃` could not leave a focused terminal; Escape closed overlays instead of reaching `vim`. One rule now (FRONTEND §6.11): `attachCustomKeyEventHandler` releases only the toggle, and the window handlers test the event's origin. | — (WS-I narrowed the toggle to ⌃`; TE-1's remaining half is the app's *other* chords, deferred to ROADMAP). |
@@ -112,13 +113,12 @@ WS-I, and D-14 with D-15 in WS-P. Kept as a register (IDs are referenced from
 
 ### 3.2 Defects still open
 
-One of the original twenty, plus two this plan's own work uncovered (D-21, D-22).
+Two, both uncovered by this plan's own work.
 
 | ID | Client | Defect | Severity |
 |---|---|---|---|
 | D-21 | Both | **A directory-backed entry has no content stamp, so its open diff can go stale.** `FileEntry.stat_stamp` is `symlink_metadata` mtime + size (`core/src/git.rs:708-724`), which for a *directory* describes its top-level entry list and not what is inside. Two entries are directories: a **submodule whose recorded pointer moved** (`SC..`, which `is_dirty_submodule` lets through, so a diff *is* read and renders `-Subproject commit A` / `+Subproject commit B`) and an untracked directory or embedded repo. Move that submodule to another commit in a terminal without changing its top-level entries and nothing in the diff's key moves — the pane keeps showing the old target indefinitely, and the poll can't catch it either, since `parse_ordinary_entry` discards porcelain v2's `hH`/`hI` gitlink shas so `RepoStatus` compares equal too. The fix is to keep those two fields and let a submodule entry's stamp be them: they are exactly what the diff renders, they cost nothing (they are already on the line being parsed), and `stat_stamp` is opaque by contract. Narrow — before WS-P narrowed the key, only the native client's unconditional refocus reload caught it, and the Tauri client never did. | Low |
 | D-22 | Native | **A drag through the diff cannot select more than one line.** `.textSelection` makes a `Text` selectable; it does not join separate `Text` views into one selection domain, and the pane draws one `Text` per line, so a drag is confined to the line it began in no matter where the grant is attached. **Deferred by decision — see §10.** Multi-line copying is served by the gutter run instead (click, ⇧-click, *Select All Lines*, ⌘C), which is strictly more faithful than a drag would be, so what is actually missing is only the *gesture*. | Low |
-| D-9 | Native | **Collapsing the terminal reflows the emulator to one row.** The zero-height frame is full-width, so SwiftTerm's degenerate-size bail (width *and* height zero) doesn't fire; the buffer reflows to `MINIMUM_ROWS = 1` and each collapse/expand cycle sends a spurious `SIGWINCH` (TerminalDock's `.frame(height: 0)` + SwiftTerm `AppleTerminalView.swift:353-356`). | Medium |
 
 ### 3.3 Standing efficiency wastes (quantified)
 
@@ -952,9 +952,8 @@ and matched, not that it was skipped.
   before. This is BG-2's *first* half, taken here because ST-3 could not ship a
   true footer without it; ✅ *WS-J* replaced the flat intervals underneath with
   the self-scheduling chain, and the effect now reschedules a loop rather than
-  restarting a timer. **Still open, native:** no control for the two AI
-  timeouts, so they are Tauri-set and natively honoured (now a FRONTEND §8
-  row). → WS-R
+  restarting a timer. ✅ *WS-R* closed the last gap: the two AI timeouts have
+  native controls, so every field either client reads is settable in both.
 - **ST-2 · Save semantics** — ✅ *WS-B.* `patch_config` is the only writer, and
   it reads-edits-normalizes-writes under a lock the shared file never had, so
   a surface can only change the fields it names. `Config::normalized()` runs on
@@ -976,11 +975,12 @@ and matched, not that it was skipped.
   claiming a setting that isn't on disk), and a clamp that lands on the value
   already displayed re-seeds the form anyway — otherwise 999 typed into a field
   already at its maximum stays on screen, which is the one case the
-  "corrections are visible" promise exists for. **Still open, native:** its
-  patch names every field the window holds rather than the one that changed
-  (D-5 at form scale — see §6's WS-H entry), and it should adopt Tauri's
-  load-failure handling rather than rendering editable defaults that aren't the
-  user's settings. D-8's lost text edit is already fixed. → WS-R
+  "corrections are visible" promise exists for. ✅ *WS-R* for the native half,
+  and it needed a different mechanism rather than the same one: a SwiftUI
+  control holds its own value, so the form keeps per-field state and compares
+  it against what the file last said (`SettingsStore.Field` + `seeded`), which
+  is what makes "has this changed?" one question instead of three. Same two
+  rules, plus the load-failure handling — no configuration, no controls.
 - **ST-4 · Units and bounds.** ✅ *WS-B* for the bounds: `config_bounds()` is
   the one declaration, read by both forms and enforced by the one writer, so a
   control can no longer offer a value the writer then clamps away (native's
@@ -993,9 +993,12 @@ and matched, not that it was skipped.
   with both windows open the pickers can disagree, and a Settings save of any
   unrelated field silently reverts a composer-side provider change. Tauri's
   single `$config` store is the shape to copy.
-  Route both native surfaces through `AppConfigStore` (which exists precisely
-  to be the single owner — and grow it the `scanPaths` accessor three other
-  call sites currently bypass it for). → WS-R
+  ✅ *WS-R*: `ai_provider` lives on `AppConfigStore` behind a pending shadow, so
+  both pickers read one value and answer on the click; `CommitStore.aiProvider`
+  is a read of it and its own write task is gone. The store also grew the
+  `scanPaths`/`scanDepth` accessors the three bypassing call sites now use, and
+  is handed to every store that needs it at construction — an optional assigned
+  from a `.task` has a window in which discovery would walk no paths at all.
 - **ST-6 · AI mapping duplication** — ✅ *WS-B.* `ai::provider_config` and
   `ai::load_ai_config` live in core; the bridge is the delegation it always
   claimed to be, the TS copy is deleted, and both clients call
@@ -1010,9 +1013,10 @@ and matched, not that it was skipped.
   reverted everything the store learned meanwhile — D-5's lost update, one layer
   up. ✅ *WS-H* for the Settings overlay: instant-apply made the revert a rule
   rather than one picker's special case — any control whose write is refused is
-  re-seeded from the config on disk, the provider picker included. **Still open,
-  native:** a failed save there leaves the control showing the value that didn't
-  land, and clears only on the next successful write. → WS-R
+  re-seeded from the config on disk, the provider picker included. ✅ *WS-R* for
+  the native half, and it falls out of the field-wise rewrite rather than being
+  a rule of its own: every write re-seeds its control from the config core hands
+  back, which on a refusal is the untouched previous value.
 - **ST-8 · One model field, two providers.** Set `sonnet`, switch to Ollama,
   Generate fails — a shared design flaw; GitHub Desktop stores per-provider
   models. **Decided: split per provider, restructured cleanly** —
@@ -1056,8 +1060,9 @@ and matched, not that it was skipped.
   config until Done, so leaving mid-edit discards the draft; no confirmation
   anywhere. ✅ *WS-H* for the Tauri half, which also moved parsing to Done (the
   old parse-on-input desynced the textarea from the model on every keystroke)
-  and made the applied edit re-walk discovery itself. **Still open, native:**
-  the plain field, plus `.monospaced()` on it. → WS-R
+  and made the applied edit re-walk discovery itself. ✅ *WS-R* for the native
+  half: the same Edit ▸ Done cycle over a `.monospaced()` field, with the draft
+  held beside the value so leaving mid-edit discards it.
 
 ### 4.10 Terminal (TE)
 
@@ -1088,22 +1093,42 @@ and matched, not that it was skipped.
   `TerminalController.resize`, not the delegate, to keep the one-shot
   initial-size push). ✅ *WS-B* for the core half: `resize_terminal` ignores a
   `< 2×2` grid itself, so no host can announce a collapsed panel to the PTY —
-  which leaves D-9 as purely the native inner-frame pin. → WS-R
-- **TE-4 · Scrollback.** 500 (native) vs 1000 (Tauri) — both library
-  defaults, neither chosen. Set 1000 explicitly on both (`git log --stat`
-  exceeds 500; VS Code ships 1000). → WS-R
+  which left D-9 as purely the native inner-frame pin. ✅ *WS-R* for both
+  halves: the emulator is pinned at the panel height and clipped by an outer
+  frame (§3.1's D-9 row), and `TerminalController.resize` coalesces on 80 ms
+  while `pushCurrentSize` goes straight through — the debounce is in the
+  controller and not the delegate precisely so the initial push keeps its
+  one-shot path.
+- **TE-4 · Scrollback.** 500 (native) vs 1000 (Tauri) — both library defaults,
+  neither chosen. ✅ *WS-R*: 1000 stated in both (`git log --stat` exceeds 500;
+  VS Code ships 1000). Native passes it through `TerminalOptions` at
+  construction, since SwiftTerm reads its options once and has no setter for
+  them afterwards.
 - **TE-5 · Links + OSC 52.** ✅ *WS-I* for the Tauri half, and the rule is
   FRONTEND §6.17. Modifier-click on both (⌘ on macOS, Ctrl elsewhere), with the
   convention taught on hover rather than the modifier dropped — which turned out
   to be mandatory, not merely nice: xterm's link addon cannot make its own
   underline conditional, so a gated link with no affordance simply looks broken.
   OSC 52 is honoured write-only in both clients; the read form is swallowed, not
-  declined. **Native half left, and it leaves Tauri ahead** — per WS-E's rule,
-  stated rather than left to be discovered: SwiftTerm already has ⌘-click and
-  OSC 52, so the *behaviour* matches and only the hover affordance is missing
-  there. It was not taken here because SwiftTerm's hover surface needs an API
-  check first (a tracking-area overlay if it exposes none), which is native UI
-  work in a Tauri workstream. → WS-R
+  declined. **Decided by the user in WS-R, after the API check: the affordance is
+  per-client, and the native one is SwiftTerm's own.** The check found no hover
+  surface at all — `TerminalView` resolves the hovered link into a private var
+  and notifies nobody, `mouseMoved`/`flagsChanged`/`cursorUpdate` are `public
+  override` rather than `open` so no subclass outside the module can hook them,
+  and on macOS 26 SwiftTerm deliberately drops `.mouseMoved` from its tracking
+  area to dodge a WindowServer bug that synthesizes mouse-downs. A host hint was
+  buildable — a window-level `.mouseMoved` monitor, the fallback SwiftTerm itself
+  uses on 26, plus the `open characterIndex(for:)` point→cell mapping and the
+  public `Terminal.link(at: .screen:)` — and was **not** taken: the
+  discoverability cost it pays is real in the Tauri client and mostly absent
+  natively, because xterm's addon cannot make its underline conditional (a gated
+  link there draws underlined-and-dead and looks broken) while SwiftTerm draws
+  nothing until ⌘ is held and then highlights the link and floats its URL. ✅
+  *WS-R* pinned the two knobs that make the shared half a contract rather than
+  an inherited default (`linkReporting = .implicit`, `linkHighlightMode =
+  .hoverWithModifier`) and recorded the divergence as a FRONTEND §8 row. The
+  clean fix is upstream — one delegate callback beside the link SwiftTerm
+  already resolves — and is a ROADMAP candidate, not a parity gap.
 - **TE-6 · Refocus.** ✅ *WS-I.* The Tauri panel takes the caret back when the
   window returns, reading `document.activeElement` at that moment rather than
   latching a `focusin` flag; AppKit already did it natively.
@@ -1307,7 +1332,7 @@ is mostly adoption of already-proven native behavior.
      None)]`), so a one-field write is one line, and clearing an optional field
      is patching it to `""` — the blank-means-absent rule doing double duty.
      It is what made ST-3's instant-apply form a change per control rather than
-     a redesign, and what WS-R's native half still has to adopt.
+     a redesign, in both clients.
    - **`config.toml` field order is load-bearing.** `toml` serializes in
      declaration order and a table swallows every key after it, so nothing
      scalar may be declared below `[claude]` and `[ollama]`. A round-trip test
@@ -1316,9 +1341,9 @@ is mostly adoption of already-proven native behavior.
      therefore self-tuning: nothing is held when the host keeps up. WS-I's
      `Channel` rewrite inherited it and added no second layer, which still
      stands as the rule; the native relay's own coalescing is redundant but
-     harmless (WS-R may simplify it).
-   - **`resize_terminal` ignores a `< 2×2` grid itself**, so D-9 (WS-R) is purely
-     the native inner-frame pin.
+     harmless.
+   - **`resize_terminal` ignores a `< 2×2` grid itself**, so D-9 was only ever
+     the native inner-frame pin, which WS-R supplied.
    - **H-16 had no consumer for six workstreams.** `copy_text` /
      `copy_diff_text` were this plan's one deliberate dead surface; WS-P wired
      the native side to them (DF-6), and the Tauri `copy` listener is what
@@ -1543,14 +1568,11 @@ is mostly adoption of already-proven native behavior.
    visible tab surviving a repo switch (SH-7).
 
    **Still live.**
-   - **The native Settings window has D-5's lost update at form scale, and it is
-     WS-R's first item.** `SettingsStore.currentPatch`
-     (`SettingsStore.swift:196-215`) names the *same twelve fields on every
-     save*, filled from what `load()` read when the window opened — so a
-     `tab_size` the Tauri client writes while that window stands open is
-     reverted by the next unrelated toggle. `patch_config` cannot protect
-     against this; a field-wise writer only helps a caller that names fields
-     field-wise. The Tauri form is the reference.
+   - **`patch_config` only helps a caller that names fields field-wise.** A
+     patch listing every field the *form* holds is D-5 again at form scale, and
+     core cannot see the difference — this is what the native window did until
+     WS-R, and it is the shape to check for in any surface that writes a shared
+     file.
    - **A Svelte `value={expr}` will not repaint a control whose expression did
      not change**, even when the DOM has diverged from it — 999 typed into a
      field already at its maximum comes back as the maximum, so nothing in the
@@ -1615,9 +1637,11 @@ is mostly adoption of already-proven native behavior.
    - **xterm's link addon cannot gate its own decorations.** `LinkComputer`
      pushes links with no `decorations`, which means all of them, so a
      modifier-gated link still underlines on a bare hover. The hover affordance
-     is load-bearing rather than a nicety — WS-R's native half has to match the
-     string *Follow link (⌘ + click)*. Making the underline conditional needs a
-     hand-written `ILinkProvider`.
+     is load-bearing rather than a nicety **in this client specifically**, and
+     that is why TE-5's affordance ended up per-client (§4.10): an emulator that
+     draws nothing until the modifier is held has no broken-looking state to
+     explain. Making the underline conditional needs a hand-written
+     `ILinkProvider`.
    - **`navigator.clipboard` is not usable for anything a click didn't ask
      for** — WebKit gates a programmatic write on recent user activation, which
      an OSC 52 write does not have. Hence `tauri-plugin-clipboard-manager`,
@@ -1825,8 +1849,9 @@ is mostly adoption of already-proven native behavior.
       folders to search* opens Settings, and nothing native re-walked when
       `scan_paths` changed. `leogitScanPathsChanged` is posted from the patch
       and answered by the **root** view — the picker is the surface offering the
-      advice and the one with no switcher to re-open. WS-R rewrites that
-      Settings store field-wise and must keep the hook on the patch.
+      advice and the one with no switcher to re-open. WS-R's field-wise rewrite
+      kept the hook on the patch, which is where it belongs: any future writer
+      of `scan_paths` or `scan_depth` has to post it too.
     - **A SwiftUI `body` is not a memoization boundary.** The picker ranked,
       disambiguated and crossed into core *per body pass* while the identifier
       store published once per repository — fifty repositories, fifty rankings
@@ -2009,8 +2034,9 @@ is mostly adoption of already-proven native behavior.
     - **A config field can belong to a surface other than Settings.** The layout
       is patched from the diff header, which is why the Settings patch must keep
       *not* naming it — naming it would revert whatever the header last wrote
-      while that window stood open. **WS-R rewrites that patch field-wise and
-      must not "complete" it by adding `sideBySideDiff`.**
+      while that window stood open. WS-R's field-wise rewrite deliberately kept
+      it unnamed for the same reason — **"the form has a control for it" is the
+      only thing that entitles a form to name a field.**
     - **A control the user clicks must write synchronously, and a shared file
       needs a queue rather than only a lock.** A SwiftUI control re-reads its
       `Binding` in the same layout pass and a `Task` does not start there, so a
@@ -2019,7 +2045,9 @@ is mostly adoption of already-proven native behavior.
       about order: two writes in flight are two patches whose winner is the
       scheduler's. Both clients chain their writes in the store, and a store
       that reads the same file needs the other half — `AppConfigStore.reload()`
-      drops a read a write overtook. **All three matter directly to WS-R.**
+      drops a read a write overtook. WS-R generalized the chain into that
+      store's one `patch(_:)`, so all three now hold for every native writer
+      rather than for the layout segment alone.
     - **DF-13 is closed by the platform, and both candidate fixes were worse.**
       SwiftUI `Text` uses `byWordWrapping`, documented as breaking a word that
       cannot fit a line on its own. `.byCharWrapping` is not reachable from
@@ -2160,30 +2188,82 @@ is mostly adoption of already-proven native behavior.
 
 17. **WS-Q — Native history & sync polish (M).** ✅ **Shipped 2026-08-29.**
     HI-4, HI-5, HI-7's, HI-8's, HI-10's, SY-7's, BR-4's, BR-8's, SH-5's and
-    SH-7's native halves, plus HI-9 and SY-10; per-item state in §4.3, §4.4,
-    §4.7 and §4.11. One Tauri line went with it — the detail card's date, which
-    was the half of HI-5 native already had right.
+    SH-7's native halves, plus HI-9 and SY-10, and one Tauri line — the detail
+    card's date; per-item state in §4.3, §4.4, §4.7 and §4.11.
 
-    **Three of the twelve were about a claim made too early.** HI-4: an empty
-    `commits` array is equally true of a repository with no history and one
-    still reading it, and the pane asserted the first in two places;
-    `RepoStore.historyLoaded` is the log's `statusLoaded`. HI-7: `open()` now
-    clears `commits` where it publishes `repoPath`, because the sidebar re-seeds
-    its selection from that array and the old rows were handing the detail pane
-    a sha from one repository to load against another's path. BR-4:
-    `BranchStore.run` answers `BranchOpOutcome` instead of a `String?` whose
-    `nil` meant both *succeeded* and *never ran*.
+    Three of the twelve were one shape — a value whose empty case also means
+    "not answered yet" (`RepoStore.historyLoaded`, `open()` clearing `commits`
+    where it publishes `repoPath`, and `run`'s `nil`). Four were a
+    `confirmationDialog` doing a sheet's job, which is also how SY-10 ended with
+    `.actionFailureAlert` becoming `.actionFailureSheet`: **neither route §4.3
+    proposed for it existed**, since an `.alert`'s message is bridged to
+    `NSAlert`'s informative-text label and no modifier reaches it. The rest:
+    the 10 s date tick keyed on `BackgroundSchedulingPolicy`, one spelled-out
+    date vocabulary in both clients, prefetch at N−5, neutral tag chips, scroll
+    restore across a tab trip, the `· merging` suffix in the conflicted colour,
+    and undo no longer reloading a branch list a `--mixed` reset cannot change.
 
-    **Four were a `confirmationDialog` doing a sheet's job.** Checkout (HI-9)
-    and force push (SY-7) became `CheckoutCommitSheet` and `ForcePushSheet`,
-    which hold themselves open while git works and keep git's refusal inside
-    themselves. SY-10 was the same problem one level up, and **neither route
-    §4.3 proposed for it existed** — the banner is §6.13's second class, and an
-    `.alert`'s message is bridged to `NSAlert`'s informative-text label, which
-    no modifier reaches. So the presenter changed instead:
-    `.actionFailureAlert` → `.actionFailureSheet`, git's text monospaced and
-    selectable in a height-capped `ScrollView`, matching the Tauri `ErrorModal`
-    that had carried a `<pre>` all along.
+    Gates: zero-warning `just mac-build`, `pnpm check` 0/0 over 153 files,
+    prettier clean, `pnpm tauri build` bundled, 181 core + 24 bridge + 2 host
+    tests, `cargo fmt --check` clean, clippy-pedantic **165 in core** with
+    `leogit` and `leogit-ffi` at zero. No Rust changed.
+
+    Findings still live from it:
+    - **A latent collapse becomes a live bug the moment a caller starts
+      waiting.** `SyncStore.run`'s `nil`-means-both was harmless for as long as
+      every caller merely refreshed afterwards — and stopped being harmless the
+      hour SY-7 gave the force push a dialog that waits for its answer. When
+      fixing a bug class, grep for its *shape* rather than its symptom: the
+      second instance had no symptom yet. `OpOutcome` is the shared type now,
+      so a third serializer inherits the right vocabulary.
+    - **A `Bool` checked before an `await` is a race, not a guard.** Every
+      `.disabled(store.isBusy)` in the branch menu was already there and none of
+      them helped: the check happens, the task suspends, the flag moves. The
+      *outcome* has to carry the refusal.
+    - **A toolbar item is the worst place in the window to own a modal.** It
+      can already be behind one of its own sheets when the answer arrives, and
+      SwiftUI gives no ordering. Anything that presents from `.toolbar` should
+      report upward to the screen instead.
+    - **Two clients delegating to "the platform's own formatter" is a
+      divergence, not a convergence.** Foundation's `.relative(presentation:
+      .named)` and a hand-rolled JS tier ladder are both reasonable and they
+      disagree — *yesterday* vs *1 day ago* — on the rows a user looks at most.
+      Where a string is part of the contract, spell it out in both and pin it.
+    - **The plan's proposed fix is a hypothesis, not an instruction.** SY-10
+      offered two routes and neither was available: one contradicted a rule a
+      later workstream had established, the other assumed an API shape SwiftUI
+      does not have. Check that a prescribed option still exists before costing
+      the work around it — DF-8 was the same lesson in WS-P, and TE-5 was in
+      WS-R.
+
+18. **WS-R — Native settings & terminal (S/M).** ✅ **Shipped 2026-08-29.**
+    ST-1's, ST-3's, ST-5's, ST-7's and ST-10's native halves, TE-3 with **D-9**,
+    TE-4 in both clients, and TE-5's native half by decision; per-item state in
+    §4.9, §4.10 and §3.1.
+
+    **The lead item was D-5 at form scale, and the fix could not be a copy of
+    the Tauri form.** `SettingsStore` named the same twelve fields on every
+    save, filled from the load that ran when the window opened. It is now
+    field-wise: `Field` is the unit of the patch, of the debounce, and of one
+    predicate — *does this control still differ from the file?* — that answers
+    whether to write, what closing must flush, and which controls an edit made
+    elsewhere may repaint. Every write re-seeds its own control from the config
+    core hands back, which is ST-7 for free. With it: the two AI timeout
+    controls (ST-1), Edit ▸ Done over a monospaced scan-path field (ST-10), and
+    no form at all when the config cannot be read (ST-3).
+
+    **`AppConfigStore` became the single writer as well as the single reader**
+    (ST-5). `patch(_:)` queues writes in the order they were asked for, two
+    fields carry a pending shadow so their controls answer on the click
+    (`side_by_side_diff`, and now `ai_provider` — which had two independent
+    owners and could show two different providers with both surfaces open), and
+    the three call sites that read the file behind the store are gone. Every
+    store that needs it is handed it at construction.
+
+    Terminal: the emulator is pinned at panel height and clipped by an outer
+    frame (D-9), `TerminalController.resize` coalesces on 80 ms while the
+    initial push goes straight through, scrollback is stated as 1 000 in both
+    clients, and the link knobs are pinned to the shared contract.
 
     Gates: zero-warning `just mac-build`, `pnpm check` 0/0 over 153 files,
     prettier clean, `pnpm tauri build` bundled, 181 core + 24 bridge + 2 host
@@ -2191,79 +2271,53 @@ is mostly adoption of already-proven native behavior.
     `leogit` and `leogit-ffi` at zero. No Rust changed, so core is untouched and
     the FFI surface stays at 67 exports.
 
-    Findings for WS-R and the workstreams after it:
-    - **A store's "I have not answered yet" is not the same as its empty
-      value, and only the store can tell them apart.** Three separate defects
-      here were one shape: a view reading `commits.isEmpty`, a caller reading
-      `nil`, a poll reading a stale `head_sha`. WS-R's settings form has the
-      same hazard in `SettingsStore` — a field that has never been loaded reads
-      as the type's zero, and an instant-apply form writes what it reads.
-    - **A `Bool` checked before an `await` is a race, not a guard.** Every
-      `.disabled(store.isBusy)` in the branch menu was already there and none of
-      them helped: the check happens, the task suspends, the flag moves. The
-      *outcome* has to carry the refusal. WS-R's `SettingsStore` writes on every
-      control change with no serialization at all, which is the same shape with
-      a file underneath it.
-    - **A latent collapse becomes a live bug the moment a caller starts
-      waiting.** `SyncStore.run`'s `nil`-means-both was harmless for as long as
-      every caller merely refreshed afterwards — and stopped being harmless the
-      hour SY-7 gave the force push a dialog that waits for its answer. When
-      fixing a bug class, grep for its *shape* rather than its symptom: the
-      second instance had no symptom yet. `OpOutcome` is now the shared type,
-      so a third serializer inherits the right vocabulary.
-    - **A toolbar item is the worst place in the window to own a modal.** It
-      can already be behind one of its own sheets when the answer arrives, and
-      SwiftUI gives no ordering. `SyncControls` and `BranchMenu` now raise
-      failures to `ContentView` the way `ChangesSidebar` always did. Anything
-      that presents from `.toolbar` should report upward instead.
-    - **`.task(id:)` is a cheaper gate than a flag tested inside a loop.**
-      Keying the relative-date clock on `canTickRelativeDates` means a hidden
-      window has no timer running at all, and returning rebuilds the task —
-      which re-reads the clock immediately, so a window away for an hour is
-      current on arrival rather than up to 10 s later. A `while` loop testing
-      the same predicate would keep waking to answer "no".
-    - **Reuse the predicate table; add a row rather than a mechanism.** The
-      tick is the fourth entry in `BackgroundSchedulingPolicy`, and the two
-      things that make it different from the other three are written down there:
-      it ignores `networkOpInFlight` (it reads no git state) and stays out of
-      the App Nap assertion (a repaint is not worth keeping a Mac awake for).
-    - **Two clients delegating to "the platform's own formatter" is a
-      divergence, not a convergence.** Foundation's `.relative(presentation:
-      .named)` and a hand-rolled JS tier ladder are both reasonable and they
-      disagree — *yesterday* vs *1 day ago* — on the rows a user looks at most.
-      Where a string is part of the contract, spell it out in both and pin it
-      (FRONTEND §6.12 now does).
-    - **The plan's proposed fix is a hypothesis, not an instruction.** SY-10
-      offered two routes and neither was available: one contradicted a rule a
-      later workstream had established, the other assumed an API shape SwiftUI
-      does not have. Check that a prescribed option still exists before costing
-      the work around it — DF-8 was the same lesson in WS-P.
-18. **WS-R — Native settings & terminal (S/M).** **Lead with the field-wise
-    patch, which WS-H found and did not fix:** `SettingsStore.currentPatch`
-    (`SettingsStore.swift:196-215`) names the same twelve fields on every save,
-    filled from the load that ran when the window opened, so a field the Tauri
-    client writes while that window stands open is reverted by the next
-    unrelated toggle — D-5 at form scale, in the client that was supposed to be
-    the reference. Each control should patch what it owns, as the Tauri form now
-    does; the 300 ms debounce can stay, keyed per field. With it: a refused save
-    should re-seed its control from disk rather than leaving the value that
-    didn't land (ST-7), the two AI timeouts want controls (ST-1 — they are
-    honoured natively and settable only from the other client, a FRONTEND §8 row
-    until they land), ST-5 (route both provider owners through `AppConfigStore`
-    — with both windows open the pickers can disagree today; grow it the
-    `scanPaths` accessor three call sites bypass),
-    ST-3's native half (don't render editable defaults that aren't the user's
-    settings — the form currently renders struct defaults behind
-    `"Could not read the configuration file."`, editable and silently inert),
-    ST-9's native export, ST-10's native half (Edit ▸ Done +
-    `.monospaced()`), TE-3 + **D-9** (pin the inner frame so a collapsed panel
-    stops reflowing the emulator to one row — WS-B already made the PTY side
-    safe, so this is purely the frame — plus the missing 80 ms resize debounce,
-    placed in `TerminalController.resize` and *not* the delegate, to keep the
-    one-shot initial-size push), TE-4 (scrollback 1000 explicitly, both
-    clients), TE-5's native half (the hover affordance alone — ⌘-click and OSC 52
-    are already right there; SwiftTerm's hover surface needs an API check, and
-    the string to match is the Tauri client's *Follow link (⌘ + click)*).
+    Findings for WS-S and after:
+    - **Port the reference client's rules, not its shape.** The Tauri form
+      renders straight from `$config` and has no per-field state at all. That
+      is not available in SwiftUI: a control re-reads its `Binding` in the same
+      layout pass, so a store-driven control whose write is deferred snaps back
+      for a frame — which is why `setSideBySideDiff` is synchronous, and why the
+      native form keeps its own field values and reconciles them instead. Same
+      two rules (field-wise patch, refused write puts its control back), a
+      different mechanism. A WS-S item that says "match the other client" should
+      be read as its contract, not its code.
+    - **One predicate can replace three mechanisms.** `isDirty` retired a
+      `lastPersisted` snapshot, a generation counter and a `pendingSave` slot.
+      The trick that makes it work is recording the baseline *through the
+      outbound normalizer* (`seeded[field] = patch(for: field)`), so a value the
+      form cleans on its way out — a trimmed model name, a re-parsed path list —
+      reads as unchanged rather than rewriting itself on every visit.
+    - **A shared serializer has to be joined synchronously.** `enqueue`
+      registers the write and bumps `writeGeneration` before any `await`; a
+      caller that hopped through a `Task` of its own would join in scheduler
+      order, which is precisely the ordering the queue exists to impose. Any
+      future queue in either client needs the same split between "take my place"
+      and "wait for my turn".
+    - **Optional dependency injection has a window, and the window is where the
+      first pass runs.** `store.configStore = appConfig` from a `.task` is late
+      for anything that acts on appear — `RepoDirectoryStore`'s first walk in
+      that window would have walked no scan paths at all. `ContentView.init(
+      appConfig:)` + `State(initialValue:)` removes the optional entirely, and
+      is the shape to reach for the next time a store needs a collaborator.
+      **This is directly relevant to WS-S's `RepoStore.open` guard**: the
+      reentrancy fix is about ordering *within* a store, and it should not
+      reintroduce a late-bound dependency to get there.
+    - **A collapsed pane is not a zero-sized pane.** Anything that lays out
+      against its own frame — an emulator, a text view, a canvas — must be
+      pinned and clipped rather than resized to nothing. The corollary bit:
+      a pinned view still occupies space for hit-testing, so the same predicate
+      that hides it has to stop it answering the mouse.
+    - **A library default is not a decision.** Two emulators shipped two
+      scrollback numbers and neither client had chosen either — the same lesson
+      as WS-Q's date formatter, one layer down. Where the two clients are meant
+      to feel like one app, state the number in both.
+    - **Check what the user actually loses before costing the fix.** TE-5's
+      remaining half read as a missing affordance; the API check showed the
+      *behaviour* already matched and the affordance existed in a different
+      form, because the emulator that needs a hint is the one that draws links
+      unconditionally. The gap was smaller than the item implied, and the
+      platform's own answer was better than a hand-built one — see §4.10.
+
 19. **WS-S — Sweep & contract cleanup (S/M).** What genuinely had no home, plus
     the work that can only land once everything else has:
     - **Leftover efficiency**: RM-11 (move the native sweep's slot re-check
@@ -2290,13 +2344,17 @@ is mostly adoption of already-proven native behavior.
       a tab round trip went in with WS-Q; the settings surface row is already
       there.) (Counts
       placement and progress surface went in with WS-F, branch-menu shape with
-      WS-G — each workstream files its own.) The terminal link convention
-      becomes a shared §6 rule (TE-5), not a §8 row.
+      WS-G — each workstream files its own. TE-5 landed in WS-R as both: the
+      modifier-click and OSC 52 rules in §6.17, how the modifier is *taught* as
+      an §8 row.)
     - **Stale source comments**, all verified: `CommitStore.swift:20-23`,
       `SyncControls.swift:9-11,131`, `TerminalStore.swift:32`,
       `CloneSheet.swift:8-10`, `ContentView.swift:154-159`,
       `TerminalSessionView.swift:124-126`,
       `BackgroundSchedulingPolicy.swift:7`, `repoSyncScheduler.ts:66-70`.
+      Re-locate each before editing: WS-Q and WS-R rewrote parts of
+      `CommitStore`, `SyncControls`, `ContentView` and `TerminalSessionView`,
+      so the line numbers have moved and some of the comments with them.
     - **Doc claims outside the audit's checklist**, fixed as their area lands:
       DESIGN's header-cluster list (ahead/behind are badges *on* the Pull/Push
       buttons). (The committer-vs-author date this list used to carry was never
@@ -2406,13 +2464,18 @@ written as each chunk lands, no duplication between documents:
   clients, and that a view *raises* its failure while the screen presents it.
   Three §8 rows changed with WS-Q: the relative-date row narrowed from "does it
   tick at all" to how each client gates the tick, and two were added — the
-  commit list's place across a tab round trip, and the detached/merging
-  markers.
+  commit list's place across a tab round trip, and the detached/merging markers.
+  WS-R retired the settings-field-coverage row's native exception (every field
+  either client reads is now settable in both) and added one for how each client
+  teaches the terminal's link modifier; §6.15 gained the rule that a
+  configuration that cannot be read renders no form, and that a setting with a
+  second owner is read and written through that owner rather than copied.
 - **TECHNICAL.md** — new mechanics paragraphs only for genuinely new machinery
   (the core hoists, the Tauri channel transport, the native launch path, WS-N's
   `Set` selection + `FileListSelection` + held `PathText` fit, WS-O's one-row-
   model split layout and the `AppConfigStore` writer, WS-P's `LoadKey` and
-  `rendered`-identity rules), plus the claims WS-S lists as their areas land.
+  `rendered`-identity rules, WS-R's field-wise `SettingsStore` and the config
+  store's write queue), plus the claims WS-S lists as their areas land.
 - **DESIGN.md** — flow 1 is shared end to end since WS-M, `leogit <dir>` and
   the *Create a repository here?* prompt included, and flow 11 (the update
   chip) is now both clients'. The per-flow client hedges retire as parity

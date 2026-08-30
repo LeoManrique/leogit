@@ -57,6 +57,14 @@ final class CloneStore {
     /// `last_clone_dir` → first scan path → `~/Dev`, like the Tauri dialog.
     var destinationDir = ""
 
+    /// The app-wide config owner, for the scan path that seeds the
+    /// destination. A dependency rather than sheet state, hence unobserved.
+    @ObservationIgnored private let configStore: AppConfigStore
+
+    init(config: AppConfigStore) {
+        configStore = config
+    }
+
     var filter = "" {
         didSet {
             guard filter != oldValue else { return }
@@ -163,7 +171,7 @@ final class CloneStore {
             hasReadSharedState = true
             let state = try? await GitBridge.reposState()
             sortMode = SortMode(persisted: state?.cloneSortMode) ?? .recent
-            destinationDir = await defaultDestination(lastCloneDir: state?.lastCloneDir)
+            destinationDir = defaultDestination(lastCloneDir: state?.lastCloneDir)
         }
 
         if !hasLoadedList, !isLoadingList {
@@ -173,9 +181,9 @@ final class CloneStore {
 
     /// Where a clone lands unless the user says otherwise: wherever the last
     /// one went, then the first scan path, then `~/Dev`.
-    private func defaultDestination(lastCloneDir: String?) async -> String {
+    private func defaultDestination(lastCloneDir: String?) -> String {
         if let lastCloneDir, !lastCloneDir.isEmpty { return lastCloneDir }
-        if let first = (try? await GitBridge.appConfig())?.scanPaths.first { return first }
+        if let first = configStore.scanPaths.first { return first }
         return "~/Dev"
     }
 

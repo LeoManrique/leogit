@@ -114,6 +114,11 @@
         foreground: '#e5e5e5',
       },
       cursorBlink: true,
+      // Chosen rather than inherited: xterm defaults to 1 000 and SwiftTerm to
+      // 500, which had the two clients remembering different amounts of the
+      // same shell. 1 000 is the one that survives a `git log --stat`, and what
+      // VS Code ships.
+      scrollback: 1000,
       windowsPty,
     })
 

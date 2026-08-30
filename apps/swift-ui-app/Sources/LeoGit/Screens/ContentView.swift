@@ -23,7 +23,13 @@ enum RepoTab: String, CaseIterable, Identifiable {
 /// decided here: every guard names a `BackgroundSchedulingPolicy` predicate.
 struct ContentView: View {
     @Environment(RepoStore.self) private var store
-    @Environment(AppConfigStore.self) private var appConfig
+
+    /// The shared config owner. Taken as a parameter rather than read from the
+    /// environment because three of the stores below are built with it in
+    /// `init`, where environment values do not exist yet — and a store that
+    /// adopted it a frame later would run its first pass against no config at
+    /// all. Descendants still read it from the environment.
+    private let appConfig: AppConfigStore
 
     /// Folders handed to the app from outside it — `leogit <dir>`, a drop on
     /// the Dock icon, Finder's Open With. Owned by the app delegate, which is
@@ -34,7 +40,7 @@ struct ContentView: View {
     @Environment(\.openSettings) private var openSettings
 
     @State private var branchStore = BranchStore()
-    @State private var directoryStore = RepoDirectoryStore()
+    @State private var directoryStore: RepoDirectoryStore
     @State private var terminalStore = TerminalStore()
 
     /// Repo labels, looked up once per path and kept for the process's
@@ -46,7 +52,7 @@ struct ContentView: View {
     /// survives a close and reopen. A store created with the sheet re-ran
     /// `gh repo list` on every open — a ~20 s dead zone each time, for a list
     /// that had not changed.
-    @State private var cloneStore = CloneStore()
+    @State private var cloneStore: CloneStore
 
     /// The once-per-session release check. Owned by the root view, not the
     /// repository screen, so it also runs while the app sits on the picker —
@@ -64,7 +70,7 @@ struct ContentView: View {
     /// pane, which would drop an in-progress commit message — and amend mode
     /// is started from the *History* tab, so it has to survive the switch
     /// that puts the composer on screen.
-    @State private var commitStore = CommitStore()
+    @State private var commitStore: CommitStore
     /// The one sheet the root view can present. A window hosts one sheet at a
     /// time, so this is a single slot rather than an `isPresented` flag per
     /// kind: with several, a request that arrived while another was up had
@@ -109,10 +115,14 @@ struct ContentView: View {
     /// windows started together don't stay in phase. See `autoFetchLoop`.
     private static let sessionFetchSkew: Duration = .milliseconds(Int64.random(in: 0...30_000))
 
-    init() {
+    init(appConfig: AppConfigStore) {
+        self.appConfig = appConfig
         let policy = BackgroundSchedulingPolicy()
         _schedulingPolicy = State(initialValue: policy)
         _syncStore = State(initialValue: SyncStore(schedulingPolicy: policy))
+        _directoryStore = State(initialValue: RepoDirectoryStore(config: appConfig))
+        _cloneStore = State(initialValue: CloneStore(config: appConfig))
+        _commitStore = State(initialValue: CommitStore(config: appConfig))
     }
 
     var body: some View {

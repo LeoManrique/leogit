@@ -779,12 +779,14 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    (§7). That is why the rule is *a surface patches the fields it owns* rather than *the
    Settings form owns the file* — two surfaces writing one field-wise config cannot
    revert each other, and each client serializes its own writes so two quick changes
-   land in the order they were made.
-   Native's three remaining drifts, all owned by the parity plan's WS-R: its patch names
-   every field the window holds rather than the one that changed (D-5's lost update at
-   form scale — a `tab_size` written by the other client while the Settings window
-   stands open is reverted by the next unrelated toggle), its scan-path field is a plain
-   one, and a rejected write leaves its control showing the value that didn't land.
+   land in the order they were made. A control whose setting has a second owner reads
+   and writes *that* owner rather than a copy: the AI provider has a picker in the
+   composer as well as in Settings, and two copies meant the two could disagree while
+   both were on screen.
+   **A configuration that cannot be read is not a form.** Neither client renders
+   editable controls behind the failure — struct defaults presented as the user's
+   settings are wrong and silently inert at the same time — so the window shows the
+   failure and nothing else until there is a config to edit.
    Fields the two clients don't both expose are listed in §8.
 16. **Escape dismisses the frontmost surface, and only that one.** A confirmation
    raised from a popover closes itself and leaves the popover standing; a surface
@@ -800,9 +802,9 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
 17. **The terminal's pointer and clipboard follow terminal conventions, not the web's.**
    A URL in the scrollback opens on **modifier-click** — ⌘ on macOS, `Ctrl` elsewhere — never
    on a plain one, because a plain click belongs to the selection and dragging across a line
-   that happens to contain a URL must not navigate. What that costs in discoverability is
-   paid back by the affordance rather than by dropping the modifier: hovering a link names
-   the gesture ("Follow link (⌘ + click)"), the way Terminal.app and iTerm do. **OSC 52 is
+   that happens to contain a URL must not navigate. Both clients detect bare URLs as well as
+   OSC 8 ones. *How* the modifier is taught is presentation and differs (§8), because what
+   each emulator draws before the modifier is held differs. **OSC 52 is
    honoured write-only.** A shell, `tmux` or `vim` — including one on the far side of an SSH
    session, where nothing else can reach the local clipboard — may *set* it; the sequence's
    read form, which types the clipboard back down the TTY, is swallowed and never answered,
@@ -931,7 +933,8 @@ every deliberate difference here.
 | Pane geometry persistence | `localStorage` (sidebar width, composer height, commit-files width) | `UserDefaults` (composer height, `commitComposerHeight`); sidebar and commit-files widths are per-session |
 | Window frame persistence | `tauri-plugin-window-state` saves size and position on exit and restores them at launch; the `tauri.conf.json` size is the first-run default | AppKit frame autosave on the `WindowGroup`, with `.defaultSize` as the first-run default |
 | Settings surface (§6.15) | a modal overlay inside the one window, with a header ✕ and a footer **Close** — there is nothing to save, so the button only dismisses | the stock SwiftUI `Settings` scene, a separate window with ⌘, and the standard title-bar close and no content buttons at all; a text field also commits on `.onDisappear` |
-| Settings field coverage (§6.15) | every `Config` field the app reads has a control, except `side_by_side_diff` — the diff header owns it in both clients | no control for `theme` (a permanent exemption, above) or the two AI timeouts — so a timeout set in the Tauri client bounds native's requests but cannot be changed there. Closing the timeout gap is the parity plan's WS-R |
+| Settings field coverage (§6.15) | every `Config` field the app reads has a control, except `side_by_side_diff` — the diff header owns it in both clients | the same, minus `theme` (a permanent exemption, above) |
+| Teaching the terminal's link modifier (§6.17) | a hint follows the pointer onto a link — *Follow link (⌘ + click)*. Not optional here: xterm's link addon cannot make its own underline conditional, so a gated link draws as underlined-and-dead and simply looks broken without something naming the gesture | nothing until ⌘ goes down, at which point SwiftTerm highlights the link under the pointer and floats the URL beside it. Nothing is drawn beforehand, so there is no broken-looking state to explain — the cost is discoverability alone, and it is not paid by a hint: SwiftTerm publishes no hover callback (it resolves the hovered link and notifies nobody), and on macOS 26 it deliberately drops `.mouseMoved` from its tracking area to dodge a WindowServer bug that synthesizes mouse-downs, so a host hover surface would have to re-enter exactly that hazard |
 | Background-cadence enforcement (§6.1) | the ladder is a self-scheduling `setTimeout` chain, so a WebView free to throttle a backgrounded document can only make the hidden rung *slower* than 30 s; the wake-up resync is what guarantees a current screen | an App Nap assertion is held while a repo is open, so the same ladder's timers are not coalesced away, and the hidden rung is exactly 30 s (`AppNapSuppressor`) |
 | File-list selection & keyboard (§6.4) | two anchors and hand-rolled key handling: shift-click on the row body extends from a sticky row anchor, shift-click on a checkbox range-toggles from a second one that *does* move, and Home/End jump to first/last. Plain click and ⌘-click both collapse to one row. An extension **activates the shift-clicked row**, so the diff follows the far end | one `List(selection: Set<String>)`, so the range and multi-row gestures are AppKit's own and behave like every other macOS list, and the checkbox column has no separate anchor. The gesture that produced a selection is not recoverable from a `Set`, so an extension leaves the diff on the row it was already showing rather than guessing which row was clicked |
 | Relative-date tick gating (§6.12) | one `setInterval` that skips its own body while `document.hidden` or the pane has no height — the pane stays mounted behind the other tab, so the tick has to test for it | a `.task` keyed on `BackgroundSchedulingPolicy.canTickRelativeDates`, torn down and rebuilt with the predicate; the History pane is *removed* from the hierarchy on a tab change, so "is the pane showing?" needs no test at all. Rebuilding also re-reads the clock at once, so a window returning from an hour hidden is current immediately |

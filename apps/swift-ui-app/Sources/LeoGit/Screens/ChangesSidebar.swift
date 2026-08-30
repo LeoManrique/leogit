@@ -134,11 +134,6 @@ struct ChangesSidebar: View {
                 keeping: selectedPath
             )
         }
-        .task {
-            // The provider picker mirrors the shared config file; one read
-            // per appearance is enough (it's machine-global, not per-repo).
-            await commitStore.loadAIProvider()
-        }
         .task(id: commitStore.aiProvider) {
             // Re-asked whenever the picker moves, so the gate always describes
             // the provider Generate would actually run. Keyed on the provider
