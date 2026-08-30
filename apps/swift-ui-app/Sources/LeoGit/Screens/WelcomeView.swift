@@ -44,7 +44,7 @@ struct WelcomeView: View {
                 // No repository is open, so there is no transfer to hold
                 // switching back.
                 switchBlockedReason: nil,
-                listMaxHeight: 320,
+                height: .upTo(320),
                 onSelect: onSelect,
                 onClone: onClone,
                 onChooseFolders: onChooseFolders

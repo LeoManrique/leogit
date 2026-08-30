@@ -1,5 +1,41 @@
 import SwiftUI
 
+/// How a `RepoPickerList` is sized by whatever is showing it.
+///
+/// Not cosmetic. A container that fits its content measures this list *once*,
+/// and what the list holds during that pass is the placeholder — `rows` is
+/// state seeded by an `onChange(initial:)` that runs after it, and on a cold
+/// open discovery has genuinely published nothing yet either. Fitted, a
+/// popover freezes at placeholder height and the rows then arrive into a
+/// three-row window. `fill` says the container has already decided its own
+/// size, so nothing here needs measuring.
+enum RepoPickerHeight {
+    /// Grow with the rows, up to a ceiling — the Welcome card, which sits in a
+    /// window that would otherwise let it run the full height of the screen.
+    case upTo(CGFloat)
+
+    /// Take whatever the header and footer leave.
+    case fill
+
+    /// The ceiling to hand `frame(maxHeight:)`.
+    var limit: CGFloat {
+        switch self {
+        case .upTo(let limit): limit
+        case .fill: .infinity
+        }
+    }
+
+    /// Whether the placeholder stretches with the rows. Without it the footer
+    /// floats up under a short placeholder in a fixed-size container, leaving
+    /// the popover half empty above and below it.
+    var placeholderMaxHeight: CGFloat? {
+        switch self {
+        case .upTo: nil
+        case .fill: .infinity
+        }
+    }
+}
+
 /// The repository list, in the one form both places that show it use: the
 /// Welcome screen's body and the toolbar switcher's popover.
 ///
@@ -7,7 +43,7 @@ import SwiftUI
 /// drifted before — the empty state, the footer and the search input set had
 /// all diverged between the clients' two lists — and everything shown in both
 /// is therefore shown by the same code. Only what genuinely differs is a
-/// parameter: how tall the rows may run, whether a repository is already open,
+/// parameter: how the rows are sized, whether a repository is already open,
 /// and whether something is currently holding switching back.
 ///
 /// Rows are labelled by the remote's repository name where one is known
@@ -29,10 +65,9 @@ struct RepoPickerList: View {
     /// claims no slot in either client.
     let switchBlockedReason: String?
 
-    /// How tall the scrolling rows may grow before they scroll. The popover
-    /// and the Welcome screen have very different room, and it is the only
-    /// geometry that differs between them.
-    let listMaxHeight: CGFloat
+    /// How the scrolling rows are sized in the container showing them — the
+    /// only geometry that differs between the two.
+    let height: RepoPickerHeight
 
     let onSelect: (String) -> Void
     let onClone: () -> Void
@@ -130,6 +165,7 @@ struct RepoPickerList: View {
                     scannedPaths: directory.scanFolders,
                     onChooseFolders: onChooseFolders
                 )
+                .frame(maxHeight: height.placeholderMaxHeight)
             } else {
                 rowList
             }
@@ -191,7 +227,7 @@ struct RepoPickerList: View {
                 }
                 .padding(.vertical, 4)
             }
-            .frame(maxHeight: listMaxHeight)
+            .frame(maxHeight: height.limit)
             // `anchor: nil` scrolls the least amount that reveals the row, so
             // an already-visible cursor never makes the list jump under a
             // mouse user — the Tauri lists' `block: 'nearest'`.

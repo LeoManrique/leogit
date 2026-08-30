@@ -47,7 +47,7 @@ struct RepoSwitcher: View {
                 directory: directory,
                 identifiers: identifiers,
                 switchBlockedReason: switchBlockedReason,
-                listMaxHeight: 360,
+                height: .fill,
                 onSelect: { path in
                     isPresented = false
                     onSelect(path)
@@ -61,7 +61,11 @@ struct RepoSwitcher: View {
                     onChooseFolders()
                 }
             )
-            .frame(width: 320)
+            // A declared size, not a fitted one — see `RepoPickerHeight`. The
+            // width was already fixed for the same reason it always is: rows
+            // are paths, and a list that widens with its longest one would
+            // resize as the user types.
+            .frame(width: 320, height: 440)
             // Fresh list and fresh badges each time the popover opens, and
             // *concurrently*: the walk is a filesystem crawl over the scan
             // tree, while the sweep is two git reads per row, and running the

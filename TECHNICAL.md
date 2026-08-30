@@ -685,9 +685,7 @@ switcher's own re-walk on open covers the repository screen; the picker has no s
 re-open, which is exactly why the hook cannot hang off a dialog dismissal.
 
 **The two native pickers are one view.** `RepoPickerList` is the Welcome screen's body and
-the toolbar popover's content, parameterized only by what genuinely differs — how tall the
-rows may run, whether a repository is already open, and whether a transfer is holding
-switching back. Row *labels* come from `RepoIdentifierStore`, a process-lifetime cache of
+the toolbar popover's content, parameterized only by what genuinely differs — how the rows are sized, whether a repository is already open, and whether a transfer is holding switching back. Sizing is a RepoPickerHeight, and the popover passes .fill because it declares a size of its own. A popover that fits its content measures that content once, and what this list holds during its first layout pass is the placeholder: rows is state seeded by an onChange(initial:) that runs after the pass, and on a cold open discovery has published nothing yet either. Fitted, the popover freezes at placeholder height and the rows arrive into a three-row window; a declared size makes the geometry a decision rather than a race. Row *labels* come from `RepoIdentifierStore`, a process-lifetime cache of
 each repository's `owner`/`name` parsed from its remote. The cache is three-valued on
 purpose: a missing key is "not looked up", a stored `nil` is "looked up, no parseable
 remote" (the row keeps its folder name and is never asked again), and collapsing those two
