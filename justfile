@@ -80,6 +80,30 @@ mac-run *flags:
     esac
     open "{{mac_app}}"
 
+# ---------------------------------------------------------------------------
+# Release pipeline. One version and one release across both clients: macOS
+# ships the SwiftUI app, Linux and Windows ship Tauri. The scripts live in
+# scripts/ and share _common.py / _version.py / _build.py; run them from here
+# or directly, they behave the same. `install.sh` is not among them — it is the
+# curlable end-user installer and deliberately needs no interpreter.
+# ---------------------------------------------------------------------------
+
+# Build the release bundle this platform ships (--client tauri to force Tauri)
+bundle *flags:
+    python3 scripts/build.py {{flags}}
+
+# Build and publish a GitHub release; pass x.y.z to bump the version first
+release *version:
+    python3 scripts/deploy_release.py {{version}}
+
+# Install a locally built Release bundle into /Applications (macOS)
+mac-install *flags:
+    python3 scripts/install_local.py {{flags}}
+
+# Delete every GitHub release older than the latest one
+cleanup-releases *flags:
+    python3 scripts/cleanup_releases.py {{flags}}
+
 # The Cargo workspace target/ lives at the repo root, so `cargo clean` wipes it
 # for every crate at once; the macOS app's generated project and bindings go too.
 # Clean all build artifacts

@@ -1,17 +1,25 @@
-//! In-app update check against the GitHub Releases feed `deploy_releases.sh`
+//! In-app update check against the GitHub Releases feed `deploy_release.py`
 //! publishes to — a port of `LeoSync`'s updater.
 //!
 //! One unauthenticated `releases/latest` request, a plain three-part numeric
-//! version compare against this build's `CARGO_PKG_VERSION`, and no
+//! version compare against the version the *host* passes in, and no
 //! auto-install: on macOS/Linux the frontend offers the `install.sh` one-liner
 //! to run in a terminal, on Windows a link to the release page's installer.
 //! Failures (offline, rate-limited, GitHub down) surface as `Err` so the
 //! frontend can retry quietly later — never as user-facing errors.
+//!
+//! The running version is a **parameter**, not `env!("CARGO_PKG_VERSION")`.
+//! That macro expands to the version of the crate the source file belongs to,
+//! so reading it here would answer with `leogit-core`'s own version — a number
+//! no release is ever named after — and every published release would compare
+//! newer than every build for ever. Each host knows its own version and is the
+//! only thing that can: the Tauri host from its crate manifest, the native app
+//! from its bundle's `CFBundleShortVersionString`.
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-/// The repo whose releases `deploy_releases.sh` creates; tags are `v<x.y.z>`.
+/// The repo whose releases `deploy_release.py` creates; tags are `v<x.y.z>`.
 const RELEASES_URL: &str = "https://api.github.com/repos/LeoManrique/leogit/releases/latest";
 
 /// GitHub answers in well under a second; this only catches a stalled link.
@@ -70,25 +78,31 @@ fn fake_update() -> Option<UpdateInfo> {
     })
 }
 
-/// Ask GitHub Releases whether a version newer than this build exists.
+/// Ask GitHub Releases whether a version newer than `current_version` exists.
 /// `Ok(None)` means this build is current (or the latest tag is malformed,
 /// which can only ever compare low — see [`parse3`]).
+///
+/// `current_version` is the running app's own `x.y.z`, supplied by the host —
+/// see this module's header for why core cannot answer it for itself. A
+/// version this function cannot parse compares low against everything, so a
+/// host that passes something malformed goes quiet rather than announcing an
+/// update on every launch.
 ///
 /// # Errors
 /// Returns `Err` when the request can't be built, fails, times out, or the
 /// response is a non-success status or undecodable body. Callers treat this
 /// as "couldn't check", not "no update".
-pub async fn check_for_update() -> Result<Option<UpdateInfo>, String> {
+pub async fn check_for_update(current_version: &str) -> Result<Option<UpdateInfo>, String> {
     #[cfg(debug_assertions)]
     if let Some(info) = fake_update() {
         return Ok(Some(info));
     }
 
-    let current = env!("CARGO_PKG_VERSION");
     let client = reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
-        // GitHub's API rejects requests without a User-Agent.
-        .user_agent(concat!("leogit/", env!("CARGO_PKG_VERSION")))
+        // GitHub's API rejects requests without a User-Agent. The app's version
+        // rather than core's, so the traffic is attributable to a release.
+        .user_agent(format!("leogit/{current_version}"))
         .build()
         .map_err(|e| format!("update check failed: {e}"))?;
     let release: GithubRelease = client
@@ -104,10 +118,10 @@ pub async fn check_for_update() -> Result<Option<UpdateInfo>, String> {
         .map_err(|e| format!("update check failed: {e}"))?;
 
     let latest = release.tag_name.trim_start_matches('v').to_string();
-    if !is_newer(&latest, current) {
+    if !is_newer(&latest, current_version) {
         return Ok(None);
     }
-    // `deploy_releases.sh` runs once per platform onto one shared release, so
+    // `deploy_release.py` runs once per platform onto one shared release, so
     // the first platform to finish publishes a release the others aren't in
     // yet. Announcing that would send a Windows user to a page with only a
     // macOS zip — and worse on macOS/Linux, where `install.sh` kills the
@@ -118,7 +132,7 @@ pub async fn check_for_update() -> Result<Option<UpdateInfo>, String> {
         eprintln!("[update] v{latest} exists but has no {wanted} yet — staying quiet");
         return Ok(None);
     }
-    eprintln!("[update] v{latest} available (running v{current})");
+    eprintln!("[update] v{latest} available (running v{current_version})");
     Ok(Some(UpdateInfo {
         version: latest,
         url: release.html_url,
@@ -126,7 +140,7 @@ pub async fn check_for_update() -> Result<Option<UpdateInfo>, String> {
     }))
 }
 
-/// The release asset this host needs, in the exact shape `deploy_releases.sh`
+/// The release asset this host needs, in the exact shape `deploy_release.py`
 /// uploads and `install.sh` downloads: `LeoGit-<ver>-<platform>-<arch>.<ext>`
 /// (Windows swaps the extension for a `-setup.exe` suffix). Kept byte-identical
 /// to those scripts — a mismatch here would either hide real updates or offer
@@ -158,7 +172,7 @@ fn install_command() -> Option<String> {
 }
 
 /// Strictly-newer test over three-part numeric versions — the same ordering
-/// `sort -V` gives our plain `x.y.z` tags in `deploy_releases.sh`. Equal
+/// `sort -V` gives our plain `x.y.z` tags in `deploy_release.py`. Equal
 /// versions are not newer, so a just-updated build goes quiet. A tag we can't
 /// parse is never newer: we'd have no artifact name to offer for it anyway.
 fn is_newer(latest: &str, current: &str) -> bool {
@@ -175,7 +189,7 @@ fn is_newer(latest: &str, current: &str) -> bool {
 /// Coercing is what a lenient parse gets wrong in *both* directions:
 /// `0.2.0-beta.1` would collapse to `(0, 2, 0)` and announce a phantom update
 /// over `0.1.27`, while `0.1.28+build.5` would collapse to `(0, 1, 0)` and
-/// hide a real one. `deploy_releases.sh` only regex-validates the version when
+/// hide a real one. `deploy_release.py` only regex-validates the version when
 /// one is passed as an argument, so a tag like that isn't purely theoretical.
 fn parse3(v: &str) -> Option<(u64, u64, u64)> {
     let mut parts = v.split('.');
@@ -232,7 +246,7 @@ mod tests {
 
     #[test]
     fn artifact_name_matches_what_the_release_scripts_publish() {
-        // Golden strings, byte-identical to what `deploy_releases.sh` uploads
+        // Golden strings, byte-identical to what `deploy_release.py` uploads
         // and `install.sh` downloads by name. If either script's naming
         // changes this must change with it — a name that drifts silently
         // hides every future update instead of failing loudly.

@@ -2,4 +2,7 @@
 # Cargo workspace build output (relocated here from tauri-app/src-tauri/target).
 /target
 
+# Bytecode for the release scripts' shared modules (_common, _version, _build).
+__pycache__/
+
 .DS_Store

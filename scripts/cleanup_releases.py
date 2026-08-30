@@ -1,177 +1,154 @@
 #!/usr/bin/env python3
-import sys
-import os
-import subprocess
-import shutil
-import json
+"""Deletes every GitHub release older than the latest one.
+
+    python3 scripts/cleanup_releases.py             # asks first
+    python3 scripts/cleanup_releases.py --dry-run   # show what would go
+    python3 scripts/cleanup_releases.py --yes       # no prompt
+
+Only the newest release is kept. Its tag is what `install.sh` and the in-app
+update check both resolve, so the older ones carry artifacts nothing will ever
+download again — while still costing storage and making the releases page a
+scroll.
+
+The git tags go with the releases by default: a tag left behind after its
+release is deleted is a commit pointer with nothing attached, and
+`deploy_release.py` reuses an existing tag rather than failing on it, so a
+stray one would silently attach a future release to an old commit. Pass
+--keep-tags to keep them anyway.
+"""
+
+from __future__ import annotations
+
 import argparse
-import re
+import json
 
-# Deletes older releases than the latest one for the LeoGit repository:
-#   1. Validates prerequisites (gh CLI installed and authenticated)
-#   2. Fetches the list of releases
-#   3. Identifies the latest release (to keep) and all older releases (to delete)
-#   4. Deletes older releases and optionally their git tags (both local/remote)
-#
-# Usage: python3 scripts/cleanup_releases.py [options]
-#   By default, it will prompt for confirmation before deleting.
-#   Run with --dry-run to preview actions safely.
+from _common import (
+    GREEN,
+    NC,
+    RED,
+    REPO,
+    Steps,
+    capture,
+    error,
+    finish,
+    quietly,
+    require_gh_auth,
+    require_tools,
+    success,
+    warn,
+)
 
-# ── Colors ──
-RED = '\033[0;31m'
-GREEN = '\033[0;32m'
-YELLOW = '\033[1;33m'
-BLUE = '\033[0;34'
-CYAN = '\033[0;36m'
-NC = '\033[0m'
+step = Steps(3)
 
-# Add missing color escape character fix
-BLUE = '\033[0;34m'
 
-TOTAL_STEPS = 3
-
-def step(step_num, title):
-    print(f"\n{BLUE}[{step_num}/{TOTAL_STEPS}]{NC} {CYAN}{title}{NC}")
-
-def success(msg):
-    print(f"  {GREEN}✓ {msg}{NC}")
-
-def warn(msg):
-    print(f"  {YELLOW}⚠ {msg}{NC}")
-
-def error(msg):
-    print(f"  {RED}✗ {msg}{NC}", file=sys.stderr)
-    sys.exit(1)
-
-def command_exists(name):
-    return shutil.which(name) is not None
-
-def detect_repo():
-    if not command_exists("git"):
-        return "LeoManrique/leogit"
-    
-    # Check if inside git work tree
-    res = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
-    if res.returncode != 0:
-        return "LeoManrique/leogit"
-    
-    # Get origin URL
-    res = subprocess.run(["git", "remote", "get-url", "origin"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
-    if res.returncode != 0:
-        return "LeoManrique/leogit"
-    
-    url = res.stdout.strip()
-    match = re.search(r'github\.com[:/]([^/]+/[^/.]+?)(?:\.git)?$', url)
-    if match:
-        return match.group(1)
-        
-    return "LeoManrique/leogit"
-
-def main():
-    parser = argparse.ArgumentParser(description="Deletes older GitHub releases than the latest one.")
-    parser.add_argument("-d", "--dry-run", action="store_true", help="Show what would be deleted without actually deleting")
-    parser.add_argument("-y", "--yes", action="store_true", help="Skip interactive confirmation prompt")
-    parser.add_argument("-r", "--repo", help="Specify the GitHub repository (owner/repo) (default: auto-detect)")
-    parser.add_argument("-l", "--limit", type=int, default=100, help="Maximum number of releases to inspect (default: 100)")
-    parser.add_argument("--no-cleanup-tag", dest="cleanup_tag", action="store_false", help="Do not delete the git tags associated with the releases")
-    
-    args = parser.parse_args()
-    
-    # Resolve repository
-    repo = args.repo if args.repo else detect_repo()
-    
-    # Change working directory to project root
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(script_dir)
-    os.chdir(project_root)
-    
-    # ── Step 1: Validate prerequisites ──
-    step(1, "Validating prerequisites")
-    
-    if not command_exists("gh"):
-        error("gh CLI is not installed")
-    success("gh CLI found")
-    
-    auth_check = subprocess.run(["gh", "auth", "status"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
-    if auth_check.returncode != 0:
-        error("gh CLI not authenticated. Run: gh auth login")
-    success("gh authenticated")
-    
-    repo_check = subprocess.run(["gh", "repo", "view", repo], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
-    if repo_check.returncode != 0:
-        error(f"Cannot access repository: {repo}")
-    success(f"Repository access verified: {repo}")
-    
-    # ── Step 2: Identify releases ──
-    step(2, f"Identifying releases for {repo}")
-    
-    cmd = ["gh", "release", "list", "--limit", str(args.limit), "--repo", repo, "--json", "tagName"]
-    list_check = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
-    if list_check.returncode != 0:
-        error(f"Failed to list releases: {list_check.stderr.strip()}")
-        
+def releases(limit: int) -> list[str]:
+    """Every release tag, newest first — the order `gh` already lists them in."""
+    code, payload = capture(
+        ["gh", "release", "list", "--limit", str(limit), "--repo", REPO, "--json", "tagName"]
+    )
+    if code != 0:
+        error(f"Failed to list releases for {REPO}")
     try:
-        releases = json.loads(list_check.stdout)
-    except Exception as e:
-        error(f"Failed to parse release JSON output: {e}")
-        
-    if not releases:
-        error(f"No releases found for repository: {repo}")
-        
-    tags = [r["tagName"] for r in releases if "tagName" in r]
-    
-    if len(tags) <= 1:
-        success(f"Only one release exists ({tags[0]}). Nothing to delete.")
-        sys.exit(0)
-        
-    keep_tag = tags[0]
-    delete_tags = tags[1:]
-    
-    print(f"  Keeping latest release: {GREEN}{keep_tag}{NC}")
-    print(f"  The following {RED}{len(delete_tags)}{NC} older releases will be deleted:")
-    for tag in delete_tags:
+        listed = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        error(f"Could not parse the release list: {exc}")
+    return [entry["tagName"] for entry in listed if entry.get("tagName")]
+
+
+def confirm(count: int) -> None:
+    try:
+        answer = input(f"  Delete these {count} releases? [y/N]: ")
+    except (KeyboardInterrupt, EOFError):
+        print()
+        error("Cancelled")
+    if answer.strip().lower() not in ("y", "yes"):
+        error("Cancelled")
+
+
+def delete(tag: str, *, with_tag: bool) -> bool:
+    """Delete one release. Returns whether it went."""
+    command = ["gh", "release", "delete", tag, "--yes", "--repo", REPO]
+    if with_tag:
+        command.append("--cleanup-tag")
+    code, _ = capture(command)
+    if code == 0:
+        return True
+    if not with_tag:
+        return False
+    # A protected or already-deleted tag fails the combined call while the
+    # release itself would have gone fine. Retry without it rather than leaving
+    # a release standing because of its tag.
+    warn(f"{tag}: could not remove the tag, deleting the release alone")
+    code, _ = capture(["gh", "release", "delete", tag, "--yes", "--repo", REPO])
+    return code == 0
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Delete every GitHub release older than the latest one."
+    )
+    parser.add_argument(
+        "-d", "--dry-run", action="store_true", help="show what would be deleted, delete nothing"
+    )
+    parser.add_argument("-y", "--yes", action="store_true", help="skip the confirmation prompt")
+    parser.add_argument(
+        "-l", "--limit", type=int, default=100, help="how many releases to inspect (default: 100)"
+    )
+    parser.add_argument(
+        "--keep-tags",
+        dest="cleanup_tag",
+        action="store_false",
+        help="leave the git tags behind when deleting their releases",
+    )
+    args = parser.parse_args()
+
+    # ── Step 1: Validate prerequisites ──
+    step("Validating prerequisites")
+    require_tools("gh")
+    require_gh_auth()
+    code, _ = capture(["gh", "repo", "view", REPO])
+    if code != 0:
+        error(f"Cannot access {REPO}")
+    success(f"Repository access verified: {REPO}")
+
+    # ── Step 2: Identify releases ──
+    step(f"Identifying releases for {REPO}")
+    tags = releases(args.limit)
+    if not tags:
+        error(f"No releases found for {REPO}")
+    if len(tags) == 1:
+        finish(f"Nothing to delete for {REPO}", f"{tags[0]} is the only release")
+        return
+
+    keep, doomed = tags[0], tags[1:]
+    print(f"  Keeping the latest release: {GREEN}{keep}{NC}")
+    print(f"  Deleting {RED}{len(doomed)}{NC} older releases:")
+    for tag in doomed:
         print(f"    - {tag}")
-        
+
     # ── Step 3: Execute cleanup ──
-    step(3, "Executing cleanup")
-    
+    step("Executing cleanup")
     if args.dry_run:
-        warn("Dry-run active. No releases were deleted.")
-        sys.exit(0)
-        
+        warn("Dry run — nothing was deleted")
+        return
     if not args.yes:
-        try:
-            confirm = input(f"  {YELLOW}⚠{NC} Are you sure you want to delete these {len(delete_tags)} releases? [y/N]: ")
-        except (KeyboardInterrupt, EOFError):
-            print()
-            error("Cleanup cancelled by user.")
-        if not confirm.strip().lower() in ['y', 'yes']:
-            error("Cleanup cancelled by user.")
-            
-    # Set gh release delete flags
-    delete_flags = ["--yes"]
+        confirm(len(doomed))
+
+    failed = [tag for tag in doomed if not delete(tag, with_tag=args.cleanup_tag)]
+    for tag in doomed:
+        if tag not in failed:
+            success(f"Deleted {tag}")
+    if failed:
+        error(f"Could not delete: {', '.join(failed)}")
+
     if args.cleanup_tag:
-        delete_flags.append("--cleanup-tag")
-        
-    for tag in delete_tags:
-        print(f"  Deleting release {tag}... ", end="", flush=True)
-        del_cmd = ["gh", "release", "delete", tag] + delete_flags + ["--repo", repo]
-        del_check = subprocess.run(del_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
-        if del_check.returncode == 0:
-            print(f"{GREEN}Deleted{NC}")
-        else:
-            # Retry without cleanup tag if it failed, or show error
-            warn("Failed to delete with tag. Retrying release only...")
-            print(f"  Deleting release {tag} (release only)... ", end="", flush=True)
-            retry_cmd = ["gh", "release", "delete", tag, "--yes", "--repo", repo]
-            retry_check = subprocess.run(retry_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
-            if retry_check.returncode == 0:
-                print(f"{GREEN}Deleted (release only){NC}")
-            else:
-                print(f"{RED}Failed{NC}")
-                
-    success(f"Cleanup complete. Kept latest release: {keep_tag}")
-    print(f"\n{GREEN}═══ Cleanup complete for {repo} ═══{NC}")
+        # `--cleanup-tag` removes the remote tag; the local clone keeps its own
+        # copy until it is told otherwise, and a stale local tag is exactly what
+        # makes `deploy_release.py` reuse one instead of creating it.
+        quietly(["git", "fetch", "--prune", "--prune-tags", "origin"])
+
+    finish(f"Cleanup complete for {REPO}", f"Kept {keep}")
+
 
 if __name__ == "__main__":
     main()

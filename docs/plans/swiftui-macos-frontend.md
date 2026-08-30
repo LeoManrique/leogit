@@ -365,9 +365,11 @@ Follow LeoGit's rule: implement in user-flow order, verify each step before the 
    store-by-store. Verify each screen against FRONTEND.md before the next.
 6. **Streaming features** — git-progress (push/pull/clone) and the terminal
    (SwiftTerm + PTY reuse) over the chosen event transport.
-7. **Packaging & release** — `.app` assembly + codesign; extend
-   `scripts/deploy_releases.sh` so macOS ships the SwiftUI app while Win/Linux keep
-   shipping Tauri. Single-source the version.
+7. **Packaging & release** — ✅ shipped with the parity plan's WS-T. `.app`
+   assembly + ad-hoc codesign, and `scripts/deploy_release.py` ships the SwiftUI
+   app on macOS while Win/Linux keep shipping Tauri. The version is
+   single-sourced from `tauri.conf.json` across five files by
+   `scripts/_version.py`, with a test in each host crate pinning its half.
 
 Per `CLAUDE.md` visual-testing rule, each UI screen is confirmed by Leo visually
 before it counts as done. Keep meaningful debug logs on both sides during dev.

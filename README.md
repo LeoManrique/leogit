@@ -16,7 +16,7 @@ A calm desktop Git client built with Tauri 2, Rust, and Svelte 5. Designed to ge
 ## Requirements
 
 - `git` and (optionally) `gh` in `$PATH`.
-- macOS 10.13+, Ubuntu 20.04+, or Windows 10+.
+- macOS 26+, Ubuntu 20.04+, or Windows 10+.
 - Node.js 18+ and `pnpm` for development.
 - Rust 1.85+ for building from source (the workspace is on the 2024 edition).
 
@@ -26,7 +26,9 @@ A calm desktop Git client built with Tauri 2, Rust, and Svelte 5. Designed to ge
 curl -fsSL https://raw.githubusercontent.com/LeoManrique/leogit/main/scripts/install.sh | bash
 ```
 
-Auto-detects your platform: installs `leogit.app` into `/Applications` on macOS, or the AppImage into `~/.local/bin` with an app-menu launcher on Linux (x86_64; needs WebKitGTK 4.1 + FUSE 2 — on Arch, `sudo pacman -S webkit2gtk-4.1 fuse2`). Or grab a `.zip` / `.AppImage` from the [latest release](https://github.com/LeoManrique/leogit/releases/latest).
+Auto-detects your platform: installs `LeoGit.app` into `/Applications` on macOS, or the AppImage into `~/.local/bin` with an app-menu launcher on Linux (x86_64; needs WebKitGTK 4.1 + FUSE 2 — on Arch, `sudo pacman -S webkit2gtk-4.1 fuse2`). Or grab a `.zip` / `.AppImage` from the [latest release](https://github.com/LeoManrique/leogit/releases/latest).
+
+A release holds one artifact per platform, each built from whichever client covers it: **macOS runs the native SwiftUI app, Linux and Windows run the Tauri one.** Same version, same features — see [FRONTEND.md](FRONTEND.md) §8 for the handful of places they present the same behaviour differently.
 
 Re-run the same command to upgrade. leogit checks GitHub Releases at launch and, when a newer version exists, shows an **Update** chip in the header that hands you that command (or the installer download on Windows) — nothing downloads or restarts itself.
 
@@ -41,6 +43,9 @@ just build       # produce a debug bundle
 just check       # type-check (svelte-check + cargo check --workspace)
 just mac-run     # build and launch the native macOS app (needs Xcode + xcodegen)
                  # add --no-build to relaunch the last build without rebuilding
+just bundle      # build this platform's release bundle
+just mac-install # install a Release build into /Applications (macOS)
+just release     # build and publish a GitHub release; pass x.y.z to bump first
 ```
 
 (Or run the underlying `pnpm tauri …` commands directly — see `justfile`.)
@@ -64,6 +69,9 @@ apps/
 └── swift-ui-app/        # Native macOS client (SwiftUI, Swift 6)
     ├── ffi/             # leogit-ffi: UniFFI bridge over the same core/
     └── Sources/LeoGit/  # App, Screens, Stores, IPC, Design
+scripts/                 # release pipeline: build, deploy_release, install_local,
+                         #   cleanup_releases (Python, sharing _common/_version/_build)
+                         #   + install.sh, the curlable installer
 Cargo.toml               # workspace root (target/ and Cargo.lock live here)
 ```
 
@@ -81,11 +89,12 @@ dies) → cloning (your GitHub repos via `gh` or any URL, with live progress) �
 with a repo picker — the same searchable list in the toolbar switcher and on the screen
 shown before a repository opens, rows named by their remote with dirty / pull / push
 indicators — that restores the last opened repo at launch, or opens a folder handed to it
-from outside (`open -a LeoGit <dir>`, a drop on the Dock icon, Finder's Open With — one
-that isn't a repository yet is offered one; the installed `leogit` command still opens the
-Tauri build), a menu bar carrying the app's shortcuts, a release check with the same quiet
+from outside (`open -a LeoGit <dir>`, the installed `leogit` command, a drop on the Dock
+icon, Finder's Open With — one that isn't a repository yet is offered one), a menu bar
+carrying the app's shortcuts, a release check with the same quiet
 update chip, and a native Settings window
-(⌘,) editing the same shared config. Every Tauri flow is now ported. Building it also needs Xcode's Metal Toolchain component
+(⌘,) editing the same shared config. Every Tauri flow is ported, and it is what macOS
+releases ship. Building it also needs Xcode's Metal Toolchain component
 (`xcodebuild -downloadComponent MetalToolchain`, once) for SwiftTerm's shaders.
 
 The pre-monorepo design is preserved on the `legacy/classic-design` branch (== tag `v0.1.32`);

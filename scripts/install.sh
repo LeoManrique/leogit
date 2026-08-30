@@ -2,10 +2,18 @@
 set -euo pipefail
 
 # Installs LeoGit from the latest GitHub release for the host platform:
-#   macOS → /Applications/leogit.app
-#   Linux → ~/.local/bin/leogit (AppImage) + an app-menu launcher
+#   macOS → /Applications/LeoGit.app        (the native SwiftUI client)
+#   Linux → ~/.local/bin/leogit (AppImage) + an app-menu launcher (Tauri)
 # Intended to be curlable:
 #   curl -fsSL https://raw.githubusercontent.com/LeoManrique/leogit/main/scripts/install.sh | bash
+#
+# This is the one script written in bash rather than Python. It runs on a
+# machine with no checkout — it is fetched and piped — so it can import nothing,
+# and needs no interpreter beyond the shell that is already running it. That
+# costs a second copy of the platform detection and artifact naming that
+# scripts/_common.py holds for the maintainer scripts; change the two together.
+# The third copy is core::update::artifact_name, which is what decides whether
+# an available release actually contains this build's artifact.
 
 # ── Colors ──
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -21,16 +29,31 @@ REPO="LeoManrique/leogit"
 API_URL="https://api.github.com/repos/$REPO/releases/latest"
 TMP_DIR="/tmp/leogit-install"
 
+# The macOS bundle the native client builds, and the one the Tauri client built
+# when it was what macOS shipped. On a case-insensitive volume — the default —
+# these are the same path, which is why only one client ships per platform; a
+# machine that installed the old one still has it under the other spelling.
+MAC_BUNDLE="LeoGit.app"
+MAC_BUNDLE_LEGACY="leogit.app"
+
 # ── leogit() shell command ────────────────────────────────────────────────────
 # A `leogit` shell function lets you open a repo straight from a terminal:
-# `leogit` (current dir) or `leogit <path>`. It resolves the directory and hands
-# it to the app — on macOS via `open -n --args` (a fresh process whose argv the
-# single-instance plugin forwards to the running window), on Linux via the PATH
-# wrapper, backgrounded so the terminal returns. Installed into the rc file of
-# the user's login shell (detected from $SHELL in Step 6 below).
+# `leogit` (current dir) or `leogit <path>`. Installed into the rc file of the
+# user's login shell (detected from $SHELL in step 6).
+#
+# It names the path this installer just wrote, and uses the form that path's
+# client understands. Both halves are load-bearing:
+#
+#   * A path, not `open -b <bundle id>`. A bundle id resolves through Launch
+#     Services to whichever copy was registered last, which on a machine that
+#     also builds the app is a Debug build in a derived-data directory. The
+#     installer is the one thing that knows where the installed copy is.
+#   * `open -a "<path>" "$dir"`, not `open -na "<path>" --args "$dir"`. The
+#     native app declares `public.folder` under CFBundleDocumentTypes, so
+#     LaunchServices delivers the folder to `application(_:open:)` — on a cold
+#     start *and* to an already-running instance, which is the case `--args`
+#     cannot serve, argv being read only once at launch.
 
-# Emit the marker-delimited zsh/bash block for the current $OS. Quoted heredocs
-# keep $dir / $target / $1 literal in the generated function body.
 leogit_shell_block() {
   cat <<'HEADER'
 # >>> leogit >>>
@@ -38,14 +61,17 @@ leogit_shell_block() {
 # Managed by the LeoGit installer; re-running the installer replaces this block.
 HEADER
   if [ "$OS" = "darwin" ]; then
-    cat <<'MAC'
+    # Unquoted heredoc so $DEST — the path this run installed to — is baked in;
+    # everything the generated function evaluates at *its* call time is escaped
+    # to stay literal. The Linux block below needs none of that and stays quoted.
+    cat <<MAC
 leogit() {
-  local target="${1:-.}" dir
-  if ! dir=$(cd "$target" 2>/dev/null && pwd); then
-    echo "leogit: no such directory: $target" >&2
+  local target="\${1:-.}" dir
+  if ! dir=\$(cd "\$target" 2>/dev/null && pwd); then
+    echo "leogit: no such directory: \$target" >&2
     return 1
   fi
-  open -na "/Applications/leogit.app" --args "$dir"
+  open -a "$DEST" "\$dir"
 }
 MAC
   else
@@ -88,15 +114,15 @@ install_fish_function() {
   mkdir -p "$dir" 2>/dev/null || return 1
   local f="$dir/leogit.fish"
   if [ "$OS" = "darwin" ]; then
-    cat > "$f" <<'FISH'
+    cat > "$f" <<FISH
 function leogit --description 'Open a repository in LeoGit'
-    set -l target $argv[1]
-    test -z "$target"; and set target "."
-    if not test -d "$target"
-        echo "leogit: no such directory: $target" >&2
+    set -l target \$argv[1]
+    test -z "\$target"; and set target "."
+    if not test -d "\$target"
+        echo "leogit: no such directory: \$target" >&2
         return 1
     end
-    open -na "/Applications/leogit.app" --args (realpath "$target")
+    open -a "$DEST" (realpath "\$target")
 end
 FISH
   else
@@ -156,20 +182,33 @@ esac
 success "Platform: $PLATFORM"
 
 # ── Step 2: Stop any running instance ──
-# A running app holds an open file lock on its binary; replacing the bundle
-# on disk while the old copy is running leaves you with a half-old/half-new
-# install until the next launch. Kill it first.
+# A running app holds an open file lock on its binary; replacing the bundle on
+# disk while the old copy is running leaves a half-old/half-new install until
+# the next launch.
 step 2 "Stopping running instance"
 
-if pgrep -x leogit >/dev/null 2>&1; then
-  pkill -TERM -x leogit 2>/dev/null || true
+if [ "$OS" = "darwin" ]; then
+  # Match the executable path inside the bundle rather than the process name.
+  # Both spellings, because a machine upgrading from the Tauri macOS build has
+  # its old copy running under the other one, and `pgrep` matches case-sensitively
+  # even where the filesystem does not.
+  RUNNING_PATTERN='/Contents/MacOS/(LeoGit|leogit)'
+  is_running() { pgrep -f "$RUNNING_PATTERN" >/dev/null 2>&1; }
+  stop_running() { pkill -"$1" -f "$RUNNING_PATTERN" 2>/dev/null || true; }
+else
+  is_running() { pgrep -x leogit >/dev/null 2>&1; }
+  stop_running() { pkill -"$1" -x leogit 2>/dev/null || true; }
+fi
+
+if is_running; then
+  stop_running TERM
   for _ in $(seq 1 16); do
-    pgrep -x leogit >/dev/null 2>&1 || break
+    is_running || break
     sleep 0.5
   done
-  if pgrep -x leogit >/dev/null 2>&1; then
-    warn "Force-killing leogit (graceful stop timed out)"
-    pkill -KILL -x leogit 2>/dev/null || true
+  if is_running; then
+    warn "Force-killing LeoGit (graceful stop timed out)"
+    stop_running KILL
   fi
   success "Stopped running instance"
 else
@@ -189,13 +228,17 @@ VERSION="${TAG#v}"
 success "Latest version: $VERSION (tag: $TAG)"
 
 # ── Step 4: Download artifact ──
+# The name is built the same way core::update::artifact_name and
+# scripts/_common.py build it — a release holds one artifact per platform, and
+# each is uploaded by a run of deploy_release.py on a machine of that kind.
 ARTIFACT="LeoGit-$VERSION-$PLATFORM.$ARTIFACT_EXT"
 step 4 "Downloading $ARTIFACT"
 
 # `|| true` keeps a no-match from tripping `set -o pipefail` and aborting the
 # script silently before the explicit "not found" check below can run.
 DOWNLOAD_URL=$(echo "$RELEASE_JSON" | { grep -o '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*'"$ARTIFACT"'"' || true; } | head -1 | sed 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
-[ -z "$DOWNLOAD_URL" ] && error "Could not find artifact $ARTIFACT in release $TAG"
+[ -z "$DOWNLOAD_URL" ] \
+  && error "Release $TAG has no $ARTIFACT yet. Releases are published one platform at a time — try again shortly."
 
 rm -rf "$TMP_DIR"
 mkdir -p "$TMP_DIR"
@@ -208,29 +251,35 @@ success "Downloaded $ARTIFACT"
 step 5 "Installing LeoGit"
 
 if [ "$OS" = "darwin" ]; then
-  APP_NAME="leogit.app"
-  DEST="/Applications/$APP_NAME"
+  DEST="/Applications/$MAC_BUNDLE"
 
   # `ditto -x -k` unpacks the zip preserving the bundle structure (xattrs,
-  # resource forks, symlinks) — the inverse of how deploy_releases.sh packs it.
+  # resource forks, symlinks) — the inverse of how deploy_release.py packs it.
   ditto -x -k "$TMP_DIR/$ARTIFACT" "$TMP_DIR"
-  [ -d "$TMP_DIR/$APP_NAME" ] || error "Expected $APP_NAME inside $ARTIFACT, but didn't find it"
+  [ -d "$TMP_DIR/$MAC_BUNDLE" ] || error "Expected $MAC_BUNDLE inside $ARTIFACT, but didn't find it"
 
-  if [ -d "$DEST" ]; then
-    rm -rf "$DEST"
-    warn "Replaced existing $DEST"
-  fi
-  mv "$TMP_DIR/$APP_NAME" "$DEST"
+  # Both spellings, not just the one being written. On the usual
+  # case-insensitive volume the second removal is a no-op; on a case-sensitive
+  # one they are two directories, and leaving the older client behind would put
+  # two LeoGits in /Applications with the same purpose.
+  for existing in "$MAC_BUNDLE" "$MAC_BUNDLE_LEGACY"; do
+    if [ -d "/Applications/$existing" ]; then
+      rm -rf "/Applications/$existing"
+      warn "Replaced existing /Applications/$existing"
+    fi
+  done
+  mv "$TMP_DIR/$MAC_BUNDLE" "$DEST"
 
   # Strip the quarantine xattr Gatekeeper adds to anything downloaded via curl.
   # Without this, ad-hoc-signed bundles trigger a "developer cannot be verified"
-  # dialog and won't open with a double-click. Stripping is the standard escape
-  # hatch for open-source / unsigned tools.
-  xattr -cr "$DEST" 2>/dev/null || true
+  # dialog and won't open with a double-click. Only that attribute, not every
+  # xattr: a blanket clear is a needless swing at the code signature.
+  xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
 
-  # Register with Launch Services so Spotlight, Launchpad, and `open -a leogit`
-  # resolve the freshly-unpacked bundle. Without this, LS only learns about the
-  # app the first time Finder touches it.
+  # Register with Launch Services so Spotlight, Launchpad and `open -a` resolve
+  # the freshly-unpacked bundle — the last of those is how the `leogit` shell
+  # function below reaches the app. Without this, Launch Services only learns
+  # about it the first time Finder touches it.
   LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
   [ -x "$LSREGISTER" ] && "$LSREGISTER" -f "$DEST" >/dev/null 2>&1 || true
 
@@ -316,6 +365,8 @@ fi
 rm -rf "$TMP_DIR"
 
 # ── Step 6: Install the `leogit` shell command ──
+# After step 5, because the function it writes names $DEST — the path the
+# install actually used.
 step 6 "Installing the leogit shell command"
 
 if install_leogit_shell_command; then
@@ -327,7 +378,7 @@ fi
 
 echo -e "\n${GREEN}═══ LeoGit $VERSION installed ═══${NC}"
 if [ "$OS" = "darwin" ]; then
-  echo -e "  ${CYAN}Open from /Applications, Spotlight, or:  open $DEST${NC}"
+  echo -e "  ${CYAN}Open from /Applications, Spotlight, or:  open \"$DEST\"${NC}"
 else
   echo -e "  ${CYAN}Launch from your app menu, or run:  leogit${NC}"
   echo -e "  ${CYAN}(ensure ~/.local/bin is on your PATH)${NC}"

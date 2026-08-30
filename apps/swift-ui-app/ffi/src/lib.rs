@@ -1771,10 +1771,17 @@ pub fn resolve_launch_target(args: Vec<String>, cwd: String) -> Option<LaunchTar
     launch::resolve_launch_target(&args, std::path::Path::new(&cwd))
 }
 
-/// Ask GitHub Releases whether a version newer than this build exists.
+/// Ask GitHub Releases whether a version newer than `current_version` exists.
 /// `None` means this build is current — or that the newer release has no
 /// artifact for this platform yet, which core withholds rather than offering
 /// an update the installer could not complete.
+///
+/// The version crosses the bridge rather than being read on this side: the app
+/// this crate is linked into is versioned by `project.yml`'s
+/// `MARKETING_VERSION`, which reaches the built bundle as
+/// `CFBundleShortVersionString` and never reaches Cargo at all. `leogit-ffi`'s
+/// own manifest version is not the app's and is not what a release is named
+/// after, so `Bundle.main` is the only place the answer exists.
 ///
 /// # Errors
 ///
@@ -1782,8 +1789,10 @@ pub fn resolve_launch_target(args: Vec<String>, cwd: String) -> Option<LaunchTar
 /// GitHub down). That is "couldn't check", not "no update": the caller retries
 /// quietly and shows the user nothing.
 #[uniffi::export(async_runtime = "tokio")]
-pub async fn check_for_update() -> Result<Option<UpdateInfo>, GitError> {
-    update::check_for_update().await.map_err(GitError::from)
+pub async fn check_for_update(current_version: String) -> Result<Option<UpdateInfo>, GitError> {
+    update::check_for_update(&current_version)
+        .await
+        .map_err(GitError::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -1967,6 +1976,36 @@ mod tests {
     #[test]
     fn core_version_is_reported() {
         assert!(!core_version().is_empty());
+    }
+
+    /// The app this crate is linked into reads its own version out of its
+    /// bundle, which `XcodeGen` fills from `project.yml`'s `MARKETING_VERSION` —
+    /// a number that never reaches Cargo, so no manifest can be made to agree
+    /// with it by construction. `scripts/_version.py` moves it together with
+    /// `tauri.conf.json`, the declared source of truth; this fails the build if
+    /// anything else moves one alone, which would ship a macOS app comparing
+    /// the wrong version against the latest tag on every launch.
+    ///
+    /// Reaching into the other app's directory is the point: the two clients
+    /// share one version because they share one release.
+    #[test]
+    fn marketing_version_matches_the_declared_product_version() {
+        fn quoted_after<'a>(text: &'a str, key: &str) -> &'a str {
+            text.lines()
+                .find_map(|line| line.trim().strip_prefix(key))
+                .and_then(|rest| rest.split('"').next())
+                .unwrap_or_else(|| panic!("no {key} found"))
+        }
+
+        let marketing = quoted_after(include_str!("../../project.yml"), "MARKETING_VERSION: \"");
+        let declared = quoted_after(
+            include_str!("../../../tauri-app/src-tauri/tauri.conf.json"),
+            "\"version\": \"",
+        );
+        assert_eq!(
+            marketing, declared,
+            "project.yml's MARKETING_VERSION and tauri.conf.json disagree about the version"
+        );
     }
 
     /// Runs `git` in `dir`, panicking on failure so a broken fixture is loud.

@@ -1,6 +1,6 @@
 # Plan — Cross-client feature parity (SwiftUI ⇄ Tauri)
 
-> Status: **in progress — WS-A…WS-E shipped 2026-08-27, WS-F through WS-J and WS-L…WS-N 2026-08-28, WS-O through WS-S 2026-08-29/30. WS-T is next. One named half is deliberately outstanding: the Tauri client's multi-line diff copy (DF-6), whose design is written out in that item; D-22 is deferred by decision (§10). WS-K is unblocked but needs a Linux machine (§6's sequencing note), so it is taken whenever that machine is available. WS-T is the deliberate last one.**
+> Status: **WS-A…WS-E shipped 2026-08-27, WS-F through WS-J and WS-L…WS-N 2026-08-28, WS-O through WS-T 2026-08-29/30. Two pieces remain: WS-K, which needs a Linux machine rather than a predecessor (§6's sequencing note), and DF-6(T), the Tauri client's multi-line diff copy — a named half with no workstream of its own, whose design is written out in that item. D-22 is deferred by decision (§10); D-21, D-23 and D-24 are open and all Low.**
 > The remaining work was re-cut into seventeen smaller workstreams (C…S) on
 > 2026-08-27 after WS-B proved too large to review as one piece — see §6.
 > Accepted 2026-08-27 with every open decision resolved. Per-workstream state
@@ -1172,13 +1172,14 @@ and matched, not that it was skipped.
   (`resolve_repo_root` already validates the restore) and would be dead surface
   the FFI's own rule forbids, and the `set`/`take_pending_launch_target` pair —
   see WS-M's §6 entry.
-  **`install.sh` is unfinished and needs a decision** (§6, WS-M's findings):
-  the entry's premise was wrong twice over — the shell function points at a
-  *path*, not a bundle id, and its `open -na … --args` form reaches argv rather
-  than the document callback, so the plan's own suggested command would work
-  only on a cold start. The deeper problem is that `install.sh` installs the
-  Tauri release into that path and the native app has no release artifact, so
-  there is nothing for a branch to key on. → the open question in WS-M's entry
+  ✅ *WS-T* closed the installer half. The `leogit` command reaches the native
+  app because the installer generates the shell function **after** the install,
+  naming the path it just wrote and using the form that path's client
+  understands — `open -a "<path>" "$dir"`, which the document type routes to
+  `application(_:open:)` warm as well as cold. Both earlier objections were
+  about a function written blind; neither survives the installer knowing its own
+  answer. macOS releases are built from the native client (WS-T's
+  `RELEASE_CLIENT`), so the path a release installs is this app.
 - **SH-2 · Menu bar as the discovery surface.** ✅ *WS-H* for the Tauri half:
   ⌘1/⌘2 select the two tabs absolutely, beside the ⌘L toggle rather than
   replacing it — the toggle is the one people have, and an absolute binding is
@@ -2354,13 +2355,14 @@ is mostly adoption of already-proven native behavior.
     finding below; D-23 and D-24 were filed and the one defect among the three
     was fixed.
 
-    Gates: zero-warning `just mac-build`, `pnpm check` 0/0 over 153 files,
-    prettier clean, 181 core + 24 bridge + 2 host tests, `cargo fmt --check`
-    clean, clippy-pedantic **165 in core** with `leogit` and `leogit-ffi` at
-    zero. `pnpm tauri build` compiles and bundles `leogit.app` cleanly; its
-    `.dmg` step fails in an agent shell on `Finder got an error: The Finder is
-    busy. (-15260)` from `bundle_dmg.sh`'s cosmetic AppleScript, which needs a
-    real user session — run it once from a terminal to confirm the artifact.
+    Gates: zero-warning `just mac-build`, `pnpm check` 0/0 over 154 files
+    (the workstream added `RepoDiscoveryFailure.svelte`), prettier clean, 181
+    core + 24 bridge + 2 host tests, `cargo fmt --check` clean,
+    clippy-pedantic **165 in core** with `leogit` and `leogit-ffi` at zero.
+    `pnpm tauri build` compiles and bundles `leogit.app` cleanly; its `.dmg`
+    step fails in an agent shell on `Finder got an error: The Finder is busy.
+    (-15260)` from `bundle_dmg.sh`'s cosmetic AppleScript, which needs a real
+    user session.
 
     Findings for WS-T and after:
     - **"File it as a divergence" is a claim to check, not an instruction to
@@ -2396,27 +2398,102 @@ is mostly adoption of already-proven native behavior.
       behaviour* needs re-reading whenever that client changes, and WS-T should
       expect the same of the `leogit`-opens-the-Tauri-build sentences.
 
-20. **WS-T — `leogit` reaches the native app (S).** ✅ **Decided, deliberately
-    last.** `install.sh` writes a `leogit [dir]` shell function pointing at
-    `/Applications/leogit.app` — the **Tauri** bundle, which is the only one with
-    a release artifact. It stays that way until parity is done, because the two
-    candidate shortcuts are both wrong: the function names a *path*, not a bundle
-    id, so on a case-insensitive volume a native `LeoGit.app` cannot coexist there
-    anyway; and its `open -na … --args "$dir"` form sends the folder through
-    **argv**, which reaches a native app only on a cold start, while the working
-    form (`open -a … "$dir"`) is one the Tauri app would ignore, having no
-    document types. Falling back to `open -b <native bundle id>` would silently
-    point `leogit` at whatever build LaunchServices last registered, a stale
-    DerivedData one included. So: **the native app gets a release artifact and a
-    real installer branch, once every other workstream has landed** — release
-    engineering, taken as the last piece rather than smuggled into a parity
-    workstream. Until then the native app is reached from Finder, `just mac-run`,
-    or `open -a <path> <dir>`, and every living doc says so plainly.
+20. **WS-T — `leogit` reaches the native app (S/M).** ✅ **Shipped 2026-08-30.**
+    The native app has a release artifact, macOS releases are built from it, and
+    the `leogit [dir]` shell function points at the copy the installer wrote.
+    The release scripts were reorganised into Python around three shared modules
+    on the way.
 
-Suggested order: **A → B → … → S**, then **T**, as lettered. Each workstream
-maintained its own doc rows as it landed (per CLAUDE.md); WS-S carried only what
-needed the whole plan finished, and WS-T needs WS-S — which has shipped, so
-apart from WS-K's Linux machine and DF-6, WS-T is what is left.
+    **`RELEASE_CLIENT` — one artifact per platform, macOS native.** A release is
+    one tag holding one artifact per OS, each built from whichever client covers
+    it: macOS native, Linux and Windows Tauri. Not a preference —
+    `core::update::artifact_name` decides whether a release contains *this*
+    build's artifact from `cfg!(target_os)` alone and no cfg separates a native
+    macOS build from a Tauri one, so two macOS artifacts would leave each client
+    looking for a name that could belong to either. `LeoGit.app` and `leogit.app`
+    are the same path on a case-insensitive volume besides. `build.py --client
+    tauri` still builds the Tauri bundle on macOS, so the path a release does not
+    publish stays exercised rather than rotting.
+
+    **The entry's premise, answered.** Both objections were about a shell
+    function written *blind*. The installer is the one thing that knows where it
+    put the app, so the function is generated after the install, naming that
+    path — no bundle id to resolve through Launch Services to a stale
+    DerivedData build — and in the form that path's client understands:
+    `open -a "<path>" "$dir"` on macOS, which the native app's `public.folder`
+    document type routes to `application(_:open:)` warm as well as cold, and the
+    backgrounded PATH wrapper on Linux. Both bundle names are removed on
+    install, so a machine upgrading from the Tauri macOS build does not keep it
+    under the other spelling.
+
+    **Two live version defects, found by reading the release path.** Both had
+    the same shape — a version read where it could not be right:
+    - `core::update::check_for_update` compared against
+      `env!("CARGO_PKG_VERSION")`, which in a *core* source file expands to
+      `leogit-core`'s `0.1.0` — a number no release is named after. Every
+      published release compared newer than every build, for ever, in both
+      clients. The version is a parameter now; each host passes its own.
+    - XcodeGen does not derive the Info.plist version keys from the build
+      settings, and writes the literal `"1.0"` for an undeclared
+      `CFBundleShortVersionString`. The native app had always reported 1.0.
+      Both keys are declared as `$(MARKETING_VERSION)` /
+      `$(CURRENT_PROJECT_VERSION)` now, and `project.yml` joined the version
+      files at 0.1.32.
+
+    A test in each host crate pins its half of the agreement — the Tauri crate's
+    `CARGO_PKG_VERSION` against `tauri.conf.json`, and `project.yml`'s
+    `MARKETING_VERSION` against the same — so drift fails `cargo test` rather
+    than release day. Both were confirmed to fail on an induced mismatch.
+
+    **Scripts.** `bundle.sh`, `deploy_releases.sh` and the unreferenced
+    `apps/tauri-app/verify-build.sh` are gone. `build.py`, `deploy_release.py`,
+    `install_local.py` and `cleanup_releases.py` share `_common.py` (console,
+    subprocesses, paths, platform, artifact naming), `_version.py` (the five
+    files that state the version) and `_build.py` (build, sign, package,
+    install), wrapped by `just bundle` / `release` / `mac-install` /
+    `cleanup-releases`. **`install.sh` stayed bash by decision**: it runs on a
+    machine with no checkout, so it can import nothing and needs no interpreter
+    beyond the shell already running it. It pays a second copy of the platform
+    detection and artifact naming; both files name the other.
+
+    The macOS Release build is `clean`, because an incremental one re-copies the
+    SPM resource bundles without re-signing the app around them and leaves a
+    seal Gatekeeper refuses. `ONLY_ACTIVE_ARCH: YES` now holds in Release too:
+    the app links a `libleogit_ffi.a` cargo built for one triple, so a universal
+    build would fail at the link step — going universal means lipo-ing two cargo
+    targets first, and the per-arch artifact name already says which is which.
+
+    Gates: zero-warning `just mac-build` **and** zero-warning Release build,
+    `pnpm check` 0/0 over 154 files, prettier clean, **181 core + 25 bridge + 3
+    host** tests, `cargo fmt --check` clean, clippy-pedantic 165 in core with
+    `leogit` and `leogit-ffi` at zero, and `build.py --client tauri` bundling
+    `leogit.app` with no warnings. The artifact was built, packaged, unpacked
+    and re-verified end to end (`LeoGit-0.1.32-macOS-arm64.zip`, 10 MB, seal
+    intact after the round trip). Asking for one bundle format also retires
+    WS-S's `.dmg`/Finder failure from the release path: nothing in it invokes
+    the cosmetic AppleScript. Plain `pnpm tauri build` still does.
+
+    Findings for whoever is next:
+    - **`env!("CARGO_PKG_VERSION")` in a library crate is almost always a bug.**
+      It answers for the crate the *file* is in, not the binary. Anything in
+      `core/` that wants to know something about the running application has to
+      be told it.
+    - **A generated Info.plist is not derived from the build settings.** Assume
+      XcodeGen writes a placeholder for anything `info.properties` does not
+      declare, and check the built bundle rather than the spec.
+    - **The remaining pieces are WS-K (needs a Linux machine) and DF-6(T)**, the
+      Tauri half of the model-based multi-line copy, whose design is written out
+      in that item. DF-6 belongs to no workstream and wants one.
+    - A small honest oddity, deliberately left: the welcome screen's `core
+      <ver>` line is `leogit-ffi`'s manifest version (0.1.0), a bridge smoke
+      test. It is labelled "core", so it is not wrong, but on a 0.1.32 app it
+      reads oddly — a UI change, so it wants a visual sign-off rather than a
+      drive-by edit.
+
+Suggested order: **A → B → … → T**, as lettered. Each workstream maintained its
+own doc rows as it landed (per CLAUDE.md); WS-S carried only what needed the
+whole plan finished. What is left is **WS-K**, which needs a Linux machine, and
+**DF-6(T)**, which needs a workstream of its own.
 
 One sequencing note that is not free to reorder: **WS-K needs a Linux machine
 rather than a predecessor** — WS-J, the workstream it waited on, has shipped, so
@@ -2454,11 +2531,11 @@ other decision lives inline with the item it governs, marked **Decided** in §4.
 Per workstream, matching the previous plan's bar:
 
 - Zero-warning `xcodebuild` via `just mac-build`; `pnpm check` (svelte-check)
-  0/0 over 153 files; `cargo test --workspace` green (**181 core + 24 bridge + 2 host** — up
+  0/0 over 154 files; `cargo test --workspace` green (**181 core + 25 bridge + 3 host** — up
   from the 120 + 24 this plan started at; ten of them are WS-J's `exclusions`
-  module, three are WS-P's copy fixes, and the host's two are WS-I's, pinning
-  the terminal channel's JSON because the TypeScript that reads it is
-  hand-written);
+  module, three are WS-P's copy fixes, two are WS-I's, pinning the terminal
+  channel's JSON because the TypeScript that reads it is hand-written, and one
+  in each host crate is WS-T's version-drift pin);
   `cargo clippy --workspace --all-targets -- -W clippy::pedantic` at
   **165** or better, never worse (the plan opened at 184; WS-B took it to 170,
   WS-C to 166, WS-F to 165), with `leogit` and `leogit-ffi` at zero. A Tauri

@@ -17,6 +17,17 @@ options:
     macOS: "26.0"
   createIntermediateGroups: true
 
+  fileTypes:
+    # An Icon Composer document is a *directory* on disk, and XcodeGen walks
+    # directories: without this it adds `icon.json` and `Assets/icon.png` as two
+    # loose resources, which build without complaint and leave the app with the
+    # generic icon, because nothing in the bundle is an icon any more. `file:
+    # true` makes it one reference that actool compiles, which is how Xcode
+    # itself treats the package.
+    icon:
+      file: true
+      buildPhase: resources
+
 settings:
   base:
     # Swift 6 language mode: data-race safety as errors rather than warnings.
@@ -67,6 +78,11 @@ targets:
       # failure to Xcode, which reports a far more confusing missing-build-input
       # error against a file the build itself is supposed to produce.
       - path: ffi/generated/LeoGitCore.swift
+      # The app icon, authored in Icon Composer. Deliberately *not* inside an
+      # asset catalog — Xcode 26 consumes an `.icon` package standing on its
+      # own, and putting one in a catalog is what Apple's own instructions say
+      # not to do.
+      - path: Resources/AppIcon.icon
 
     dependencies:
       - package: SwiftTerm
@@ -78,6 +94,15 @@ targets:
         LSApplicationCategoryType: public.app-category.developer-tools
         LSMinimumSystemVersion: "26.0"
         NSHumanReadableCopyright: "© 2026 Leonardo Manrique"
+
+        # Both version keys are declared rather than left out. XcodeGen does
+        # not derive them from the build settings — an undeclared
+        # CFBundleShortVersionString is written as the literal "1.0" — and the
+        # app reads its own version back out of this dictionary to ask GitHub
+        # whether a newer release exists. Left at the default it would compare
+        # low against every tag and announce an update for ever.
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
 
         # Declaring folders as a document type is what routes `open -a LeoGit
         # <dir>` into
@@ -100,8 +125,32 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.leomanrique.leogit.mac
         PRODUCT_NAME: LeoGit
-        MARKETING_VERSION: "0.1.0"
+
+        # The product's version, not this client's: one release covers both
+        # frontends, and `scripts/_version.py` moves this line together with
+        # tauri.conf.json, package.json and the host crate's Cargo.toml.
+        # XcodeGen writes it into the generated Info.plist as
+        # CFBundleShortVersionString, which is where the app reads its own
+        # version back for the update check — nothing else can tell it, since
+        # this number never reaches Cargo.
+        MARKETING_VERSION: "0.1.32"
         CURRENT_PROJECT_VERSION: "1"
+
+        # Host architecture only, in Release as well as Debug. The app links
+        # `libleogit_ffi.a`, which `build-rust.sh` compiles for one target
+        # triple, so a universal build would fail at the link step for the arch
+        # the archive does not contain. The release pipeline is per-architecture
+        # to match: the artifact carries the arch in its name and is built on a
+        # machine of that kind, exactly as the Linux and Windows ones are.
+        # Going universal means lipo-ing two cargo targets together first.
+        ONLY_ACTIVE_ARCH: YES
+
+        # Names `Resources/AppIcon.icon`, extension dropped. Set explicitly
+        # rather than relying on the "AppIcon" default: the file being found at
+        # all depends on this matching its basename, and a mismatch is silent —
+        # the build succeeds and ships the generic icon.
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+
         ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOL_EXTENSIONS: NO
       configs:
         # Linked by absolute path rather than -l + LIBRARY_SEARCH_PATHS: the

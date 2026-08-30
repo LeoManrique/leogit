@@ -89,6 +89,8 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 ## Spacing, radii, focus
 
 - **Radius scale:** 6px for inputs, buttons, file rows when selected; 8px for menu items, dropdown items, terminal pane; 10px for modals and the branch picker; 12px for the app icon. Avoid larger than 12px in chrome — corners shouldn't shout.
+
+  The shipped **app icon** is the branch-graph mark on a dark ground: three nodes and two edges, the diverge-and-merge shape the whole app is about, in the blue→violet gradient. Both clients carry it. The native one authors it in Icon Composer (`apps/swift-ui-app/Resources/AppIcon.icon`), so macOS 26 applies its own rounding, shadow and specular pass — the squircle is the system's, not ours, and the source art must therefore stay a flat full-bleed square with no baked-in corner or shadow of its own.
 - **Padding for controls:** ~4×8px (inputs), ~3×12px (buttons), ~6×10px (dropdown items). System-native controls are surprisingly tight.
 - **Row height in dense lists:** ~22–24px effective. Vertical padding of 4px with 13px text matches macOS Finder list view. This applies to the file list and the branch list. The commit list is the deliberate exception — its rows are 50px because each commit stacks a summary line and an author/date line (see Commit list).
 - **Pane gutters:** 1px borders, never wider. The sidebar/content separator and tab-bar underline are both 1px `--border-inactive`. No 2px divider, no double rule. A resize handle's *grab zone* may be wider (~7px) — its rule stays 1px.

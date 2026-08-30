@@ -671,8 +671,19 @@ enum GitBridge {
     ///
     /// Already async in the bindings — core drives the request through tokio —
     /// so no `@concurrent` hop is needed or wanted here.
+    ///
+    /// The version travels *into* core rather than being read there. This app
+    /// is versioned by `project.yml`'s `MARKETING_VERSION`, which XcodeGen
+    /// writes into the generated `Info.plist` as `CFBundleShortVersionString`
+    /// and which never reaches Cargo — so the bundle is the only place that
+    /// knows what release this build is. A bundle with no such key is not a
+    /// release build at all; `"0.0.0"` compares low against every published
+    /// tag, which surfaces as "an update exists" rather than as silence.
     static func latestRelease() async throws -> UpdateInfo? {
-        try await checkForUpdate()
+        let version =
+            Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? "0.0.0"
+        return try await checkForUpdate(currentVersion: version)
     }
 
     // MARK: - Embedded terminal

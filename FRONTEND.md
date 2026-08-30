@@ -844,9 +844,10 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    no reset, no refetch, no MRU bump. A repository outside every scan path keeps its
    row from then on through the shared MRU (§6.9).
    **A second invocation must never open a second window.** The Tauri host intercepts
-   it with `plugin-single-instance`; macOS does it in LaunchServices (§8). (The `leogit`
-   shell function `install.sh` writes still targets the Tauri bundle, so today it is
-   `open -a LeoGit <dir>`, the Dock and Finder that exercise the native path.)
+   it with `plugin-single-instance`; macOS does it in LaunchServices (§8). The `leogit`
+   shell function `install.sh` writes is `open -a "<installed path>" <dir>` on macOS —
+   the document-types route, which reaches a running instance as well as a cold one —
+   and the backgrounded PATH wrapper on Linux.
 20. **The release check is once per session, and never interrupts.** One
    `check_for_update` on start, retried every 30 minutes **only while attempts keep
    failing** and once more on the offline→online edge — launching offline is exactly
