@@ -155,7 +155,7 @@ The installer detects your platform (macOS and Linux) and also adds the
 ### Requirements
 
 - macOS 26 or later (Apple silicon or Intel, matching the artifact's architecture)
-- Linux (x86_64) with WebKitGTK 4.1 + FUSE 2 (Arch: `sudo pacman -S webkit2gtk-4.1 fuse2`)
+- Linux (arm64 or amd64, matching the artifact's architecture) with FUSE 2 (Arch: `sudo pacman -S fuse2`)
 - Windows 10/11 (the installer bundles the WebView2 bootstrapper)"""
 
 

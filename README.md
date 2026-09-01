@@ -26,7 +26,7 @@ A calm desktop Git client built with Tauri 2, Rust, and Svelte 5. Designed to ge
 curl -fsSL https://raw.githubusercontent.com/LeoManrique/leogit/main/scripts/install.sh | bash
 ```
 
-Auto-detects your platform: installs `LeoGit.app` into `/Applications` on macOS, or the AppImage into `~/.local/bin` with an app-menu launcher on Linux (x86_64; needs WebKitGTK 4.1 + FUSE 2 — on Arch, `sudo pacman -S webkit2gtk-4.1 fuse2`). Or grab a `.zip` / `.AppImage` from the [latest release](https://github.com/LeoManrique/leogit/releases/latest).
+Auto-detects your platform: installs `LeoGit.app` into `/Applications` on macOS, or the AppImage into `~/.local/bin` with an app-menu launcher on Linux (arm64 or amd64; needs FUSE 2 — on Arch, `sudo pacman -S fuse2`). Or grab a `.zip` / `.AppImage` from the [latest release](https://github.com/LeoManrique/leogit/releases/latest).
 
 A release holds one artifact per platform, each built from whichever client covers it: **macOS runs the native SwiftUI app, Linux and Windows run the Tauri one.** Same version, same features — see [FRONTEND.md](FRONTEND.md) §8 for the handful of places they present the same behaviour differently.
 
