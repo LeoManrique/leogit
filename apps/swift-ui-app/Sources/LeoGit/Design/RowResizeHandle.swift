@@ -7,10 +7,13 @@ import SwiftUI
 /// system row-resize pointer, which is how the affordance gets discovered.
 ///
 /// It is also reachable from the keyboard, which is the only way it exists for
-/// anyone who cannot make a 7 pt drag: Tab to it, then ↑/↓ to move it 16 pt at
-/// a time and Home/End to send it to either bound. VoiceOver gets the same
-/// two steps as an adjustable element, so the handle is one control however it
-/// is reached.
+/// anyone who cannot make a 7 pt drag: with macOS keyboard navigation on, Tab
+/// to it, then ↑/↓ to move it 16 pt at a time and Home/End to send it to
+/// either bound. That setting is the gate because the handle takes focus like
+/// a button and not like a field (see `.focusable` below) — and without it Tab
+/// reaches no non-text control anyway, so nothing is actually lost. VoiceOver
+/// gets the same two steps as an adjustable element, so the handle is one
+/// control however it is reached.
 ///
 /// The owner supplies the height and its bounds; this view only turns pointer
 /// motion and key presses into a clamped value, and calls `onCommit` when a
@@ -53,7 +56,13 @@ struct RowResizeHandle: View {
                         onCommit()
                     }
             )
-            .focusable()
+            // Button-like, not field-like: `.automatic` would enable `.edit`
+            // too, which makes the divider an unconditional first-responder
+            // candidate — with a clean tree it is the only focusable view in
+            // the sidebar, so window activation hands it focus and paints the
+            // ring across the whole gutter. `.activate` scopes it to users who
+            // turned keyboard navigation on, which is who the keys are for.
+            .focusable(interactions: .activate)
             .onKeyPress(keys: [.upArrow, .downArrow, .home, .end]) { press in
                 switch press.key {
                 // Up grows the pane below, which is the direction the divider

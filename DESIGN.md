@@ -210,7 +210,7 @@ The embedded terminal is not a text field but a shell, and it owns its keys: whi
 | `Space` | Include / exclude every highlighted file — include them all if any is excluded, otherwise exclude them all | File list focused |
 | `↑` / `↓` | Move active file (loads its diff) | File list focused |
 | `Home` / `End` (or `Cmd+↑` / `Cmd+↓`) | Jump to first / last file | File list focused. **Tauri only** — the native list is AppKit's and keeps whatever AppKit binds |
-| `↑` / `↓`, `Home` / `End` | Move the commit composer's top edge by 16 pt, or to its smallest / tallest | The resize handle above the composer focused |
+| `↑` / `↓`, `Home` / `End` | Move the commit composer's top edge by 16 pt, or to its smallest / tallest | The resize handle above the composer focused. Natively, reaching it needs macOS keyboard navigation switched on: the handle takes focus like a button rather than like a text field, so activating the window never lands on the divider |
 | `Escape` | Close the frontmost dialog, menu or popover — and only that one, so a confirmation raised from a popover leaves the popover standing | Global, except in the terminal (where it reaches the shell). A surface running an operation that can't be called off takes the key and refuses it rather than letting it dismiss what's underneath |
 
 ## Persistence model
