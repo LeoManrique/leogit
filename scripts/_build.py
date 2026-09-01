@@ -10,6 +10,7 @@ Not a script: it does nothing on its own.
 
 from __future__ import annotations
 
+import platform
 import shutil
 import subprocess
 from pathlib import Path
@@ -162,6 +163,9 @@ def build_tauri() -> Path:
         env=env,
     )
 
+    if target_os == "linux":
+        _drop_bundled_gio_module()
+
     if target_os == "macOS":
         bundle = TAURI_BUNDLE_DIR / "macos" / BUNDLE_NAME[Client.TAURI]
         if not bundle.is_dir():
@@ -181,6 +185,65 @@ def build_tauri() -> Path:
 
     success(f"Built {bundle.name}")
     return bundle
+
+
+def _drop_bundled_gio_module() -> None:
+    """Remove the GIO TLS module linuxdeploy's gtk plugin bundles, then repack.
+
+    The plugin ends by copying `libgiognutls.so` into the AppDir with a raw
+    `cp --parents` and pointing `GIO_EXTRA_MODULES` at it. That copy bypasses
+    linuxdeploy's dependency resolution, so the module's own chain
+    (libgnutls -> libnettle/libhogweed -> libgmp) is only partly bundled:
+    `libgmp.so.10` is absent and resolves against the host mid-`dlopen`.
+
+    GTK reaches that module on the very first window: creating an
+    ApplicationWindow calls `gtk_css_provider_load_from_path`, which calls
+    `g_vfs_get_default`, which dlopens every GIO module it can find. Loading
+    this half-bundled one segfaults inside `ld.so`, so the app dies during
+    `create_window` before it can paint.
+
+    Dropping the module leaves GIO to use the host's own, which matches the
+    host's GLib. LeoGit talks to git over subprocesses and libgit2, never
+    through GIO's network VFS, so nothing here needs a bundled TLS backend.
+    """
+    appimage_dir = TAURI_BUNDLE_DIR / "appimage"
+    appdirs = sorted(appimage_dir.glob("*.AppDir")) if appimage_dir.is_dir() else []
+    if len(appdirs) != 1:
+        error(f"Expected exactly one *.AppDir in {appimage_dir}, found {len(appdirs)}")
+    appdir = appdirs[0]
+
+    gio_modules = appdir / "usr" / "lib" / "gio"
+    hook = appdir / "apprun-hooks" / "linuxdeploy-plugin-gtk.sh"
+    if not gio_modules.is_dir() and "GIO_EXTRA_MODULES" not in hook.read_text():
+        return  # Upstream fixed it; nothing to strip and nothing to repack.
+
+    shutil.rmtree(gio_modules, ignore_errors=True)
+    hook.write_text(
+        "".join(
+            line
+            for line in hook.read_text().splitlines(keepends=True)
+            if not line.startswith("export GIO_EXTRA_MODULES=")
+        )
+    )
+
+    # The AppImage Tauri just wrote still holds the old AppDir, so rebuild it
+    # from the patched tree with the same plugin Tauri itself invokes.
+    packager = Path.home() / ".cache" / "tauri" / "linuxdeploy-plugin-appimage.AppImage"
+    if not packager.is_file():
+        error(f"Cannot repack the AppImage: {packager} is missing")
+    image = _only_file(TAURI_BUNDLE_DIR / "appimage", "*.AppImage", "an AppImage")
+    info(f"Repacking {image.name} without the broken GIO module")
+    run(
+        [str(packager), f"--appdir={appdir.name}"],
+        cwd=appdir.parent,
+        what="AppImage repack",
+        env={
+            "APPIMAGE_EXTRACT_AND_RUN": "1",
+            "NO_STRIP": "true",
+            "ARCH": platform.machine(),
+            "OUTPUT": image.name,
+        },
+    )
 
 
 def _require_pixbuf_dir() -> None:
