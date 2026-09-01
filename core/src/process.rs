@@ -1,14 +1,22 @@
 //! Cross-platform subprocess spawning helpers.
 //!
-//! Release builds run as a GUI app (`windows_subsystem = "windows"`), which on
-//! Windows has no attached console. When such a process spawns a console
-//! subprocess (`git`, `gh`, `claude`), Windows allocates and briefly flashes a
-//! new console window for each call. Because the UI polls `git status` every
-//! 2s, that means a `cmd` box flickering on screen continuously.
+//! [`prepare_child`] is the single hook every command we spawn passes through,
+//! and it applies the two corrections a child needs on the way out:
 //!
-//! Passing the `CREATE_NO_WINDOW` creation flag suppresses that window. These
-//! helpers are no-ops on every non-Windows platform, so call sites stay
-//! platform-agnostic.
+//! **No console window (Windows).** Release builds run as a GUI app
+//! (`windows_subsystem = "windows"`), which has no attached console. When such
+//! a process spawns a console subprocess (`git`, `gh`, `claude`), Windows
+//! allocates and briefly flashes a new console window for each call. Because
+//! the UI polls `git status` every 2s, that means a `cmd` box flickering on
+//! screen continuously; the `CREATE_NO_WINDOW` creation flag suppresses it.
+//!
+//! **No `AppImage` environment (Linux).** The Linux client runs from an `AppImage`
+//! whose `AppRun` points a dozen variables at a temporary mount that vanishes
+//! when we quit. Those belong to us, never to our children — see
+//! [`crate::appimage`] for what that breaks and how it is undone.
+//!
+//! Both corrections are no-ops on the platforms they don't apply to, so call
+//! sites stay platform-agnostic and there is one place to add the next one.
 //!
 //! This module also owns [`run_timed`], the bounded subprocess runner every
 //! network-touching git/gh command goes through so an offline or flaky
@@ -20,28 +28,31 @@ use std::io::Read;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+use super::appimage;
+
 /// CREATE_NO_WINDOW process creation flag (Win32 `winbase.h`).
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// Suppress the console window for a std `Command` on Windows. Returns the
-/// command for chaining; no-op on other platforms.
-pub fn hide_console(cmd: &mut std::process::Command) -> &mut std::process::Command {
+/// Apply the standard child-process corrections to a std `Command` (see module
+/// docs). Returns the command for chaining.
+pub fn prepare_child(cmd: &mut std::process::Command) -> &mut std::process::Command {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
+    appimage::sanitize(cmd);
     cmd
 }
 
-/// Suppress the console window for a tokio `Command` on Windows. Returns the
-/// command for chaining; no-op on other platforms.
-pub fn hide_console_async(cmd: &mut tokio::process::Command) -> &mut tokio::process::Command {
+/// [`prepare_child`] for a tokio `Command`.
+pub fn prepare_child_async(cmd: &mut tokio::process::Command) -> &mut tokio::process::Command {
     #[cfg(windows)]
     {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
+    appimage::sanitize(cmd);
     cmd
 }
 
@@ -54,6 +65,12 @@ pub fn hide_console_async(cmd: &mut tokio::process::Command) -> &mut tokio::proc
 /// mirroring what VS Code's `fix-path` does. No-op on Windows, where GUI
 /// launches inherit the full user environment already.
 ///
+/// The probe shell goes through [`prepare_child`] like any other child, which
+/// matters for more than tidiness: a login shell appends to the `PATH` it
+/// inherits, so probing with the `AppImage`'s `PATH` would report the `AppImage`'s
+/// entries back and bake a temporary mount into the `PATH` every later child
+/// starts from.
+///
 /// Call this once at the very top of the host's startup — before the UI
 /// framework, the tokio runtime, or any worker thread exists — because it
 /// writes the process environment, which is only sound while nothing else
@@ -65,10 +82,9 @@ pub fn fix_path_env() {
         Ok(s) if !s.is_empty() => s,
         _ => return,
     };
-    let output = Command::new(&shell)
-        .arg("-ilc")
-        .arg("echo -n \"$PATH\"")
-        .output();
+    let mut cmd = Command::new(&shell);
+    cmd.arg("-ilc").arg("echo -n \"$PATH\"");
+    let output = prepare_child(&mut cmd).output();
     if let Ok(out) = output
         && out.status.success()
     {

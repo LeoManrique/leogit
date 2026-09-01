@@ -13,12 +13,18 @@ from __future__ import annotations
 import platform
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from _common import (
+    APPIMAGE_DEST,
     APPLICATIONS,
     BUNDLE_NAME,
+    DESKTOP_DEST,
     DIST_DIR,
+    ICON_DEST,
+    LAUNCHER_DEST,
+    LOCAL_BIN,
     LSREGISTER,
     MAC_DIR,
     TARGET_DIR,
@@ -321,6 +327,21 @@ def bundle_version(bundle: Path) -> str:
     return value
 
 
+def built_version(built: Path) -> str:
+    """The version an artifact reports about itself, read from the artifact.
+
+    Asked of the build rather than of the version files so `--no-build` cannot
+    report the version in the tree over a bundle that predates it.
+    """
+    if host_os() == "macOS":
+        return bundle_version(built)
+    # Tauri names the AppImage `<productName>_<version>_<arch>.AppImage`.
+    parts = built.stem.split("_")
+    if len(parts) < 3 or not parts[1][:1].isdigit():
+        error(f"Could not read the version from {built.name}")
+    return parts[1]
+
+
 # ── Packaging ──
 def package(built: Path, version: str) -> Path:
     """Put the built bundle into `dist/` under its release artifact name."""
@@ -352,7 +373,19 @@ def package(built: Path, version: str) -> Path:
 
 
 # ── Installing ──
-def install_bundle(source: Path) -> Path:
+def install_build(built: Path) -> Path:
+    """Install `built` where this platform's users launch LeoGit from.
+
+    "Install" means a different thing on each: a bundle in `/Applications` on
+    macOS, and on Linux an AppImage plus the three files that make it reachable
+    — a `PATH` wrapper, an icon and a desktop entry.
+    """
+    if host_os() == "macOS":
+        return _install_macos_bundle(built)
+    return _install_appimage(built)
+
+
+def _install_macos_bundle(source: Path) -> Path:
     """Replace the installed macOS app with `source`, and return where it went.
 
     Both bundle names are removed first, not just the one being written. On the
@@ -393,3 +426,104 @@ def install_bundle(source: Path) -> Path:
 
     success(f"Installed: {destination}")
     return destination
+
+
+# The launcher `install.sh` writes verbatim. The duplication is deliberate and
+# is the same one `_common.py` documents: install.sh runs on a machine with no
+# checkout, so it can import nothing. Change this and its heredoc together.
+LAUNCHER = """#!/usr/bin/env bash
+APPIMAGE="$(dirname "$(readlink -f "$0")")/leogit.AppImage"
+
+# Optional per-user launch tweaks (extra env vars, compositor-specific scaling).
+# Kept in a separate file the installer never overwrites, so customizations
+# survive updates that regenerate this wrapper. Ships nothing by default, so
+# this is inert unless the user creates it. Example (Hyprland fractional scale):
+#   if [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
+#     export GDK_BACKEND=x11 GDK_DPI_SCALE=1.5
+#   fi
+LAUNCH_ENV="${XDG_CONFIG_HOME:-$HOME/.config}/leogit/launch-env"
+[ -f "$LAUNCH_ENV" ] && . "$LAUNCH_ENV"
+
+if [ -z "${WEBKIT_DISABLE_DMABUF_RENDERER:-}" ] && [ -e /dev/nvidia0 ]; then
+  export WEBKIT_DISABLE_DMABUF_RENDERER=1
+fi
+exec "$APPIMAGE" "$@"
+"""
+
+DESKTOP_ENTRY = """[Desktop Entry]
+Type=Application
+Name=LeoGit
+Comment=A fast, native Git client
+Exec={launcher}
+Icon={icon}
+Terminal=false
+Categories=Development;RevisionControl;
+"""
+
+
+def _install_appimage(source: Path) -> Path:
+    """Install the AppImage and the three files that make it reachable.
+
+    The image alone is only an executable file. What turns it into an installed
+    app is the wrapper on `PATH` (which is also the `leogit [dir]` command), the
+    extracted icon, and the desktop entry that puts it in the app menu — so all
+    four are written together, exactly where `install.sh` writes them.
+
+    The wrapper is regenerated on every install rather than kept if present: it
+    is ours, it is small, and a stale copy would be the thing that silently
+    stops applying a fix like the NVIDIA renderer guard.
+    """
+    LOCAL_BIN.mkdir(parents=True, exist_ok=True)
+    if APPIMAGE_DEST.exists():
+        warn(f"Replaced the existing {APPIMAGE_DEST}")
+    # copy2 rather than move: the build tree keeps its artifact, so a second
+    # `--no-build` install has something to install.
+    shutil.copy2(source, APPIMAGE_DEST)
+    APPIMAGE_DEST.chmod(0o755)
+
+    LAUNCHER_DEST.write_text(LAUNCHER)
+    LAUNCHER_DEST.chmod(0o755)
+
+    _extract_icon()
+
+    DESKTOP_DEST.parent.mkdir(parents=True, exist_ok=True)
+    DESKTOP_DEST.write_text(
+        DESKTOP_ENTRY.format(launcher=LAUNCHER_DEST, icon=ICON_DEST)
+    )
+    if shutil.which("update-desktop-database"):
+        quietly(["update-desktop-database", str(DESKTOP_DEST.parent)])
+
+    # AppImages need FUSE 2 to mount-and-run, and Arch ships only FUSE 3. Named
+    # after the install rather than before it, because the install is still
+    # correct — it is the launch that would fail.
+    code, libs = capture(["ldconfig", "-p"])
+    if code != 0 or "libfuse.so.2" not in libs:
+        warn("FUSE 2 not found — LeoGit won't launch without it (Arch: sudo pacman -S fuse2)")
+
+    success(f"Installed: {LAUNCHER_DEST}")
+    return LAUNCHER_DEST
+
+
+def _extract_icon() -> None:
+    """Pull the icon out of the AppImage for the desktop entry.
+
+    `--appimage-extract` unpacks without FUSE, so this works on a machine that
+    cannot yet *run* the image. A failure here costs a generic icon and nothing
+    else, so it warns rather than stopping the install.
+    """
+    ICON_DEST.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        extracted = subprocess.run(
+            [str(APPIMAGE_DEST), "--appimage-extract"],
+            cwd=tmp,
+            capture_output=True,
+            check=False,
+        )
+        root = Path(tmp) / "squashfs-root"
+        icons = sorted(root.glob("*.png")) if root.is_dir() else []
+        icon = icons[0] if icons else root / ".DirIcon"
+        if extracted.returncode != 0 or not icon.is_file():
+            warn("Could not extract the app icon (the launcher will use a default)")
+            return
+        shutil.copy2(icon, ICON_DEST)
+    success(f"Icon: {ICON_DEST}")

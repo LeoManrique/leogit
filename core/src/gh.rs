@@ -17,7 +17,7 @@ const GH_TRANSFER_TIMEOUT: Duration = Duration::from_secs(600);
 pub fn check_auth() -> bool {
     let mut cmd = Command::new("gh");
     cmd.arg("auth").arg("status");
-    super::process::hide_console(&mut cmd);
+    super::process::prepare_child(&mut cmd);
     // A spawn failure (gh missing) or timeout both mean "can't confirm auth" → false.
     super::process::run_timed(cmd, "gh auth status", GH_QUERY_TIMEOUT)
         .is_ok_and(|out| out.status.success())
@@ -89,7 +89,7 @@ pub fn gh_repo_list(limit: u32) -> Result<Vec<GhRepo>, String> {
         "--json",
         "nameWithOwner,name,description,isPrivate,pushedAt",
     ]);
-    super::process::hide_console(&mut cmd);
+    super::process::prepare_child(&mut cmd);
     let output = super::process::run_timed(cmd, "gh repo list", GH_QUERY_TIMEOUT)
         .map_err(|e| gh_unavailable(&e))?;
     if !output.status.success() {
@@ -159,7 +159,7 @@ pub async fn gh_publish_repo(
 
         let mut cmd = Command::new("gh");
         cmd.args(&args);
-        super::process::hide_console(&mut cmd);
+        super::process::prepare_child(&mut cmd);
         let output = super::process::run_timed(cmd, "gh repo create", GH_TRANSFER_TIMEOUT)
             .map_err(|e| gh_unavailable(&e))?;
         if !output.status.success() {
@@ -208,7 +208,7 @@ pub async fn gh_clone(
             "--",
             "--progress",
         ]);
-        super::process::hide_console(&mut cmd);
+        super::process::prepare_child(&mut cmd);
         let output =
             super::process::run_timed_streaming(cmd, "gh repo clone", GH_TRANSFER_TIMEOUT, forward)
                 .map_err(|e| gh_unavailable(&e))?;

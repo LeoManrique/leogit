@@ -207,7 +207,7 @@ pub async fn check_provider_status(
 async fn run_claude(args: &[&str]) -> Option<std::process::Output> {
     let mut cmd = tokio::process::Command::new("claude");
     cmd.args(args);
-    super::process::hide_console_async(&mut cmd)
+    super::process::prepare_child_async(&mut cmd)
         .output()
         .await
         .ok()
@@ -325,7 +325,7 @@ async fn generate_claude(diff: &str, config: &AiProviderConfig) -> Result<Commit
         // Kill the child if we stop awaiting it (e.g. on timeout) so a slow CLI
         // can't linger as an orphan after we've already given up on it.
         .kill_on_drop(true);
-    super::process::hide_console_async(&mut cmd);
+    super::process::prepare_child_async(&mut cmd);
 
     let mut child = cmd
         .spawn()

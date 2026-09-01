@@ -96,8 +96,8 @@ bundle *flags:
 release *version:
     python3 scripts/deploy_release.py {{version}}
 
-# Install a locally built Release bundle into /Applications (macOS)
-mac-install *flags:
+# Install a locally built Release build (macOS: /Applications, Linux: ~/.local/bin)
+install-local *flags:
     python3 scripts/install_local.py {{flags}}
 
 # Delete every GitHub release older than the latest one

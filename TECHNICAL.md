@@ -55,7 +55,8 @@ leogit/
 │       ├── shell.rs                 # shell discovery for the terminal
 │       ├── os.rs                    # reveal-in-file-manager + open-with-default-app
 │       ├── paths.rs                 # the app's canonicalizer (never verbatim)
-│       ├── process.rs               # CREATE_NO_WINDOW spawn + run_timed / run_blocking
+│       ├── process.rs               # child-process prep hook + run_timed / run_blocking
+│       ├── appimage.rs              # strips the AppImage environment from children
 │       ├── progress.rs              # git --progress step/weight parser
 │       └── update.rs                # GitHub-release update check
 ├── apps/
@@ -1175,7 +1176,7 @@ All work flows through Tauri's IPC. There are no HTTP servers, no sidecars, and 
 
 ### Startup PATH fix
 
-`main.rs::fix_path_env` runs once before the Tauri builder. On macOS/Linux it spawns `$SHELL -ilc 'echo -n "$PATH"'` and replaces the process PATH with the result. Without this, apps launched from Finder or a `.desktop` entry inherit a minimal PATH (e.g. `/usr/bin:/bin:/usr/sbin:/sbin`) and miss user-installed tools like `claude`, `gh`, or Homebrew binaries. No-op on Windows.
+`main.rs::fix_path_env` runs once before the Tauri builder. On macOS/Linux it spawns `$SHELL -ilc 'echo -n "$PATH"'` and replaces the process PATH with the result. Without this, apps launched from Finder or a `.desktop` entry inherit a minimal PATH (e.g. `/usr/bin:/bin:/usr/sbin:/sbin`) and miss user-installed tools like `claude`, `gh`, or Homebrew binaries. No-op on Windows. The probe shell goes through `prepare_child` like any other child, which matters for more than tidiness: a login shell appends to the PATH it inherits, so probing with the AppImage's PATH would report the AppImage's entries back and bake a temporary mount into the PATH every later child starts from.
 
 ### Path normalisation
 
@@ -1209,9 +1210,17 @@ Two consequences worth knowing:
 
 `effective_scan_paths` (git.rs) reports the folders discovery would walk, so the empty state can list them. It and `discover_repos` both route through `resolve_scan_paths`, the sole owner of the "empty config → stock defaults" rule, so the folders shown can't drift from the folders searched — pinned by `effective_scan_paths_matches_the_resolution_discovery_uses`.
 
-### Windows console suppression
+### Child-process preparation
 
-Release builds set `windows_subsystem = "windows"` (in `main.rs`), so the app runs with no attached console. On Windows a console-less process that spawns a console subprocess gets a **new console window allocated and briefly flashed** for each call — and because the UI polls `git status` every 2s, that would mean a `cmd` box flickering on screen continuously, plus one on every fetch/commit/diff. Every subprocess spawn therefore routes through [core/src/process.rs](core/src/process.rs): `hide_console` (std `Command`) and `hide_console_async` (tokio `Command`) set the `CREATE_NO_WINDOW` creation flag; both are no-ops off Windows. Call sites: `git_cmd` / `git_net_cmd` (git.rs), `apply_patch` (diff.rs), `check_auth` / `gh_repo_list` / `gh_clone` / `gh_publish_repo` (gh.rs), and both `claude` spawns (ai.rs). The PTY shell in terminal.rs is intentionally exempt — ConPTY is a pseudo-terminal, not a console subprocess, so it never flashes a window.
+Every command LeoGit spawns passes through one hook in [core/src/process.rs](core/src/process.rs) — `prepare_child` (std `Command`) and `prepare_child_async` (tokio `Command`) — which applies the two corrections a child needs on the way out. Call sites: `git_cmd` / `git_net_cmd` (git.rs), `apply_patch` (diff.rs), `check_auth` / `gh_repo_list` / `gh_clone` / `gh_publish_repo` (gh.rs), both `claude` spawns (ai.rs), the three file-manager / browser / default-app hand-offs (os.rs), and `fix_path_env`'s own login-shell probe. Keeping it one hook is what makes the next cross-cutting correction a one-line change instead of a sweep.
+
+**No console window (Windows).** Release builds set `windows_subsystem = "windows"` (in `main.rs`), so the app runs with no attached console. On Windows a console-less process that spawns a console subprocess gets a **new console window allocated and briefly flashed** for each call — and because the UI polls `git status` every 2s, that would mean a `cmd` box flickering on screen continuously, plus one on every fetch/commit/diff. The hook sets the `CREATE_NO_WINDOW` creation flag; no-op off Windows. The PTY shell in terminal.rs is intentionally exempt — ConPTY is a pseudo-terminal, not a console subprocess, so it never flashes a window.
+
+**No AppImage environment (Linux).** Owned by [core/src/appimage.rs](core/src/appimage.rs). The Linux client runs from an AppImage, whose `AppRun` exports ~19 variables pointing into the temporary mount the image unpacks itself into (`$APPDIR`, e.g. `/tmp/.mount_leogitXXXXXX`): `LD_LIBRARY_PATH`, `GTK_PATH`, `GIO_EXTRA_MODULES`, `GDK_PIXBUF_MODULE_FILE`, `QT_PLUGIN_PATH`, `PYTHONHOME`, `PERLLIB`, a `PATH` prefix and more. Those values are correct for *this* process and **its own environment is never scrubbed** — they are how the bundled WebKitGTK, its helper processes and every lazily-`dlopen`ed GTK module find their libraries, so removing them would break the app. They are wrong for every program we hand off to: `git`, `gh`, `claude`, the shells in the terminal panel and whatever `xdg-open` launches are system binaries that must link against system libraries. And because the mount is unmounted when LeoGit quits, a child that outlives us — an editor opened from a file row, a terminal — is left pointing at paths that no longer exist. A `PYTHONHOME` under a dead mount stops `python3` starting at all: it cannot find `encodings` and aborts before running a line.
+
+The edits are derived from `$APPDIR` rather than from a list of variable names, because that list is not ours to keep current — every `linuxdeploy` plugin adds its own, and a name we failed to anticipate is exactly the one that would leak. So: drop every `:`-separated entry living under `$APPDIR`; drop the variable entirely when nothing real is left (including the trailing `:` AppRun leaves when it prepends to a variable the session never set, as in `PYTHONPATH=$APPDIR/usr/share/pyshared/:`); leave anything that never mentioned `$APPDIR` byte-identical. `PATH` is filtered but never deleted — no `PATH` at all is worse for a child than a stale one. The self-describing markers (`APPDIR`, `APPIMAGE`, `ARGV0`, `OWD`, `APPIMAGE_EXTRACT_AND_RUN`) go outright, so a child never believes it is running inside an AppImage of its own.
+
+Edits are recomputed per spawn rather than cached, because the environment legitimately changes once at startup: `fix_path_env` replaces `PATH` after probing the login shell, and a snapshot taken before that would re-apply the stale `PATH` to every child forever after. A `ChildEnv` trait states the policy once for the three builder types LeoGit spawns through — `std::process::Command`, `tokio::process::Command` and `portable_pty::CommandBuilder`. The PTY one is the reason the terminal panel is covered despite sitting outside `prepare_child`, and it works because `CommandBuilder` materializes the inherited environment into a map at construction, so `env_remove` there is a real removal rather than a shadow. Twelve tests in `appimage::tests` pin the policy; two of them spawn a real child and inspect a real `CommandBuilder` so the plumbing is proven, not assumed.
 
 ### Network resilience (offline / flaky)
 
@@ -1630,7 +1639,7 @@ Everything in `gh.rs` shells out to the `gh` CLI, time-boxed through `process::r
 - `reveal_path` — macOS `open -R`, Windows `explorer /select,<path>`, Linux `xdg-open <parent dir>` (no portable "select file" there).
 - `open_path` — macOS `open`, Windows `cmd /c start "" <path>`, Linux `xdg-open <path>`.
 
-They're `#[tauri::command(async)]` (worker thread) and routed through `process::run_timed` (15 s cap, so a wedged file manager can't hang a thread) with `hide_console` for the Windows no-flash guarantee. The launchers are treated as fire-and-forget: a completed run is success regardless of exit code, because some launchers (notably `explorer /select,`) return non-zero even on success — only a spawn failure (e.g. `xdg-open` absent) or a timeout surfaces as an error. The frontend side (clipboard copy, label selection) lives in [services/fileActions.ts](apps/tauri-app/src/lib/services/fileActions.ts); the menu is built in `FileList.svelte` and the destructive-discard confirmation in [DiscardConfirm.svelte](apps/tauri-app/src/lib/components/DiscardConfirm.svelte).
+They're `#[tauri::command(async)]` (worker thread) and routed through `process::run_timed` (15 s cap, so a wedged file manager can't hang a thread) with `prepare_child` for the Windows no-flash and clean-child-environment guarantees. The launchers are treated as fire-and-forget: a completed run is success regardless of exit code, because some launchers (notably `explorer /select,`) return non-zero even on success — only a spawn failure (e.g. `xdg-open` absent) or a timeout surfaces as an error. The frontend side (clipboard copy, label selection) lives in [services/fileActions.ts](apps/tauri-app/src/lib/services/fileActions.ts); the menu is built in `FileList.svelte` and the destructive-discard confirmation in [DiscardConfirm.svelte](apps/tauri-app/src/lib/components/DiscardConfirm.svelte).
 
 ## Config & persistence
 
@@ -1713,10 +1722,12 @@ The maintainer scripts are Python and share three modules — [_common.py](scrip
 |---|---|
 | `build.py` | Builds this platform's release bundle. `--client tauri` forces the Tauri build, which on macOS is a supported client that no release publishes — the flag is how that path stays exercised. |
 | `deploy_release.py` | The full release: validate → resolve/bump version → tag → build → package → upload. |
-| `install_local.py` | Installs a locally built Release bundle into `/Applications` — the Release counterpart of `just mac-run`, which goes on launching the Debug build. |
+| `install_local.py` | Installs this tree's Release build where the platform's users launch it from: `/Applications` on macOS, `~/.local/bin` plus icon and desktop entry on Linux. macOS and Linux only — a Windows install is an NSIS installer to run, not files to place. |
 | `cleanup_releases.py` | Deletes every release older than the latest, and their tags. |
 
-`just bundle`, `just release`, `just mac-install` and `just cleanup-releases` are thin wrappers.
+`just bundle`, `just release`, `just install-local` and `just cleanup-releases` are thin wrappers.
+
+`install_local.py` and `install.sh` write the *same paths*, so a machine that has run both ends up with one copy rather than two: on Linux that is `~/.local/bin/leogit.AppImage`, the `~/.local/bin/leogit` wrapper that execs it (which is also the `leogit [dir]` command), `~/.local/share/icons/leogit.png` and `~/.local/share/applications/leogit.desktop`. The wrapper's text is duplicated in `_build.py`'s `LAUNCHER` because install.sh is fetched and piped and can import nothing; each file names the other, and a test-free duplication like that is kept honest by both being short. Installing stops a running copy first — on Linux that matters more than on macOS, because the AppImage file *is* the squashfs the running app is still reading from.
 
 `deploy_release.py` runs **once per OS against the same tag** — the first run creates the release, the rest upload into it — because nothing here cross-compiles. It refuses a dirty tree, refuses a tree whose version files disagree, and guards against shipping behind the live release: it queries GitHub's `/releases/latest` (the endpoint `install.sh` installs from) and aborts if the version it is about to ship is older, since a stale local tree would otherwise clobber artifacts onto a superseded release. Re-running an already-released version is the supported retry — the tag is reused and the artifact replaces the one on the release — so a run that died at the upload is fixed by running it again rather than by inventing a version to get past it. Tagging happens *before* the build, so a long build is never thrown away by a name collision found at the end.
 

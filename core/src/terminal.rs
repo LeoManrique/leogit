@@ -19,6 +19,11 @@
 //! which Win32 cannot resolve at all, and launched from Explorer it is a stale
 //! login-time snapshot that misses anything installed since. Only deliberate
 //! additions are set below.
+//!
+//! The one thing removed rather than added is the `AppImage` environment the
+//! Linux client runs under: a shell in this panel is a session the user drives
+//! for as long as they like, so inheriting paths into a mount that disappears
+//! when `LeoGit` quits is exactly the case [`crate::appimage`] exists to prevent.
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::Serialize;
@@ -225,6 +230,7 @@ pub fn start_terminal(
     let mut cmd = CommandBuilder::new(&chosen.path);
     cmd.args(&chosen.args);
     cmd.cwd(&cwd);
+    crate::appimage::sanitize(&mut cmd);
     for (key, value) in session_env(&chosen) {
         cmd.env(key, value);
     }

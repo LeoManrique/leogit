@@ -44,7 +44,7 @@ just check       # type-check (svelte-check + cargo check --workspace)
 just mac-run     # build and launch the native macOS app (needs Xcode + xcodegen)
                  # add --no-build to relaunch the last build without rebuilding
 just bundle      # build this platform's release bundle
-just mac-install # install a Release build into /Applications (macOS)
+just install-local # install a Release build from this tree (macOS + Linux)
 just release     # build and publish a GitHub release; pass x.y.z to bump first
 ```
 

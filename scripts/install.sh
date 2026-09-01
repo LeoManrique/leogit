@@ -296,6 +296,10 @@ else
   mv -f "$TMP_DIR/$ARTIFACT" "$APPIMAGE_DEST"
   chmod +x "$APPIMAGE_DEST"
 
+  # The wrapper below is duplicated in _build.py's LAUNCHER, which installs the
+  # same four files from a local build. This script is fetched and piped, so it
+  # can import nothing; change the two together.
+  #
   # WebKitGTK's DMABUF/GBM renderer is broken on the NVIDIA proprietary driver:
   # it spams "Failed to create GBM buffer of size WxH: Invalid argument" and can
   # leave a blank or garbled window. Disabling that renderer falls back to a

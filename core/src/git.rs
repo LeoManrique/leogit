@@ -340,7 +340,7 @@ fn git_cmd(repo_path: &str, args: &[&str]) -> Command {
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .args(args);
-    super::process::hide_console(&mut cmd);
+    super::process::prepare_child(&mut cmd);
     cmd
 }
 
@@ -438,7 +438,7 @@ fn git_net_cmd(
         .arg("-c")
         .arg(format!("http.lowSpeedTime={stall_secs}"))
         .args(args);
-    super::process::hide_console(&mut cmd);
+    super::process::prepare_child(&mut cmd);
     cmd
 }
 

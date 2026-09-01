@@ -10,13 +10,15 @@ Not a script: it does nothing on its own.
 
 `install.sh`. It is the one script that runs on a machine with no checkout —
 it is fetched and piped — so it cannot import anything and duplicates the
-platform detection and artifact naming below. The two must be changed
-together; each file says so where the duplication lives.
+platform detection and artifact naming below, plus the Linux launcher script
+that `_build.py` writes. Each copy must be changed with its twin; every file
+says so where its half of the duplication lives.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -105,6 +107,16 @@ LSREGISTER = Path(
     "/System/Library/Frameworks/CoreServices.framework/Frameworks"
     "/LaunchServices.framework/Support/lsregister"
 )
+
+# Where a Linux install puts its four pieces. Spelled out under `$HOME` rather
+# than through `XDG_DATA_HOME` because `install.sh` writes exactly these paths,
+# and a machine that has run both installers must not end up with two copies in
+# two places — whichever ran last has to land on top of the other.
+LOCAL_BIN = Path.home() / ".local" / "bin"
+APPIMAGE_DEST = LOCAL_BIN / "leogit.AppImage"
+LAUNCHER_DEST = LOCAL_BIN / "leogit"
+ICON_DEST = Path.home() / ".local" / "share" / "icons" / "leogit.png"
+DESKTOP_DEST = Path.home() / ".local" / "share" / "applications" / "leogit.desktop"
 
 
 class Client(StrEnum):
@@ -244,9 +256,16 @@ def require_gh_auth() -> None:
     success("gh authenticated")
 
 
-def require_macos() -> None:
-    if host_os() != "macOS":
-        error("This script only runs on macOS")
+def require_os(*supported: str) -> str:
+    """Stop unless this machine is one of `supported`; returns [`host_os`].
+
+    Named platforms rather than a boolean so the refusal can say which ones
+    would have worked.
+    """
+    current = host_os()
+    if current not in supported:
+        error(f"This script runs on {' and '.join(supported)}, not {current}")
+    return current
 
 
 # ── Git ──
@@ -266,27 +285,43 @@ def working_tree_is_dirty() -> bool:
 
 
 # ── Running instances ──
-def stop_running_app() -> None:
-    """Stop any running copy of either client before replacing a bundle.
+def _running_app_patterns() -> list[str]:
+    """`pgrep -f` patterns that match a running LeoGit and nothing else.
 
-    A running app holds its executable open; overwriting the bundle around it
-    leaves a half-old install until the next launch. Both clients are matched,
-    not just the one being installed: on macOS they occupy the same
-    `/Applications` slot, so installing one is also removing the other, and the
-    other is exactly the copy that would still be running.
+    Matched against the whole command line, so each is anchored or carries
+    enough path to be unmistakable — a bare `leogit` would also match the very
+    script doing the matching.
     """
-    executables = ("LeoGit", "leogit")
+    if host_os() == "macOS":
+        # The path inside the bundle rather than the bare executable name: on a
+        # case-insensitive volume `pgrep -x leogit` answers for both bundles.
+        # Both clients are matched, not just the one being installed — they
+        # occupy the same `/Applications` slot, so installing one is also
+        # removing the other, and the other is exactly the copy still running.
+        return [f"/Contents/MacOS/{name}" for name in ("LeoGit", "leogit")]
+    # An AppImage shows up as two processes: the runtime, whose command line is
+    # the image's own path, and the app it mounted and exec'd, which lives under
+    # the mount point. Killing only the first would leave the second holding the
+    # squashfs open.
+    return [f"^{re.escape(str(APPIMAGE_DEST))}", r"^/tmp/\.mount_leogit"]
+
+
+def stop_running_app() -> None:
+    """Stop any running copy before an install overwrites what it is running.
+
+    A running app holds its executable open. On macOS, overwriting the bundle
+    around it leaves a half-old install until the next launch; on Linux it is
+    worse, because the AppImage file *is* the mounted filesystem the running app
+    is still reading pages from.
+    """
+    patterns = _running_app_patterns()
 
     def running() -> list[str]:
         return [
-            name
-            for name in executables
-            # Match the path inside the bundle rather than the bare process
-            # name: on a case-insensitive volume `pgrep -x leogit` answers for
-            # both bundles, and `pgrep -f leogit` would also match this very
-            # script's command line.
+            pattern
+            for pattern in patterns
             if subprocess.run(
-                ["pgrep", "-f", f"/Contents/MacOS/{name}"], capture_output=True, check=False
+                ["pgrep", "-f", pattern], capture_output=True, check=False
             ).returncode
             == 0
         ]
@@ -295,14 +330,14 @@ def stop_running_app() -> None:
         success("No running instances")
         return
 
-    for name in running():
-        quietly(["pkill", "-TERM", "-f", f"/Contents/MacOS/{name}"])
+    for pattern in running():
+        quietly(["pkill", "-TERM", "-f", pattern])
     for _ in range(16):
         if not running():
             break
         time.sleep(0.5)
     if stubborn := running():
-        warn(f"Force-killing {', '.join(stubborn)} (graceful stop timed out)")
-        for name in stubborn:
-            quietly(["pkill", "-KILL", "-f", f"/Contents/MacOS/{name}"])
+        warn(f"Force-killing {len(stubborn)} stubborn process group(s) (graceful stop timed out)")
+        for pattern in stubborn:
+            quietly(["pkill", "-KILL", "-f", pattern])
     success("Stopped the running app")

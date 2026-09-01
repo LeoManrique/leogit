@@ -14,6 +14,7 @@
 pub mod events;
 
 pub mod ai;
+pub mod appimage;
 pub mod config;
 pub mod diff;
 pub mod exclusions;

@@ -54,7 +54,7 @@ pub fn reveal_path(repo_path: String, rel_path: String) -> Result<(), String> {
         cmd = Command::new("xdg-open");
         cmd.arg(abs.parent().unwrap_or(&abs));
     }
-    process::hide_console(&mut cmd);
+    process::prepare_child(&mut cmd);
     launch(cmd, "reveal in file manager")
 }
 
@@ -104,7 +104,7 @@ pub fn open_url(url: String) -> Result<(), String> {
         cmd = Command::new("xdg-open");
         cmd.arg(url);
     }
-    process::hide_console(&mut cmd);
+    process::prepare_child(&mut cmd);
     launch(cmd, "open URL in browser")
 }
 
@@ -134,6 +134,6 @@ pub fn open_path(repo_path: String, rel_path: String) -> Result<(), String> {
         cmd = Command::new("xdg-open");
         cmd.arg(&abs);
     }
-    process::hide_console(&mut cmd);
+    process::prepare_child(&mut cmd);
     launch(cmd, "open with default program")
 }
