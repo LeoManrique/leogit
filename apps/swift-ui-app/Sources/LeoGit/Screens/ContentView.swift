@@ -966,6 +966,7 @@ struct ContentView: View {
     private func open(launchTarget target: LaunchTarget) {
         if target.isRepo {
             switchRepo(target.path)
+            declineActivationFocus()
         } else {
             // The sheet slot has one occupant, and a `leogit <dir>` typed in a
             // terminal is not a reason to take it from a clone that is running
@@ -976,6 +977,40 @@ struct ContentView: View {
                 return
             }
             sheet = .initRepo(target.path)
+        }
+    }
+
+    /// Take the keyboard back off whatever the app's own activation gave it to.
+    ///
+    /// A `leogit <dir>` reaches the app through LaunchServices, which activates
+    /// it and makes the window key again — and a window becoming key is when
+    /// focus gets assigned to a candidate that nobody chose. In this sidebar
+    /// that candidate is the composer's description editor: `TextEditor` is the
+    /// first thing SwiftUI's focus system can see there, since the summary
+    /// above it is an `NSViewRepresentable` and only ever joins AppKit's key
+    /// view loop. The caret therefore lands in the description of a message the
+    /// user may be halfway through, in a window they were not looking at.
+    ///
+    /// Apple documents none of that assignment, so this declines the focus
+    /// rather than redirecting it: `makeFirstResponder(nil)` "makes the window
+    /// its first responder", which is the one documented way to end up with the
+    /// keyboard nowhere in particular. Predicting where focus *should* have gone
+    /// would mean reproducing emergent behaviour, which is the part that can
+    /// change under us.
+    ///
+    /// Scoped to this path on purpose. Switching repositories inside the app
+    /// never makes the window key, so that path keeps whatever it does today,
+    /// and ⌘-tabbing back to the app still restores the caret where it was.
+    ///
+    /// Queued rather than called inline: SwiftUI settles its own first responder
+    /// as the update pass ends, so a synchronous call here is undone a moment
+    /// later — the ordering `TerminalController.applyPendingFocus` needs for the
+    /// same reason.
+    @MainActor
+    private func declineActivationFocus() {
+        Task { @MainActor in
+            guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return }
+            window.makeFirstResponder(nil)
         }
     }
 }
