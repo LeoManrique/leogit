@@ -56,9 +56,17 @@ mac-generate: mac-bindings
 
 # Xcode's pre-build phase runs build-rust.sh, so the Rust core and its bindings
 # are always rebuilt first.
+#
+# `-skipPackagePluginValidation` because SwiftTerm 1.20.0 added
+# `SwiftTermBuildInfoPlugin`, a SwiftPM build-tool plugin, and Xcode gates
+# third-party build-tool plugins behind a one-time "Trust & Enable" prompt only
+# the GUI can show — xcodebuild cannot answer it and fails the build instead.
+# The plugin stamps SwiftTerm's own git branch/tag/commit into a generated Swift
+# file; it reads the package checkout and writes only inside its plugin work
+# directory. Trusted deliberately, not skipped for convenience.
 # Build the macOS app
 mac-build: mac-generate
-    cd {{mac}} && xcodebuild -project LeoGit.xcodeproj -scheme LeoGit -configuration Debug -derivedDataPath build build
+    cd {{mac}} && xcodebuild -project LeoGit.xcodeproj -scheme LeoGit -configuration Debug -derivedDataPath build -skipPackagePluginValidation build
 
 # `mac-build` is invoked from the body rather than declared as a dependency,
 # because just resolves dependencies before the recipe runs and so cannot skip

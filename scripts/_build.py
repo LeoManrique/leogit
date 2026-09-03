@@ -120,6 +120,9 @@ def build_native() -> Path:
             # info block; passing it again makes the build fail loudly rather
             # than silently ship a stale one if the two ever part company.
             f"MARKETING_VERSION={read_version()}",
+            # See the justfile's mac-build recipe: SwiftTerm ships a build-tool
+            # plugin, and Xcode's trust prompt has no non-interactive answer.
+            "-skipPackagePluginValidation",
             "clean",
             "build",
         ],

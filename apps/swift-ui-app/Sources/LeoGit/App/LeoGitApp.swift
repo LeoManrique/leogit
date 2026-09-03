@@ -23,7 +23,17 @@ struct LeoGitApp: App {
     }
 
     var body: some Scene {
-        WindowGroup {
+        // One window, deliberately. The app shows one repository at a time, so
+        // a `WindowGroup` has nothing to model: it is a *group*, and SwiftUI
+        // opens another member of it whenever LaunchServices hands the app a
+        // folder. Every `leogit <dir>`, Dock drop and Finder "Open With" would
+        // leave a second window behind while `LaunchStore` switched the first
+        // one's repository. `Window` makes the single-window model structural
+        // instead of something each entry point has to remember.
+        //
+        // The title only names the Window-menu entry; `ContentView`'s
+        // `.navigationTitle(store.repoName)` still owns the title bar.
+        Window("LeoGit", id: "main") {
             ContentView(appConfig: appConfig)
                 .environment(store)
                 .environment(appConfig)

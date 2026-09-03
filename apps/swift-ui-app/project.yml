@@ -9,7 +9,7 @@ packages:
   # its Package.resolved) is gitignored; bump deliberately, never downgrade.
   SwiftTerm:
     url: https://github.com/migueldeicaza/SwiftTerm
-    from: 1.18.0
+    from: 1.20.0
 
 options:
   bundleIdPrefix: com.leomanrique

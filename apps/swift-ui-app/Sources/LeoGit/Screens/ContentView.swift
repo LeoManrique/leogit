@@ -112,6 +112,16 @@ struct ContentView: View {
     /// up the same ladder and can arrive as two rises.
     @State private var isResyncing = false
 
+    /// The repository this screen's own per-repo state was last prepared for.
+    ///
+    /// `.task(id:)` restarts whenever its view re-appears, not only when the id
+    /// changes, and re-appearing is exactly what the window does when
+    /// LaunchServices activates the app for a `leogit <dir>` naming the
+    /// repository already open. Keying the clear on the repository rather than
+    /// on the task's lifetime is what makes it happen once per real switch and
+    /// leaves work in progress standing through a re-appearance.
+    @State private var preparedRepo: String?
+
     /// A once-per-launch 0–30 s offset on the first automatic fetch, so two
     /// windows started together don't stay in phase. See `autoFetchLoop`.
     private static let sessionFetchSkew: Duration = .milliseconds(Int64.random(in: 0...30_000))
@@ -141,7 +151,9 @@ struct ContentView: View {
                     onChooseFolders: { openSettings() },
                     onDismissUpdate: { updateStore.isDismissed = true }
                 )
-                .task { await resolveLaunchRepo() }
+                .task {
+                    await resolveLaunchRepo()
+                }
             }
         }
         .frame(minWidth: 720, minHeight: 460)
@@ -251,19 +263,28 @@ struct ContentView: View {
         // Mission Control and the Window menu.
         .toolbar(removing: .title)
         .task(id: repoPath) {
-            branchStore.reset()
-            syncStore.reset()
-            // A different repository must not inherit the previous one's
-            // draft message, checkbox opt-outs, or amend target — nor its
-            // selections, which the sidebars re-seed from the new lists.
-            commitStore.reset()
-            actionFailure = nil
-            changesSelection = []
-            selectedPath = nil
-            selectedSha = nil
-            // Sessions never survive a repo switch — a shell from the prior
-            // repo would be a leak wearing the new repo's dock.
-            terminalStore.closeSession()
+            // Unconditional and self-guarding: the composer holds a draft per
+            // repository and works out for itself whether this is a switch, so
+            // a half-written message follows its repository around instead of
+            // living and dying with the screen.
+            commitStore.activate(repoPath: repoPath)
+            // The rest is state this screen owns, and it is cleared only on an
+            // actual switch — see `preparedRepo`. A re-appearance reaches here
+            // with the same repository and must leave the work in progress
+            // alone.
+            if preparedRepo != repoPath {
+                preparedRepo = repoPath
+                branchStore.reset()
+                syncStore.reset()
+                actionFailure = nil
+                // The sidebars re-seed these from the new repository's lists.
+                changesSelection = []
+                selectedPath = nil
+                selectedSha = nil
+                // Sessions never survive a repo switch — a shell from the prior
+                // repo would be a leak wearing the new repo's dock.
+                terminalStore.closeSession()
+            }
             await directoryStore.noteOpened(repoPath)
             await branchStore.load(repoPath: repoPath)
             await warmUpFetch(repoPath: repoPath)
@@ -937,8 +958,10 @@ struct ContentView: View {
     /// way the invocation can report that it found a folder but no repository.
     ///
     /// Re-running `leogit .` on the open repository is a no-op beyond the
-    /// window activation LaunchServices already performed — `switchRepo`
-    /// refuses the same path, so nothing resets under the user.
+    /// window activation LaunchServices already performed: `switchRepo` refuses
+    /// the same path, and the screen's per-repository setup is keyed on the
+    /// repository rather than on the window appearing, so nothing resets under
+    /// the user.
     @MainActor
     private func open(launchTarget target: LaunchTarget) {
         if target.isRepo {

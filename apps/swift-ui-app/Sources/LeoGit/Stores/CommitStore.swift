@@ -200,7 +200,9 @@ final class CommitStore {
         clocks = Dictionary(uniqueKeysWithValues: kept.map { ($0.path, $0) })
     }
 
-    /// Forget everything typed and unchecked — for switching repositories.
+    /// Forget everything typed and unchecked, for a draft that has been spent:
+    /// the commit it described landed. A repository switch does *not* come
+    /// through here — it parks the draft instead, see `activate(repoPath:)`.
     func reset() {
         summary = ""
         details = ""
@@ -210,6 +212,97 @@ final class CommitStore {
         errorMessage = nil
         amendTarget = nil
         coAuthors = []
+    }
+
+    // MARK: Per-repository drafts
+
+    /// Everything typed or unchecked for one repository, as a value that can be
+    /// set down.
+    ///
+    /// `errorMessage`, `isCommitting` and the provider block are deliberately
+    /// not part of it: each describes an attempt or a machine state rather than
+    /// a repository, and carrying one back would re-raise something the user
+    /// has already dealt with.
+    struct Draft {
+        var summary = ""
+        var details = ""
+        var excludedPaths: Set<String> = []
+        var clocks: [String: Exclusion] = [:]
+        var amendTarget: CommitInfo?
+        var coAuthors: [String] = []
+
+        /// Nothing to come back to. A repository the user only looked at holds
+        /// one of these, and parking it would grow the cache with entries that
+        /// restore an empty composer.
+        var isEmpty: Bool {
+            summary.isEmpty && details.isEmpty && excludedPaths.isEmpty
+                && amendTarget == nil && coAuthors.isEmpty
+        }
+    }
+
+    /// Drafts belonging to repositories that are not on screen, keyed by path.
+    ///
+    /// In memory only, and for one run of the app: a draft is worth a trip to
+    /// another repository and back, which is the trip that used to lose it. The
+    /// dictionary is unobserved because no view reads it — only the live
+    /// properties it swaps in and out are on screen.
+    @ObservationIgnored private var parked: [String: Draft] = [:]
+
+    /// Which repository the live properties currently describe.
+    @ObservationIgnored private var activeRepo: String?
+
+    /// The live draft as a value, for parking and restoring.
+    private var draft: Draft {
+        get {
+            Draft(
+                summary: summary,
+                details: details,
+                excludedPaths: excludedPaths,
+                clocks: clocks,
+                amendTarget: amendTarget,
+                coAuthors: coAuthors
+            )
+        }
+        set {
+            summary = newValue.summary
+            details = newValue.details
+            excludedPaths = newValue.excludedPaths
+            clocks = newValue.clocks
+            amendTarget = newValue.amendTarget
+            coAuthors = newValue.coAuthors
+        }
+    }
+
+    /// Point the composer at `repoPath`: park the outgoing repository's draft
+    /// and take back whatever was left in this one.
+    ///
+    /// Idempotent, and that is the point. The screen tells the composer which
+    /// repository it is on from a `.task(id:)`, which restarts whenever the
+    /// window re-appears as well as when the id changes — and a `leogit <dir>`
+    /// naming the repository already open re-appears the window without
+    /// changing anything. Being asked again for the same repository has to mean
+    /// nothing happens, or a message half-typed at the moment the command ran
+    /// is the thing that gets thrown away.
+    func activate(repoPath: String) {
+        guard repoPath != activeRepo else { return }
+        if let previous = activeRepo {
+            let outgoing = draft
+            if outgoing.isEmpty {
+                parked.removeValue(forKey: previous)
+            } else {
+                parked[previous] = outgoing
+            }
+        }
+        // Removed rather than copied: the live properties are now the draft,
+        // and a second copy under the old key would be the one restored after
+        // the next switch, silently undoing everything typed in between.
+        draft = parked.removeValue(forKey: repoPath) ?? Draft()
+        activeRepo = repoPath
+        // The exclusion clocks came back from a repository that has not been
+        // polled since it was parked; ageing them against the gap would expire
+        // opt-outs for time the file list was never read.
+        lastReconcile = .now
+        errorMessage = nil
     }
 
     // MARK: Amend

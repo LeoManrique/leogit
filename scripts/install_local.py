@@ -22,6 +22,7 @@ run rather than files to place.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 from pathlib import Path
 
 from _build import (
@@ -37,6 +38,7 @@ from _common import (
     APPLICATIONS,
     BUNDLE_NAME,
     RELEASE_CLIENT,
+    REPO_ROOT,
     Client,
     Steps,
     error,
@@ -65,6 +67,57 @@ def existing_build(client: Client, target_os: str) -> Path:
             f"found {len(images)}. Re-run without --no-build."
         )
     return images[0]
+
+
+# What each client's build compiles, for the freshness check in step 2. Scoped
+# to source trees rather than the app directories that hold them: derived data
+# (`apps/swift-ui-app/build`) and cargo's `target/` live inside the tree, and an
+# artifact compared against a directory that contains it is always current.
+SOURCE_ROOTS = {
+    Client.NATIVE: (
+        "core/src",
+        "apps/swift-ui-app/Sources",
+        "apps/swift-ui-app/ffi/src",
+    ),
+    Client.TAURI: (
+        "core/src",
+        "apps/tauri-app/src",
+        "apps/tauri-app/src-tauri/src",
+    ),
+}
+
+
+def newest_file_mtime(path: Path) -> float:
+    """The most recent mtime inside a tree, or the file's own if it is one.
+
+    A macOS bundle is a directory and an AppImage is a file. A directory's own
+    mtime records when its entries last changed, not when its contents were
+    built, so a bundle has to be asked about the files inside it.
+    """
+    if path.is_file():
+        return path.stat().st_mtime
+    return max(
+        (p.stat().st_mtime for p in path.rglob("*") if p.is_file()),
+        default=0.0,
+    )
+
+
+def newer_source(built_at: float, client: Client) -> Path | None:
+    """The newest source this client compiles, if it postdates the build.
+
+    `None` means the artifact is current. The path is returned rather than a
+    bool so the refusal can name what the artifact is missing.
+    """
+    sources = (
+        p
+        for root in SOURCE_ROOTS[client]
+        for p in (REPO_ROOT / root).rglob("*")
+        if p.is_file()
+    )
+    newest = max(sources, key=lambda p: p.stat().st_mtime, default=None)
+    if newest is None or newest.stat().st_mtime <= built_at:
+        return None
+    return newest
 
 
 def destination(target_os: str) -> str:
@@ -105,7 +158,18 @@ def main() -> None:
         # the only question both answer.
         if not built.exists():
             error(f"No build at {built}. Re-run without --no-build.")
-        success("Skipped (using the existing build)")
+        # `--no-build` installs the *Release* artifact, and `just mac-build`
+        # writes Debug — the two paths never meet. Left unchecked this installs
+        # whatever Release build happens to be lying around, reports success,
+        # and leaves the change under test silently absent from the app.
+        built_at = newest_file_mtime(built)
+        if newer := newer_source(built_at, client):
+            error(
+                f"{built} predates {newer.relative_to(REPO_ROOT)}. "
+                "Re-run without --no-build."
+            )
+        stamp = datetime.fromtimestamp(built_at).strftime("%Y-%m-%d %H:%M")
+        success(f"Skipped (using the {stamp} build)")
     else:
         require_toolchain(client)
         built = build(client)
