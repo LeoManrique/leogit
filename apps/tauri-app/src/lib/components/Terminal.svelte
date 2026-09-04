@@ -434,7 +434,7 @@
     line-height: 1.4;
     white-space: nowrap;
     pointer-events: none;
-    box-shadow: 0 2px 8px rgb(0 0 0 / 35%);
+    box-shadow: var(--shadow-popover);
   }
 
   :global(.terminal-link-hint.below) {

@@ -354,7 +354,7 @@
   }
 
   .error-screen h1 {
-    font-size: 17px;
+    font-size: 15px;
     font-weight: 600;
     color: var(--text-primary);
     margin: 0;

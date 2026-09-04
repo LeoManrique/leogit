@@ -1,11 +1,17 @@
 # Plan — Re-skin the Tauri client onto the native design language
 
-> Status: **planning**. No code has been written for this. The audits and the
-> platform research behind every claim here are done and cited, and the design
-> question is settled — the native client wins (§8). What is left is the
-> per-item work in §6 and three on-target checks.
+> Status: **the code is written; the looking is not done**. All six steps in §9
+> have landed, and §6.1–§6.5 record what each one changed and why, against the
+> source the claim came from. The design question is settled — where the native
+> client and this document disagree, the native client wins (§8).
+> What is left is not work but evidence: **§8's three checks need a Windows and
+> a Linux build**, because they ask what the two engines render rather than what
+> they support, and that is the one question neither source nor a mac dev build
+> can answer. §6.6 is a decision not to act, and stays one.
 > Companions: [`STYLE.md`](../../STYLE.md) (the design language),
-> [`FRONTEND.md`](../../FRONTEND.md) §8 (the divergences that stay).
+> [`FRONTEND.md`](../../FRONTEND.md) §8 (the divergences that stay),
+> [`ROADMAP.md`](../../ROADMAP.md) (the control *shapes* this plan deliberately
+> left alone — see §6.5).
 
 ## 1. Goal & scope
 
@@ -49,7 +55,7 @@ is missing them. Transitions are 80–120 ms throughout. No custom titlebar —
 zero hits for `data-tauri-drag-region`.
 
 Some components already match the reference to the pixel. The status badge at
-[`FileList.svelte:648-661`](../../apps/tauri-app/src/lib/components/FileList.svelte#L648-L661)
+[`FileList.svelte:642-655`](../../apps/tauri-app/src/lib/components/FileList.svelte#L642-L655)
 is 18×18, radius 4, 15 % tint, 10 px mono bold — which is exactly
 `FileStatusBadge` at
 [`FileStatusStyle.swift:67-72`](../../apps/swift-ui-app/Sources/LeoGit/Design/FileStatusStyle.swift#L67-L72).
@@ -94,16 +100,64 @@ Researched against current docs, not from memory. Version-dated, with the
 **Engines.** Windows: Evergreen WebView2, stable runtime 152.x (Aug 2026),
 Chromium-based. Linux: `webkit2gtk-4.1`. Tauri 2.11 (`tauri = "2.11.2"`).
 
-**Scrollbars.** `scrollbar-width` / `scrollbar-color` landed in Chromium 121;
-WebKitGTK gained `scrollbar-color` in 2.52.3 (2026-04-16) and `scrollbar-width`
-is **not named in any release note** — unverified. The two systems are
-**mutually exclusive**: a non-`auto` `scrollbar-color`/`-width` overrides
-`::-webkit-scrollbar-*`. Overlay behaviour is an engine/OS property, not CSS:
+**Scrollbars.** `scrollbar-width` / `scrollbar-color` landed in Chromium 121.
+WebKitGTK enables `scrollbar-width` from **2.46** (`CSSScrollbarWidthEnabled`
+defaults true from that release) and `scrollbar-color` from **2.52.3**
+(2026-04-16), backported onto the 2.52 branch. Confirm the target's actual
+package version rather than trusting a figure here — distro builds move — but
+any build from 2.52.3 on has both. The two systems are **mutually exclusive**,
+and WebKit's own predicate is where that is written down rather than inferred
+(`Source/WebCore/rendering/style/RenderStyle+GettersInlines.h`, one identical
+blob at `webkitgtk-2.52.3` and `2.52.6`):
+
+```cpp
+// ignore non-standard ::-webkit-scrollbar when standard properties are in use
+usesStandardScrollbarStyle() { return scrollbarWidth() != Auto || !scrollbarColor().isAuto(); }
+usesLegacyScrollbarStyle()   { return hasPseudoStyle(WebKitScrollbar) && !usesStandardScrollbarStyle(); }
+```
+
+It is an **or**, so *either* standard property alone switches the pseudo-elements
+off — the `*` rule sets both, so a `::-webkit-scrollbar` block is inert twice
+over. The same predicate gates custom-scrollbar creation at all three sites
+(`RenderLayerScrollableArea::createScrollbar`, `RenderListBox::createScrollbar`,
+and `LocalFrameView`, which additionally requires `scrollbarWidthStyle() ==
+Auto` before honouring a block declared on `<body>`), and it gates overlay:
+`RenderBox::canUseOverlayScrollbars()` is
+`!style().usesLegacyScrollbarStyle() && ScrollbarTheme::theme().usesOverlayScrollbars()`,
+and `RenderScrollbar::isOverlayScrollbar()` is hardcoded `false`. **So a
+`::-webkit-scrollbar` block that is not overridden costs Linux its overlay
+scrollbars and a reserved column in every pane** — which is the reason the ban
+on that block is structural rather than tidiness.
+
+What Linux does *not* get is thickness: `ScrollbarThemeAdwaita::scrollbarThickness`
+branches only on `ScrollbarWidth::None` and otherwise returns a constant 21, and
+nothing under `platform/adwaita/` or `platform/gtk/` reads `ScrollbarWidth::Thin`
+at all. `scrollbar-color` *is* honoured there, overlay thumb included — **but
+only because the app is on the Adwaita path in the first place**, which is not
+the GTK3 default. `ScrollbarTheme::nativeTheme()` on `webkit2gtk-4.1` is
+`ScrollbarThemeGtk`, which paints through GTK CSS gadgets and contains no
+reference to `scrollbar-color` at all; every one of its entry points opens by
+delegating to Adwaita `if (!m_useSystemAppearance)`. wry sets exactly that —
+`context.set_use_system_appearance_for_scrollbars(false)`
+(`wry-0.55.1/src/webkitgtk/mod.rs:422`) — so the thumb colour on Linux rides on
+a wry call, and a wry release that changed it would drop the colour silently.
+
+Overlay behaviour is an engine/OS property, not CSS:
 WebKitGTK has painted real overlay scrollbars **by default since 2.12**, so
-Linux gets the reference behaviour free; Chromium ships Fluent scrollbars
-**non-overlay** on Windows, and whether the returning `#overlay-scrollbars` flag
-is reachable through WebView2 `AdditionalBrowserArguments` is **not
-documented**. CSSWG `scrollbar-style: overlay`
+Linux gets the reference behaviour free. `ScrollbarThemeAdwaita::usesOverlayScrollbars()`
+reads no CSS at all — only `SystemSettings`' `overlayScrolling` (defaulting
+`true`) and, on GTK3, a `GTK_OVERLAY_SCROLLING=0` escape hatch — so a desktop
+that has turned overlay scrolling off is the one Linux configuration that draws
+classic scrollbars, and it is the user's setting rather than the app's. Chromium
+ships Fluent scrollbars
+**non-overlay** by default on Windows, but overlay there is a **first-class
+embedder option, not a flag**: `CoreWebView2ScrollbarStyle.FluentOverlay`,
+which Tauri surfaces as the `scrollBarStyle` window key (`"fluentOverlay"`) and
+as `WebviewWindowBuilder::scroll_bar_style`. It needs **WebView2 Runtime
+125.0.2535.41+** and silently does nothing below that; Linux and macOS accept
+only `Default` and no-op; and every webview sharing a data directory must carry
+the same value. Tauri also documents that **CSS scrollbar styling applies on top
+of** the native appearance chosen here. CSSWG `scrollbar-style: overlay`
 ([csswg-drafts#13218](https://github.com/w3c/csswg-drafts/issues/13218)) is open
 with no resolution.
 
@@ -129,131 +183,460 @@ unsupported on Linux; `tauri-plugin-decorum` is Windows+macOS and in maintenance
 mode. **No blur or material is available on Linux at all.**
 
 **Form controls.** `accent-color` affects checkbox, radio, range and
-`<progress>` — **never `<select>`**. `appearance: base` ships **nowhere**
-(MDN; [csswg-drafts#10804](https://github.com/w3c/csswg-drafts/issues/10804)).
-But customizable select **is** shipping as `appearance: base-select` — Chrome/
-Edge 135 (Apr 2025), with `::picker(select)`, `::checkmark` and
-`<selectedcontent>`. WebView2 stable is far past 135, so it is **available on
-Windows**; no WebKitGTK release note mentions it, so assume **unavailable on
-Linux** and verify on target.
+`<progress>` — **never `<select>`** — and both engines read it **only on the
+native paint path**, so it colours a control the engine still draws and nothing
+else. It is available on both: Blink throughout, and WebKitGTK with
+`AccentColorEnabled` stable and defaulting true under `USE(THEME_ADWAITA)`
+(`Source/WTF/Scripts/Preferences/UnifiedWebPreferences.yaml` at
+`webkitgtk-2.52.0` and `2.52.3`).
+
+**Neither engine devolves a checkbox or a radio**, whatever an author declares
+on it. Blink's `LayoutTheme::IsControlStyled` (`branch-heads/7977`, M152)
+switches on the button, progress, meter, menulist, search, textarea and
+textfield parts and returns `default: false` for the rest; WebKit's
+`RenderTheme::isControlStyled` (`webkitgtk-2.52.3`) has the same shape. The
+declarations are discarded instead. **A `<select>` is the opposite**: an author
+`background`, `border` **or `border-radius`** — the radius longhands carry
+Blink's `is_border` flag — devolves it to a *styled menulist* (`kMenulistButton`
+on Blink, `nativeAppearanceDisabled()` on WebKit), which is a half-native state
+that keeps the engine's own arrow and its arrow padding, loses `box-shadow` to
+the themed-control reset, and on WebKitGTK has its `line-height` overwritten by
+`RenderThemeAdwaita::adjustMenuListStyle`. `appearance: none` is what leaves the
+native path outright, on both.
+
+**A select's popup is only stylable on one engine.** Windows is the surprise:
+Chromium uses an internal popup — a real HTML document — and applies per-option
+`color`, `background-color` and font; the external native popup is the macOS
+path. WebKitGTK is the reverse of the folklore and builds a genuine
+`GtkTreeView` in a `GtkPopover`, consuming none of the `<option>` styles WebCore
+computes ([webkit.org/b/9846](https://bugs.webkit.org/show_bug.cgi?id=9846),
+filed 2006, still open).
+
+**Customizable select** ships as `appearance: base-select` from **Chrome/Edge
+135** (2025-04-01) with `::picker(select)`, `::picker-icon`, `::checkmark` and
+`<selectedcontent>`, so it is available on Windows. On Linux it is **absent from
+2.52 by two weeks**: WebKit added the keyword 2026-02-03 and enabled it
+2026-02-14, after the `webkitglib/2.52` branch was cut ~2026-01-20. It is on
+`webkitglib/2.54`. Two detection traps go with it: probe the `appearance`
+**value**, since an unknown value invalidates the declaration — `base` alone is
+in 2.52's `CSSValueKeywords.in` and would report true while delivering nothing —
+and never probe with `::picker()` or `:open`, which parse without behaving.
 
 ## 5. What this means
 
-Three of the four goals are reachable on both platforms with CSS alone. The
-divergences that cannot be closed are **overlay scrollbars** (free on Linux,
-not reachable on Windows), **window materials** (Windows only), and
-**customizable `<select>`** (Windows only). Each is recorded in §6 as a decision
-rather than left to be rediscovered.
+Three of the four goals are reachable on both platforms without leaving the
+frontend. The one divergence that cannot be closed is **window materials**
+(Windows only), and §6.6 declines it rather than half-building it. **Overlay
+scrollbars are not among them** — free on Linux, and one config key on Windows
+(§4), so the reference behaviour is reachable on both. The one scroller no rule
+here reaches is the terminal's, which xterm draws itself in JS; it is already an
+auto-fading overlay, so the divergence is width and colour rather than
+behaviour.
+
+**Customizable `<select>` is available on Windows only and is used on neither**
+(§6.5): a control styled on one platform and not the other is a wider divergence
+than the one it closes, and the gap is a WebKitGTK release rather than a
+platform limit. What both platforms do get is a select taken off the native path
+with `appearance: none`, which is the part that renders the same on both. Each
+of these is recorded in §6 as a decision rather than left to be rediscovered.
 
 ## 6. The work
 
-### 6.1 Scrollbars — delete the dead block, keep the standard properties
+### 6.1 Scrollbars — one standard rule, and Windows asked for overlay
 
-[`app.css:283-312`](../../apps/tauri-app/src/app.css#L283-L312) sets **both**
-systems on `*`: `scrollbar-width: thin` + `scrollbar-color`, and a
-`::-webkit-scrollbar` block. Because the standard properties win in Chromium
-121+, **the entire `::-webkit-scrollbar` block is dead code on Windows** and the
-8 px width, 4 px radius and hover colour it specifies never render. Delete it;
-keep `scrollbar-width` + `scrollbar-color`.
+Done. [`app.css`](../../apps/tauri-app/src/app.css) holds the whole definition
+in one `*` rule — `scrollbar-width: thin` with
+`scrollbar-color: var(--border-strong) transparent` — and the client contains no
+`::-webkit-scrollbar` rule anywhere. The deleted block never rendered on either
+engine, because either standard property alone switches the pseudo-elements off
+(§4 quotes the predicate).
 
-Windows keeps non-overlay Fluent scrollbars — not reachable, see §4 — and Linux
-keeps GTK's overlay ones. Accept the divergence and record it in `FRONTEND.md`
-§8, which is what that section is for.
+**Both standard properties stay, because each is the one an engine actually
+renders**, and `app.css` says so per property to stop either being "cleaned up"
+as inert. `scrollbar-width: thin` is a real thickness on Chromium/WebView2 and
+sets none on WebKitGTK, whose Adwaita theme branches only on `None`.
+`scrollbar-color` is what Linux renders (2.52.3+), giving the neutral thumb at
+GTK's own width. Neither is what keeps the legacy block at bay by itself — the
+gate is an **or** and both properties are set, so it is shut twice over.
 
-One consequence to test rather than assume:
-[`FileList.svelte:543`](../../apps/tauri-app/src/lib/components/FileList.svelte#L543)
-sets `scrollbar-gutter: stable`, which reserves space on Windows and is inert
-under Linux's overlay scrollbars — a genuine one-platform layout difference in
-the densest list in the app.
+Windows is asked for overlay where such a switch belongs:
+`"scrollBarStyle": "fluentOverlay"` on the `main` window in
+[`tauri.conf.json`](../../apps/tauri-app/src-tauri/tauri.conf.json). The app
+builds no webview in Rust, so this is a one-key config change with no call site.
+The key is verified against this exact toolchain rather than assumed: `tauri`
+2.11.5 / `tauri-utils` 2.9.3 parse `tauri.conf.json` at build time with
+`deny_unknown_fields`, and `scrollBarStyle` is in the accepted set — a misspelled
+key or a bad enum value is a compile error, not a silent no-op. (The file's
+`$schema` now points at the CLI's real `config.schema.json`, so an editor
+validates the key too.)
+
+**`scrollbar-gutter: stable` stays** at
+[`FileList.svelte`](../../apps/tauri-app/src/lib/components/FileList.svelte#L543).
+Nothing depends on the column it reserves — the rows are `left: 0; right: 0`,
+the filename cell is `flex: 1 1 0; min-width: 0; overflow: hidden`, and no
+script reads a width — so it satisfies `STYLE.md`'s rule that a gutter may
+narrow a column but must never be what one depends on. It costs nothing under
+overlay, and the one configuration it still serves is precisely the one the
+config key cannot reach: a Windows host below WebView2 125.0.2535.41, where
+`fluentOverlay` is ignored and classic Fluent scrollbars would otherwise shift
+the list sideways the moment it grows past the viewport.
+
+**The terminal is outside all of this**, and `STYLE.md` and `FRONTEND.md` §8 now
+say so rather than leaving the app-wide rule quietly untrue. `@xterm/xterm` 6
+vendors VS Code's scrollable element and draws the scrollbar as `<div>`s, so no
+CSS scrollbar property reaches it — `.xterm-viewport` still carries
+`overflow-y: scroll` but is left empty and never produces a thumb. It is themed
+through `ITheme` instead, and is already an auto-fading overlay slider, so the
+behaviour matches; only its width (14 px) and colour (the terminal foreground at
+20 %) differ from the app's hairline. Both are reachable via
+`ITheme.scrollbarSlider*` if the divergence ever stops being acceptable.
+
+Noted while mapping that DOM, for whoever next touches `Terminal.svelte`:
+its `:global(.xterm-viewport) { background-color: #000 !important }` paints
+nothing. The visible black comes from `Viewport.ts` setting
+`backgroundColor` inline on the scrollable element from `theme.background`,
+which the component already sets to `#000000`, over a `.terminal-body` that is
+also black. Left in place rather than removed here because it is a background
+rather than a scrollbar, so it wants its own visual check on target.
 
 ### 6.2 Context menus — keep drawing them, draw them like AppKit
 
-**Decision: do not adopt Tauri's native context menu.** It is feasible on both
+Done.
+[`ContextMenu.svelte`](../../apps/tauri-app/src/lib/components/ContextMenu.svelte)
+draws a reproduction of a macOS 26 `NSMenu`, and every number in it is a
+measurement of a real one rather than a value chosen here. Only the style block
+and one label wrapper changed; the component's behaviour is untouched.
+
+**Tauri's native context menu is not adopted.** It is feasible on both
 platforms, and it is the wrong call here on five separate grounds: the Windows
 menu is a classic win32 `HMENU` (§4), so it defeats goal #1 outright; there is
-no theming API to bring it back; the destructive-red item that
-[`ContextMenu.svelte`](../../apps/tauri-app/src/lib/components/ContextMenu.svelte)
-has today would be lost; Wayland positioning is broken; and there is no
-dismissal event to drive the callers' state.
+no theming API to bring it back; the destructive-red item would be lost;
+Wayland positioning is broken; and there is no dismissal event to drive the
+callers' state. [`STYLE.md`](../../STYLE.md)'s *Context menus* states the split
+this rests on — the native client takes the system menu, the Tauri client draws
+its own to the same metrics.
 
-Instead, restyle the existing component — used by
-[`FileList`](../../apps/tauri-app/src/lib/components/FileList.svelte#L516),
-[`CommitList`](../../apps/tauri-app/src/lib/components/CommitList.svelte#L423),
-[`Header`](../../apps/tauri-app/src/lib/components/Header.svelte#L697) and
-[`BranchDropdown`](../../apps/tauri-app/src/lib/views/BranchDropdown.svelte) —
-to AppKit's metrics. It already does separators, disabled items and keyboard
-navigation, which is the expensive half.
+**Where the metrics came from.** Apple publishes none of them: the HIG's *Menus*
+page carries no numbers for macOS at all, and `NSMenu` exposes no layout API. So
+they were read out of AppKit on **macOS 26.6.2 (build 25G83)** — popping a real
+`NSMenu`, walking `NSPopupMenuWindow`'s view and layer trees, and rasterizing
+rows offscreen. Two independent passes agreed on every row below but one, and
+that one is the row worth reading twice: the label's *view frame* sits at 14pt
+and its glyphs at 16pt, and CSS padding positions glyphs. This table is the only
+record in the repo of what an AppKit menu measures.
 
-This contradicts [`STYLE.md:179`](../../STYLE.md#L179) ("Row context menus are
-**stock system menus** … Nothing here is hand-drawn or re-themed; the platform
-owns the look"), which is written from the native client's position. See §7.
+| Property | AppKit, macOS 26 | How it was read | In the component |
+|---|---|---|---|
+| Menu corner radius | **12pt**, `continuous` | `cornerRadius` on the menu window's glass layers | `border-radius: 12px` (CSS has no squircle) |
+| Menu content inset | **5pt** top and bottom; rows full-bleed horizontally | first `NSTableRowView` at y=5; `_styleInsets` = 5/0/5/0 | `padding: 4px` + the 1px border |
+| Item row height | **24pt**, rows abutting | row frames; `rowHeight` 24, `intercellSpacing` (0,0) | `height: 24px` |
+| Label leading inset | **16pt** from the menu edge | glyph ink at x=16 in an offscreen raster — the `_NSMenuItemTextField` *frame* is at 14, and its own `alignmentRectInsets` add the other 2 | 1px border + 4px padding + `padding: 0 11px` |
+| Label trailing inset | **16pt** | `NSMenu.size.width` is the title's width + 32pt exactly, across four different strings | the same 11px |
+| Label font | **13pt regular** `.AppleSystemUIFont`, 16pt line box | `NSFont.menuFont(ofSize: 0)`; the live text field | `font-size: 13px`, `font-family: inherit`; the line box stays inherited, since pinning 16px would clip a Linux fallback face whose own box is taller and the row centres the glyphs either way |
+| Highlight shape | inset rounded rect — **5pt** left and right, the row's **full 24pt** height | `NSRootMenuWindowBackgroundView` at (5, 5, 136×24) in a 146pt menu | the item box itself |
+| Highlight radius | **7pt** | `cornerRadius` on that view's fill layers | `border-radius: 7px` |
+| Highlight fill | the **accent**, composited through glass | fill layer reads sRGB `#1769E6` in Dark over a `CABackdropLayer`; the highlight follows the user's accent | `var(--border-active)` |
+| Highlighted label | **opaque white in both appearances** | the text field's colour flips to `selectedMenuItemTextColor` | `var(--on-accent)` |
+| Enabled label | `labelColor` | the live text field | `var(--text-primary)` |
+| Disabled label | `tertiaryLabelColor` — 0.259 Light, 0.247 Dark | the text field on a disabled item | `var(--text-faint)` |
+| Disabled row | takes no highlight | HIG: "doesn't respond to interactions" | `:not(:disabled)` on the highlight rule |
+| Destructive **and** disabled | reads disabled, not red | a disabled item greys whatever its title colour | `:disabled` last, at equal specificity to `.destructive`, so source order decides it |
+| Rows highlighted at once | **exactly one** | the single `NSRootMenuWindowBackgroundView` is re-framed onto the current row rather than one fill per row | the fill is keyed on `focusIdx` alone, which `mouseenter` moves, so the pointer and the keyboard cursor cannot light two rows |
+| Separator row | **11pt**: 5pt, a **1pt** hairline, 5pt | the separator row's frame; its line layer at y=5, h=1 | `height: 1px; margin: 5px 11px` |
+| Separator inset | **16pt** each side — aligned to the **label**, not to the highlight | that line layer at x=16, w=114 in a 146pt menu | the 11px margin + 4px padding + 1px border |
+| Highlight animation | **none** | — | `transition: none`, stated so the global `button` rule cannot lend it 120ms |
+| Destructive item | no `NSMenuItem` API exists; SwiftUI's `Button(role: .destructive)` is what the native client uses, and a red label goes **white** on the highlight | `ChangesSidebar.swift:276,289`, `SyncControls.swift:127`, `BranchMenu.swift:104`; an `attributedTitle` in `systemRed` measurably *stays* red on the fill, which is the trap to avoid | `.destructive` ordered ahead of the highlight rule, which outranks it |
 
-### 6.3 Two colour literals, repeated 26 times
+**The surface is the one thing that cannot be reproduced.** The real menu is a
+Liquid Glass window — an `NSVisualEffectView` on a private material, composited
+by the WindowServer, so it cannot even be sampled — and `STYLE.md` rules
+`backdrop-filter` out because these windows are opaque. The menu therefore takes
+the app's standing elevated-surface treatment, the same one the branch picker
+and every dialog wear: `--bg-elevated`, a 1px `--border-inactive` hairline, and
+`--shadow-popover`. **That border is why the paddings are one pixel short of the
+measured insets** — it stands in for the edge the glass gives the original, so
+it is part of the 5px the highlight is inset by and part of the label's 16px.
 
-Not 26 decisions — two, applied 26 times:
+**Five places the reproduction departs from the measurement on purpose**, each
+because a standing rule outranks the literal rather than an approximation
+slipping in — the first three are `STYLE.md`'s "token, never a hex":
 
-- **15** sites hardcode `rgba(0, 0, 0, 0.4)` as the modal backdrop. That is
-  wrong in *both* themes: `STYLE.md:216` specifies 0.3 light / 0.5 dark. Add
-  `--overlay-backdrop` to both theme blocks and replace all 15.
-- **11** sites hardcode `color: #ffffff` on primary-CTA text. Add `--on-accent`
-  and replace all 11.
+- **The highlight is the flat accent**, not the glass composite. `#1769E6` is
+  what the accent becomes *under* a material this client cannot have; without
+  it, the accent itself is the honest reproduction, and `--border-active` is
+  already what every accent fill in the app paints.
+- **The separator is `--border-inactive`** (0.1 in both themes). Light matches
+  the measured hairline almost exactly (0.102); Dark is lighter than AppKit's
+  (0.141). One hairline token covers the whole app, and a menu-only second one
+  would buy 0.04 of alpha.
+- **The disabled label is `--text-faint`** (0.3 / 0.32) against AppKit's 0.259 /
+  0.247 — a shade stronger, and the token `STYLE.md` already assigns to this
+  register.
+- **The hit area is the highlight.** AppKit's row is full-bleed and highlights
+  from the menu's own edge inward; here the item box *is* the highlight, so the
+  outer 5px is inert. The picture is identical; the hover target is 5px
+  narrower.
+- **The 200px floor outranks the 16px trailing inset.** An `NSMenu` hugs its
+  widest title, so its trailing inset is 16pt and nothing more. Three of the
+  four callers here have no label long enough to reach 200px — Header's two menus
+  measure 174px and 184px, the commit list's 159px — so they sit on the floor
+  and carry 32–118px of trailing space instead. The floor is what makes
+  `Header.svelte`'s right-alignment land, so it wins; only the file list's menu
+  is genuinely content-sized.
 
-14 of 31 components use tokens exclusively today; this takes it to 30. The
-remainder is terminal black (`#000000`), which `STYLE.md:248` explicitly allows.
+**One divergence is behaviour, so it stays.** The menu paints its first enabled
+item highlighted the moment it opens, because `focusIdx` starts there — a real
+`NSMenu` opens with nothing highlighted, and ↓ then takes the first item rather
+than the second. An accent fill states it far louder than a 4% tint would, and
+on the file list it means *Discard Changes…* is filled the moment the menu
+appears. Dropping the paint alone would only hide the mismatch and leave ↓ still
+skipping the first item, so the paint and the key belong to one change — a
+behavioural one, which §1 puts outside this plan. **This is the thing to look at
+first** when judging the reproduction, because it is the one place it does not
+match.
+
+The same index has a second consequence worth knowing before it is rediscovered:
+`mouseenter` only moves it for an *enabled* item, so resting the pointer on a
+greyed row — or on the menu's own padding — leaves the last enabled row lit
+somewhere else, where an `NSMenu` would clear the highlight outright. Clearing
+`focusIdx` there would take Return's target with it, so this is the same
+behavioural change as the paragraph above rather than a second one.
+
+**A menu item is still in the tab order**, so Tab reaches one and `app.css`'s
+`button:focus-visible` draws a `--cursor-bg` halo an `NSMenu` has no counterpart
+for. The halo is the only thing marking DOM focus, which `focusIdx` does not
+track, so removing it would leave that state undrawn — the fix is focus
+management, which is behaviour again.
+
+**`min-width: 200px` is load-bearing across files** and the component says so:
+`Header.svelte` anchors both of its menus at `rect.right - 200` so they hang
+from the right edge of their chevron, and nothing else makes that land. A long
+label ellipsizes instead of widening past the viewport, capped at the same 6px
+margin the component's own clamp keeps.
+
+**The two radii are in `STYLE.md`'s scale**, since a number this table measured
+belongs in the design language rather than only in a plan; §7 item 5 records
+where.
+
+### 6.3 Two colour tokens, applied 24 times
+
+Done. Two decisions, 24 sites, and both tokens are defined in **both** theme
+blocks of [`app.css`](../../apps/tauri-app/src/app.css) — a token that exists in
+only one theme falls back silently and is worse than the literal it replaced.
+
+- **`--overlay-backdrop`** — `rgba(0,0,0,0.3)` light, `rgba(0,0,0,0.5)` dark,
+  which is what `STYLE.md`'s *Modals / dialogs* specifies, at **14** modal and
+  overlay backdrops.
+  The flat `rgba(0, 0, 0, 0.4)` it replaces was wrong in both directions at
+  once, so this is a visible change in both themes: the light scrim lifts, the
+  dark one deepens. It is declared beside `--shadow-popover`, the other piece of
+  modal chrome.
+- **`--on-accent`** — `#FFFFFF` in both themes, at **10** sites, every one of
+  them a `color` on a `background: var(--border-active)` fill. The same value in
+  both blocks is the point rather than an oversight, and it is listed in both
+  rather than hoisted to `:root` so the accent and the label that has to read on
+  it stay together. `#FFFFFF` is what the native client renders: **no
+  `.borderedProminent` site in `apps/swift-ui-app/` sets a label colour at all**
+  — `Color.white` appears nowhere in the native sources — so AppKit paints the
+  prominent label, and both accents (`#007AFF` light, `#0A84FF` dark) are dark
+  enough that it resolves to white in either appearance. `STYLE.md`'s *Buttons*
+  states the same rule in words.
+
+**One white is deliberately not `--on-accent`.**
+[`MainLayout.svelte:3057`](../../apps/tauri-app/src/lib/views/MainLayout.svelte#L3057)
+sets `color: #ffffff` over `background: var(--status-red)` — the terminal close
+button's hover, a white glyph on a destructive fill. It is the client's only
+white-on-status-fill, the native client has no counterpart to copy, and a token
+named for the accent would name the wrong background, so it stays a literal.
+
+**30 of 32 components use tokens exclusively.** The two that do not are
+`Terminal.svelte` and `MainLayout.svelte`, and between them they hold only the
+terminal: black (`#000000`), which `STYLE.md`'s *Terminal* explicitly allows; the
+emulator's `#e5e5e5` foreground, which is the sRGB triple
+`Screens/TerminalSessionView.swift:369` hands SwiftTerm, so both clients paint
+the same grey on purpose.
 
 ### 6.4 Per-component conformance
 
-- **Focus ring**
-  [`FileList.svelte:637`](../../apps/tauri-app/src/lib/components/FileList.svelte#L637)
-  uses `outline: 2px solid var(--border-active)` — solid accent, where every
-  other ring in the app is the low-alpha `0 0 0 2px var(--cursor-bg)`.
-- **Letter-spacing on lowercase**
-  [`MainLayout.svelte:3010`](../../apps/tauri-app/src/lib/views/MainLayout.svelte#L3010)
-  (`.shell-name`). `STYLE.md:24` forbids it.
-- **Headings** — settled by "the native client wins", which resolves the three
-  oversized ones **differently**, because each has a different counterpart:
-  - [`App.svelte:357`](../../apps/tauri-app/src/App.svelte#L357) — the
-    error-screen `h1` at 17 px. Native's equivalent failure title is
-    `.title3.weight(.semibold)` (`Design/ActionFailureSheet.swift:68`, and every
-    sheet). **17 px → 15 px.**
-  - [`CommitDetail.svelte:105`](../../apps/tauri-app/src/lib/views/CommitDetail.svelte#L105)
-    — the commit summary at 15 px. Native renders the same string with
-    `.headline` (`Screens/HistoryDetailPane.swift:148`), which is 13 pt
-    semibold on macOS. **15 px → 13 px** — this one comes *down*.
-  - [`MainLayout.svelte:2943`](../../apps/tauri-app/src/lib/views/MainLayout.svelte#L2943)
-    — the dirty-submodule title at 15 px. Native uses a stock
-    `ContentUnavailableView` here (`Screens/DiffView.swift:359-370`), whose
-    title the system sizes well above 13 pt. **Stays 15 px.**
+Done. Each item and where it landed:
 
-  The pattern underneath: native has three heading registers, not one — a sheet
-  or failure title (`.title3.semibold`), a detail-pane heading (`.headline`),
-  and a system-sized pane empty state. `STYLE.md:210`'s single 13 px rule
-  cannot express that, which is why §7 amends it.
-- **The one unshared shadow** —
-  [`Terminal.svelte:437`](../../apps/tauri-app/src/lib/components/Terminal.svelte#L437)
-  uses a literal `0 2px 8px rgb(0 0 0 / 35%)` where everything else uses
-  `--shadow-popover`.
+- **Focus ring — a checkbox taking an `outline` rather than the shared halo is
+  not a defect.** The shared ring is a `0 0 0 2px var(--cursor-bg)` halo, which
+  on a field sits around a border swapped to `var(--border-active)`. A checkbox
+  can wear neither half.
+  WebKitGTK erases the shadow: `RenderTheme::adjustStyle` runs
+  `if (!supportsBoxShadow(style)) style.setBoxShadow(None)`, and the base
+  `supportsBoxShadow` returns `false` for every themed control — `RenderThemeIOS`
+  is its only override in the tree, so Adwaita inherits the `false`. A text field
+  escapes it because its author border and background take it off the native
+  path first, which a checkbox cannot be. And the halo alone is not a ring: over
+  the selected row's `--bg-tertiary` it measures **1.24:1**, under WCAG 1.4.11's
+  3:1, because elsewhere it is the solid border beside it that carries the
+  contrast. An outline is exempt from the style adjuster, paints over the themed
+  control, and takes the accent at full strength — the only ring these controls
+  can take. `STYLE.md`'s *Spacing, radii, focus* states both shapes; §6.5 is
+  where the checkbox one became a single app-wide rule.
+- **Letter-spacing.** Gone from `.shell-name` in `MainLayout.svelte`. The
+  client's only remaining declarations are `Header.svelte`'s two.
+- **Headings.** The error-screen `h1` in `App.svelte` is **15 px**; the commit
+  summary in `CommitDetail.svelte` is **13 px** and still semibold; the
+  dirty-submodule title in `MainLayout.svelte` was already 15 px and is
+  untouched. Three registers rather than one, which is what native draws — a
+  sheet or failure title (`.title3.semibold`), a detail-pane heading
+  (`.headline`), a system-sized pane empty state — and `STYLE.md`'s *Section
+  headers* carries all three.
+- **Dialog titles — one rule, thirteen dialogs.**
+  [`app.css`](../../apps/tauri-app/src/app.css) holds
+  `.modal-header h2 { font-size: 15px; font-weight: 600; color: var(--text-primary) }`
+  once, and no component restates size or weight. Svelte emits a scoped rule as
+  `.modal-header.svelte-hash h2:where(.svelte-hash)` — 0-2-1 against the
+  unscoped rule's 0-1-1 — so `ForcePushConfirm`, `DiscardConfirm` and
+  `ErrorModal` win on specificity while restating `color` alone, as does
+  `ConfirmDialog`'s `.destructive` variant. `RepoPicker` is the thirteenth: its
+  class sat on the `<h2>` itself, outside a descendant selector's reach, so its
+  header is now a wrapper around the `<h2>` like every other dialog's.
+- **Pane-level empty states.** `.diff-empty` (`MainLayout.svelte`) and
+  `.empty-state` (`DiffViewer.svelte`) are **15 px**. The register belongs to
+  the title, so `.diff-empty .show-anyway` is pinned to 13 px against the global
+  `button { font-size: inherit }`, and the `.muted` and `.detail` sub-lines
+  already set their own 12 / 11 px. A *list's* empty line is the other register
+  and stays where it is — `FileList`, `CommitList`, `BranchDropdown`,
+  `RepoListEmptyState`. So does `DiffViewer`'s `.binary-state`, which stands in
+  for content that exists rather than announcing a pane with none.
+- **Shadows are all one token.** `.terminal-link-hint` in `Terminal.svelte`
+  takes `var(--shadow-popover)` like every other floating surface — it is a hint
+  over the terminal, the same class of surface as `RepoTooltip`. The token is
+  theme-aware, so the hint casts a light shadow in Light and a heavy one in
+  Dark; no component holds a literal shadow.
 
-**Not a defect:** `font-weight: 700` at `FileList.svelte:659`. It matches the
-native badge exactly (§2), and `STYLE.md:9` says the native app wins. The rule
-is what needs amending — see §7.
+**Not a defect:** `font-weight: 700` on the status plate in `FileList.svelte`.
+It matches the native badge exactly (§2), and `STYLE.md`'s *Typography* names
+the status plate as the one exception to *avoid bold*.
 
-**Not a defect:** the `letter-spacing` at `Header.svelte:819,826`. Those style
-the literal strings `DETACHED HEAD` and `MERGING`, so tracking on them is
-correct typography, and `FRONTEND.md` §8 already records the badge-vs-chip-label
+**Not a defect:** the `letter-spacing` in `Header.svelte`. Those style the
+literal strings `DETACHED HEAD` and `MERGING`, so tracking on them is correct
+typography, and `FRONTEND.md` §8 already records the badge-vs-chip-label
 difference as intentional.
 
 ### 6.5 Settings form controls
 
-`STYLE.md:205` wants `Toggle`/`Picker` shapes; the Tauri form draws a checkbox
-and a `<select>` at
-[`SettingsOverlay.svelte`](../../apps/tauri-app/src/lib/views/SettingsOverlay.svelte#L222)
-(and :236, :265, :275, :337, :355). `accent-color` already handles the
-checkboxes. For the selects, gate on `@supports (appearance: base-select)` so
-Windows gets the styled picker and Linux keeps the current control as the
-baseline (§4). Do not reach for a hand-rolled dropdown to close the gap —
-that trades a platform control for a maintenance burden on the one platform
-that cannot use it.
+Done, in [`app.css`](../../apps/tauri-app/src/app.css) rather than in the four
+components that draw one of these controls. Two of the three results below are
+the opposite of what the platform notes predicted, and each says so with the
+source that settled it.
+
+**Every checkbox in the app now has a focus ring, and one rule draws it.** Four
+of the six had none. One `:focus-visible` rule on
+`input[type='checkbox'], input[type='radio']` sets
+`outline: 2px solid var(--border-active)` with `outline-offset: 2px` — the
+shape `STYLE.md`'s *Spacing, radii, focus* names — and no component restates
+it. Six controls take it: `FileList`'s two, Settings' three
+([`SettingsOverlay.svelte:238`](../../apps/tauri-app/src/lib/views/SettingsOverlay.svelte#L238),
+`:267`, `:277`), and `PublishRepository.svelte:86`. The file list's two arrived
+with this ring already — `FileList` stated it locally, which is the "not a
+defect" §6.4 records — and the other four had `input:focus`'s `outline: none`
+reaching them instead, which left **nothing** on WebKitGTK — WebKit adds the
+focused state only while
+`outlineStyle() == OutlineStyle::Auto`, and `RenderThemeAdwaita::supportsFocusRing`
+returns true for `Checkbox` and `Radio`, so Adwaita was willing to draw one and
+was never asked — and on Chromium the `--cursor-bg` halo alone, which measures
+**1.24:1** over the file list's selected row, under WCAG 1.4.11's 3:1. The two
+engines disagree about the halo and the disagreement is why the answer is an
+outline: Blink paints an author `box-shadow` on a themed checkbox (its shadow
+pass has no appearance check) and WebKit deletes it (`RenderTheme::adjustStyle`
+runs `if (!supportsBoxShadow(style)) style.setBoxShadow(None)`, and neither the
+base nor `RenderThemeAdwaita` returns true). An outline is the only ring both
+draw.
+
+The narrowing that stops `outline: none` reaching a checkbox is written
+`input:where(:not([type='checkbox']):not([type='radio']))`, and the `:where()`
+is load-bearing. Without it the selector takes its arguments' specificity and
+lands at (0,2,1) — heavier than a **single-class** component rule, which Svelte
+emits as a bare `.class.svelte-hash` at (0,2,0) rather than with the `:where()`
+it gives a descendant (§6.4's dialog-title bullet is the descendant case, where
+the component wins at 0-2-1). At (0,2,1) an app-wide default silently outranks
+every field that states its own padding — the commit summary's 48px right inset
+for its character counter among them. `:where()` contributes nothing, so the
+rule keeps the weight a bare `input` had and only its reach changes.
+
+**`accent-color` is what colours these controls, and the Chromium trap this
+step went looking for does not exist.** The 2020 Form Controls Refresh reads as
+though an author `background`/`border` would devolve a checkbox on Blink and
+leave `accent-color` inert on the wreckage. Source says otherwise:
+`LayoutTheme::IsControlStyled` — read at `branch-heads/7977`, the M152 branch
+WebView2 tracks — switches on button, progress, meter, menulist, search,
+textarea and textfield, and `kCheckbox`/`kRadio` fall to `default: return
+false`. WebKit's `RenderTheme::isControlStyled` at `webkitgtk-2.52.3` does the
+same. **Neither engine devolves a checkbox**; both discard the declarations
+instead (Blink's `AdjustCheckboxStyle` runs `ResetPadding` and `ResetBorder`,
+which clears the radii too, and the background paint is skipped wherever the
+theme painted). So `accent-color` was never at risk — and it is now stated
+once, with the 14×14 size and the pointer, instead of in three components.
+WebKitGTK carries it stable and default-on (`AccentColorEnabled` is true under
+`USE(THEME_ADWAITA)`), which is half of the old verification 3 answered from
+source rather than on target.
+
+The narrowing stays on the field rule as well as the focus rule, even though
+only the focus rule needs it: it keeps four declarations out of a control that
+silently discards them, and writing the same selector in both places makes one
+idea cover one set of controls rather than two sets that have to be kept in
+agreement.
+
+**The `<select>`s take `appearance: none`, and `base-select` is declined.**
+Gating a styled picker on `@supports (appearance: base-select)` would have been
+a Windows-only fork of a control, and three things say not to:
+
+- **The popup is the platform's on both, and that is what the reference does.**
+  The native client shows a stock `Picker`, i.e. the system popup; drawing our
+  own on Windows would make the Tauri client the only one of the three with a
+  dropdown of its own. It is also not available on Linux at any price —
+  WebKitGTK renders the popup as a real `GtkTreeView` in a `GtkPopover` and
+  consumes none of the `<option>` styles WebCore computes
+  ([webkit.org/b/9846](https://bugs.webkit.org/show_bug.cgi?id=9846), open since
+  2006). Chromium's popup **is** an internal HTML document and would style, so
+  the fork would be exactly one platform wide.
+- **The gate is temporary.** `base-select` is stable in Chromium from **135**
+  (2025-04-01) and present in WebView2's channel; WebKit implemented it
+  2026-02-03 and enabled it 2026-02-14, but the `webkitglib/2.52` branch was cut
+  ~2026-01-20, two weeks early. It is already on `webkitglib/2.54`. So the
+  one-sided gate is a fork with a known expiry, and building it now buys a
+  Windows-only presentation that has to be maintained until Linux catches up and
+  then reconsidered anyway.
+- **The closed control was the real problem, on Linux, today.** Author
+  background and border without `appearance: none` do not leave a select native:
+  both engines devolve it to a *styled menulist* (Blink returns
+  `kMenulistButton`; WebKit routes through `nativeAppearanceDisabled()`), which
+  is the worst of the three states. The engine keeps painting its own arrow, so
+  Windows and Linux showed different glyphs; it keeps reserving its own arrow
+  padding; `RenderThemeAdwaita::adjustMenuListStyle` calls
+  `style.setLineHeight(initialLineHeight())` unconditionally, so on Linux the
+  control sat **shorter than the fields stacked with it**; and, still counting
+  as a themed control, it lost the focus halo to the same `supportsBoxShadow`
+  reset as the checkboxes.
+
+`appearance: none` ends all four at once — `RenderTheme::adjustStyle`
+early-returns and no control part is created — so the select now wears the same
+register and the same focus ring as the fields beside it, on both engines. The
+chevron `appearance: none` removes is drawn back once, as a `::after` on a
+`.select-field` wrapper (a pseudo-element cannot hang off the `<select>`
+itself), from two borders in `--text-secondary` — one theme-aware token, so no
+asset has to be themed — and it is the same 90° V the header draws for "this
+opens something", at the affordance weight rather than the label's. All four
+selects wear it: `SettingsOverlay.svelte:223`, `:340`, `:360` and
+[`CommitMessage.svelte:522`](../../apps/tauri-app/src/lib/components/CommitMessage.svelte#L522),
+the last of which stays button-filled because it sits in the composer's button
+bar rather than in a form column.
+
+**The control *shapes* `STYLE.md` names are not part of this plan, and that is
+§1's rule rather than an omission.** *Forms (Settings)* wants a `Toggle` for a
+boolean and a segmented control for 2–4 exclusive options, which the native form
+gets from `Toggle` and `Picker`. Reaching them here means replacing a checkbox
+and three of the four selects with different controls — new markup, keyboard
+and AT semantics — and §1 puts behaviour out of scope: this plan changes what a
+control looks like, never what it is. The three binary selects (theme,
+and the AI provider in both places) are the candidates, `DiffViewer.svelte`
+already draws the segmented pattern the replacement would reuse, and `ROADMAP.md`
+carries it as its own item.
 
 ### 6.6 Window chrome — decline
 
@@ -262,75 +645,142 @@ inert; materials are Windows-only with no Linux equivalent at all. The window
 frame is host-owned chrome under §1's exception, so it stays as the platform
 draws it. Recorded here so it is not re-opened.
 
-## 7. `STYLE.md` amendments this plan requires
+## 7. `STYLE.md` amendments
 
-The design language is written from the native client's position and three of
-its rules do not survive contact with a Windows/Linux WebView. Each needs an
-explicit exception rather than a component quietly disagreeing with the doc:
+All five are applied. `STYLE.md` now states the language for both clients, so
+every target in §6 is the document's own rule rather than this plan's reading of
+it:
 
-1. **§Context menus (`STYLE.md:179`)** — "stock system menus … the platform owns
-   the look" is right for the native client and wrong for the Tauri one, where
-   the stock menu is a win32 `HMENU`. State the split: native takes the system
-   menu, Tauri draws one to the same metrics.
-2. **§Typography (`STYLE.md:23`)** — "avoid bold (700+)" needs the status-badge
-   exception, since the native reference is 700 there.
-3. **§Terminal (`STYLE.md:255`)** — "No scrollbar styling — let the platform
-   draw it" currently sits in the Terminal section, but the client styles
-   scrollbars globally. Say what the app-wide rule is, and that overlay
-   behaviour is the engine's to give.
-4. **§Section headers (`STYLE.md:210`)** — "13px semibold for in-app section
-   titles (Settings categories, dialog titles)" collapses three native registers
-   into one (§6.4). Split it: **15 px semibold** for sheet, dialog and failure
-   titles (`.title3.semibold`), **13 px semibold** for detail-pane headings
-   (`.headline`) and section labels, and pane-level empty states left to the
-   system's own sizing.
+1. **Context menus — `STYLE.md`'s *Context menus*.** "The native client takes the system menu;
+   the Tauri client draws its own to the same metrics," because on Windows and
+   Linux the stock menu is a win32 `HMENU` no theming API reaches. *Disable,
+   don't hide* and the ordering rule govern both clients unchanged.
+2. **Typography — `STYLE.md`'s *Typography*.** "Avoid bold (700+)" now carries exactly one
+   exception, the **single-letter status plate** at 10 px mono 700, which is
+   what the native `FileStatusBadge` sets. Nothing else takes bold.
+3. **Scrollbars — `STYLE.md`'s *Spacing, radii, focus***, beside "the window
+   never scrolls", where an app-wide rule belongs. Three bullets: the `*` rule
+   (`scrollbar-width: thin` + `scrollbar-color`) is the whole definition, with
+   `::-webkit-scrollbar` banned and the reason it is banned stated as structural
+   rather than tidiness; overlay behaviour is the engine's to give, not CSS's,
+   with overlay named as the target on every platform and Windows' config key
+   named as where it is asked for; and the terminal is recorded as the one
+   surface the rule cannot reach, because xterm draws its scrollbar in JS.
+4. **Section headers — `STYLE.md`'s *Section headers*.** Three registers: **15 px semibold**
+   for sheet, dialog and failure titles; **13 px semibold** for detail-pane
+   headings and Settings section labels; **system-sized** for pane-level empty
+   states.
+5. **Radius scale — `STYLE.md`'s *Spacing, radii, focus***. The scale carries
+   the context menu's pair — **12 px** at the menu, **7 px** on its items — and
+   states that both are a measurement of a macOS 26 `NSMenu` rather than a
+   choice, pointing at §6.2's table for the rest. Dropdown items sit at 6 px
+   beside the inputs and buttons, which is what the branch picker's rows are,
+   and the terminal pane carries no radius at all.
 
 ## 8. On-target verifications
 
 **The design question is settled: where the native client and this document
-disagree, the native client wins** — `STYLE.md:9`'s standing rule, applied to
+disagree, the native client wins** — `STYLE.md`'s *the native client is the
+reference* note, applied to
 every choice in §6 and §7.
 
-What remains is not preference but three facts about what the two engines
-support, which no documentation answers and no decision can supply. Each is
-recorded with the outcome the rule above asks for, so the test has a target
-rather than only a question. Where an engine cannot reach it, the answer is to
+What remains is not preference but three questions about what the two engines
+actually render, which no decision can supply and only a build on target can
+settle. Each is recorded with the outcome the rule above asks for, so the test
+has a target rather than only a question. Where an engine cannot reach it, the answer is to
 record the divergence in `FRONTEND.md` §8 — never to redesign both platforms
 down to the weaker one.
 
-1. **Does `scrollbar-width` defeat WebKitGTK's overlay scrollbars?**
-   *Target:* Linux keeps overlay scrollbars, which is the native behaviour and
-   is free there. If setting the property turns them into classic ones, drop
-   `scrollbar-width` on Linux and keep `scrollbar-color` alone.
-2. **Is `#overlay-scrollbars` reachable through WebView2's
-   `AdditionalBrowserArguments`?**
-   *Target:* Windows matches Linux. If the flag is not reachable, Windows keeps
-   non-overlay Fluent scrollbars and that is a recorded divergence, not a defect.
-3. **Does WebKitGTK 2.52 support `accent-color` and `appearance: base-select`?**
-   *Target:* both platforms get the styled control. Shared WebKit code makes
-   `accent-color` near-certain and `base-select` unlikely; the
-   `@supports` gate in §6.5 already handles the negative case, so this only
-   decides how much of §6.5 runs on Linux.
+A question that source can answer is not on this list. "Does `scrollbar-width`
+defeat WebKitGTK's overlay scrollbars?" was, and the answer read out of the
+tagged 2.52.3/2.52.6 sources is **no, and it is the property preventing that
+outcome** — §4 has the predicate and the two call sites. There is nothing left
+to discover about the mechanism; what is below is what a person still has to
+look at.
+
+1. **Does the Linux build actually draw a thin, neutral, floating scroller?**
+   *Target:* the thumb overlays the content rather than displacing it, and
+   carries `--border-strong` in both themes at GTK's own width. Two things
+   upstream source cannot settle: whether Debian or Ubuntu carry a distro patch
+   over the scrollbar code, and whether the host's desktop has overlay scrolling
+   switched off, which is a user setting the app does not override. Both show up
+   the same way — a scroller that takes a column. Neither is a reason to change
+   the CSS. A *different* symptom, a thumb in the GTK theme's colour rather than
+   the app's grey, means the Adwaita path lost (§4) and is worth reporting
+   against the wry version rather than adjusting here.
+2. **Does `"scrollBarStyle": "fluentOverlay"` reach the target machine, and does
+   it read like the reference?** *Target:* Windows matches Linux. That the key is
+   spelled right and accepted by this Tauri version is settled at build time
+   (§6.1), so what is left is the runtime and the look: confirm the machine's
+   WebView2 Runtime clears **125.0.2535.41** — below it the key is silently
+   ignored and Windows keeps classic Fluent scrollbars — and judge the Fluent
+   overlay scroller beside the macOS one. If the runtime is too old, that is the
+   host's to update, not a reason to redesign; the reserved gutter in the file
+   list is already the fallback that keeps that case laying out correctly.
+3. **Do the form controls read as one register on both engines?** *Target:* a
+   checkbox is an accent-filled native control with a visible ring around it
+   when it is tabbed to, and a `<select>` is the same height, the same fill and
+   the same chevron as the fields it is stacked with. Support is not the
+   question — §6.5 read `AccentColorEnabled` and `appearance` straight out of
+   `webkitgtk-2.52.3` and the M152 branch — so what is left is what the two
+   engines make of them. Four things to look at, in the order they would go
+   wrong: the ring's contrast against the row fill on GTK, which is Adwaita's
+   accent rendering rather than a token; whether the Settings selects now line
+   up with the number fields on Linux, which is the `line-height` clobber
+   `appearance: none` was adopted to end; whether any stray arrow survives
+   beside the drawn chevron, which would mean `appearance: none` did not take;
+   and `text-align` on the closed select, the one property whose GTK behaviour
+   source did not settle. A second arrow or a misaligned row is a bug in this
+   CSS; an accent hue that is Adwaita's rather than `--border-active` is the
+   engine's and belongs in `FRONTEND.md` §8.
 
 All three are answered by building the Tauri client on a Windows and a Linux
 target and looking.
+
+`appearance: base-select` is deliberately absent from this list. It is a real
+gap on Linux — the keyword missed the `webkitglib/2.52` branch by two weeks and
+is already on `2.54` — but §6.5 declines to gate on it, so there is nothing
+about it for a build to show. It is worth revisiting when the ship target moves
+to 2.54, at which point it stops being a Windows-only fork.
 
 ## 9. Execution order
 
 Ordered so each step is verifiable on its own and nothing depends on an
 unanswered question:
 
-1. **§7** — the four `STYLE.md` amendments, so the document and the reference
-   agree before any component is moved to match either.
-2. **§6.3** — the two tokens. Mechanical, 26 sites, nothing to decide.
-3. **§6.4** — the conformance fixes, headings included; §7's amendment 4 is what
-   unblocks them, and each heading's target is already named.
-4. **§6.1** — delete the dead `::-webkit-scrollbar` block. Then run
-   verifications 1 and 2 on target and record the outcome in `FRONTEND.md` §8.
-5. **§6.2** — restyle `ContextMenu.svelte` to AppKit metrics. The largest single
-   piece, and the one most worth checking visually against the native client
-   side by side.
-6. **§6.5** — Settings controls, with verification 3 deciding how much of it
-   runs on Linux.
+1. ~~**§7** — the `STYLE.md` amendments.~~ **Done** — the document and the
+   reference agree; §7 records where each rule landed. Step 5 added the fifth,
+   which is where a measured number and the written scale first disagreed.
+2. ~~**§6.3** — the two tokens.~~ **Done** — `--overlay-backdrop` and
+   `--on-accent` are in both theme blocks and applied at 24 sites; §6.3 records
+   the values, the counts and the one white that is not accent-on-fill.
+3. ~~**§6.4** — the conformance fixes, headings included.~~ **Done** — §6.4
+   records each item's resolution, the one shared rule all thirteen dialog
+   titles take their size from, and the one item that turned out not to be a
+   defect. It also hands §6.5 a focus-ring gap in the checkboxes it owns.
+4. ~~**§6.1** — the scrollbar rule and the window's `scrollBarStyle`.~~ **Done** —
+   §6.1 records the single `*` rule, why `scrollbar-width` stays despite Adwaita
+   ignoring `thin`, the build-time proof that `"scrollBarStyle": "fluentOverlay"`
+   is a real key in this Tauri version, and why the file list keeps its gutter.
+   It also hands §4 the WebKit predicate that answered the old verification 1
+   from source, and records the terminal as the one surface the app-wide rule
+   cannot reach. `FRONTEND.md` §8 carries both divergences; §8's remaining two
+   scrollbar checks are what a build on target still has to show.
+5. ~~**§6.2** — restyle `ContextMenu.svelte` to AppKit metrics.~~ **Done** —
+   §6.2 records the reproduction and tabulates every metric against the live
+   `NSMenu` it was read from, which is the only place in the repo those numbers
+   exist. It also names the five places a standing rule outranks the
+   measurement, the surface the reproduction cannot have, and the three
+   divergences that are behaviour rather than paint and so wait for a
+   behavioural change. §7 carries the radius-scale correction it turned up.
+6. ~~**§6.5** — Settings controls.~~ **Done** — §6.5 records one app-wide
+   checkbox shape and focus ring where three components held pieces of one, the
+   `accent-color` trap that source says is not a trap, and why the `<select>`s
+   take `appearance: none` and a drawn chevron rather than the `@supports
+   (appearance: base-select)` gate this section originally called for. It hands
+   §8 a replacement for verification 3 — support was answerable from source, the
+   rendering is not — and `ROADMAP.md` the one thing it deliberately did not do:
+   the `Toggle` and segmented-control *shapes*, which replace controls rather
+   than re-skin them.
 
 §6.6 is a decision, not a step.

@@ -1,5 +1,5 @@
 {
-  "$schema": "../node_modules/@tauri-apps/cli/schema.json",
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "leogit",
   "version": "1.0.0",
   "identifier": "com.leomanrique.leogit",
@@ -19,7 +19,8 @@
         "minWidth": 900,
         "minHeight": 600,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "scrollBarStyle": "fluentOverlay"
       }
     ],
     "security": {

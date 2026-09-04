@@ -649,7 +649,7 @@
 
   .btn-primary {
     background: var(--border-active);
-    color: #ffffff;
+    color: var(--on-accent);
     border-color: var(--border-active);
   }
 

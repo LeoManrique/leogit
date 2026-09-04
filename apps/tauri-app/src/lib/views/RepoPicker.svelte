@@ -134,7 +134,7 @@
 
 <div class="repo-picker-overlay">
   <div class="repo-picker-modal">
-    <h2 class="modal-header">Select Repository</h2>
+    <div class="modal-header"><h2>Select Repository</h2></div>
 
     <div class="search-section">
       <input
@@ -197,7 +197,7 @@
   .repo-picker-overlay {
     position: absolute;
     inset: 0;
-    background: rgba(0, 0, 0, 0.4);
+    background: var(--overlay-backdrop);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -219,11 +219,7 @@
 
   .modal-header {
     padding: 14px 16px 12px;
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text-primary);
     border-bottom: 1px solid var(--border-inactive);
-    margin: 0;
   }
 
   .search-section {

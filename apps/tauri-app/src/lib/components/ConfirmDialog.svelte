@@ -85,7 +85,7 @@
   .overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.4);
+    background: var(--overlay-backdrop);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -113,13 +113,7 @@
     border-bottom: 1px solid var(--border-inactive);
   }
 
-  .modal-header h2 {
-    margin: 0;
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text-primary);
-  }
-
+  /* Size, weight and the default colour come from app.css. */
   .modal-header h2.destructive {
     color: var(--status-red);
   }
@@ -180,7 +174,7 @@
   .btn-primary {
     background: var(--border-active);
     border-color: var(--border-active);
-    color: #ffffff;
+    color: var(--on-accent);
   }
 
   .btn-primary:hover:not(:disabled) {

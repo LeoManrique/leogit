@@ -78,7 +78,7 @@
   .overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.4);
+    background: var(--overlay-backdrop);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -104,13 +104,6 @@
     align-items: center;
     padding: 12px 16px;
     border-bottom: 1px solid var(--border-inactive);
-  }
-
-  .modal-header h2 {
-    margin: 0;
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text-primary);
   }
 
   .close-btn {

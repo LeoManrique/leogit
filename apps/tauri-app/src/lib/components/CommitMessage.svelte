@@ -518,15 +518,17 @@
 
   <div class="button-bar">
     <div class="button-group">
-      <select
-        class="provider-select"
-        value={provider}
-        onchange={(e) => setProvider(e.currentTarget.value as 'claude' | 'ollama')}
-        disabled={isGenerating || isCommitInProgress}
-      >
-        <option value="claude">Claude</option>
-        <option value="ollama">Ollama</option>
-      </select>
+      <div class="select-field">
+        <select
+          class="provider-select"
+          value={provider}
+          onchange={(e) => setProvider(e.currentTarget.value as 'claude' | 'ollama')}
+          disabled={isGenerating || isCommitInProgress}
+        >
+          <option value="claude">Claude</option>
+          <option value="ollama">Ollama</option>
+        </select>
+      </div>
       <button
         class="action-button"
         onclick={handleGenerate}
@@ -774,15 +776,20 @@
     align-items: center;
   }
 
+  /* Sized and filled as a button rather than as a field: this one sits in the
+     composer's button bar, so it takes `--bg-elevated` and the row's 12px like
+     the two buttons beside it, not the recessed register the Settings selects
+     wear. Everything else about it — `appearance: none`, the chevron and its
+     wrapper — is `app.css`'s, and the trailing padding is restated only because
+     this shorthand would otherwise close the gap the chevron sits in. */
   .provider-select {
     font-size: 12px;
-    padding: 3px 8px;
+    padding: 3px 24px 3px 8px;
     background: var(--bg-elevated);
     color: var(--text-primary);
     border: 1px solid var(--border-strong);
     border-radius: 6px;
     font-family: inherit;
-    cursor: pointer;
   }
 
   .action-button,
@@ -813,7 +820,7 @@
 
   .commit-button {
     background: var(--border-active);
-    color: #ffffff;
+    color: var(--on-accent);
     border-color: var(--border-active);
     padding: 3px 16px;
     font-weight: 500;

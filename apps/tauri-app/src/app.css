@@ -37,6 +37,16 @@
 
   --border-active: #0a84ff;
   --accent-secondary: #0066cc;
+  /* Label colour on a solid accent fill. Deliberately the same white in both
+     themes, and listed in both rather than hoisted to :root so the accent and
+     the thing that has to read on top of it stay next to each other. macOS
+     picks this label from the *fill's* luminance rather than from the
+     appearance — a prominent button takes white on a dark tint and flips to
+     black on a light one — and both accents here are dark enough that the rule
+     lands on white, so a theme swap moves the fill and leaves the label alone.
+     White on either accent is ~3.7:1, under AA for body text and deliberate:
+     it is what macOS itself ships, so a contrast pass should not "fix" it. */
+  --on-accent: #ffffff;
 
   --status-green: #22c55e;
   --status-red: #ef4444;
@@ -58,6 +68,11 @@
 
   --cursor-bg: rgba(10, 132, 255, 0.22);
   --shadow-popover: 0 4px 12px rgba(0, 0, 0, 0.4);
+  /* Modal scrim. Heavier in dark than in light: the same alpha that reads as a
+     dimmed window over a white one barely separates a dialog from an already
+     dark background, so the two themes take different alphas to land on the
+     same amount of recession. */
+  --overlay-backdrop: rgba(0, 0, 0, 0.5);
 
   --badge-bg: rgba(255, 255, 255, 0.12);
   --badge-fg: rgba(255, 255, 255, 0.72);
@@ -99,6 +114,7 @@
 
   --border-active: #007aff;
   --accent-secondary: #0051d5;
+  --on-accent: #ffffff;
 
   --status-green: #16a34a;
   --status-red: #dc2626;
@@ -115,6 +131,7 @@
 
   --cursor-bg: rgba(0, 122, 255, 0.18);
   --shadow-popover: 0 4px 12px rgba(0, 0, 0, 0.12);
+  --overlay-backdrop: rgba(0, 0, 0, 0.3);
 
   --badge-bg: rgba(0, 0, 0, 0.08);
   --badge-fg: rgba(0, 0, 0, 0.6);
@@ -255,7 +272,39 @@ button:focus-visible {
   box-shadow: 0 0 0 2px var(--cursor-bg);
 }
 
-input,
+/* The field register (STYLE.md, *Forms (Settings)*): recessed `--bg-primary`,
+   1px `--border-strong`, 6px radius, 4×8 padding.
+
+   Being taken off the engine's own painting is what lets a field wear this at
+   all, and the declarations below are themselves what does it. Both engines
+   decide from the author style rather than from a property: Blink's
+   `LayoutTheme::IsControlStyled` returns true for the text-like parts on any
+   author `background`, `border` **or** `border-radius` — the radius longhands
+   carry the `is_border` flag — and WebKit's `RenderTheme::isControlStyled` does
+   the same through `nativeAppearanceDisabled()`. A `<select>` is the one part
+   that devolves to something rather than to nothing (Blink returns
+   `kMenulistButton`), which is why it takes this fill and still draws its own
+   arrow.
+
+   Checkbox and radio are excluded, here and in the focus rule below. Neither
+   engine devolves them — both switches fall through to `default: return false`
+   for those parts — so every property in this rule is discarded on one anyway:
+   Blink's `LayoutTheme::AdjustCheckboxStyle` runs `ResetPadding` and
+   `ResetBorder` (which clears the radii too) and skips the background paint
+   wherever the theme painted. Declaring them would describe a control this
+   stylesheet does not draw. The exclusion in the focus rule is the half that is
+   load-bearing; it is written the same way here so that one idea covers one set
+   of controls rather than two sets that have to be kept in agreement.
+
+   **The `:where()` is not decoration.** A bare `:not([type='checkbox'])
+   :not([type='radio'])` would take its arguments' specificity and make this
+   selector (0,2,1) — heavier than a *single-class* component rule, which Svelte
+   emits as a bare `.class.svelte-hash` at (0,2,0) with no `:where()` of its own.
+   That is enough to beat the padding a component declares for its own field, and
+   an app-wide default that outranks the component it is a default for is
+   backwards. `:where()` contributes nothing, so this stays (0,0,1) — what a bare
+   `input` weighed — and narrowing which controls it reaches costs no weight. */
+input:where(:not([type='checkbox']):not([type='radio'])),
 textarea,
 select {
   font-family: inherit;
@@ -267,7 +316,7 @@ select {
   padding: 4px 8px;
 }
 
-input:focus,
+input:where(:not([type='checkbox']):not([type='radio'])):focus,
 textarea:focus,
 select:focus {
   outline: none;
@@ -275,38 +324,197 @@ select:focus {
   box-shadow: 0 0 0 2px var(--cursor-bg);
 }
 
+/* A `<select>` takes the register above and then leaves the native path
+   outright, which is a stronger statement than the fields make and is what the
+   two engines require to agree.
+
+   Without `appearance: none` a select is not native either — an author border
+   or background devolves it to a *styled menulist* on both engines rather than
+   turning painting off (Blink returns `kMenulistButton`; WebKit routes through
+   `nativeAppearanceDisabled()`). That half-state is the worst of the three: the
+   engine still paints its own arrow, so Windows and Linux show different
+   glyphs; it still reserves its own arrow padding on the trailing edge; on
+   WebKitGTK `RenderThemeAdwaita::adjustMenuListStyle` calls
+   `style.setLineHeight(initialLineHeight())` unconditionally, so the control
+   comes out shorter than the fields it is stacked with; and, still counting as
+   a themed control, it loses the focus halo to the `supportsBoxShadow` reset in
+   the checkbox comment below. `appearance: none` ends all four at once —
+   `RenderTheme::adjustStyle` early-returns and no control part is created, so
+   the focus ring above is the same ring the fields wear, on both engines.
+
+   What stays the engine's is the open list, and that is not a concession: the
+   native client shows a stock `Picker`, i.e. the system popup, so taking each
+   platform's own is what matches the reference. It could not be otherwise on
+   Linux in any case — WebKitGTK renders the popup as a real `GtkTreeView` in a
+   `GtkPopover` and consumes none of the `<option>` styles WebCore computes
+   (webkit.org/b/9846, open since 2006). §6.5 of docs/plans/tauri-reskin.md
+   records why `appearance: base-select` is not the answer here. */
+select {
+  appearance: none;
+  cursor: pointer;
+  /* Room for the wrapper's chevron. The register above sets the other three. */
+  padding-right: 24px;
+}
+
+/* The chevron `appearance: none` takes away. It cannot be a pseudo-element on
+   the `<select>` — a select's box is the engine's to fill — so it hangs off a
+   wrapper, which is the only thing `.select-field` exists for. Drawn from two
+   borders rather than fetched, so one token carries it in both themes and no
+   asset has to be themed; it is the same 90° V the header draws for "this opens
+   something", at the affordance weight rather than the label's.
+
+   `align-items` here centres the *chevron*, not the control. The wrapper's
+   height is already the select's, so the property looks inert — but the
+   `::after` sets no `top`, which leaves it at its static position, and in a flex
+   container that is what `align-items` decides. Remove it and the chevron goes
+   to the top edge. */
+.select-field {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.select-field > select {
+  width: 100%;
+}
+
+.select-field::after {
+  content: '';
+  position: absolute;
+  right: 9px;
+  width: 5px;
+  height: 5px;
+  /* Two borders of a square, rotated: the corner they meet at is the V. The
+     universal reset does not reach pseudo-elements, so these sit outside the
+     5px rather than inside it and the glyph draws 6.5px on a side. */
+  border-right: 1.5px solid var(--text-secondary);
+  border-bottom: 1.5px solid var(--text-secondary);
+  /* The visible corner sits below the box's centre, so the whole box is nudged
+     up to put the V on the control's midline rather than under it. */
+  transform: translateY(-2px) rotate(45deg);
+  pointer-events: none;
+}
+
+/* The chevron is outside the control it belongs to, so a disabled select would
+   dim around a glyph at full strength. */
+.select-field:has(> select:disabled)::after {
+  opacity: 0.6;
+}
+
+/* The checkbox shape, once for the whole app — the file list's two, Settings'
+   three and the Publish dialog's one. Its size, its accent and its ring are the
+   same everywhere they appear, so they are stated here rather than in the three
+   components that draw one.
+
+   `accent-color` is the whole of the colour, and it works here precisely
+   because these two are the controls the engine still paints: both engines read
+   it only on the native paint path — Blink from inside `ThemePainter::Paint`,
+   which is unreachable once appearance is `none`, and WebKit from
+   `RenderTheme::extractControlStyleForRenderer`. WebKitGTK has it stable and on
+   by default (`AccentColorEnabled` is true under `USE(THEME_ADWAITA)`).
+
+   The radio half is a guard, not a description — the app draws no radio today.
+   It is here because the two shapes share every reason above, and a radio added
+   later must not silently fall back into the field register. */
+input[type='checkbox'],
+input[type='radio'] {
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+  accent-color: var(--border-active);
+}
+
+/* The one focus ring in the app drawn as an `outline` rather than as the shared
+   halo (STYLE.md, *Spacing, radii, focus*). Without this rule these controls
+   have no ring worth the name on either engine, and the reasons differ per
+   engine, which is why the answer has to be a third thing rather than one of
+   the two halves used elsewhere:
+
+   - **The engine's own ring is the author's to destroy, on both.** `outline:
+     none` in the field rule above would reach it — which is why that selector
+     excludes these types rather than merely not mentioning them. Blink draws
+     the ring from `html.css`'s `:focus-visible { outline: auto 1px
+     -webkit-focus-ring-color }`, and an author-origin declaration beats a UA
+     one whatever its specificity; WebKit adds the focused state only while
+     `outlineStyle() == OutlineStyle::Auto`. Adwaita is willing to draw a
+     checkbox ring — `RenderThemeAdwaita::supportsFocusRing` is true for
+     Checkbox and Radio — and simply never gets the chance.
+   - **The shared halo cannot stand in for it.** WebKit deletes it outright:
+     `RenderTheme::adjustStyle` runs `if (!supportsBoxShadow(style))
+     style.setBoxShadow(None)`, the base `supportsBoxShadow` returns false for
+     every themed control, and `RenderThemeAdwaita` does not override it. Blink
+     does paint it — its shadow pass has no appearance check — so the halo is a
+     one-engine affordance, and even there it is not enough on its own: over the
+     file list's selected row it measures 1.24:1, under WCAG 1.4.11's 3:1.
+     Elsewhere the contrast comes from the border swapped to `--border-active`
+     beside it, and a checkbox refuses an author border.
+
+   An outline survives both: it is exempt from WebKit's style adjuster, paints
+   over the themed control on either engine, and takes the accent at full
+   strength. `outline-offset` keeps its 2px gap transparent so the ring reads
+   against a filled row. */
+input[type='checkbox']:focus-visible,
+input[type='radio']:focus-visible {
+  outline: 2px solid var(--border-active);
+  outline-offset: 2px;
+}
+
 textarea {
   font-family: inherit;
   resize: vertical;
 }
 
+/* Dialog, sheet and overlay titles. Every modal in the app builds its header the
+   same way — a `.modal-header` element wrapping the title `<h2>` — so the title
+   register lives here once rather than in each dialog's scoped block, where
+   thirteen copies of one number could only drift apart. 15px semibold is the
+   sheet/dialog/failure register (STYLE.md, *Section headers*).
+
+   A dialog whose title is a failure restates `color` alone in its own styles and
+   still takes its size from here. That works because of how Svelte scopes: it
+   emits `.modal-header.svelte-hash h2:where(.svelte-hash)`, adding a real class
+   to the ancestor and a specificity-free `:where()` to the descendant — (0,2,1)
+   against this selector's (0,1,1), so the local colour wins on specificity
+   rather than on source order. */
+.modal-header h2 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* The app-wide scrollbar rule (STYLE.md, *Spacing, radii, focus*). No component
+   restates it; the one other scrollbar declaration anywhere in the client is
+   `scrollbar-gutter` on the file list's scroller, which STYLE.md covers.
+
+   Why each property is here:
+
+   `scrollbar-color` is what Linux renders. WebKitGTK honours it from 2.52.3 on,
+   overlay thumb included, so this is the declaration that gives GTK the neutral
+   thumb.
+
+   `scrollbar-width: thin` is what Windows renders — Chromium is where `thin`
+   actually sets a thickness. On WebKitGTK it sets none, because the Adwaita
+   theme branches only on `ScrollbarWidth::None`, so Linux takes the colour at
+   GTK's own width. Keep it anyway: it is a real effect on one engine and
+   correct intent on both.
+
+   Do not add a `::-webkit-scrollbar` block. Both engines gate the legacy
+   pseudo-elements on the same predicate — WebKit spells it
+
+     usesStandardScrollbarStyle() = scrollbarWidth() != Auto || !scrollbarColor().isAuto()
+     usesLegacyScrollbarStyle()   = hasPseudoStyle(WebKitScrollbar) && !usesStandardScrollbarStyle()
+
+   — so while *either* property above is set the pseudo-elements are inert and a
+   block would be confusing but harmless. The harm is if both ever go: a legacy
+   rule that took effect would build a `RenderScrollbar`, whose
+   `isOverlayScrollbar()` is hardcoded `false`, and
+   `RenderBox::canUseOverlayScrollbars()` would then turn GTK's overlay
+   scrollbars into classic ones taking a column from every scrolling pane.
+
+   Whether the scroller floats or takes a column is not settled here. It is the
+   engine's to give, and `scrollBarStyle` in `src-tauri/tauri.conf.json` is
+   where Windows is asked for it. */
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--border-strong) transparent;
-}
-
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-::-webkit-scrollbar-thumb {
-  background: var(--border-strong);
-  border-radius: 4px;
-  border: 2px solid transparent;
-  background-clip: padding-box;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: var(--text-muted);
-  background-clip: padding-box;
-  border: 2px solid transparent;
-}
-
-::-webkit-scrollbar-corner {
-  background: transparent;
 }

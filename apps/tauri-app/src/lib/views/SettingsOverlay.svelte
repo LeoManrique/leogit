@@ -219,14 +219,16 @@
           <h3>Appearance</h3>
           <div class="setting-group">
             <label for="theme-select">Theme</label>
-            <select
-              id="theme-select"
-              value={config.theme}
-              onchange={(e) => patch({ theme: e.currentTarget.value })}
-            >
-              <option value="dark">Dark</option>
-              <option value="light">Light</option>
-            </select>
+            <div class="select-field">
+              <select
+                id="theme-select"
+                value={config.theme}
+                onchange={(e) => patch({ theme: e.currentTarget.value })}
+              >
+                <option value="dark">Dark</option>
+                <option value="light">Light</option>
+              </select>
+            </div>
           </div>
 
           <h3>Git</h3>
@@ -334,16 +336,18 @@
           <h3>Terminal</h3>
           <div class="setting-group">
             <label for="terminal-shell">Shell</label>
-            <select
-              id="terminal-shell"
-              value={shellChoice}
-              onchange={(e) => patch({ terminal_shell: e.currentTarget.value })}
-            >
-              <option value="">Automatic{autoShellLabel ? ` (${autoShellLabel})` : ''}</option>
-              {#each shells as shell (shell.id)}
-                <option value={shell.id}>{shell.label}</option>
-              {/each}
-            </select>
+            <div class="select-field">
+              <select
+                id="terminal-shell"
+                value={shellChoice}
+                onchange={(e) => patch({ terminal_shell: e.currentTarget.value })}
+              >
+                <option value="">Automatic{autoShellLabel ? ` (${autoShellLabel})` : ''}</option>
+                {#each shells as shell (shell.id)}
+                  <option value={shell.id}>{shell.label}</option>
+                {/each}
+              </select>
+            </div>
           </div>
           <p class="section-footer">
             Only shells found on this machine are listed. Applies to new terminal sessions.
@@ -352,14 +356,16 @@
           <h3>AI Commit Messages</h3>
           <div class="setting-group">
             <label for="provider-select">Provider</label>
-            <select
-              id="provider-select"
-              value={config.ai_provider}
-              onchange={(e) => patch({ ai_provider: e.currentTarget.value })}
-            >
-              <option value="claude">Claude</option>
-              <option value="ollama">Ollama</option>
-            </select>
+            <div class="select-field">
+              <select
+                id="provider-select"
+                value={config.ai_provider}
+                onchange={(e) => patch({ ai_provider: e.currentTarget.value })}
+              >
+                <option value="claude">Claude</option>
+                <option value="ollama">Ollama</option>
+              </select>
+            </div>
           </div>
           <!-- One model field per provider: a single shared one meant a model
                set for Claude was handed to Ollama, which has never heard of
@@ -444,7 +450,7 @@
   .overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.4);
+    background: var(--overlay-backdrop);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -470,13 +476,6 @@
     align-items: center;
     padding: 12px 16px;
     border-bottom: 1px solid var(--border-inactive);
-  }
-
-  .modal-header h2 {
-    margin: 0;
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text-primary);
   }
 
   .close-btn {
@@ -561,24 +560,16 @@
     margin-left: 152px;
   }
 
-  .checkbox-label input[type='checkbox'] {
-    width: 14px;
-    height: 14px;
-    cursor: pointer;
-    accent-color: var(--border-active);
-  }
-
-  .setting-group select,
+  /* The recessed fill, border, radius, padding and font are the app-wide field
+     register in `app.css`, which the `<select>` takes along with the text and
+     number fields — the three read as one column because they are one rule.
+     All this form adds is that they fill the width the label column leaves,
+     which for a select is its `.select-field` wrapper's job: the wrapper is the
+     flex item, and `app.css` stretches the control inside it. */
+  .setting-group .select-field,
   .setting-group input[type='number'],
   .setting-group input[type='text'] {
     flex: 1;
-    padding: 4px 8px;
-    font-size: 13px;
-    background: var(--bg-primary);
-    color: var(--text-primary);
-    border: 1px solid var(--border-strong);
-    border-radius: 6px;
-    font-family: inherit;
   }
 
   .setting-group input:disabled {

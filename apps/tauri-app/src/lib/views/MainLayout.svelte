@@ -2893,6 +2893,10 @@
     overflow: hidden;
   }
 
+  /* Pane-level empty state. 15px is the register for a title that fills a pane
+     rather than a row, and it is set here because the block's title line is the
+     one child with no size of its own — the sub-lines and the action below
+     carry theirs. */
   .diff-empty {
     flex: 1;
     display: flex;
@@ -2902,7 +2906,7 @@
     gap: 6px;
     color: var(--text-secondary);
     background: var(--bg-primary);
-    font-size: 13px;
+    font-size: 15px;
   }
 
   .diff-empty .muted {
@@ -2930,6 +2934,13 @@
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     user-select: text;
+  }
+
+  /* The pane's title register does not reach its action: a button is a control
+     and keeps the 13px body size, so it is pinned here against the global
+     `button { font-size: inherit }`. */
+  .diff-empty .show-anyway {
+    font-size: 13px;
   }
 
   /* Submodule whose inner working tree is dirty but pointer hasn't moved: the
@@ -3007,7 +3018,6 @@
      the muted weight even while the label button is hovered. */
   .shell-name {
     font-size: 10px;
-    letter-spacing: 0.02em;
     white-space: nowrap;
   }
 
@@ -3063,7 +3073,7 @@
     left: 0;
     right: 0;
     bottom: 0;
-    background: rgba(0, 0, 0, 0.4);
+    background: var(--overlay-backdrop);
     display: flex;
     align-items: flex-start;
     justify-content: center;

@@ -101,8 +101,11 @@
     gap: 12px;
   }
 
+  /* Detail-pane heading register: the commit summary is the counterpart of the
+     native pane's `.headline`, which macOS draws at 13pt. Semibold, not bold —
+     the status plate is the app's only bold. */
   .title {
-    font-size: 15px;
+    font-size: 13px;
     font-weight: 600;
     color: var(--text-primary);
     margin: 0;

@@ -109,7 +109,7 @@
   .overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.4);
+    background: var(--overlay-backdrop);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -133,10 +133,8 @@
     border-bottom: 1px solid var(--border-inactive);
   }
 
+  /* Size and weight come from app.css; this dialog only recolours its title. */
   .modal-header h2 {
-    margin: 0;
-    font-size: 13px;
-    font-weight: 600;
     color: var(--status-red);
   }
 

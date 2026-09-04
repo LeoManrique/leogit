@@ -438,6 +438,9 @@
     -moz-tab-size: var(--tab-size, 4);
   }
 
+  /* A pane-level empty state, so it takes the pane register (15px) rather than
+     the 13px body size a list's empty line uses. Sans, not the viewer's mono:
+     it is prose about the pane, not diff content. */
   .empty-state {
     display: flex;
     align-items: center;
@@ -445,6 +448,7 @@
     flex: 1;
     color: var(--text-faint);
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 15px;
   }
 
   /*

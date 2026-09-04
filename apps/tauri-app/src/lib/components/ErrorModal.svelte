@@ -54,7 +54,7 @@
   .overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.4);
+    background: var(--overlay-backdrop);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -81,10 +81,8 @@
     border-bottom: 1px solid var(--border-inactive);
   }
 
+  /* Size and weight come from app.css; the error title only takes the red. */
   .modal-header h2 {
-    margin: 0;
-    font-size: 13px;
-    font-weight: 600;
     color: var(--status-red);
   }
 
@@ -154,7 +152,7 @@
 
   .btn-primary {
     background: var(--border-active);
-    color: #ffffff;
+    color: var(--on-accent);
     border: 1px solid var(--border-active);
   }
 

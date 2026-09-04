@@ -619,23 +619,17 @@
     white-space: nowrap;
   }
 
+  /* Size, cursor, accent and focus ring are the app-wide checkbox shape in
+     `app.css`. What is left here is what only a row's checkbox needs: it must
+     not be squeezed by a long filename beside it, and it is the one checkbox in
+     the app that can be disabled while the list is busy. */
   .file-checkbox {
-    width: 14px;
-    height: 14px;
     flex-shrink: 0;
-    cursor: pointer;
-    accent-color: var(--border-active);
-    margin: 0;
   }
 
   .file-checkbox:disabled {
     cursor: not-allowed;
     opacity: 0.4;
-  }
-
-  .file-checkbox:focus-visible {
-    outline: 2px solid var(--border-active);
-    outline-offset: 2px;
   }
 
   /*
