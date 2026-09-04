@@ -8,6 +8,7 @@
     BlobSource,
   } from '$lib/api/commands'
   import { highlightApi } from '$lib/api/commands'
+  import Icon from './Icon.svelte'
 
   interface Props {
     diff: ParsedDiff | null
@@ -275,19 +276,13 @@
               aria-label="Unified"
               onclick={() => onLayoutChange(false)}
             >
-              <svg
-                width="15"
-                height="15"
-                viewBox="0 0 16 16"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.3"
-                stroke-linecap="round"
-                aria-hidden="true"
-              >
-                <rect x="2" y="2.5" width="12" height="11" rx="1.5" />
-                <path d="M4.5 6h7M4.5 8.5h7M4.5 11h4" />
-              </svg>
+              <!-- One frame divided two ways, which is the whole distinction
+                   the native picker draws with `rectangle.grid.1x2` and
+                   `rectangle.split.2x1` (`DiffView.swift:326-329`): rows for
+                   one column of changes, a column split for two. The old pair
+                   put text rules against a divider, so the two faces were not
+                   answering the same question. -->
+              <Icon name="rectangle-grid-1x2" size={15} />
             </button>
             <button
               class="layout-btn"
@@ -297,19 +292,7 @@
               aria-label="Split"
               onclick={() => onLayoutChange(true)}
             >
-              <svg
-                width="15"
-                height="15"
-                viewBox="0 0 16 16"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.3"
-                stroke-linecap="round"
-                aria-hidden="true"
-              >
-                <rect x="2" y="2.5" width="12" height="11" rx="1.5" />
-                <path d="M8 2.5v11" />
-              </svg>
+              <Icon name="rectangle-split-2x1" size={15} />
             </button>
           </div>
         {/if}

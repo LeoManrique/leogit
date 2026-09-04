@@ -59,6 +59,7 @@
   import { pacedLoop } from '$lib/services/pacedLoop'
 
   import Header from '$lib/components/Header.svelte'
+  import Icon from '$lib/components/Icon.svelte'
   import TabBar from '$lib/components/TabBar.svelte'
   import FileList from '$lib/components/FileList.svelte'
   import DiscardConfirm from '$lib/components/DiscardConfirm.svelte'
@@ -2139,6 +2140,29 @@
 </script>
 
 <div class="main-layout" style="--sidebar-width: {sidebarWidth}px;">
+  <!--
+    The toolbar spans the window, above the sidebar/detail split, because that
+    is where the native client's is: `ContentView`'s `.toolbar` (ContentView
+    .swift:341) belongs to the *window*, so the repo chip, the branch chip and
+    the sync control sit over the file list as much as over the diff. Hosting
+    it inside `.main-content` started the bar at the split and left the sidebar
+    wearing a bare tab strip — the single largest reason the two clients read
+    as different windows.
+
+    The wrapper is here only to be the grid item. `<Header>`'s own root belongs
+    to that component's scope, so the `grid-column` that makes the bar span all
+    three tracks has to be declared on a box this file owns.
+  -->
+  <div class="header-slot">
+    <Header
+      onOpenRepos={openRepos}
+      onOpenBranches={openBranches}
+      onOpenSettings={() => (showSettings = true)}
+      onOpenHelp={() => (showHelp = true)}
+      onTransferFinished={reloadAfterHeadMove}
+    />
+  </div>
+
   <div class="sidebar">
     <TabBar />
     <!--
@@ -2220,14 +2244,6 @@
   ></div>
 
   <div class="main-content">
-    <Header
-      onOpenRepos={openRepos}
-      onOpenBranches={openBranches}
-      onOpenSettings={() => (showSettings = true)}
-      onOpenHelp={() => (showHelp = true)}
-      onTransferFinished={reloadAfterHeadMove}
-    />
-
     <!--
       Failures that aren't worth the window. Two of them share this strip and
       differ only in who retires them: the poll's own (a streak of failed ticks
@@ -2238,11 +2254,11 @@
     -->
     {#if $repoState.pollError}
       <div class="poll-banner" role="status">
-        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M8 2.5 14.5 13.5h-13z" />
-          <line x1="8" y1="6.5" x2="8" y2="9.5" />
-          <circle cx="8" cy="11.6" r="0.6" fill="currentColor" stroke="none" />
-        </svg>
+        <!-- Filled, not outlined: every warning banner on the native side uses
+             `exclamationmark.triangle.fill` (`ContentView.swift:1055`), and the
+             outlined variant is reserved there for the full-pane
+             `ContentUnavailableView` states. -->
+        <Icon name="exclamationmark-triangle-fill" size={13} />
         <span class="poll-banner-text">
           Can't read this repository — it may have been moved, deleted, or unmounted.
         </span>
@@ -2252,17 +2268,10 @@
 
     {#if $repoState.notice}
       <div class="poll-banner" role="status">
-        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M8 2.5 14.5 13.5h-13z" />
-          <line x1="8" y1="6.5" x2="8" y2="9.5" />
-          <circle cx="8" cy="11.6" r="0.6" fill="currentColor" stroke="none" />
-        </svg>
+        <Icon name="exclamationmark-triangle-fill" size={13} />
         <span class="banner-message">{$repoState.notice}</span>
         <button class="banner-dismiss" onclick={dismissNotice} aria-label="Dismiss">
-          <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
-            <line x1="4" y1="4" x2="12" y2="12" />
-            <line x1="12" y1="4" x2="4" y2="12" />
-          </svg>
+          <Icon name="xmark" size={10} weight="semibold" />
         </button>
       </div>
     {/if}
@@ -2439,10 +2448,7 @@
             title={terminalExpanded ? 'Minimize terminal (Ctrl+`)' : 'Expand terminal (Ctrl+`)'}
             aria-label={terminalExpanded ? 'Minimize terminal' : 'Expand terminal'}
           >
-            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <polyline points="4,6 7,8 4,10" />
-              <line x1="8.5" y1="11" x2="12" y2="11" />
-            </svg>
+            <Icon name="terminal" size={13} />
             <!-- The strip is always here, so it always says what it is. Before
                  a session exists there is no shell to name, and an unlabelled
                  glyph left the panel's whole purpose to be guessed at. -->
@@ -2455,10 +2461,7 @@
               title="New terminal session"
               aria-label="New terminal session"
             >
-              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
-                <line x1="8" y1="3" x2="8" y2="13" />
-                <line x1="3" y1="8" x2="13" y2="8" />
-              </svg>
+              <Icon name="plus" weight="medium" />
             </button>
             <button
               class="terminal-control-button"
@@ -2466,14 +2469,14 @@
               title={terminalExpanded ? 'Minimize terminal (Ctrl+`)' : 'Expand terminal (Ctrl+`)'}
               aria-label={terminalExpanded ? 'Minimize terminal' : 'Expand terminal'}
             >
+              <!-- A chevron in both directions rather than a minus collapsing
+                   to a chevron: the native dock toggles between `chevron.down`
+                   and `chevron.up` (`TerminalDock.swift:112`), so the pair
+                   reads as one control pointing at where the panel will go. -->
               {#if terminalExpanded}
-                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
-                  <line x1="3" y1="8" x2="13" y2="8" />
-                </svg>
+                <Icon name="chevron-down" weight="medium" />
               {:else}
-                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <polyline points="3,10 8,5 13,10" />
-                </svg>
+                <Icon name="chevron-up" weight="medium" />
               {/if}
             </button>
             <button
@@ -2483,10 +2486,7 @@
               aria-label="Close terminal"
               disabled={terminalSessionId === 0}
             >
-              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
-                <line x1="4" y1="4" x2="12" y2="12" />
-                <line x1="12" y1="4" x2="4" y2="12" />
-              </svg>
+              <Icon name="xmark" weight="medium" />
             </button>
           </div>
         </div>
@@ -2654,10 +2654,22 @@
   .main-layout {
     display: grid;
     grid-template-columns: var(--sidebar-width, 320px) 1px 1fr;
+    /* Two rows: the toolbar at its own height, everything else taking what is
+       left. The `1fr` is what keeps the split panes bounded — they scroll
+       inside a fixed viewport, so the row they sit in may not be sized by its
+       contents. */
+    grid-template-rows: auto 1fr;
     width: 100%;
     height: 100vh;
     background: var(--bg-primary);
     overflow: hidden;
+  }
+
+  /* Spanning all three tracks is the whole job; the sidebar, the resize handle
+     and the detail pane then auto-place into row 2 in source order. */
+  .header-slot {
+    grid-column: 1 / -1;
+    min-width: 0;
   }
 
   .sidebar {
@@ -2706,8 +2718,11 @@
     cursor: row-resize;
     user-select: none;
     flex-shrink: 0;
+    /* The rule above the composer belongs to the handle, not to the composer:
+       the native client's is a `Divider()` inside `RowResizeHandle`
+       (RowResizeHandle.swift:41), and the composer itself draws nothing at its
+       own edge. The handle is 4px of grab area *including* the line. */
     border-top: 1px solid var(--border-inactive);
-    margin-bottom: -1px;
     position: relative;
     z-index: 2;
   }
@@ -2795,8 +2810,12 @@
     font-size: 12px;
   }
 
-  .poll-banner svg {
-    flex-shrink: 0;
+  /* `:global` because the glyph is a child component's element now, and a
+     direct-child combinator so it tints only the banner's own warning mark:
+     the descendant form also caught the dismiss button's ✕ and beat
+     `.banner-dismiss`'s colour on specificity, which is why that button's
+     hover rule below could never fire. `flex-shrink` lives in `Icon`. */
+  .poll-banner > :global(svg) {
     align-self: center;
     color: var(--status-yellow);
   }

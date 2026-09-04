@@ -2,6 +2,7 @@
   import { tick } from 'svelte'
   import type { CommitInfo } from '$lib/api/commands'
   import ContextMenu, { type ContextMenuItem } from './ContextMenu.svelte'
+  import Icon from './Icon.svelte'
 
   interface Props {
     commits: CommitInfo[]
@@ -153,9 +154,31 @@
         ],
   )
 
-  // Two-line rows (summary + indicators / author + date), so taller than the
-  // old single-line list. Must stay in sync with `.commit-row { height }`.
-  const ROW_HEIGHT = 50
+  // Built from the native row rather than chosen, the same way `FileList`
+  // derives its 30. `CommitRow` is a `VStack(spacing: 2)`
+  // (`HistorySidebar.swift:194`) over two lines — the summary line, whose
+  // height is the taller of its 13pt text (16) and its 16pt tag chips
+  // (`:220`, `:247`), and the `.caption` line beneath, which macOS draws at
+  // 10pt and the engine gives a 12px line box — under `.padding(.vertical, 3)`
+  // (`:231`). That is 3 + 16 + 2 + 12 + 3 = 36pt of row content. The `List`
+  // holding it is `.listStyle(.inset)` (`:108`), which adds 4pt above and
+  // below every row on macOS, and its `intercellSpacing` height is 0 on
+  // Big Sur and later, so rows abut and the pitch *is* the row height:
+  // 36 + 8 = 44.
+  //
+  // The one point of slack in that sum is the caption's line box: AppKit gives
+  // a 10pt caption 13, and the engine's `normal` gives it 12, because `normal`
+  // rounds SF's ascent and descent separately and loses a point below 12pt. The
+  // only way to close it is a pinned `line-height` on a single-line label,
+  // which is exactly what STYLE.md's leading rule forbids — so the row keeps
+  // the engine's box and centres the pair inside it, which spends the point as
+  // half a pixel of air at each end.
+  //
+  // The number is the whole of the row's proportion, and 6pt too many turns a
+  // sidebar of commits into a table of records, so it is derived and not tuned.
+  // Must stay in sync with `.commit-row { height }`, which the virtualizer
+  // positions by.
+  const ROW_HEIGHT = 44
   const VISIBLE_ROWS = 14
   const LOAD_MORE_OFFSET = 200
 
@@ -248,12 +271,18 @@
     return years === 1 ? '1 year ago' : `${years} years ago`
   }
 
-  // Full date-time for the row title attribute; the browser shows it on hover.
-  // Uses the user's locale via `dateStyle: 'full', timeStyle: 'short'`.
-  function formatDateFull(dateStr: string): string {
+  // Absolute local time for the row tooltip, which is where the exact date
+  // lives now that the row itself only states an age. Abbreviated month and a
+  // minute-precision time — `CommitDate.absolute`'s
+  // `.formatted(date: .abbreviated, time: .shortened)`, the same string the
+  // native row hands `.help()` (`HistorySidebar.swift:232`) and the same one
+  // the detail card prints. `dateStyle: 'full'` spelled the weekday and month
+  // out in words, which is a different sentence from the one the reference
+  // shows and from the one two panes away.
+  function formatDateAbsolute(dateStr: string): string {
     const date = new Date(dateStr)
     return date.toLocaleString(undefined, {
-      dateStyle: 'full',
+      dateStyle: 'medium',
       timeStyle: 'short',
     })
   }
@@ -345,7 +374,12 @@
   })
 </script>
 
-<div class="commit-list" bind:this={scrollContainer} onscroll={handleScroll}>
+<div
+  class="commit-list"
+  style="--row-height: {ROW_HEIGHT}px"
+  bind:this={scrollContainer}
+  onscroll={handleScroll}
+>
   {#if loaded && commits.length === 0}
     <div class="empty-state">
       <p>No commits yet</p>
@@ -361,14 +395,14 @@
           class="commit-row"
           class:selected={commit.sha === selectedSha}
           data-commit-row-index={rowIndex}
-          title={formatDateFull(commit.author_date)}
+          title={formatDateAbsolute(commit.author_date)}
           onclick={() => onSelect(commit)}
           oncontextmenu={(e) => openContextMenu(e, commit)}
           onkeydown={(e) => handleRowKeyDown(e, commit, rowIndex)}
           role="button"
           tabindex="0"
         >
-          <div class="commit-line summary-line">
+          <div class="summary-line">
             <span class="commit-summary">{commit.summary}</span>
             {#if tags.length > 0 || isUnpushed}
               <div class="commit-indicators">
@@ -382,31 +416,29 @@
                 {/if}
                 {#if isUnpushed}
                   <span class="unpushed-badge" title="Not yet pushed" aria-label="Not yet pushed">
-                    <svg
-                      class="unpushed-icon"
-                      width="10"
-                      height="10"
-                      viewBox="0 0 16 16"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="2"
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      aria-hidden="true"
-                    >
-                      <polyline points="4,7 8,3 12,7" />
-                      <line x1="8" y1="3" x2="8" y2="13" />
-                    </svg>
+                    <!-- `bold` on purpose, not for emphasis: the native draws
+                         this same marker at `.system(size: 9, weight: .bold)`
+                         (`HistorySidebar.swift:217`), and a symbol's stroke
+                         tracks the weight of the text it sits with. -->
+                    <Icon name="arrow-up" size={10} weight="bold" />
                   </span>
                 {/if}
               </div>
             {/if}
           </div>
-          <div class="commit-line meta-line">
-            <span class="commit-author">{commit.author_name}</span>
-            <span class="commit-meta-sep">·</span>
-            <span class="commit-date">{formatDate(commit.author_date)}</span>
-          </div>
+          <!--
+            One text run, not three spans in a flex row. The native row's second
+            line is a single interpolated `Text` — `"\(authorName) · \(relative)"`
+            (`HistorySidebar.swift:226`, and the byte is U+00B7 with one ordinary
+            space either side) — so the separator is worth about 2.5px of space
+            at this size, where a flex `gap` would put its own value there twice
+            and visibly widen the line.
+
+            It also settles what gives way when the sidebar narrows: one run
+            under `.lineLimit(1)` (`:229`) truncates at the tail, so the date is
+            what goes, not the author.
+          -->
+          <div class="meta-line">{commit.author_name} · {formatDate(commit.author_date)}</div>
         </div>
       {/each}
     </div>
@@ -459,10 +491,18 @@
     display: flex;
     flex-direction: column;
     justify-content: center;
-    gap: 3px;
-    /* Must equal ROW_HEIGHT in the script — virtualization positions rows by it. */
-    height: 50px;
+    /* `VStack(alignment: .leading, spacing: 2)` (`HistorySidebar.swift:194`).
+       The two lines sit 2px apart and the row's remaining slack — the native
+       row's own 3pt of vertical padding plus the inset `List`'s 4pt above and
+       below — falls either side of the pair, which is what centring does. */
+    gap: 2px;
+    /* Published by the wrapper from `ROW_HEIGHT`, which is also the step the
+       virtualizer positions by — one number, so they cannot drift. */
+    height: var(--row-height);
     padding: 0 10px;
+    /* Apple's own sample for imitating list selection draws it as
+       `.rect(cornerRadius: 6)`, and `NSTableView.Style.inset` is documented to
+       round the row background and its selection together. */
     border-radius: 6px;
     background: transparent;
     cursor: pointer;
@@ -479,15 +519,16 @@
     background: var(--bg-tertiary);
   }
 
-  .commit-line {
+  /* ── Line 1: summary + tag / push indicators ──
+     6px between every item on this line, including between the summary and the
+     first chip: the native row builds it as one `HStack(spacing: 6)` whose
+     chips and unpushed plate are all direct children
+     (`HistorySidebar.swift:195`), so a single spacing governs the whole run. */
+  .summary-line {
     display: flex;
     align-items: center;
     min-width: 0;
-  }
-
-  /* ── Line 1: summary + tag / push indicators ── */
-  .summary-line {
-    gap: 8px;
+    gap: 6px;
   }
 
   .commit-summary {
@@ -510,21 +551,34 @@
     max-width: 50%;
   }
 
+  /* The tag and its `+N` companion are separate children of the native row's
+     one `HStack(spacing: 6)`, so they sit 6px apart like everything else on
+     the line — this wrapper only exists to keep them together when the
+     indicator cluster shrinks. */
   .tag-indicator {
     flex: 0 1 auto;
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 6px;
     min-width: 0;
   }
 
-  .tag-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  /*
+    Both chips come out of one native builder — `chip(_:)` at
+    `HistorySidebar.swift:242-250`: 10.5px mono, 5px of horizontal padding,
+    a pinned 16px height and a 5px radius on the `.quaternary` plate that
+    `--badge-bg` / `--badge-fg` stand for. `+N` is that same builder called
+    with a different string (`:207`), so it takes the same type and the same
+    padding rather than a smaller register of its own.
+
+    `line-height: 16px` here is the pinned-box exception STYLE.md allows: it is
+    the chip's geometry, matching `.frame(height: 16)`, not reading leading.
+  */
+  .tag-name,
+  .tag-indicator-more {
     height: 16px;
     line-height: 16px;
-    padding: 0 6px;
+    padding: 0 5px;
     border-radius: 5px;
     background: var(--badge-bg);
     color: var(--badge-fg);
@@ -533,15 +587,14 @@
     font-variant-numeric: tabular-nums;
   }
 
+  .tag-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .tag-indicator-more {
     flex: 0 0 auto;
-    height: 16px;
-    line-height: 16px;
-    padding: 0 5px;
-    border-radius: 5px;
-    background: var(--badge-bg);
-    color: var(--badge-fg);
-    font-size: 10px;
   }
 
   /*
@@ -556,40 +609,29 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    /* A fixed square, not a padded minimum: the native plate is
+       `.frame(width: 16, height: 16)` (`HistorySidebar.swift:220`), so it is
+       exactly as wide as it is tall whatever the glyph inside measures. These
+       two indicators are meant to read as one family, and a plate wider than
+       the chip beside it is tall is the one proportion that breaks that. */
+    width: 16px;
     height: 16px;
-    min-width: 16px;
-    padding: 0 4px;
     border-radius: 5px;
     background: var(--badge-bg);
     color: var(--badge-fg);
   }
 
-  .unpushed-icon {
-    flex-shrink: 0;
-  }
-
-  /* ── Line 2: author · relative date ── */
+  /* ── Line 2: author · relative date ──
+     `.font(.caption).foregroundStyle(.secondary)` on the native run
+     (`HistorySidebar.swift:227-228`): macOS draws `.caption` at 10pt regular,
+     and `.secondary` is `--text-secondary`, one step brighter than the
+     `--text-muted` that stands for `.tertiary`. Tabular digits come from the
+     app-wide `body` rule, so a ticking "N minutes ago" still can't wobble. */
   .meta-line {
-    gap: 5px;
-    color: var(--text-muted);
-    font-size: 11.5px;
-  }
-
-  .commit-author {
-    flex: 0 1 auto;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    min-width: 0;
-  }
-
-  .commit-meta-sep {
-    flex: 0 0 auto;
-  }
-
-  .commit-date {
-    flex: 0 0 auto;
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
+    color: var(--text-secondary);
+    font-size: 10px;
   }
 </style>

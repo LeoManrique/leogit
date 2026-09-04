@@ -10,6 +10,7 @@
   import { repoSync } from '$lib/stores/repoSync'
   import { repoSyncScheduler } from '$lib/services/repoSyncScheduler'
   import { discoveringRepos } from '$lib/services/repoDiscovery'
+  import Icon from '$lib/components/Icon.svelte'
   import RepoDiscoveryFailure from '$lib/components/RepoDiscoveryFailure.svelte'
   import { recentRepos, repoSortMode } from '$lib/stores/reposState'
   import { activeNetworkOp } from '$lib/stores/networkOps'
@@ -254,19 +255,13 @@
                the header's Pull/Push glyphs. Shown only when non-zero. -->
           {#if sync && sync.behind > 0}
             <span class="sync-badge behind" title={`${sync.behind} commit${sync.behind === 1 ? '' : 's'} to pull`}>
-              <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <line x1="8" y1="3" x2="8" y2="12" />
-                <polyline points="4,8 8,12 12,8" />
-              </svg>
+              <Icon name="arrow-down" size={11} weight="medium" />
               {sync.behind}
             </span>
           {/if}
           {#if sync && sync.ahead > 0}
             <span class="sync-badge ahead" title={`${sync.ahead} commit${sync.ahead === 1 ? '' : 's'} to push`}>
-              <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <line x1="8" y1="4" x2="8" y2="13" />
-                <polyline points="4,8 8,4 12,8" />
-              </svg>
+              <Icon name="arrow-up" size={11} weight="medium" />
               {sync.ahead}
             </span>
           {/if}
@@ -457,10 +452,6 @@
     font-variant-numeric: tabular-nums;
     color: var(--text-muted);
     line-height: 1;
-  }
-
-  .sync-badge svg {
-    flex-shrink: 0;
   }
 
   .repo-item:hover .sync-badge,

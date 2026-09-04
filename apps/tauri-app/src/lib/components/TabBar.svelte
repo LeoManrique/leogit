@@ -23,11 +23,19 @@
 </div>
 
 <style>
+  /* 36px, and it is `RepoTabBar`'s own arithmetic rather than a number chosen
+     to line up with something: a 13px label's 16px line box under
+     `.padding(.vertical, 10)` (RepoTabBar.swift:41), inside a strip whose only
+     other inset is `.padding(.horizontal, 8)` (`:24`).
+
+     It used to be 40px to stand level with the header beside it, which is a
+     rationale that no longer exists — the header spans the window now and sits
+     *above* this strip rather than next to it, so the tab bar answers to the
+     native tab bar and to nothing else. */
   .tab-bar {
     display: flex;
-    /* Match the Header's height so the Changes/History tabs sit on the same
-       horizontal baseline as the repo chips and Pull/Push buttons next door. */
-    height: 40px;
+    height: 36px;
+    flex-shrink: 0;
     border-bottom: 1px solid var(--border-inactive);
     background: var(--bg-secondary);
     gap: 0;
@@ -39,7 +47,7 @@
     align-items: center;
     gap: 6px;
     flex: 0 0 auto;
-    padding: 8px 14px;
+    padding: 10px 14px;
     font-size: 13px;
     font-weight: 400;
     cursor: pointer;
@@ -47,7 +55,14 @@
     color: var(--text-muted);
     border: none;
     border-radius: 0;
-    border-bottom: 2px solid transparent;
+    /* The active underline is an inset shadow rather than a border, because
+       natively it is an `.overlay(alignment: .bottom)` (RepoTabBar.swift:45-52)
+       — it is painted *over* the tab's bottom edge and takes none of its
+       height. A `border-bottom` would eat 2px out of a border-box tab and push
+       the label a pixel off centre, and only on the active one, so the strip
+       would shift as the tab changed. It hangs 1px below the strip's own
+       hairline so the two fuse, which is what the native comment describes. */
+    box-shadow: inset 0 -2px 0 transparent;
     margin-bottom: -1px;
     transition: color 120ms;
   }
@@ -59,7 +74,7 @@
   .tab.active {
     color: var(--text-primary);
     font-weight: 600;
-    border-bottom-color: var(--border-active);
+    box-shadow: inset 0 -2px 0 var(--border-active);
   }
 
   /*

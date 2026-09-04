@@ -41,6 +41,12 @@
   --border-inactive: rgba(255, 255, 255, 0.1);
   --border-strong: rgba(255, 255, 255, 0.18);
   --surface-hover: rgba(255, 255, 255, 0.06);
+  /* Every other row of the changed-file list. Roughly half `--surface-hover`
+     rather than the ~4.7 % AppKit measures for its own striping: the native
+     list has no hover state for a stripe to collide with and this one does, so
+     matching AppKit's number exactly would have cost a state the user relies
+     on to buy a texture they do not. See `FileList.svelte`'s `.striped`. */
+  --surface-stripe: rgba(255, 255, 255, 0.03);
 
   --text-primary: #ffffff;
   --text-secondary: rgba(255, 255, 255, 0.65);
@@ -63,6 +69,13 @@
   --status-green: #22c55e;
   --status-red: #ef4444;
   --status-yellow: #f59e0b;
+  /* Modified files, and the commit summary's over-length counter — both are
+     `.orange` on the native side (`FileStatusStyle.swift:41`,
+     `CommitComposer.swift:151`), and `--status-yellow` is an amber that reads
+     as a different status beside it. These are Apple's *current* systemOrange:
+     the published values changed on 2025-06-09 with the macOS 26 cycle, so the
+     familiar #FF9500 / #FF9F0A pair is now the previous generation's. */
+  --status-orange: #ff9230;
   --status-blue: #3b82f6;
   /* Conflicted. Its own hue rather than red, which already means Deleted: a
      glance down the list has to separate "you deleted this" from "git
@@ -118,6 +131,7 @@
   --border-inactive: rgba(0, 0, 0, 0.1);
   --border-strong: rgba(0, 0, 0, 0.18);
   --surface-hover: rgba(0, 0, 0, 0.04);
+  --surface-stripe: rgba(0, 0, 0, 0.022);
 
   --text-primary: #1d1d1f;
   --text-secondary: rgba(0, 0, 0, 0.62);
@@ -131,6 +145,7 @@
   --status-green: #16a34a;
   --status-red: #dc2626;
   --status-yellow: #d97706;
+  --status-orange: #ff8d28;
   --status-blue: #2563eb;
   --status-purple: #9333ea;
 

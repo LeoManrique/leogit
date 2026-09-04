@@ -47,6 +47,11 @@
   // composer stays live behind the dialog and Generate can still be started,
   // landing its result on a composer the confirmed commit has just cleared.
   const isCommitInProgress = $derived(isCommitting || pendingFiles.length > 0)
+  // Committing and generating share one busy treatment, as they do natively
+  // (CommitComposer.swift:60-62): the fields lock, and one spinner in the
+  // button row stands for whichever of the two is running. Purely a display
+  // condition — every gate below still asks its own question.
+  const isBusy = $derived(isGenerating || isCommitInProgress)
   // Outer repo name (repoPath basename) for the warning copy.
   const outerRepoName = $derived(
     $appState.repoPath ? basename($appState.repoPath) : 'this repository',
@@ -80,7 +85,34 @@
   // single-file auto-summary. Also drives the input placeholder so the user
   // sees the message they'll commit before typing.
   const effectiveSummary = $derived(summary.trim() || autoSummary)
-  const summaryPlaceholder = $derived(autoSummary || 'Summary')
+  // "(required)" is the native composer's wording (CommitComposer.swift:80).
+  // The disabled Commit button already carries the requirement, so the bare
+  // noun was defensible — but the two clients shipped different words for one
+  // control, and the reference is the one that decides.
+  const summaryPlaceholder = $derived(autoSummary || 'Summary (required)')
+
+  // How many files the next commit would contain. Resolved against the live
+  // status list rather than read off `selectedFiles.size`, so a path that has
+  // left the working tree since the last status read cannot be advertised in
+  // the button's label and then quietly dropped by `handleCommit`, which
+  // resolves its file list exactly the same way.
+  const includedCount = $derived(
+    $repoState.status.files.filter((f) => $repoState.selectedFiles.has(f.path)).length,
+  )
+
+  // The Commit button names what it is about to do, in the native's wording and
+  // title case (CommitComposer.swift:314-323): the count spelled out, "File"
+  // singular at one. Zero drops the count rather than saying "Commit 0 Files" —
+  // the button is disabled there anyway, and a count of nothing is not a
+  // sentence. Amending names the rewrite instead of a count, because the file
+  // list is not what an amend is about, and it is the only state with its own
+  // in-progress title: everywhere else the spinner beside the button carries
+  // that, so the label can keep telling the user what they are committing.
+  const commitLabel = $derived.by(() => {
+    if (isAmending) return isCommitting ? 'Amending…' : 'Amend Commit'
+    if (includedCount === 0) return 'Commit'
+    return includedCount === 1 ? 'Commit 1 File' : `Commit ${includedCount} Files`
+  })
 
   // Relaxed submit gate when amending: git allows --amend with no staged files
   // (message-only edit). Outside amend mode, canCommit requires file selection.
@@ -177,7 +209,11 @@
   // in again." and "Failed to authenticate: OAuth session expired" are one
   // fact, and stacking both is what made this strip unreadable.
   const blockedDetail = $derived(blocked?.detail ?? '')
-  const generateHint = $derived(blockedReason || 'Generate (Ctrl+G)')
+  // The native's own fallback hint (CommitComposer.swift:110-111), with its
+  // shortcut written the way this client's hosts write it.
+  const generateHint = $derived(
+    blockedReason || 'Generate a commit message from the checked files (Ctrl+G)',
+  )
   const canGenerate = $derived(
     !isGenerating && !isCommitInProgress && !blocked && $repoState.selectedFiles.size > 0,
   )
@@ -448,7 +484,7 @@
         onclick={() => onStopAmending?.()}
         disabled={isCommitInProgress}
       >
-        Stop amending
+        Stop Amending
       </button>
     </div>
   {/if}
@@ -539,19 +575,35 @@
       </button>
     </div>
 
-    <button
-      class="commit-button"
-      onclick={handleCommit}
-      disabled={!canSubmit || isCommitInProgress}
-      title={isAmending ? 'Amend commit (Ctrl+Enter)' : 'Commit (Ctrl+Enter)'}
-      aria-label={isAmending ? 'Amend commit' : 'Commit'}
-    >
-      {#if isCommitting}
-        {isAmending ? 'Amending…' : 'Committing…'}
-      {:else}
-        {isAmending ? 'Amend commit' : 'Commit'}
+    <!--
+      The spinner sits between the row's trailing edge and the Commit button,
+      where the native puts it (CommitComposer.swift:113-118). It is what lets
+      the button keep naming the commit while one is running instead of
+      swapping its label out for "Committing…" — the label answers "what will
+      this do?", which is still worth reading mid-flight, and the spinner
+      answers "is something happening?".
+    -->
+    <div class="commit-group">
+      {#if isBusy}
+        <span class="commit-progress" role="progressbar" aria-label="Working"></span>
       {/if}
-    </button>
+
+      <!--
+        No `aria-label`: the visible text now carries the file count, and an
+        override reading only "Commit" would hide that from a screen reader and
+        put the accessible name at odds with the label on screen.
+      -->
+      <button
+        class="commit-button"
+        onclick={handleCommit}
+        disabled={!canSubmit || isCommitInProgress}
+        title={isAmending
+          ? 'Rewrite the most recent commit (Ctrl+Enter)'
+          : 'Commit the checked files (Ctrl+Enter)'}
+      >
+        {commitLabel}
+      </button>
+    </div>
   </div>
 </div>
 
@@ -566,13 +618,22 @@
 {/if}
 
 <style>
+  /* 10px inset and an 8px rhythm between the rows: the native composer's
+     `.padding(10)` and its `VStack(alignment: .leading, spacing: 8)`
+     (CommitComposer.swift:73, :133).
+
+     No `border-top` of its own. The rule above the composer belongs to the
+     resize handle, exactly as it does natively — there the handle *is* a
+     `Divider` (RowResizeHandle.swift:41) and `CommitComposer` draws nothing at
+     its edge. `.commit-resize-handle` in `MainLayout.svelte` already paints
+     that line, so a second one here read as a double rule with a 2px gutter
+     between the two. */
   .commit-message-container {
     display: flex;
     flex-direction: column;
     gap: 8px;
-    padding: 12px;
+    padding: 10px;
     background: var(--bg-secondary);
-    border-top: 1px solid var(--border-inactive);
     height: 100%;
     min-height: 0;
     box-sizing: border-box;
@@ -620,10 +681,16 @@
     cursor: not-allowed;
   }
 
+  /* The counter sits *beside* the field, not on top of it, and the 6px between
+     them is the native row's `HStack(spacing: 6)` (CommitComposer.swift:78).
+     Overlaying it inside the input is what the native deliberately refused to
+     do (CommitComposer.swift:143-146), and for a reason that applies just as
+     well here: a single-line input scrolls its own text under the caret, so a
+     long summary ends up running underneath the digits counting it. */
   .summary-section {
-    position: relative;
     display: flex;
-    flex-direction: column;
+    align-items: center;
+    gap: 6px;
     flex-shrink: 0;
   }
 
@@ -634,25 +701,35 @@
     min-height: 0;
   }
 
+  /* macOS `.caption` with monospaced digits, in the tertiary rank
+     (CommitComposer.swift:148-153). `flex-shrink: 0` is that view's
+     `.fixedSize()`: the digits never compress, the field yields instead. */
   .char-count {
-    position: absolute;
-    right: 8px;
-    top: 50%;
-    transform: translateY(-50%);
+    flex-shrink: 0;
     font-size: 10px;
-    color: var(--text-faint);
+    color: var(--text-muted);
     font-variant-numeric: tabular-nums;
     pointer-events: none;
   }
 
+  /* Advisory only, and only past git's conventional 72. Nothing is truncated
+     and nothing is blocked — the native says why (CommitComposer.swift:136-141):
+     a silent hard cap chops pasted and AI-generated summaries with no warning. */
   .char-count.warning {
-    color: var(--status-yellow);
+    color: var(--status-orange);
   }
 
+  /* `min-width: 0` is the field's half of the row's bargain, and the native
+     needs the same thing badly enough to subclass for it: `ScrollingTextField`
+     drops its intrinsic width (WheelScrollableTextField.swift:64-70) so a long
+     summary cannot push the layout wider. Without it a flex item refuses to
+     shrink below its content and the counter gets squeezed off the row. */
   .summary-input {
+    flex: 1;
+    min-width: 0;
     height: 28px;
     font-size: 13px;
-    padding: 4px 48px 4px 8px;
+    padding: 4px 8px;
     background: var(--bg-primary);
     color: var(--text-primary);
     border: 1px solid var(--border-strong);
@@ -679,12 +756,18 @@
      — its 180px minimum, enforced by the resize handle and by MainLayout's
      clamp — and a second floor here can only disagree with it: the textarea
      refused to shrink when the status strip appeared, overflowed its flex slot,
-     and painted over the strip below. One floor, in one place. */
+     and painted over the strip below. One floor, in one place.
+
+     The inset is 4px down the top and 9px in from the leading edge, which is
+     where the native editor puts its first character and its placeholder
+     (CommitComposer.swift:286, :294-296): a 4pt scroll-content margin on every
+     side, plus the text view's own 5pt line-fragment padding on the two
+     horizontal ones. */
   .description-input {
     flex: 1;
     min-height: 0;
     font-size: 13px;
-    padding: 8px;
+    padding: 4px 9px;
     background: var(--bg-primary);
     color: var(--text-primary);
     border: 1px solid var(--border-strong);
@@ -763,17 +846,53 @@
     text-decoration: underline;
   }
 
+  /* 8px between every control in this row. Natively it is one
+     `HStack(alignment: .center, spacing: 8)` with a `Spacer` doing the split
+     (CommitComposer.swift:94, :113), so the picker-to-Generate gap and the
+     spinner-to-Commit gap are the same measure; the two groups here only exist
+     to put the `Spacer` between them. */
   .button-bar {
     display: flex;
-    gap: 6px;
+    gap: 8px;
     align-items: center;
     justify-content: space-between;
   }
 
-  .button-group {
+  .button-group,
+  .commit-group {
     display: flex;
-    gap: 6px;
+    gap: 8px;
     align-items: center;
+  }
+
+  /* The native's `ProgressView().controlSize(.small)`
+     (CommitComposer.swift:115-118), drawn with this codebase's own spinner ring
+     rather than the system's thinner arcs — so it is stepped below AppKit's
+     16pt small indicator to carry the same visual weight beside a 23px button. */
+  .commit-progress {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+    border: 2px solid var(--border-inactive);
+    border-top-color: var(--border-active);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  /* A spinner is the one thing here that must not be the only channel: it says
+     "busy" by turning. Held still it still reads as a distinct object in a row
+     that is otherwise empty, and the disabled controls beside it say the same
+     thing. */
+  @media (prefers-reduced-motion: reduce) {
+    .commit-progress {
+      animation: none;
+    }
   }
 
   /* Sized and filled as a button rather than as a field: this one sits in the
@@ -812,8 +931,10 @@
     background: var(--surface-hover);
   }
 
-  .action-button:disabled,
-  .commit-button:disabled {
+  /* A bordered button keeps its bezel when disabled and dims only what is
+     printed on it, which is what AppKit does to a plain `Button`'s title. The
+     prominent one below cannot be treated this way — see there. */
+  .action-button:disabled {
     opacity: 0.5;
     cursor: not-allowed;
   }
@@ -829,5 +950,19 @@
   .commit-button:hover:not(:disabled) {
     background: var(--accent-secondary);
     border-color: var(--accent-secondary);
+  }
+
+  /* A disabled prominent button gives up the accent entirely, the way
+     `.buttonStyle(.borderedProminent)` does under `.disabled(!canCommit)`
+     (CommitComposer.swift:123, :125). Fading the blue instead — which is all
+     `opacity` can do — leaves a button that still reads as the accent-coloured
+     thing you are meant to press, so the composer looked available with an
+     empty summary and the click did nothing. Losing the fill is the signal;
+     the dimming is only what follows from it. */
+  .commit-button:disabled {
+    background: var(--bg-tertiary);
+    border-color: var(--border-inactive);
+    color: var(--text-muted);
+    cursor: not-allowed;
   }
 </style>

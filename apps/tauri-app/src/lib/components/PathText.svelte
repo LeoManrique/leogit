@@ -12,7 +12,15 @@
   let { path, dim = false }: Props = $props()
 
   let container: HTMLDivElement
-  let measureRef: HTMLSpanElement
+  // Two measuring spans, not one, because the two halves are drawn in two
+  // different faces: `.file-row.included .filename` raises the filename to
+  // medium, and a medium filename is wider than the regular one. Measuring the
+  // whole string in a single span would size an included row in the lighter
+  // face and promise a fit the row then overflows. `PathText.swift` states the
+  // same rule ("Every face that is drawn is also measured") and is why
+  // `nameWeight` is a parameter there rather than a modifier stacked on top.
+  let measureDirRef: HTMLSpanElement
+  let measureNameRef: HTMLSpanElement
   let displayLength = $state<number | null>(null)
 
   function truncateMid(value: string, length: number): string {
@@ -61,29 +69,28 @@
     return { dir: '', name: truncateMid(name, length) }
   }
 
-  function displayAt(length: number): string {
-    const { dir, name } = truncatePathParts(path, length)
-    return dir + name
-  }
-
   const parts = $derived(truncatePathParts(path, displayLength ?? path.length))
   const displayed = $derived(parts.dir + parts.name)
   const truncated = $derived(displayed.length < path.length)
 
-  function measureWidth(text: string): number {
-    if (!measureRef) return 0
-    measureRef.textContent = text
-    return measureRef.getBoundingClientRect().width
+  /** Width of a candidate split, each half measured in the face it is drawn in. */
+  function measureParts({ dir, name }: PathParts): number {
+    if (!measureDirRef || !measureNameRef) return 0
+    measureDirRef.textContent = dir
+    measureNameRef.textContent = name
+    return (
+      measureDirRef.getBoundingClientRect().width +
+      measureNameRef.getBoundingClientRect().width
+    )
   }
 
   const TRAILING_PAD = 2
 
   function fit() {
-    if (!container || !measureRef) return
+    if (!container || !measureDirRef || !measureNameRef) return
     const available = container.clientWidth - TRAILING_PAD
     if (available <= 0) return
-    const fullWidth = measureWidth(path)
-    if (fullWidth <= available) {
+    if (measureParts(truncatePathParts(path, path.length)) <= available) {
       if (displayLength !== null) displayLength = null
       return
     }
@@ -92,8 +99,7 @@
     let best = 1
     while (lo <= hi) {
       const mid = Math.floor((lo + hi) / 2)
-      const w = measureWidth(displayAt(mid))
-      if (w <= available) {
+      if (measureParts(truncatePathParts(path, mid)) <= available) {
         best = mid
         lo = mid + 1
       } else {
@@ -117,7 +123,19 @@
   <span class="path-visible" class:dim
     >{#if parts.dir}<span class="dirname">{parts.dir}</span>{/if}<span class="filename">{parts.name}</span></span
   >
-  <span bind:this={measureRef} class="path-measure" aria-hidden="true"></span>
+  <!--
+    The hidden ruler, built from the same two spans as the visible half so it
+    inherits the same two faces — including the medium `.filename` that
+    FileList gives an included row. Its text is written by `measureParts`
+    rather than from the template: it changes once per binary-search step and
+    must not drag a re-render behind it.
+  -->
+  <span class="path-visible path-measure" aria-hidden="true"
+    ><span class="dirname" bind:this={measureDirRef}></span><span
+      class="filename"
+      bind:this={measureNameRef}
+    ></span></span
+  >
 </div>
 
 <style>
@@ -144,17 +162,25 @@
     white-space: nowrap;
   }
 
+  /* `.secondary`, not `.tertiary`: `PathText.swift`'s `styled()` paints the
+     directory with `foregroundColor = .secondary` and the filename with
+     `.primary`. One step of contrast is all the split needs — it exists so the
+     eye lands on the file's own name, and a directory dropped two steps reads
+     as disabled rather than as context. */
   .dirname {
-    color: var(--text-muted);
+    color: var(--text-secondary);
   }
 
   .filename {
     color: var(--text-primary);
   }
 
-  /* "From" side of a rename: whole path muted so the "to" side reads as the
-     current name. Filename stays legible (no strikethrough). */
+  /* "From" side of a rename: the whole path drops to the directory's own
+     level, so the arrow points from something uniformly quiet to the current
+     name. Native says the same thing as `isMuted`, which resolves the filename
+     to `.secondary` — the colour the directory beside it already has.
+     Filename stays legible (no strikethrough). */
   .path-visible.dim .filename {
-    color: var(--text-muted);
+    color: var(--text-secondary);
   }
 </style>

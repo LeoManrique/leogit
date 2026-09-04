@@ -1,6 +1,7 @@
 <script lang="ts">
   import { autofocus } from '$lib/actions/autofocus'
   import { dismissOnEscape } from '$lib/actions/overlayStack'
+  import Icon from './Icon.svelte'
 
   interface Props {
     title?: string
@@ -32,10 +33,7 @@
     <div class="modal-header">
       <h2>{title}</h2>
       <button class="close-btn" onclick={onDismiss} aria-label="Close">
-        <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
-          <line x1="4" y1="4" x2="12" y2="12" />
-          <line x1="12" y1="4" x2="4" y2="12" />
-        </svg>
+        <Icon name="xmark" size={11} weight="semibold" />
       </button>
     </div>
     <div class="modal-body">

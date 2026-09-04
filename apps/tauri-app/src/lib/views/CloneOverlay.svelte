@@ -6,6 +6,7 @@
   import { autofocus } from '$lib/actions/autofocus'
   import { dismissOnEscape } from '$lib/actions/overlayStack'
   import { nextActiveIndex, scrollIntoViewWhenActive } from '$lib/actions/listNavigation'
+  import Icon from '$lib/components/Icon.svelte'
   import { open } from '@tauri-apps/plugin-dialog'
   import { homeDir } from '@tauri-apps/api/path'
 
@@ -297,10 +298,7 @@
       <div class="modal-header">
         <h2>Clone a repository</h2>
         <button class="close-btn" onclick={onClose} disabled={isCloning} aria-label="Close">
-          <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
-            <line x1="4" y1="4" x2="12" y2="12" />
-            <line x1="12" y1="4" x2="4" y2="12" />
-          </svg>
+          <Icon name="xmark" size={11} weight="semibold" />
         </button>
       </div>
 
@@ -354,25 +352,17 @@
               title={$cloneSortMode === 'recent' ? 'Sorted by recently modified' : 'Sorted alphabetically'}
               aria-label={$cloneSortMode === 'recent' ? 'Sorted by recently modified' : 'Sorted alphabetically'}
             >
+              <!--
+                The same bare pair the repo pickers use, and the same pair
+                `CloneSheet.swift:132` draws. "Recent" means last *pushed*
+                here, where the pickers mean last *opened* — a distinction the
+                tooltip above carries, which is exactly why the glyph does not
+                have to and why neither one needs a direction arrow.
+              -->
               {#if $cloneSortMode === 'recent'}
-                <!-- Clock + down arrow = most-recently-modified first (mirrors the
-                     A→Z glyph's arrow so the two modes read as a matched pair). -->
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <circle cx="4.25" cy="8" r="4" />
-                  <path d="M4.25 5.5V8l1.5 0.9" />
-                  <path d="M12.5 3.5v8" />
-                  <path d="M10.5 9.5 12.5 11.5 14.5 9.5" />
-                </svg>
+                <Icon name="clock" size={16} />
               {:else}
-                <!-- A→Z = alphabetical by name. -->
-                <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
-                  <text x="0.5" y="6.6" font-size="6.5" font-weight="700" fill="currentColor" font-family="-apple-system, system-ui, sans-serif">A</text>
-                  <text x="0.5" y="14.8" font-size="6.5" font-weight="700" fill="currentColor" font-family="-apple-system, system-ui, sans-serif">Z</text>
-                  <g fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M12.5 3.5v8" />
-                    <path d="M10.5 9.5 12.5 11.5 14.5 9.5" />
-                  </g>
-                </svg>
+                <Icon name="textformat-abc" size={16} />
               {/if}
             </button>
             <!-- The list is cached for the life of the app run, because
@@ -388,10 +378,10 @@
               title="Refresh the list from GitHub"
               aria-label="Refresh the list from GitHub"
             >
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M13.8 8a5.8 5.8 0 1 1-1.7-4.1" />
-                <polyline points="12.6,1.6 12.6,4.4 9.8,4.4" />
-              </svg>
+              <!-- One loop, one head: a plain reload of a cached list, which is
+                   `arrow.clockwise` on the native sheet (`CloneSheet.swift:145`)
+                   and deliberately not the two-arrow sync the header wears. -->
+              <Icon name="arrow-clockwise" size={14} />
             </button>
           </div>
           <!-- One tab stop for the whole list (rows are tabindex=-1 below), so

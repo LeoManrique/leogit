@@ -68,7 +68,39 @@
   // the Changes tab with a 1000+ file changeset blocks the main thread for
   // hundreds of ms while the browser lays out every row. Mirrors the
   // approach GitHub Desktop takes via react-virtualized's Grid.
-  const ROW_HEIGHT = 24
+  //
+  // ROW_HEIGHT is the row's pitch *and* its CSS height, and the two may never
+  // disagree — a stylesheet row taller or shorter than the step this file
+  // positions by tears the list open at every scroll offset. So it is declared
+  // once here and handed to CSS as `--row-height` on the wrapper below, rather
+  // than written down a second time in the style block.
+  //
+  // Do not spell that block's tag out in this comment. Svelte's own parser
+  // reads the script as raw text and would not care, but `svelte-check`
+  // (through `svelte2tsx`) scans the file for the block boundaries with a
+  // lexer that has no idea what a JS comment is — a literal style or script
+  // tag anywhere in here ends the script early, and the file then fails to
+  // resolve with `<script> was left open` reported against its last line,
+  // while `vite build` compiles it perfectly happily.
+  //
+  // 30px is `ChangedFileList.swift`'s row measured out. It sets no explicit
+  // height, so the row is what its content asks for plus what the list style
+  // gives it. Content: an `HStack(spacing: 10)` whose tallest child is the
+  // 18pt `FileStatusBadge` plate (`FileStatusStyle.swift:71`) — taller than
+  // the checkbox and taller than a 13pt line — under
+  // `.padding(.vertical, 2)` (`ChangedFileList.swift:111`), so 22pt. The
+  // remaining 8 is the per-row inset `.listStyle(.inset)`
+  // (`ChangedFileList.swift:113`) adds, 4pt a side, which is the figure that
+  // reconciles that 22 with the 29–30px pitch measured off the native window.
+  // It is the one number here not read out of the Swift, so it is the one to
+  // re-measure if the row ever looks a pixel off.
+  //
+  // The 6px of air it leaves around the 18px badge is what the number is
+  // really for: the badge is the row's floor, and a pitch close to it reads as
+  // a table of cells rather than as a list you can run your eye down. This is
+  // the loudest single measurement in the Changes tab — get it wrong and the
+  // rest of the row being pixel-correct does not rescue it.
+  const ROW_HEIGHT = 30
   const BUFFER_ROWS = 8
 
   let viewportEl = $state<HTMLDivElement | null>(null)
@@ -246,8 +278,13 @@
     switch (status) {
       case 'New':
         return 'var(--status-green)'
+      // Orange, matching `FileStatus.tint` (`FileStatusStyle.swift:41`).
+      // `--status-yellow` is an amber, and beside the green and red plates it
+      // read as a fourth status rather than as the same one the native client
+      // shows — Modified is the letter on almost every row, so it was the
+      // single most-repeated colour disagreement between the two clients.
       case 'Modified':
-        return 'var(--status-yellow)'
+        return 'var(--status-orange)'
       case 'Deleted':
         return 'var(--status-red)'
       case 'Renamed':
@@ -350,7 +387,7 @@
 
 </script>
 
-<div class="file-list">
+<div class="file-list" style="--row-height: {ROW_HEIGHT}px">
   {#if showCheckbox && onToggleAll && files.length > 0}
     <div
       class="file-row select-all-row"
@@ -404,6 +441,7 @@
             class:active={isActive}
             class:included={isSelected}
             class:row-selected={isRowSelected}
+            class:striped={fileIndex % 2 === 1}
             class:submodule-dirty={file.submodule_dirty}
             data-file-row-index={fileIndex}
             style="top: {fileIndex * ROW_HEIGHT}px;"
@@ -522,12 +560,16 @@
 {/if}
 
 <style>
+  /* No padding above the header: `ChangesSidebar.swift`'s pane is a
+     `VStack(spacing: 0)` whose first child is the header itself, and the
+     header's own `.padding(.vertical, 6)` is the whole of the gap between the
+     tab bar and the checkbox. The checkbox-less variant starts at the split's
+     edge for the same reason (`HistoryDetailPane.swift:105`). */
   .file-list {
     display: flex;
     flex-direction: column;
     height: 100%;
     background: var(--bg-secondary);
-    padding-top: 4px;
     min-height: 0;
   }
 
@@ -535,13 +577,19 @@
     The actual scroller. Rows are absolutely positioned inside .rows-spacer,
     which carries the full virtual height so the scrollbar tracks the true
     document size.
+
+    Its padding is the list's own inset, and it is symmetric on purpose: the
+    first row must not sit flush against the divider above it any more than the
+    last one may against the composer below. The 6px on each side is half of
+    the 12px the rows and the header both start their content at — see
+    `.file-row`.
   */
   .rows-viewport {
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
     scrollbar-gutter: stable;
-    padding: 0 6px 4px 6px;
+    padding: 4px 6px;
     min-height: 0;
   }
 
@@ -550,21 +598,39 @@
     width: 100%;
   }
 
+  /* `.tertiary`, which is `--text-muted` — `EmptyListPlaceholder.swift` draws
+     this line with `.foregroundStyle(.tertiary)`. One step below the directory
+     prefix beside it, not two: the line is the only thing in the pane, so it
+     has to be readable as well as quiet. */
   .empty-state {
     display: flex;
     align-items: center;
     justify-content: center;
     flex: 1;
-    color: var(--text-faint);
+    color: var(--text-muted);
     font-size: 13px;
   }
 
+  /*
+    `ChangedFileList.swift`'s row: `HStack(spacing: 10) { leading; badge; path }`
+    — hence the 10px gap. The select-all header below is a different stack and
+    keeps its own 8px.
+  */
   .file-row {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 0 8px;
-    height: 24px;
+    gap: 10px;
+    /* 6 here on top of the scroller's own 6 puts a row's checkbox 12px from
+       the pane's edge — exactly where the header above puts its select-all
+       checkbox (`ChangesSidebar.swift:241` pads that stack by 12). The two
+       checkboxes are the leading item of their respective stacks and read as
+       one column, so they have to start on the same line; splitting the 12
+       across the two boxes is what leaves the rounded selection inset from the
+       pane rather than flush against it. */
+    padding: 0 6px;
+    /* Published by the wrapper from `ROW_HEIGHT`, which is also the step the
+       virtualizer positions by — one number, so they cannot drift. */
+    height: var(--row-height);
     border-radius: 6px;
     cursor: pointer;
     transition: background 100ms ease;
@@ -580,6 +646,34 @@
     position: absolute;
     left: 0;
     right: 0;
+  }
+
+  /*
+    Alternating row backgrounds, as the native list has
+    (`ChangedFileList.swift:114`). It keys off the file's index in `files`,
+    **never** off DOM position: rows are virtualized and absolutely
+    positioned, so `:nth-child` sees only the handful near the viewport and
+    would restripe the whole list on every scroll. Row 0 is the plain one.
+
+    Two deliberate departures from `NSTableView`, both of which make this the
+    better half of the pair:
+
+    - **Only real rows are striped.** AppKit's hook paints the *clip rect*,
+      so a two-file repository gets a column of empty plates running down to
+      the composer — placeholder rows for files that do not exist. Striping
+      the row element cannot do that.
+    - **A lower alpha than the measured 4.7 % white.** The native list has no
+      hover state for a stripe to collide with; this one does, at 6 %. Landing
+      the stripe within 1.3 % of hover would have traded a state the user
+      relies on for a texture they do not, so the stripe sits at roughly half
+      the hover value and all four backgrounds stay distinguishable.
+
+    Ordered before `:hover`, `.row-selected` and `.active` on purpose: all
+    four weigh (0,2,0), so source order is the whole of the cascade here and a
+    stripe declared later would paint over the row the pointer is on.
+  */
+  .file-row.striped {
+    background: var(--surface-stripe);
   }
 
   .file-row:hover {
@@ -601,19 +695,38 @@
   }
 
   /*
-    Master select-all row, modelled on GH Desktop's "N changed files" header.
-    Slightly muted vs. file rows so it reads as a header, not another file.
+    The include-all header — `ChangesSidebar.swift`'s `listHeader`, which is
+    `HStack(spacing: 8) { Toggle; Text(…).font(.caption).foregroundStyle(.secondary); Spacer }`
+    with `.padding(.horizontal, 12).padding(.vertical, 6)`, followed by a
+    `Divider()` inside a `VStack(spacing: 0)`.
+
+    Its own gap and padding, because it is a different stack from the rows
+    below it: 8 rather than the row's 10, and a height that falls out of its
+    own padding rather than taking the rows' fixed pitch — it carries no 18px
+    badge, so the number that sizes a row would only leave it slack.
+
+    The rule under it is that `Divider()`, so it is full-bleed and flush
+    against the header: it separates two regions of the pane, and a line inset
+    from the edges and floated off the text above it reads instead as an
+    underline belonging to that text.
   */
   .select-all-row {
     color: var(--text-secondary);
-    font-size: 12px;
-    font-weight: 500;
+    gap: 8px;
+    height: auto;
+    padding: 6px 12px;
     border-bottom: 1px solid var(--border-inactive);
     border-radius: 0;
-    margin: 0 6px 2px 6px;
   }
 
+  /* `.font(.caption)` at `ChangesSidebar.swift:236`, which on macOS — unlike
+     iOS — is 10pt regular (`docs/plans/tauri-reskin.md` §10.2 P-19 reads the
+     same pair off both clients). Smaller and lighter than the filenames it
+     counts, which is what keeps it reading as a header rather than as the
+     first row of the list. */
   .select-all-label {
+    font-size: 10px;
+    font-weight: 400;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -654,9 +767,17 @@
     flex-shrink: 0;
   }
 
+  /*
+    A rename's two sides and the arrow between them — `ChangedFileList.swift`'s
+    `pathLabel`, which is an `HStack(spacing: 4)`. Centre-aligned, not
+    baseline-aligned, because that HStack takes SwiftUI's default `.center`;
+    the two sides are the same face at the same size, so the two agree today
+    and would diverge the moment one side's weight moved (an included row
+    raises its filename to medium).
+  */
   .file-info {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     flex: 1 1 0;
     min-width: 0;
     overflow: hidden;
@@ -665,8 +786,10 @@
     gap: 4px;
   }
 
+  /* `.foregroundStyle(.secondary)` on the native arrow, and `.fixedSize()` so
+     it never gives up width to the two greedy paths it separates. */
   .arrow {
-    color: var(--text-muted);
+    color: var(--text-secondary);
     flex-shrink: 0;
   }
 
@@ -675,8 +798,11 @@
   }
 
   /* Dirty submodule: can't be staged from the parent, so the row reads as
-     inactive (muted name) while still being clickable to view its diff. */
+     inactive while still being clickable to view its diff. Native passes
+     `isMuted: file.submoduleDirty` into `PathText`, which resolves the
+     filename to `.secondary` — the same treatment a rename's "from" side
+     gets, and the same level as the directory already beside it. */
   .file-row.submodule-dirty :global(.filename) {
-    color: var(--text-muted);
+    color: var(--text-secondary);
   }
 </style>

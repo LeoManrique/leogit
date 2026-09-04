@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { CommitInfo, CommitStats } from '$lib/api/commands'
+  import Icon from '$lib/components/Icon.svelte'
 
   interface Props {
     commit: CommitInfo | null
@@ -56,25 +57,30 @@
       <pre class="body">{commit.body}</pre>
     {/if}
 
-    <div class="meta-row">
+    <!--
+      Identity and date. No separator glyph between the name and the address:
+      the native card sets them side by side in an `HStack(spacing: 6)`
+      (`HistoryDetailPane.swift:173-177`) and lets the gap do the separating,
+      then pushes the date to the trailing edge with a `Spacer` (`:178-180`) —
+      which is `margin-left: auto` here. A middot between the two would be the
+      one punctuation mark on the card that the reference never draws.
+    -->
+    <div class="meta-row identity-row">
       <span class="author">{commit.author_name}</span>
-      <span class="dot">·</span>
       <span class="email">{commit.author_email}</span>
       <span class="date">{formatDate(commit.author_date)}</span>
     </div>
 
-    <div class="meta-row">
+    <div class="meta-row sha-row">
       <code class="sha">{commit.sha}</code>
       <button class="copy-btn" class:copied onclick={copySha} title={copied ? 'Copied' : 'Copy SHA'} aria-label="Copy SHA">
+        <!-- Bare checkmark, not the circled one the update chip uses: this is
+             the confirmation `HistoryDetailPane.swift:195` shows, where the
+             tick replaces `doc.on.doc` inside the same small button. -->
         {#if copied}
-          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <polyline points="3.5,8.5 6.5,11.5 12.5,5" />
-          </svg>
+          <Icon name="checkmark" weight="semibold" />
         {:else}
-          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <rect x="5" y="5" width="8" height="8" rx="1.5" />
-            <path d="M11 5V3.5A1 1 0 0 0 10 2.5H4A1 1 0 0 0 3 3.5V10A1 1 0 0 0 4 11H5" />
-          </svg>
+          <Icon name="doc-on-doc" />
         {/if}
       </button>
       {#if fileCount > 0}
@@ -86,19 +92,26 @@
 {/if}
 
 <style>
+  /* 10px vertical / 16px horizontal and an 8px stack gap: the native card's
+     own `.padding(.vertical, 10)`, `.padding(.horizontal, 16)` and
+     `VStack(spacing: 8)` (`HistoryDetailPane.swift:145,211-212`). */
   .commit-card {
     display: flex;
     flex-direction: column;
     gap: 8px;
-    padding: 14px 20px;
+    padding: 10px 16px;
     border-bottom: 1px solid var(--border-inactive);
     background: var(--bg-primary);
   }
 
+  /* `HStack(alignment: .firstTextBaseline, spacing: 8)`
+     (`HistoryDetailPane.swift:146`): the +/− totals sit on the summary's
+     baseline, not on its top edge, so the two runs read as one line even
+     though the mono digits carry different metrics from the UI face. */
   .title-row {
     display: flex;
-    align-items: flex-start;
-    gap: 12px;
+    align-items: baseline;
+    gap: 8px;
   }
 
   /* Detail-pane heading register: the commit summary is the counterpart of the
@@ -112,26 +125,43 @@
     min-width: 0;
   }
 
-  /* Commit-level +adds/-dels, pinned to the top-right at the title's baseline. */
+  /* Commit-level +adds/−dels, pinned to the trailing edge at the title's
+     baseline. 12px semibold mono is the native run's own font
+     (`HistoryDetailPane.swift:164`) and the 6px gap its `HStack(spacing: 6)`
+     (`:154`); `margin-left: auto` stands in for the `Spacer(minLength: 8)`
+     (`:151`), which the row's own 8px gap already satisfies. No `line-height`:
+     this is a single-line label, and STYLE.md's leading rule leaves those to
+     the app's `normal`, so the mono digits keep the same box height as the UI
+     text beside them instead of standing a point taller than it.
+
+     `align-items: baseline` inside is load-bearing rather than cosmetic: a flex
+     container only exposes a baseline when one of its own items is
+     baseline-aligned, so under `center` this box would hand `.title-row` a
+     baseline synthesised from its border edge and the run would sit low
+     against the summary. */
   .commit-counts {
     margin-left: auto;
     display: inline-flex;
-    align-items: center;
-    gap: 8px;
+    align-items: baseline;
+    gap: 6px;
     flex-shrink: 0;
     font-family: var(--font-mono);
     font-size: 12px;
     font-weight: 600;
     font-variant-numeric: tabular-nums;
-    line-height: 1.4;
   }
 
   .add-count { color: var(--diff-add-fg); }
   .del-count { color: var(--diff-remove-fg); }
 
+  /* 12px mono on a recessed 6px plate, capped at 140px and scrolling past it —
+     the native block's `.font(.system(size: 12, design: .monospaced))`, uniform
+     `.padding(8)`, `cornerRadius: 6` and `min(bodyHeight, maxBodyHeight)` cap
+     (`HistoryDetailPane.swift:142,221-232`). The padding is 8 on all four
+     sides there, so it is 8 on all four sides here. */
   .body {
     margin: 0;
-    padding: 8px 10px;
+    padding: 8px;
     background: var(--bg-secondary);
     border-radius: 6px;
     font-family: var(--font-mono);
@@ -143,40 +173,75 @@
     overflow-y: auto;
   }
 
+  /* Both metadata rows are one-line runs: the native card puts `.lineLimit(1)`
+     on the identity row (`HistoryDetailPane.swift:184`) and on the sha
+     (`:191`), so nothing here wraps to a second line. Each run clips itself
+     rather than the row clipping them, which keeps the copy button's focus
+     halo — an outside `box-shadow` — out of an `overflow: hidden` box. Their
+     gaps differ, so each row carries its own: 6 for the identity row's
+     `HStack(spacing: 6)` (`:173`), 8 for the sha row's (`:186`). */
   .meta-row {
     display: flex;
     align-items: center;
-    gap: 8px;
-    font-size: 12px;
-    color: var(--text-muted);
-    flex-wrap: wrap;
+    min-width: 0;
+    color: var(--text-secondary);
   }
 
+  /* `.font(.caption)` on the whole row (`HistoryDetailPane.swift:182`), which
+     macOS draws at 10pt regular — the same register as the sidebar row's
+     second line, since both are the quiet line under a subject. */
+  .identity-row {
+    gap: 6px;
+    font-size: 10px;
+  }
+
+  .sha-row {
+    gap: 8px;
+  }
+
+  /* The only run on either row that is not `.secondary`: the native name takes
+     `.fontWeight(.medium)` at the default label colour
+     (`HistoryDetailPane.swift:174-175`), so the person is the one thing here
+     that reads at full strength. */
   .author {
     color: var(--text-primary);
     font-weight: 500;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .email {
-    color: var(--text-muted);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  .dot {
-    color: var(--text-faint);
-  }
-
+  /* `margin-left: auto` is the native `Spacer(minLength: 8)` at
+     `HistoryDetailPane.swift:178`: the date is trailing-aligned, not merely
+     spaced, so it holds the same edge whatever the name and address measure. */
   .date {
-    color: var(--text-muted);
+    flex: 0 0 auto;
+    white-space: nowrap;
     font-variant-numeric: tabular-nums;
     margin-left: auto;
   }
 
+  /* 11px mono `.secondary` on one line (`HistoryDetailPane.swift:187-191`).
+     Native middle-truncates it (`.truncationMode(.middle)`, `:192`), which CSS
+     has no equivalent for, so a narrow pane loses the tail rather than the
+     middle — the full sha is 40 mono characters and clears any realistic pane
+     width, so the two agree in practice. */
   .sha {
     font-family: var(--font-mono);
     font-size: 11px;
-    color: var(--text-muted);
     background: transparent;
-    word-break: break-all;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .copy-btn {
@@ -185,9 +250,17 @@
     justify-content: center;
     width: 20px;
     height: 20px;
+    /* The row no longer wraps, so every item on it is a shrinkable flex item
+       and the deficit a long sha creates is shared out by basis. Without this
+       the plate collapses toward the width of the glyph inside it — a 12×20
+       hit target on a wide pane, which is exactly where there is *most* room
+       for it. */
+    flex-shrink: 0;
     padding: 0;
     background: transparent;
-    color: var(--text-muted);
+    /* `.secondary`, the tint the native glyph carries until it flips to green
+       (`HistoryDetailPane.swift:196`). */
+    color: var(--text-secondary);
     border: none;
     border-radius: 4px;
     cursor: pointer;
@@ -203,10 +276,15 @@
     color: var(--status-green);
   }
 
+  /* `.font(.caption)` again — 10pt — behind the sha row's own
+     `Spacer(minLength: 8)` and `.fixedSize()`
+     (`HistoryDetailPane.swift:201,204-207`), so the count holds the trailing
+     edge at its full width and the sha is what gives way. */
   .files-count {
     margin-left: auto;
-    color: var(--text-muted);
-    font-size: 11px;
+    flex: 0 0 auto;
+    white-space: nowrap;
+    font-size: 10px;
     font-variant-numeric: tabular-nums;
   }
 

@@ -2,6 +2,7 @@
   import { untrack } from 'svelte'
   import { autofocus } from '$lib/actions/autofocus'
   import { dismissOnEscape } from '$lib/actions/overlayStack'
+  import Icon from './Icon.svelte'
 
   interface Props {
     defaultName: string
@@ -56,10 +57,7 @@
     <div class="modal-header">
       <h2>Publish repository</h2>
       <button class="close-btn" onclick={onCancel} disabled={isPublishing} aria-label="Close">
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
-          <line x1="4" y1="4" x2="12" y2="12" />
-          <line x1="12" y1="4" x2="4" y2="12" />
-        </svg>
+        <Icon name="xmark" size={14} weight="medium" />
       </button>
     </div>
     <div class="modal-body">

@@ -4,6 +4,7 @@
   import { dismissOnEscape } from '$lib/actions/overlayStack'
   import { nextActiveIndex, scrollIntoViewWhenActive } from '$lib/actions/listNavigation'
   import ContextMenu, { type ContextMenuItem } from '$lib/components/ContextMenu.svelte'
+  import Icon from '$lib/components/Icon.svelte'
 
   interface Props {
     branches: BranchInfo[]
@@ -267,9 +268,7 @@
     {#if isPicking}
       <div class="pick-header">
         <button class="back-btn" onclick={backToBrowse} aria-label="Back to branches">
-          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <polyline points="10,3 5,8 10,13" />
-          </svg>
+          <Icon name="chevron-left" weight="medium" />
         </button>
         <span class="pick-title">
           {#if mode === 'merge'}Merge into “{currentBranch}” — pick a branch{:else}Delete which

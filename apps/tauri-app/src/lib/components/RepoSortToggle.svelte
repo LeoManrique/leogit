@@ -1,5 +1,6 @@
 <script lang="ts">
   import { repoSortMode, setRepoSortMode } from '$lib/stores/reposState'
+  import Icon from './Icon.svelte'
 
   /*
     The repo lists' clock ⇄ A→Z toggle, shared by the startup picker and the
@@ -22,52 +23,17 @@
 </script>
 
 <button class="icon-btn" onclick={toggle} title={label} aria-label={label}>
+  <!--
+    A bare clock and a bare "abc", as `RepoPickerList.swift:245` draws them.
+    Both used to carry a descending arrow as well, which contradicted the note
+    above: if the glyph is the state label and the sentence lives in the
+    tooltip, a second mark encoding a direction the control cannot even change
+    is one claim too many.
+  -->
   {#if $repoSortMode === 'recent'}
-    <svg
-      width="16"
-      height="16"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="1.3"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true"
-    >
-      <circle cx="4.25" cy="8" r="4" />
-      <path d="M4.25 5.5V8l1.5 0.9" />
-      <path d="M12.5 3.5v8" />
-      <path d="M10.5 9.5 12.5 11.5 14.5 9.5" />
-    </svg>
+    <Icon name="clock" size={16} />
   {:else}
-    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
-      <text
-        x="0.5"
-        y="6.6"
-        font-size="6.5"
-        font-weight="700"
-        fill="currentColor"
-        font-family="-apple-system, system-ui, sans-serif">A</text
-      >
-      <text
-        x="0.5"
-        y="14.8"
-        font-size="6.5"
-        font-weight="700"
-        fill="currentColor"
-        font-family="-apple-system, system-ui, sans-serif">Z</text
-      >
-      <g
-        fill="none"
-        stroke="currentColor"
-        stroke-width="1.3"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-      >
-        <path d="M12.5 3.5v8" />
-        <path d="M10.5 9.5 12.5 11.5 14.5 9.5" />
-      </g>
-    </svg>
+    <Icon name="textformat-abc" size={16} />
   {/if}
 </button>
 
