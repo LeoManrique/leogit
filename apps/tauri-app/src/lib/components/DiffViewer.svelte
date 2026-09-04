@@ -466,15 +466,15 @@
     font-size: 13px;
   }
 
+  /* Canvas, not chrome: the native header fills nothing and separates itself
+     with a `Divider()`, and STYLE.md does not list this strip among
+     `--bg-secondary`'s surfaces. A hairline alone is the whole treatment. */
   .file-header {
-    position: sticky;
-    top: 0;
-    z-index: 10;
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 6px 12px;
-    background: var(--bg-secondary);
+    background: var(--bg-primary);
     border-bottom: 1px solid var(--border-inactive);
     font-family: var(--font-mono);
     font-size: 12px;
@@ -558,16 +558,28 @@
     position: relative;
   }
 
+  /*
+    `DiffHunkBand`'s box: 11px text with 5px of air above and below and 12px
+    each side, and **no borders**. The three go together — the size alone made
+    the band 8px shorter than the native one and left the text sitting flush
+    against two hairlines the native band does not draw.
+
+    11px is also what keeps the row on one line: git puts the enclosing heading
+    on it, so on prose it carries a whole sentence and wrapped at 12px.
+
+    The fill stays `--bg-secondary` (STYLE.md's *Diff viewer* names the token)
+    rather than native's translucent `.quaternary.opacity(0.5)`, the same way
+    the text keeps `--text-muted` against native's `.tertiary`.
+  */
   .hunk-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
     box-sizing: border-box;
-    padding: 0 12px;
+    padding: 5px 12px;
     background: var(--bg-secondary);
     color: var(--text-muted);
-    border-top: 1px solid var(--border-inactive);
-    border-bottom: 1px solid var(--border-inactive);
+    font-size: 11px;
   }
 
   /* Only the staging form is a control; the plain band is text you can select
@@ -592,6 +604,7 @@
     display: flex;
     align-items: flex-start;
     box-sizing: border-box;
+    padding: 1px 0;
   }
 
   .diff-line.diff-add,
@@ -604,22 +617,29 @@
     background: var(--diff-remove-bg);
   }
 
-  .diff-line.diff-context,
-  .sbs-side.diff-context {
-    color: var(--text-secondary);
-  }
+  /*
+    Two numbers, laid out the way the native cell lays them out: 40px of
+    right-aligned digits and a 4px gap, per column. 40 is chosen for the
+    pointer rather than the text — the gutter is the line-selection handle —
+    and it is also what four and five digit numbers need, which the old `3em`
+    did not have: at 11px that was 33px, ~20px of content box after padding,
+    and a four-digit number spilled *left* out of its box instead of clipping,
+    so any file over 999 lines overlapped its own digits.
 
+    No `border-right`. A full-height rule beside each column is chrome the
+    native pane does not draw, and after the header it was the most visible
+    difference in the body.
+  */
   .line-number {
     display: inline-flex;
     align-items: center;
     justify-content: flex-end;
-    width: 3em;
-    padding: 0 6px;
+    width: 44px;
+    padding: 0 4px 0 0;
     color: var(--text-muted);
     font-size: 11px;
     user-select: none;
     flex-shrink: 0;
-    border-right: 1px solid var(--border-inactive);
   }
 
   /*
@@ -633,10 +653,8 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 1.5em;
-    padding: 0 4px;
+    width: 16px;
     flex-shrink: 0;
-    font-weight: 500;
     user-select: none;
   }
 
@@ -656,7 +674,11 @@
   .line-content {
     flex: 1;
     min-width: 0;
-    padding: 0 8px;
+    /* No left padding: the content starts where the gutter ends, as it does
+       natively. The 8px that used to sit here was compensating for a gutter
+       narrower than the native one, and with the gutter now at its real width
+       it only pushed the whole body right. */
+    padding: 0 12px 0 0;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
@@ -711,10 +733,13 @@
   }
 
   /* Columns grow vertically with wrapped text (no clipping), gutters
-     top-aligned like the unified rows. */
+     top-aligned like the unified rows, and the same 1px of vertical padding —
+     natively both arrangements are the same cell, so a row cannot be one
+     height unified and another split. */
   .sbs-side {
     display: flex;
     align-items: flex-start;
+    padding: 1px 0;
     border-right: 1px solid var(--border-inactive);
   }
 

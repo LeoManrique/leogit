@@ -1327,6 +1327,7 @@ All git operations go through `std::process::Command::new("git")` with these def
 - `TERM=dumb` — suppresses pagers and color codes.
 - `GIT_TERMINAL_PROMPT=0` — prevents a credential prompt from blocking the process indefinitely.
 - `GIT_OPTIONAL_LOCKS=0` (as GitHub Desktop sets globally) — keeps read-only commands (`status`, `diff`) from opportunistically refreshing the index under `index.lock`. Commands run concurrently on worker threads, so without this a poll-time `diff` holding the lock could make a simultaneous `commit` fail with "index.lock exists".
+- `-c core.quotepath=false` — see *Path quoting* below.
 
 Helpers shape the output:
 
@@ -1334,6 +1335,51 @@ Helpers shape the output:
 - `run_git` — returns trimmed UTF-8 (most line-oriented commands).
 - `run_git_combined` — returns `(success, stdout+stderr)` regardless of exit code (used for local commands like `merge` where the error message is the value).
 - `run_git_net` / `run_git_net_streaming` — the **network** runners (`fetch`/`pull`/`push`/`clone`/badge fetch; the `_streaming` variant additionally forwards stderr lines live). Both build the command via `git_net_cmd` (SSH/HTTP transport timeouts), run it through `process::run_timed` / `run_timed_streaming` (hard kill-timeout), and collapse `\r`-overwritten progress repaints in the combined output so a failed transfer's error message reads like the terminal rendered it, not pages of meter spew. See *Network resilience* for the full rationale and budgets.
+
+### Path quoting
+
+Git has two ways of naming a file, and only one of them is safe to parse. Under
+`-z` a path is written raw and NUL-terminated. Everywhere it is *printed* —
+patch headers, `Binary files … differ`, `ls-files` — it is C-quoted: the whole
+path wrapped in `"` with the awkward bytes escaped as `\n`, `\"`, `\\` or
+`\nnn` octal.
+
+Two defences, and both are needed:
+
+- **`-c core.quotepath=false`, on `git_cmd` *and* `git_net_cmd`.** By default
+  git escapes every byte ≥ 0x80, so `Capítulo.md` prints as
+  `Cap\303\255tulo.md`. This turns that off, which covers the common case. It
+  is set on the shared builders rather than per call site, because a path that
+  survives `diff` only to be mangled by `log -p` is worse than one mangled
+  everywhere — and on the network builder too because `pull` runs a merge, and
+  a merge that refuses names the files it would overwrite straight into the
+  text the user is shown. Note that `-c` is inherited: git exports it as
+  `GIT_CONFIG_PARAMETERS`, so the user's hooks, merge drivers and submodule
+  sub-invocations run with it too.
+- **`git::unquote_path`.** The setting cannot switch quoting off: `"`, `\`, TAB
+  and LF are escaped whatever it says. So every printed path is decoded, and an
+  unquoted one is returned untouched. Git's escape set is exactly `\a \b \t \n
+  \v \f \r \" \\ \nnn`, and all of it is handled.
+
+One ordering subtlety in the patch header: when a name contains a space, git
+writes a **real** trailing TAB after it, *outside* any quotes. A tab *inside* a
+name is written `\t`, two characters, even with quoting otherwise off. So
+`strip_path_prefix` splits on TAB before it decodes — no real separator can hide
+inside a quoted name, and no escape can be mistaken for one.
+
+The order matters in the patch header. The `a/`/`b/` prefix sits **inside** the
+quotes (`"a/Cap\303\255tulo.md"`), so `strip_path_prefix` decodes first and
+strips second. Doing it the other way round matched nothing and left the prefix,
+the quotes and the octal in `FileDiff.old_path`/`new_path` — which reached
+`resolve_language` as a file with the extension `md"`, so **any** path holding a
+non-ASCII byte silently rendered with no syntax colours at all, in both clients,
+and would have reached `read_blob` as a rev-spec naming nothing.
+
+`build_patch` is unaffected by design: it replays the captured `file_header`
+verbatim, so what `git apply` reads is exactly what `git diff` wrote. Its
+`format_patch_path` fallback — which writes a decoded path back unquoted, and
+so is only correct for a name with no tab or newline in it — is reached only
+when `file_header` is empty, which real git output never is.
 
 ### Status parsing
 

@@ -927,6 +927,66 @@ mod tests {
         crate::diff::parse_diff_with(&raw, crate::diff::DiffOptions::default()).file_diff
     }
 
+    /// A file whose *name* holds a non-ASCII byte lost its syntax colours
+    /// entirely: git C-quotes such a path in the patch header, the `a/` prefix
+    /// ends up inside the quotes, and the undecoded `"a/c\303\263digo.rs"`
+    /// reaches `resolve_language` as a file with the extension `rs"` — no
+    /// syntax, so every line renders as plain text, in both clients.
+    ///
+    /// This runs `git diff` without `core.quotepath=false` on purpose (via
+    /// `real_diff`, which builds its own command): the escaping is the state
+    /// the parser has to survive on its own, because that config setting
+    /// cannot switch quoting off for a name containing `"`, `\` or a control
+    /// character. Both blob-sourced and diff-only tokenizing are checked,
+    /// since the path feeds `git show` on the first and `resolve_language` on
+    /// both.
+    #[test]
+    fn a_non_ascii_filename_keeps_its_syntax_highlighting() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_repo(repo);
+        let name = "código.rs";
+        fs::write(repo.join(name), "fn main() {}\n").expect("write");
+        git_in(repo, &["add", name]);
+        git_in(repo, &["commit", "-qm", "add"]);
+        fs::write(repo.join(name), "fn main() {}\nstruct Wide;\n").expect("edit");
+
+        let diff = real_diff(repo, name);
+        assert_eq!(
+            diff.new_path, name,
+            "the header path must decode back to the real filename"
+        );
+
+        let added = |lines: &[TokenLine]| -> TokenLine {
+            let idx = diff
+                .hunks
+                .iter()
+                .flat_map(|h| &h.lines)
+                .position(|l| matches!(l.line_type, LineType::Add))
+                .expect("the added line must be in the diff");
+            lines[idx].clone()
+        };
+
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+        for (label, source) in [
+            ("diff-only", None),
+            (
+                "blob-sourced",
+                Some(BlobSource::WorkingTree {
+                    repo_path: repo_path.clone(),
+                }),
+            ),
+        ] {
+            let lines = tokenize_diff(&diff, source.as_ref());
+            assert!(
+                added(&lines)
+                    .iter()
+                    .any(|t| matches!(t.class, TokenClass::Keyword)),
+                "{label}: `struct` must be tokenized as a keyword"
+            );
+        }
+    }
+
     /// The regression that motivated blob-sourced highlighting: a hunk landing
     /// inside `<script lang="ts">` must be tokenized as TypeScript. Parsing the
     /// diff's own lines starts the parser in top-level markup context (the state

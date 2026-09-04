@@ -333,15 +333,109 @@ pub fn sync_proposal(status: &RepoStatus) -> SyncProposal {
 /// opportunistically refreshing the index under `index.lock` — commands now run
 /// concurrently on worker threads, so a poll-time `diff` taking that lock could
 /// otherwise make a simultaneous `commit` fail with "index.lock exists".
+///
+/// `core.quotepath=false` turns off git's default of C-escaping every byte
+/// ≥ 0x80 in a path it prints, so `Capítulo.md` arrives as itself rather than
+/// as `Cap\303\255tulo.md`. It is set here rather than at each call site
+/// because every command that names a file is affected — `diff`, `log -p`,
+/// `ls-files` — and a path that survives one of them only to be mangled by the
+/// next is worse than one that is mangled everywhere. It is not the whole
+/// story: git escapes `"`, `\` and the control characters whatever this says,
+/// so output still has to go through [`unquote_path`].
 fn git_cmd(repo_path: &str, args: &[&str]) -> Command {
     let mut cmd = Command::new("git");
     cmd.current_dir(repo_path)
         .env("TERM", "dumb")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .arg("-c")
+        .arg("core.quotepath=false")
         .args(args);
     super::process::prepare_child(&mut cmd);
     cmd
+}
+
+/// Decodes one C-quoted path as git writes it into patch headers, `ls-files`
+/// output, and anywhere else a path is printed rather than NUL-delimited: the
+/// *whole* path wrapped in `"`, with the bytes that need escaping written as
+/// `\n`, `\"`, `\\` or `\nnn` octal.
+///
+/// Two properties of that format matter to callers:
+///
+/// * The quotes wrap the entire argument, so in a patch header the `a/`/`b/`
+///   prefix sits **inside** them (`"a/Cap\303\255tulo.md"`). A path must
+///   therefore be decoded *before* the prefix is stripped, never after.
+/// * Quoting is not optional. `core.quotepath=false` removes the common
+///   trigger (any byte ≥ 0x80) but git still quotes a path containing `"`,
+///   `\`, TAB or LF, so this decode cannot be skipped on the strength of that
+///   setting alone.
+///
+/// A path git did not quote is returned unchanged — the path every plain ASCII
+/// filename takes.
+pub(crate) fn unquote_path(path: &str) -> String {
+    let Some(inner) = path
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+    else {
+        return path.to_string();
+    };
+
+    let src = inner.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(src.len());
+    let mut i = 0;
+    while i < src.len() {
+        if src[i] != b'\\' {
+            out.push(src[i]);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        let Some(&esc) = src.get(i) else {
+            // Trailing backslash with nothing to escape: keep it verbatim
+            // rather than dropping a byte that is part of the name.
+            out.push(b'\\');
+            break;
+        };
+        i += 1;
+        match esc {
+            b'a' => out.push(0x07),
+            b'b' => out.push(0x08),
+            b'f' => out.push(0x0C),
+            b'n' => out.push(b'\n'),
+            b'r' => out.push(b'\r'),
+            b't' => out.push(b'\t'),
+            b'v' => out.push(0x0B),
+            b'0'..=b'7' => {
+                // `\nnn`: up to three octal digits. Git always writes three,
+                // but a shorter run is still well-formed, so stop at the first
+                // non-octal byte instead of assuming the width.
+                let mut value = u32::from(esc - b'0');
+                let mut digits = 1;
+                while digits < 3
+                    && let Some(&d @ b'0'..=b'7') = src.get(i)
+                {
+                    value = value * 8 + u32::from(d - b'0');
+                    i += 1;
+                    digits += 1;
+                }
+                // `\777` overflows a byte. Git never emits it; a malformed
+                // input that does gets a placeholder rather than a panic.
+                out.push(u8::try_from(value).unwrap_or(b'?'));
+            }
+            // `\"` and `\\` stand for themselves, which is what this arm is
+            // for. It also catches a sequence git does not emit at all, and
+            // there it keeps the byte and drops the backslash — the choice
+            // that loses least, since the alternative is dropping a character
+            // of somebody's filename.
+            other => out.push(other),
+        }
+    }
+
+    // A repository may hold a filename that is not valid UTF-8 (a Latin-1 name
+    // committed on another machine). It cannot be shown or opened faithfully
+    // either way, so it is replaced rather than treated as a failure — the
+    // same answer the rest of this module gives such bytes.
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Run a git command and return the raw stdout bytes.
@@ -433,6 +527,12 @@ fn git_net_cmd(
             "GIT_SSH_COMMAND",
             format!("ssh -o ConnectTimeout={connect_secs} -o BatchMode=yes"),
         )
+        // Same reason as [`git_cmd`], and set here too so the two builders
+        // cannot disagree: `pull` runs a merge, and a merge that refuses names
+        // the files it would overwrite. Those names go straight into the text
+        // the user is shown.
+        .arg("-c")
+        .arg("core.quotepath=false")
         .arg("-c")
         .arg("http.lowSpeedLimit=1000")
         .arg("-c")
@@ -2747,7 +2847,14 @@ fn ls_files_unmerged(repo_path: &str) -> Vec<String> {
     let mut ordered: Vec<String> = Vec::new();
     for line in output.lines() {
         if let Some(tab) = line.find('\t') {
-            let path = line[tab + 1..].trim().to_string();
+            // `ls-files` prints paths, so a conflicted file whose name needs
+            // escaping arrives quoted, and the merge dialog listed it as
+            // `"Cap\303\255tulo.md"` — the raw escape, quotes included.
+            //
+            // Only a trailing `\r` is stripped, never surrounding whitespace: a
+            // leading or trailing space is a legal filename and git prints it
+            // unquoted, so trimming was the sole thing corrupting it.
+            let path = unquote_path(line[tab + 1..].trim_end_matches('\r'));
             if !path.is_empty() && seen.insert(path.clone()) {
                 ordered.push(path);
             }
@@ -5013,5 +5120,46 @@ mod tests {
         run_git(&repo_path, &["commit", "-m", "first"]).expect("commit");
         let committed = get_status(repo_path).expect("status");
         assert_eq!(committed.proposal, SyncProposal::PublishRepository);
+    }
+
+    /// The escape table git writes when it quotes a path. `\nnn` is octal, not
+    /// decimal, and the three digits of a UTF-8 lead byte have to recombine
+    /// into one character rather than three.
+    #[test]
+    fn unquote_path_decodes_every_escape_git_writes() {
+        assert_eq!(unquote_path("Cap\\303\\255tulo.md"), "Cap\\303\\255tulo.md");
+        assert_eq!(unquote_path("\"Cap\\303\\255tulo.md\""), "Capítulo.md");
+        assert_eq!(unquote_path("\"a\\tb\""), "a\tb");
+        assert_eq!(unquote_path("\"a\\nb\""), "a\nb");
+        assert_eq!(unquote_path("\"say \\\"hi\\\"\""), "say \"hi\"");
+        assert_eq!(unquote_path("\"back\\\\slash\""), "back\\slash");
+        // Every byte of a multi-byte character is escaped separately, and the
+        // emoji below needs all four to survive to be one character again.
+        assert_eq!(unquote_path("\"\\360\\237\\216\\211.txt\""), "🎉.txt");
+    }
+
+    /// A path git did not quote must come back byte for byte: the overwhelming
+    /// majority of paths take this route, and a decode that fired on them
+    /// would corrupt any filename holding a backslash.
+    #[test]
+    fn unquote_path_leaves_an_unquoted_path_alone() {
+        assert_eq!(unquote_path("src/main.rs"), "src/main.rs");
+        assert_eq!(unquote_path(""), "");
+        assert_eq!(unquote_path("a\\tb"), "a\\tb");
+        // One quote is not a quoted path — only a matched pair is.
+        assert_eq!(unquote_path("\"unterminated"), "\"unterminated");
+        // Nor is a name that merely happens to contain quotes.
+        assert_eq!(unquote_path("mid\"dle"), "mid\"dle");
+    }
+
+    /// Malformed input reaches this from a repository, not from us, so it has
+    /// to degrade rather than panic: an octal run wider than a byte and a
+    /// backslash with nothing behind it are both survivable.
+    #[test]
+    fn unquote_path_degrades_on_malformed_input() {
+        assert_eq!(unquote_path("\"\\777\""), "?");
+        assert_eq!(unquote_path("\"trail\\\""), "trail\\");
+        // A short octal run is well-formed even though git writes three digits.
+        assert_eq!(unquote_path("\"\\101\\10\\1\""), "A\u{8}\u{1}");
     }
 }

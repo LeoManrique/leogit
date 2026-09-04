@@ -1,13 +1,22 @@
 # Plan — Re-skin the Tauri client onto the native design language
 
-> Status: **the code is written; the looking is not done**. All six steps in §9
-> have landed, and §6.1–§6.5 record what each one changed and why, against the
-> source the claim came from. The design question is settled — where the native
-> client and this document disagree, the native client wins (§8).
-> What is left is not work but evidence: **§8's three checks need a Windows and
-> a Linux build**, because they ask what the two engines render rather than what
-> they support, and that is the one question neither source nor a mac dev build
-> can answer. §6.6 is a decision not to act, and stays one.
+> Status: **the chrome layer §6 covered is closed; the looking then found a
+> larger layer §6 was never pointed at.** All six steps in §9 have landed, and
+> §6.1–§6.5 record what each one changed and why, against the source the claim
+> came from. **§10 is the audit that followed** — the two clients open on one
+> repository, every visible difference read back to the code that causes it.
+> It is the longer list, and most of it is not what this plan was about.
+> **The app's leading and the diff pane's geometry have since landed** (§10.1,
+> §10.3), which was the loudest item and most of the body chrome under it. What
+> is left is led by the Tauri header not spanning the window, and **two of the
+> top five are the native client's to fix, not the Tauri client's**.
+> The design question is settled — where the native client and this document
+> disagree, the native client wins (§8) — but §10.7 holds five choices that rule
+> does not decide, and the work under them waits on those choices.
+> **§8's three checks need a Windows and a Linux build**, because they ask what
+> the two engines render rather than what they support; §10 was read on macOS
+> and inherits that limit wherever it is engine-specific.
+> §6.6 is a decision not to act, and stays one.
 > Companions: [`STYLE.md`](../../STYLE.md) (the design language),
 > [`FRONTEND.md`](../../FRONTEND.md) §8 (the divergences that stay),
 > [`ROADMAP.md`](../../ROADMAP.md) (the control *shapes* this plan deliberately
@@ -73,7 +82,7 @@ adjectives. These are the targets for §6.
 | Status badge | 10 px mono **bold**, 18×18, radius 4, `tint.opacity(0.15)` | `Design/FileStatusStyle.swift:67-72` |
 | Tag chip | 10.5 px mono, `.secondary`, height 16, radius 5, `.quaternary` fill — neutral, never accent | `Screens/HistorySidebar.swift:243-249` |
 | Unpushed plate | 9 px bold arrow, 16×16, radius 5, same `.quaternary` | `Screens/HistorySidebar.swift:218-222` |
-| Lists | `List(selection:)`, `.listStyle(.inset)`, `.alternatingRowBackgrounds()`, no explicit row height — rows are 2 pt (files) / 3 pt (commits) vertical padding | `Design/ChangedFileList.swift:103-114`, `Screens/HistorySidebar.swift:95-109` |
+| Lists | `List(selection:)`, `.listStyle(.inset)`, no explicit row height — rows are 2 pt (files) / 3 pt (commits) vertical padding. Both call sites also carry `.alternatingRowBackgrounds()`, which is **not** a target — §10.2 records why it is drift | `Design/ChangedFileList.swift:103-114`, `Screens/HistorySidebar.swift:95-109` |
 | Composer chrome | amend notice and error strip are a **2 pt leading rule** (yellow / red), not a filled banner | `Screens/CommitComposer.swift:180,241` |
 | Resize handle | stock `Divider()` with 3 pt vertical padding — a 7 pt grab zone on a 1 px rule | `Design/RowResizeHandle.swift` |
 | Sheets | fixed widths 420 / 460 / 480 pt, height always intrinsic; title is `.title3.weight(.semibold)` | passim |
@@ -784,3 +793,392 @@ unanswered question:
    than re-skin them.
 
 §6.6 is a decision, not a step.
+
+## 10. Parity audit — what the side-by-side actually shows
+
+§6 closed the chrome layer it was written against. This section is what the two
+clients look like when they are put beside each other on one repository anyway,
+read from the code rather than from the screenshot: every entry names the
+mechanism and the file that causes it.
+
+The short answer the audit gave was **no, they do not read as one product**, and
+the reasons were largely not the ones §6 was about. Several of the loudest were
+one declaration each. One is a decision this plan cannot make. **Two of the top
+five belong to the native client**, which is the case §8's rule did not
+anticipate: "the native client wins" answers *which look is correct*, not
+*which client is wrong*.
+
+Entries marked **✅ Landed** describe the code as it stands and why it is that
+way; the rest are still findings. The app's leading (P-2) and the diff pane's
+body geometry (P-11 – P-15) have landed together, which was the largest single
+gain available without a decision from §10.7.
+
+Read on macOS, so anything engine-specific inherits §8's limit. Items marked
+**⚠ on-target** cannot be settled without a Windows or a Linux build.
+
+### 10.1 The two that do most of the damage
+
+**P-1 — the Tauri header does not span the window.** Natively the repo chip sits
+at the window's leading edge, immediately after the traffic lights, because the
+toolbar is the window's and spans the whole frame
+([`LeoGitApp.swift:47`](../../apps/swift-ui-app/Sources/LeoGit/App/LeoGitApp.swift#L47)
+`.windowToolbarStyle(.unified)`, split at `ContentView.swift:250`). In the Tauri
+client `.main-layout` is a three-column grid and `<Header>` is a child of the
+**third column**
+([`MainLayout.svelte:2656`](../../apps/tauri-app/src/lib/views/MainLayout.svelte#L2656),
+`:2223`), so the chips begin where the sidebar ends — roughly 320 px in.
+`TabBar.svelte:29` hardcodes `height: 40px` to keep the Changes/History tabs on
+that same baseline, which is the tell: the tab strip is standing in for the part
+of the header that is missing.
+
+Two consequences worth naming. The error banner is right-column-only
+(`MainLayout.svelte:2240`) where the native spans the frame
+(`ContentView.swift:236`). And the Tauri header *does* run full width in the
+pre-main phases (`App.svelte:261-265`), so the bar changes span between launch
+and the main view — the thing `STYLE.md`'s *chrome does not move* rule forbids.
+
+A window toolbar cannot be scoped to one column, so the native shape is not
+reproducible by moving a `<div>` alone; but nothing records the consequence
+either, and at six feet it is the first difference the eye takes. Decision in
+§10.7.
+
+**P-2 — the app's leading. ✅ Landed.** `:root` now sets `line-height: normal`
+at [`app.css`](../../apps/tauri-app/src/app.css), and STYLE.md's *Typography*
+carries the rule. It was `1.5`, one declaration, and it was the whole of
+"the Tauri text looks bigger". It is not the font and not the size: measured in
+a real `WKWebView` against AppKit, SF Mono 12 pt advance is **7.41796875 in
+both**, and `-apple-system` and `Font.system` resolve to the same `.SF NS` file
+through the same `CTFontCreateUIFontForLanguage` entry point, at the same
+clamped `opsz` of 17 and the same `trak` tracking of −12/2048 em at 13.
+Families match, sizes match, advances match. Only the leading differs:
+
+| Nominal | Native | `line-height: normal` | `line-height: 1.5` (was) |
+|---|---|---|---|
+| UI 13 | 16.0 | 16 | 19 (+19 %) |
+| Diff mono 12 | 15.0 | 15 | 18 (+20 %) |
+| Gutter mono 11 | 13.0 | 13 | 16.5 |
+
+`normal` is exact because WebKit computes it as `lround(ascent) +
+lround(descent) + lround(lineGap)` over the same font metrics AppKit reads
+(1980 / −432 / 0 at 2048 upem). Two components already knew the target and say
+so — `CommitList.svelte` pins a 16 px badge and `ContextMenu.svelte` reasons
+about "AppKit's own box is 16pt" while deliberately inheriting. The root
+declaration had been contradicting work this plan already did.
+
+**`normal`, not a fixed ratio**, and the reason is Linux rather than macOS.
+Noto Sans carries an ascent-plus-descent ratio of ~1.362 against SF's 1.178, so
+any ratio tuned to SF clips it — which is the exact defect a verification pass
+caught in §6.2 when `line-height: 16px` was tried. Leading is a property of the
+font the host gave you, not of the design, so §1's *one look* rule does not
+reach it: `normal` is what AppKit does, and it is the only value that cannot
+clip a face we do not choose. Most local `line-height` declarations that remain
+are wrapped prose or a pinned box, which is what `STYLE.md`'s rule allows; two
+are ratios on single-line labels (`Terminal.svelte`'s hint,
+`CommitDetail.svelte`'s mono metadata row) and are the rule's only outstanding
+violations.
+
+**⚠ on-target, and found while proving the above:** the chrome stack is
+`-apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui,
+sans-serif`. On macOS the first entry wins and the next three are dead —
+`'SF Pro Text'` names no installed family, because the file's family name is
+`.SF NS`, hidden behind its leading dot. **On Linux the first three are all
+no-ops and `"Helvetica Neue"` is reached before `system-ui`**, where fontconfig
+commonly aliases Helvetica to Nimbus Sans. If that alias is live, the Linux
+build has been rendering its entire UI in Nimbus rather than the system face,
+which would dwarf every other item here. A Linux build settles it in one look.
+The same applies to `'SF Mono'` in the mono stack: only `ui-monospace` reaches
+the real face, and it is already first.
+
+### 10.2 Where the native client is the one that drifted
+
+`STYLE.md`'s rule is that the native client wins **a disagreement about what the
+look should be**. It is not a claim that the native client is correct — it
+reaches the aesthetic by using stock controls, so where it takes a stock
+control's *default* that nothing chose, the default is not a target.
+
+**P-3 — the file and commit lists paint phantom alternating rows.**
+`.alternatingRowBackgrounds()` at
+[`ChangedFileList.swift:114`](../../apps/swift-ui-app/Sources/LeoGit/Design/ChangedFileList.swift#L114)
+and [`HistorySidebar.swift:109`](../../apps/swift-ui-app/Sources/LeoGit/Screens/HistorySidebar.swift#L109).
+It maps to `NSTableView`'s striping, whose drawing hook is
+`drawBackground(inClipRect:)` — it paints the **clip rect**, not the occupied
+rows, so a two-file repository gets a column of empty rounded plates running
+down to the composer. Under `.listStyle(.inset)` each stripe takes the inset
+style's rounded geometry, which is why they read as placeholder rows.
+
+There is no API to scope it: Apple's own doc says the fill is painted "on top of
+the overall list or table background", and `listRowBackground` — the only
+per-row override — by construction cannot reach space with no row in it. The
+AppKit remedy is subclassing `NSTableView`.
+
+It has been there since the first Swift commit and was never revisited.
+`STYLE.md`'s *File list* specifies hover and selected treatments and no
+striping; `FRONTEND.md` §8 does not carry it. So it is a scaffold default
+nothing chose, and the Tauri client is right to have no equivalent — a grep for
+`nth-child`/`skeleton`/`shimmer` over the Svelte returns nothing.
+
+Write `.alternatingRowBackgrounds(.disabled)` rather than deleting the line:
+deleting falls back to the style's `.automatic`, which is trusting an unstated
+default instead of stating the intent. If striping on real rows is ever wanted,
+`listRowBackground` keyed on index parity is the supported route, and its
+inability to paint empty space is the feature.
+
+**P-4 — the repo chip is named from a different source in each client, and the
+native client disagrees with itself.** The chip reads `Tesis` natively and
+`Tesis-docs` in Tauri for one repository.
+[`RepoSwitcher.swift:37`](../../apps/swift-ui-app/Sources/LeoGit/Screens/RepoSwitcher.swift#L37)
+takes `RepoDirectoryStore.displayName`, a plain `lastPathComponent`;
+[`Header.svelte:81-86`](../../apps/tauri-app/src/lib/components/Header.svelte#L81-L86)
+takes `repoIdentifier?.name ?? basename(path)` off core's `get_repo_identifier`.
+`STYLE.md`'s *Repository switcher* and `DESIGN.md` both say a repository is named
+by its remote's repository name where it has one — so Tauri is compliant.
+
+The native client already owns the compliant answer: `RepoIdentifierStore.label(of:)`
+exists and its **own picker rows use it** (`RepoPickerList.swift:209`, `:292`).
+So opening the switcher today shows a popover row reading `Tesis-docs` under a
+chip reading `Tesis`. The switcher already receives `identifiers`; it forwards
+them to the list without consulting them. Small.
+
+This also resolves the duplicate-name half of the title-strip question: the
+Tauri window title is `basename(path)` (`App.svelte:224`) while the chip below is
+the remote name, so one window states two names for one repository.
+
+**P-5 — the native client paints no pane tint at all.** Neither column takes a
+`.background(...)`; the only surface fills in the whole Screens+Design tree are
+the terminal bar's `.bar`, the sync banner's `.regularMaterial` and the
+terminal's black. The lists use `.listStyle(.inset)`, not `.sidebar`, so there
+is no vibrancy either. The Tauri sidebar is `--bg-secondary`
+(`MainLayout.svelte:2665`), which is what `STYLE.md`'s token table specifies.
+Two-tone versus flat is very visible. Decision in §10.7.
+
+**P-6 — gutter numbers.** Native is `.quaternary`
+(`DiffLineRow.swift:156`), roughly 0.10–0.25 alpha; Tauri is `--text-muted` at
+0.45/0.48, which is what `STYLE.md`'s *Diff viewer* asks for. Tauri is the
+compliant one; `.secondary` is the SwiftUI level nearest the token.
+
+**P-7 — the summary field's bezel.** The native composer stacks a square-bezelled
+`NSTextField` (`WheelScrollableTextField.swift:23`) directly above a 6 pt
+`RoundedRectangle` description editor (`CommitComposer.swift:300`) — it
+disagrees with itself, and `STYLE.md` specifies the rounded form. `.roundedBezel`
+is not a drop-in; it changes height and inset.
+
+### 10.3 The diff pane
+
+**P-8 — the header consumes a different string in each client.** Native renders
+`FileEntry.display_name`, which core derives from `git status --porcelain=2 -z`
+(`git.rs`) — `-z` output is never quoted. Tauri renders `fileDiff.new_path`
+([`DiffViewer.svelte`](../../apps/tauri-app/src/lib/components/DiffViewer.svelte)),
+parsed out of the patch's `+++` line.
+
+**The string itself is now correct in both.** The defect underneath this was not
+cosmetic and was not this plan's — it destroyed syntax highlighting in *both*
+clients for any non-ASCII path — and it is fixed in core as **D-25** in
+[`cross-client-feature-parity.md`](cross-client-feature-parity.md) §3.1, so the
+pane no longer shows `"b/01 Plan Trab Investigaci\303\263n.md"`.
+
+What is left is the parity half, and it is unchanged by that fix: the header
+still renders a whole path where the native header renders a **filename** with
+the directory as a caption under it. `DiffViewer` should take the `FileEntry`
+the file list already has — which carries `display_name`, `display_dir` and the
+status — rather than scraping the patch header for a path and deriving the rest.
+That one prop closes P-8, P-9 and P-10 together, and none of them closes
+convincingly alone.
+
+**P-9 — no status plate in the Tauri diff header.** Native leads with the 18×18
+tinted letter (`DiffView.swift:205`). `DiffViewer`'s props carry only
+`origPath` (`DiffViewer.svelte:12-40`), so it cannot draw one. The plate already
+exists at pixel parity in `FileList.svelte:642` — this is an extraction and a
+prop, not new design, and it lands with P-8.
+
+**P-10 — the header's type register is wrong.** Native is a 13 pt semibold sans
+title over a muted caption carrying the directory or the rename pair
+(`DiffView.swift:206-210`). Tauri is one 12 px **mono** line
+(`DiffViewer.svelte:469`). This violates `STYLE.md` twice: its 13 px semibold
+register names the diff-header filename explicitly, and its *Diff viewer*
+section requires a rename to read `from → to` **under** its own filename —
+Tauri renders the destination alone as the title, which is the failure that
+bullet exists to prevent.
+
+**P-11 — the header strip. ✅ Landed.** It fills `--bg-primary` with a bottom
+hairline, which is the native shape: fill nothing, take a `Divider()`.
+`STYLE.md` assigns `--bg-primary` to the diff canvas and does not list this
+header among `--bg-secondary`'s uses. The dead `position: sticky` went with it —
+the header is a sibling of the scroll container, not a child, so it never stuck
+to anything.
+
+**P-12 — the gutter's vertical rules. ✅ Landed.** `.line-number` no longer
+carries a `border-right`, and STYLE.md's *Diff viewer* now states the rule
+positively: the pane draws no vertical rules, and its only divider is the
+side-by-side separator. A full-height hairline beside each number column was
+what turned a page of code into a table, and after the header it was the most
+visible body-chrome difference.
+
+**P-13 — the number column's width. ✅ Landed.** Each column is now 44 px — 40
+of right-aligned digits and a 4 px gap — which is `DiffLineCell`'s own
+`.frame(width: 40).padding(.trailing, 4)`. It was `width: 3em`, 33 px at 11 px,
+leaving a ~20 px content box after padding and the rule: about three glyphs.
+With `flex-shrink: 0` and `justify-content: flex-end` a four-digit number spilled
+**left**, out of its box, instead of clipping, so any file over 999 lines
+overlapped its own digits. 40 px is chosen for the pointer rather than the text —
+the gutter is the line handle — and five digits fit inside it.
+
+**P-14 — context lines. ✅ Landed.** The `--text-secondary` dimming is gone and
+context takes full strength, which is what native does (no `foregroundStyle` at
+all) and what `STYLE.md` now says. On prose, where most tokens map to no syntax
+class and inherit, the dimming reached nearly every line.
+
+**P-15 — small metrics. ✅ Landed, except the blank line.** The hunk band is
+`DiffHunkBand`'s box: 11 px with `padding: 5px 12px` and **no borders**. All
+three go together — 11 px alone left the band 8 px *shorter* than the native one
+with its text flush against two hairlines native does not draw. The size is also
+what keeps the `@@` row on one line: git puts the enclosing heading there, so on
+prose it carries a whole sentence, and at 12 px it wrapped. The prefix column is 16 px at regular weight
+against the old 18 px at 500 — it is chrome, and native gives it
+`.frame(width: 16)` with no weight. `.line-content` has lost the 8 px of left
+padding native does not have; it was compensating for P-13's narrower gutter, and
+with the gutter at its real width it only pushed the body right. Rows carry
+`padding: 1px 0`, unified and split alike, since natively both arrangements are
+the same cell.
+
+The band's colours stay documented rather than native — `--text-muted` against
+`.tertiary`, `--bg-secondary` against a translucent `.quaternary.opacity(0.5)` —
+because `STYLE.md`'s *Diff viewer* names both tokens, so Tauri is the compliant
+one and this is P-6's pattern. Its box is native's, because nothing documents a
+box.
+
+**Still open in this pane:** `STYLE.md` asks for a blank line before each hunk,
+which **neither** client draws. `DiffView.swift` puts `.padding(.vertical, 4)`
+on the rows' stack with no counterpart on `.diff-body`. And `NoNewline` maps to
+`diff-context` (`DiffViewer.svelte`), so the `\ No newline at end of file`
+marker renders as a full row with a 104 px gutter, where native draws a bare
+11 pt line with 12 pt of side padding and no gutter at all.
+
+### 10.4 Chrome and controls
+
+**P-16 — the chips are one capsule natively and two boxes in Tauri.** Adjacent
+`ToolbarItem`s with no spacer share one glass background, which
+`ContentView.swift:342-347` states outright and `BranchMenu.swift:75` supports by
+hiding the menu indicator so the pair reads as one family. Tauri draws two
+`.chip-button`s with a 12 px gap. The tokens are already right; only the
+grouping is wrong, and `.split-button` at `Header.svelte:999` is the pattern to
+copy.
+
+**P-17 — the terminal dock is the surface §6 skipped.** Height 26 + 1 against
+28 + 1, where `STYLE.md` says 28. `--bg-secondary` where `STYLE.md` assigns
+`--bg-tertiary` and native takes the `.bar` material. The expanded chevron is a
+minus rather than `chevron.down`. The icon is a bare `>_` where the native
+`apple.terminal` mark carries an enclosing rounded-rect frame — one `<rect rx="3">`
+apart. The label is a plain button where native's is a `Toggle` carrying the
+panel's state. And the label is hand-styled to 10 px `--text-muted`
+(`MainLayout.svelte:3006`) where native sets no font and no foreground and takes
+the accessory bar's own typography — which `STYLE.md` forbids in as many words,
+and is why the two bars read differently more than the icon is.
+
+**P-18 — the commit button says a different thing.** `CommitComposer.swift:314-323`
+derives `Commit` / `Commit 1 File` / `Commit N Files` from the included count;
+`CommitMessage.svelte:549-553` is the constant `Commit`. The disabled paint
+diverges too: `.borderedProminent` desaturates to grey, while
+`.commit-button:disabled { opacity: 0.5 }` leaves a half-strength blue that
+still reads as an enabled button. The *gates* are equivalent — `canCommit` and
+`canSubmit` agree — so this is label and paint only.
+
+**P-19 — the include-all row reads as another file row.** Native is `.caption`
+(10 pt regular, `.secondary`); Tauri is 12 px / weight 500 and reuses
+`.file-row`'s box. `STYLE.md` asks 11 px for compact labels and both miss it, in
+opposite directions. Tauri's row-wide click target is an extra affordance, not a
+defect.
+
+**P-20 — the split behaves differently even at equal defaults.** Both start at
+320. But `HSplitView` gives extra window width to the sidebar
+(`ContentView.swift:255`) while `grid-template-columns: var(--sidebar-width) 1px 1fr`
+gives all of it to the right column, so the two agree at exactly one window
+width. Tauri also persists `leogit:sidebarWidth` where native persists only the
+composer height — tracked in `ROADMAP.md`. Separately the History inner split is
+280 / 180–600 in Tauri against native's 240 / 200–360 and `STYLE.md`'s ~240
+capped ~360, which is squarely Tauri drift: three constants.
+
+### 10.5 Latent — these agree today by luck
+
+Neither is biting now, both are one line, and both fail silently the moment a
+user changes a setting.
+
+**P-21 — the theme source.** Native follows `@Environment(\.colorScheme)`, i.e.
+the system appearance. The Tauri client drives `data-theme` purely from
+`config.theme` with **no `prefers-color-scheme` path at all**
+([`config.ts:118`](../../apps/tauri-app/src/lib/stores/config.ts#L118),
+default dark at `core/src/config.rs:242`). A machine set to Light with a config
+saying `dark` renders the two clients in different themes. `FRONTEND.md` §8
+explains why the native client ignores the config field; nothing explains why
+the WebView ignores the system.
+
+**P-22 — the accent colour.** The native client ships no `Assets.xcassets`, so
+`.tint` resolves to the **user's** system accent. `--border-active` is the
+hardcoded `#0a84ff` / `#007aff`. Set the system accent to graphite and only one
+client follows. This one has a real tension behind it — `STYLE.md`'s token table
+states the accent as a value — so it is listed in §10.7 rather than as a fix.
+
+### 10.6 Not parity — correctness defects found on the way
+
+These are behaviour, which §1 puts out of scope, so they live in
+[`cross-client-feature-parity.md`](cross-client-feature-parity.md) and are named
+here only so this audit is not read as their home. **D-25** — git's path quoting
+reaching the syntax highlighter in both clients — is fixed, in §3.1. **D-26** —
+a `maxlength="200"` on the Tauri summary field that silently truncates pasted
+and AI-generated messages — is open, in §3.2. P-13's gutter overflow stayed
+here, because its fix was one CSS value in the surface this section owns.
+
+### 10.7 Decisions this audit cannot make
+
+`STYLE.md`'s "the native client wins" settles a disagreement about a control's
+look. None of these five is that.
+
+1. **P-1, the header's span.** Match it (move `<Header>` above `.main-layout`,
+   then re-check the poll banner, the resize handle and the `100vh` math), or
+   record it in `FRONTEND.md` §8 as a divergence a window toolbar forces.
+   Matching is the larger change in this document and the largest single gain.
+2. **P-5, the sidebar tint.** `STYLE.md` mandates the two-tone, the native
+   client paints flat, and the rule says the reference wins — but here the
+   reference is *declining to paint*, which is the P-3 pattern again. Either
+   `STYLE.md` loses its two-tone or the native client gains a background.
+3. **P-22, the accent.** Follow the system accent in both (native already does,
+   Tauri would need `AccentColor` on Windows and a Linux answer that may not
+   exist), or hardcode blue in both and have the native client stop following
+   the user. `STYLE.md` currently implies the second and the native client does
+   the first.
+4. **The `Summary (required)` placeholder.** Native adds "(required)";
+   `STYLE.md` says the placeholder alone is enough, which is Tauri's string. The
+   button's disabled state already carries the requirement, so the shorter form
+   is defensible — but it means amending the native client to match a document,
+   which inverts §8's usual direction.
+5. **The 13 px register's weight.** `STYLE.md` calls it semibold; the native
+   client reaches it through `.headline`, and Apple's macOS type table gives
+   Headline as **Bold** (emphasized Heavy). Under §8 the reference wins and the
+   register becomes bold — which would widen `STYLE.md`'s single bold exception
+   (§7.2) beyond the status plate. Alternatively the native headings move to
+   `.system(size: 13, weight: .semibold)` and the document stands.
+
+Two documentation defects, independent of the above: `STYLE.md` states the
+no-count-capsule rule as an absolute in its anti-patterns while its own toolbar
+paragraph and `FRONTEND.md` §8 both record the Tauri count capsules as
+intentional; and the sync button's sentence-case labels (`Publish branch`,
+`Force push (with lease)…`) against the native's title case are a real,
+defensible platform divergence that nothing writes down.
+
+### 10.8 Checked and matching — do not re-audit
+
+Recorded so the negative results are not rediscovered. **The diff body's colour
+is genuinely in sync**: `--diff-add-bg` / `--diff-remove-bg` are byte-identical
+to `DiffPalette`'s values in both themes, both clients bleed the fill full-width
+including the gutter, both draw intra-line word highlights at matching alphas,
+and all sixteen `--syn-*` values equal `DiffPalette.color(for:)` including the
+markup classes and their weight and style intents. The status plate is at pixel
+parity (18×18, radius 4, 10 px mono 700, 15 % tint). The tab strip's count badge
+matches in size, weight, tabular numerics, radius and semantics. The composer's
+geometry constants are identical (180–600, 220 default, 16 step, 80 floor), as
+are the auto-summary derivation, the tri-state include-all semantics and its
+count string. The sync ladder matches down to which states earn a chevron and
+what the chevron menu holds. The mono stack, the diff font size, and — per P-2 —
+the resolved font file, optical size and tracking are the same on both sides.
+`FileList` row selection's two-tier split, the count-capsule placement, the
+transfer-progress surface and the layout toggle's shape are all already recorded
+in `FRONTEND.md` §8 and are not defects.

@@ -8,7 +8,19 @@
   color-scheme: light dark;
   font-family: var(--font-ui);
   font-size: 13px;
-  line-height: 1.5;
+  /* `normal`, not a ratio, and this is the single largest reason the two
+     clients used to read as different products: at 1.5 every line box in the
+     app stood ~19 % taller than the native one, on identical fonts at
+     identical sizes with identical advances.
+
+     WebKit computes `normal` as lround(ascent) + lround(descent) +
+     lround(lineGap) over the same metrics AppKit reads, which lands on 16px at
+     13px and 15px at 12px — the native leading exactly. A fixed ratio cannot
+     do that on more than one font: Noto Sans, which Linux serves, carries an
+     ascent-plus-descent ratio of ~1.362 against SF's ~1.178, so anything tuned
+     to SF clips it. Leading belongs to the font the host gave us, not to the
+     design. */
+  line-height: normal;
   font-synthesis: none;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;

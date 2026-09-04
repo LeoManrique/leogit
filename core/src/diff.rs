@@ -769,20 +769,27 @@ fn parse_binary_marker(line: &str) -> Option<(String, String)> {
     let inner = line
         .strip_prefix("Binary files ")?
         .strip_suffix(" differ")?;
-    let mid = inner.find(" and ")?;
-    let lhs = &inner[..mid];
-    let rhs = &inner[mid + 5..];
-    let old = if lhs == "/dev/null" {
-        String::new()
-    } else {
-        lhs.strip_prefix("a/").unwrap_or(lhs).to_string()
-    };
-    let new = if rhs == "/dev/null" {
-        String::new()
-    } else {
-        rhs.strip_prefix("b/").unwrap_or(rhs).to_string()
-    };
-    Some((old, new))
+    // Split on the ` and ` that introduces the *right-hand* path, not merely
+    // the first one on the line: a filename may contain ` and ` itself, and
+    // when it does the first match lands inside the left-hand path. The
+    // right-hand side always opens with `b/`, a quote, or `/dev/null`.
+    //
+    // `max()` over every candidate, not the first candidate that matches
+    // anywhere: taking the first would let a pattern earlier in the array beat
+    // a better match further right, which is how `a/notes and b/x.png` against
+    // `/dev/null` split in the wrong place.
+    let mid = [" and b/", " and \"b/", " and /dev/null"]
+        .iter()
+        .filter_map(|sep| inner.rfind(sep))
+        .max()
+        .or_else(|| inner.find(" and "))?;
+    // Both sides carry the same quoting and the same `a/`/`b/` prefix as a
+    // `---`/`+++` header, and answer `/dev/null` as absence the same way, so
+    // they are read by the same function rather than a second copy of it.
+    Some((
+        strip_path_prefix(&inner[..mid], "a/"),
+        strip_path_prefix(&inner[mid + 5..], "b/"),
+    ))
 }
 
 /// One `---`/`+++` header line: the prefixed path, or `/dev/null` for the side
@@ -795,22 +802,29 @@ fn format_patch_path(marker: &str, prefix: &str, path: &str) -> String {
     }
 }
 
-/// Strips the `--- `/`+++ ` argument down to a repo-relative path.
-/// Removes the conventional `a/` or `b/` prefix git uses, and trims an
+/// Strips the `--- `/`+++ ` argument down to a repo-relative path: undoes
+/// git's C-quoting, removes the conventional `a/` or `b/` prefix, and trims an
 /// optional trailing timestamp (tab-separated) found in some diff outputs.
 fn strip_path_prefix(rest: &str, prefix: &str) -> String {
-    // Drop trailing timestamp if present (git's --raw format separates with TAB).
-    let mut path = rest.split('\t').next().unwrap_or("").to_string();
+    // Drop the trailing timestamp if present (git's --raw format separates
+    // with TAB). Done before decoding, because inside a quoted path a tab is
+    // written as the two characters `\` and `t` — so no real separator can be
+    // hiding in one, and no escape can be mistaken for one.
+    let path = crate::git::unquote_path(rest.split('\t').next().unwrap_or(""));
     // `/dev/null` is git's way of saying *this side does not exist* — an added
     // file has no old path and a deleted one has no new path. It is not a path,
-    // so it is answered as absence, the same as `parse_binary_marker` already
-    // does: a viewer comparing the two sides to spot a rename would otherwise
-    // read every add as `/dev/null → <file>`.
+    // so it is answered as absence: a viewer comparing the two sides to spot a
+    // rename would otherwise read every add as `/dev/null → <file>`.
     if path == "/dev/null" {
         return String::new();
     }
+    // The prefix sits *inside* the quotes git writes, so it can only be
+    // stripped after decoding. Stripping first is what left every path with a
+    // non-ASCII byte in it as a literal `"a/Cap\303\255tulo.md"` — which then
+    // reached `resolve_language` as an extension of `md"` and cost the file its
+    // syntax highlighting, and `read_blob` as a rev-spec naming nothing.
     if let Some(stripped) = path.strip_prefix(prefix) {
-        path = stripped.to_string();
+        return stripped.to_string();
     }
     path
 }
@@ -1424,6 +1438,92 @@ mod tests {
         let parsed = parse_diff_with(deleted, DiffOptions::default());
         assert_eq!(parsed.file_diff.old_path, "gone.txt");
         assert_eq!(parsed.file_diff.new_path, "");
+    }
+
+    /// Git quotes a whole path when it has to escape any byte in it, and the
+    /// `a/`/`b/` prefix ends up *inside* those quotes. Stripping the prefix
+    /// first therefore matches nothing and leaves the path as
+    /// `"a/Cap\303\255tulo.md"` — which the highlighter reads as a file with
+    /// the extension `md"`, so every accented filename silently lost its
+    /// syntax colours in both clients. `core.quotepath=false` stops git
+    /// escaping the non-ASCII bytes, but it cannot stop the quoting, so the
+    /// parser has to decode either way — which is what this asserts.
+    #[test]
+    fn a_quoted_path_is_decoded_before_its_prefix_is_stripped() {
+        let escaped = concat!(
+            "diff --git \"a/Cap\\303\\255tulo.md\" \"b/Cap\\303\\255tulo.md\"\n",
+            "index 1111111..2222222 100644\n",
+            "--- \"a/Cap\\303\\255tulo.md\"\n",
+            "+++ \"b/Cap\\303\\255tulo.md\"\n",
+            "@@ -1 +1 @@\n",
+            "-uno\n",
+            "+dos\n"
+        );
+        let parsed = parse_diff_with(escaped, DiffOptions::default());
+        assert_eq!(parsed.file_diff.old_path, "Capítulo.md");
+        assert_eq!(parsed.file_diff.new_path, "Capítulo.md");
+
+        // With `core.quotepath=false` the accented byte comes through raw, but
+        // a `"` in the name still forces quoting — the case no config setting
+        // removes, and the reason the decode is unconditional.
+        let quoted_only = concat!(
+            "--- \"a/say \\\"hi\\\".txt\"\n",
+            "+++ \"b/say \\\"hi\\\".txt\"\n",
+            "@@ -1 +1 @@\n",
+            "-a\n",
+            "+b\n"
+        );
+        let parsed = parse_diff_with(quoted_only, DiffOptions::default());
+        assert_eq!(parsed.file_diff.new_path, "say \"hi\".txt");
+
+        // A plain path is not quoted and must survive untouched.
+        let plain = concat!(
+            "--- a/src/main.rs\n",
+            "+++ b/src/main.rs\n",
+            "@@ -1 +1 @@\n",
+            "-a\n",
+            "+b\n"
+        );
+        let parsed = parse_diff_with(plain, DiffOptions::default());
+        assert_eq!(parsed.file_diff.new_path, "src/main.rs");
+    }
+
+    /// The binary marker carries the same quoting and the same prefixes as a
+    /// `---`/`+++` header, so it decodes the same way. It also has a separator
+    /// a filename can contain: splitting on the first ` and ` cuts a file
+    /// called `black and white.png` in half.
+    #[test]
+    fn a_binary_marker_decodes_quoting_and_splits_on_the_right_separator() {
+        assert_eq!(
+            parse_binary_marker(
+                "Binary files \"a/im\\303\\241genes/foto.png\" and \"b/im\\303\\241genes/foto.png\" differ"
+            ),
+            Some((
+                "imágenes/foto.png".to_string(),
+                "imágenes/foto.png".to_string()
+            ))
+        );
+        assert_eq!(
+            parse_binary_marker(
+                "Binary files a/black and white.png and b/black and white.png differ"
+            ),
+            Some((
+                "black and white.png".to_string(),
+                "black and white.png".to_string()
+            ))
+        );
+        assert_eq!(
+            parse_binary_marker("Binary files /dev/null and b/added.png differ"),
+            Some((String::new(), "added.png".to_string()))
+        );
+        // The separator is the rightmost candidate, not the first pattern that
+        // matches somewhere: a directory named `… and b` put an earlier
+        // pattern ahead of a better match further right, and the deletion split
+        // inside its own left-hand path.
+        assert_eq!(
+            parse_binary_marker("Binary files a/notes and b/x.png and /dev/null differ"),
+            Some(("notes and b/x.png".to_string(), String::new()))
+        );
     }
 
     /// A synthesised header has to write the absent side back as `/dev/null`,
