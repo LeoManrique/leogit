@@ -1,6 +1,6 @@
 # leogit — Technical Architecture
 
-Functional behavior lives in [DESIGN.md](DESIGN.md). Visual design language lives in [STYLE.md](STYLE.md); the frontend contract shared by the Tauri and (planned) SwiftUI clients lives in [FRONTEND.md](FRONTEND.md). This document covers **how the code is organized** and the decisions that pin it together.
+Functional behavior lives in [DESIGN.md](DESIGN.md). Visual design language lives in [STYLE.md](STYLE.md); the frontend contract shared by the Tauri and SwiftUI clients lives in [FRONTEND.md](FRONTEND.md). This document covers **how the code is organized** and the decisions that pin it together.
 
 ## Stack
 

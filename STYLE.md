@@ -2,9 +2,11 @@
 
 leogit's interface is a desktop Git client. The design language is the calm, restrained, system-feeling aesthetic that Apple ships in macOS Tahoe — Finder, Xcode, Settings — built on system blue, semantic surfaces, and the OS font stack. Two themes are supported, Light and Dark.
 
-> **Note on current state.** The shipped CSS is GitHub Primer–flavored (`#0d1117`, `#58a6ff`, `#3fb950`, etc.). This document describes the target the UI should migrate toward, not what's currently in [tauri-app/src/app.css](apps/tauri-app/src/app.css). When a component is touched, prefer to move it in this direction rather than match neighboring code.
+> **Note on current state.** The colour layer below is implemented: [tauri-app/src/app.css](apps/tauri-app/src/app.css) carries both theme tables token for token, and the anti-patterns at the foot of this document appear nowhere in the shipped Svelte. What is still web-shaped is the chrome around them — scrollbars, context menus, and a short list of per-component details — tracked in [docs/plans/tauri-reskin.md](docs/plans/tauri-reskin.md). When a component is touched, move it toward this document rather than matching neighbouring code.
 
-> **The native client is the reference.** The macOS SwiftUI client ([apps/swift-ui-app](apps/swift-ui-app)) reaches this aesthetic by construction rather than by imitation — it uses stock `List`/`Table`/toolbar and the system font stack, so it inherits the macOS 26 look (including Liquid Glass chrome) for free. It deliberately adopts no custom glass or colour treatments: anything it can get from a standard control, it gets from the standard control. Where this document and the native app disagree about a control's look, the native app wins, and this document should be updated to match. The Tauri frontend is to be re-skinned onto it rather than the two evolving in parallel.
+> **One look on every platform.** The Tauri client ships on Windows and Linux and wears this same macOS-derived language there: leogit should read as one product, not impersonate each host. The exception is chrome the host OS owns rather than the app — traffic-light window controls, the menu bar, the window frame — which stays whatever the platform draws.
+
+> **The native client is the reference.** The macOS SwiftUI client ([apps/swift-ui-app](apps/swift-ui-app)) reaches this aesthetic by construction rather than by imitation — it uses stock `List`/`Table`/toolbar and the system font stack, so it inherits the macOS 26 look (including Liquid Glass chrome) for free. It deliberately adopts no custom glass or colour treatments: anything it can get from a standard control, it gets from the standard control. Where this document and the native app disagree about a control's look, the native app wins, and this document should be updated to match. The Tauri frontend follows it rather than the two evolving in parallel: where a control's look is in question, the answer is what the native client renders, and the re-skin closing the remaining gaps is [docs/plans/tauri-reskin.md](docs/plans/tauri-reskin.md).
 
 ## Intent
 
@@ -24,7 +26,7 @@ If a designer at Apple would not ship it in macOS Settings, Finder, or Xcode, it
 
 ## Color
 
-Each theme defines a parallel set of tokens. Components consume tokens — never hardcoded hex values — so the same component renders correctly in both themes. The current variable names (`--bg-primary`, `--text-primary`, `--status-green`, etc. in [app.css](apps/tauri-app/src/app.css#L7-L53)) stay; only the values move toward the palette below.
+Each theme defines a parallel set of tokens. Components consume tokens — never hardcoded hex values — so the same component renders correctly in both themes. The names (`--bg-primary`, `--text-primary`, `--status-green`, …) and the values below are what [app.css](apps/tauri-app/src/app.css#L23-L140) carries, both themes.
 
 ### Light
 
@@ -200,7 +202,7 @@ Each theme defines a parallel set of tokens. Components consume tokens — never
 - **Toggles** for booleans (auto-fetch, hide whitespace, syntax highlighting): flat solid accent fill when on, white knob, no gradient.
 - **Segmented controls** for 2–4 mutually exclusive options (AI provider: Claude/Ollama; theme: Light/Dark; the diff viewer's unified ⇄ side-by-side, which is the one that lives outside this form). A single rounded container with sub-buttons; selected segment gets `--bg-elevated` fill + `--text-primary`, unselected segments stay transparent + `--text-muted`.
 - Numeric settings (fetch interval, tab size, scan depth, the AI timeouts) are plain fields with tabular nums and **no stepper arrows** — a spinner is a second way to change a value that already has a keyboard, and under instant-apply each click of one is another write. macOS's `Stepper` is the exception the platform earns natively. Show the unit the user thinks in, not the one the wire carries: the fetch interval reads in seconds in both clients and is milliseconds only in `config.toml`.
-- The two control shapes above are the target and the native form already has them (`Toggle`, `Picker`); the Tauri form still draws a checkbox and a `<select>`, and picks them up with the Primer→Apple migration ROADMAP tracks. Everything else in this section is what both forms do today.
+- The two control shapes above are the target and the native form already has them (`Toggle`, `Picker`); the Tauri form draws a checkbox and a `<select>`, and picks them up with the re-skin ([docs/plans/tauri-reskin.md](docs/plans/tauri-reskin.md)). Everything else in this section is what both forms do today.
 
 ### Section headers
 
