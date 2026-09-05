@@ -535,7 +535,7 @@
       aria-label="Switch repository"
     >
       <Icon name="folder" size={TOOLBAR_GLYPH} class="chip-icon" />
-      <span class="chip-label">{repoName || '…'}</span>
+      <span class="chip-label repo">{repoName || '…'}</span>
     </button>
     <button
       class="chip-button"
@@ -809,6 +809,14 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     max-width: 200px;
+  }
+
+  /* The repo chip carries the bar's one semibold, as the native chip does:
+     with no toolbar title, this is the only place the window names the open
+     repository, so it outweighs the branch chip beside it rather than
+     matching it. */
+  .chip-label.repo {
+    font-weight: 600;
   }
 
   /* Takes exactly the space left over between the chips and the action

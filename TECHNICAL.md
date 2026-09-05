@@ -596,10 +596,21 @@ here, and the `.navigation` placement isolates each item in its own capsule — 
 were tried and rendered separate chips. Both controls carry `.labelStyle(.titleAndIcon)`
 so repo name and branch name sit on their faces (toolbar labels render icon-only by
 default), and the branch menu hides its indicator (`.menuIndicator(.hidden)`) so the
-pair reads consistently — the repo chip's popover has no chevron either. The sync
-control carries `.fontWeight(.regular)`: the trailing action region emphasizes its
-label (bold text, heavier symbol) while the leading chips render regular, and the
-control belongs to the same chip family. With the repo name on the chip
+pair reads consistently — the repo chip's popover has no chevron either. The repo
+chip alone takes `.font(.body.weight(.semibold))`: with the title removed it is the only
+place the window says which repository is open, so it leads the bar and the branch chip
+beside it stays regular — identity, then detail. Its face is `RepoIdentifierStore.label`,
+the same name the rows show, and it stays a single unstyled run: an owner prefix would
+need a second colour, and macOS draws a toolbar label in one tone (the HIG asks for the
+"default monochromatic appearance" and warns against colouring toolbar item labels), so
+the prefix could not recede the way `RepoListRow.owner` does in the list. `RepoSwitcher`
+primes its own label (`identifiers.ensure([activePath])`, on appear and on every switch)
+because `RepoPickerList` primes only the rows it draws, and those sit behind this button;
+without it the chip would sit on the folder-name fallback until the picker was first
+opened, disagreeing with the row that names the same repository. The
+sync control carries `.fontWeight(.regular)`: the trailing action region would otherwise
+emphasize its label (bold text, heavier symbol), and the bar leads with where you are
+rather than with what to do next. With the repo name on the chip
 the toolbar title became duplication, so `.toolbar(removing: .title)` hides it
 (`navigationTitle` still names the window for Mission Control and the Window menu), the
 `navigationSubtitle` is gone entirely, and its exceptional states moved into

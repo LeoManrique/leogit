@@ -34,13 +34,33 @@ struct RepoSwitcher: View {
         Button {
             isPresented.toggle()
         } label: {
-            Label(RepoDirectoryStore.displayName(of: activePath), systemImage: "folder")
+            // The repository's own name and nothing else. Deliberately not
+            // owner-qualified: an `owner/` in front of it would be one more
+            // word to read past on a chip whose whole job is to answer "which
+            // repository" at a glance, and macOS draws toolbar labels in one
+            // tone, so a prefix here cannot be shaded down out of the way.
+            // Where two checkouts really do share a name, the picker's rows
+            // disambiguate them — that is a list, and a list is where the
+            // ambiguity actually bites.
+            Label(identifiers.label(of: activePath), systemImage: "folder")
         }
         // macOS toolbars render Labels icon-only by default; the active
         // repo's name is half the chip's value (and the toolbar title no
         // longer shows it).
         .labelStyle(.titleAndIcon)
+        // The one semibold in the bar. With the title removed this chip is the
+        // only place the window says which repository is open, so it carries
+        // the weight and the branch chip beside it stays regular — identity
+        // first, then the detail.
+        .font(.body.weight(.semibold))
         .help("Switch repository")
+        // `label` prefers the remote's repository name and falls back to the
+        // folder's, and the remote half is a `git config` read. Nothing else
+        // asks for the *open* repository's — `RepoPickerList` primes the rows
+        // it draws, which live behind this button — so without this the chip
+        // would sit on the folder name until the picker was first opened, and
+        // disagree with the row naming the same repository.
+        .onChange(of: activePath, initial: true) { identifiers.ensure([activePath]) }
         .popover(isPresented: $isPresented, arrowEdge: .bottom) {
             RepoPickerList(
                 activePath: activePath,
