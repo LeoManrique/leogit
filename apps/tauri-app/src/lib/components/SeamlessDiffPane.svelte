@@ -23,8 +23,8 @@
   lays a spinner over it; it never unmounts. The old shape swapped the whole
   pane for a "Loading diff…" line, which threw away the rendered rows, their
   syntax tokens and the user's scroll position for every load — including the
-  ones that came back identical. GitHub Desktop's `SeamlessDiffSwitcher` does
-  it this way, and the native pane is meant to (its own comment says so).
+  ones that came back identical. The native pane is meant to work the same way
+  (its own comment says so).
 
   Dimming is what marks the content as no longer current: it is still the
   truth about the file the user was looking at, so it stays readable, and the

@@ -114,9 +114,9 @@ pub fn gh_repo_list(limit: u32) -> Result<Vec<GhRepo>, String> {
 
 /// Publish a local repository to GitHub via `gh repo create`. Creates the
 /// remote repo under the authenticated user, wires it up as the `origin` remote
-/// of the local repo, and pushes the current branch — the same one-shot flow as
-/// GitHub Desktop's "Publish Repository". `gh` supplies the auth, so this works
-/// for private repos without any token plumbing on our side.
+/// of the local repo, and pushes the current branch — one publish action rather
+/// than three separate steps for the user. `gh` supplies the auth, so this
+/// works for private repos without any token plumbing on our side.
 ///
 /// `name` is the GitHub repository name (may be `owner/name` to target an org).
 /// An empty `description` is omitted rather than sent as a blank value.

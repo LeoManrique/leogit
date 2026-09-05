@@ -61,12 +61,12 @@
   /*
     Re-arm the dialog every time it opens.
 
-    The *tab* is remembered, everything you typed into it is not — GitHub
-    Desktop's split, and the one that matches what each thing means. The tab is
-    a preference ("I clone by URL"), so carrying it over saves a click every
-    time. The inputs are one clone's worth of intent; carrying those over meant
-    reopening the dialog on a stale selection with a Clone button already lit,
-    one Return away from cloning a repository the user hadn't looked at.
+    The *tab* is remembered, everything you typed into it is not — the split
+    that matches what each thing means. The tab is a preference ("I clone by
+    URL"), so carrying it over saves a click every time. The inputs are one
+    clone's worth of intent; carrying those over meant reopening the dialog on
+    a stale selection with a Clone button already lit, one Return away from
+    cloning a repository the user hadn't looked at.
 
     The fetched *list* survives on purpose (CL-2): `gh repo list` takes seconds,
     and the Refresh button next to the filter is how you ask for a newer one.
@@ -144,11 +144,11 @@
     sits on either.
 
     Enter on a row the cursor has *already* selected falls through to the
-    dialog's Return-to-clone instead of re-selecting it, which is GitHub
-    Desktop's Enter-on-row-clones reached in two presses: the first commits the
-    choice, the second acts on it. Deliberately not one press — the destination
-    path is derived from the selection, and cloning before the user has seen
-    where it lands is not a shortcut worth having.
+    dialog's Return-to-clone instead of re-selecting it, so cloning from the
+    list takes two presses: the first commits the choice, the second acts on
+    it. Deliberately not one press — the destination path is derived from the
+    selection, and cloning before the user has seen where it lands is not a
+    shortcut worth having.
   */
   function handleListKeyDown(e: KeyboardEvent) {
     if (e.key === 'ArrowDown') {
@@ -296,7 +296,7 @@
       use:dismissOnEscape={escape}
     >
       <div class="modal-header">
-        <h2>Clone a repository</h2>
+        <h2>Clone Repository</h2>
         <button class="close-btn" onclick={onClose} disabled={isCloning} aria-label="Close">
           <Icon name="xmark" size={11} weight="semibold" />
         </button>

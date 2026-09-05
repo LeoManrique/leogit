@@ -11,7 +11,7 @@
 //! `CommandBuilder::new` already assembles the correct child environment: it
 //! seeds from this process's environment and then, on Windows, overlays the
 //! authoritative `HKLM`/`HKCU` `Environment` keys — so `PATH` becomes the same
-//! system+user merge that Explorer and Windows Terminal hand their children.
+//! system+user merge Windows hands a process launched from its shell.
 //! We deliberately do **not** copy our own environment over the top of that.
 //! Doing so used to replace that merged `PATH` with whatever the parent process
 //! happened to hold, which broke the terminal two ways: launched from Git Bash

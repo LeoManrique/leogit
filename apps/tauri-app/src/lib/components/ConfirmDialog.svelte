@@ -7,7 +7,7 @@
     title: string
     /** The dialog's body: one or two short paragraphs naming the real outcome. */
     body: Snippet
-    /** Verb on the confirming button — "Delete", "Abort merge". */
+    /** Verb on the confirming button — "Delete", "Abort Merge". */
     confirmLabel: string
     /** Replaces `confirmLabel` while the operation runs — "Deleting…". */
     busyLabel: string

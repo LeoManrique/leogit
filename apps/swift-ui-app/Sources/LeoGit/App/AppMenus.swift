@@ -65,8 +65,8 @@ struct FileCommands: Commands {
 /// ⌘1 / ⌘2 for the two tabs and ⌃` for the terminal panel.
 ///
 /// The tab bindings are absolute rather than a toggle, so the chord you press
-/// doesn't depend on the tab you're already on — GitHub Desktop's pair, and
-/// the Tauri client binds the same two beside its own ⌘L toggle.
+/// doesn't depend on the tab you're already on. The Tauri client binds the
+/// same two beside its own ⌘L toggle.
 struct ViewCommands: Commands {
     @FocusedValue(\.tabCommand) private var tabCommand: TabCommand?
     @FocusedValue(\.terminalCommand) private var terminalCommand: TerminalCommand?

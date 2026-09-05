@@ -463,10 +463,10 @@ private struct MergeSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var commitCount: Int32?
 
-    /// Nothing to bring in. GitHub Desktop says so and takes the primary away
-    /// rather than offering a merge that would be a no-op — where this sheet
-    /// used to print "Brings in 0 commits." beside a live Merge button, which
-    /// invites a click that does nothing and then reports success.
+    /// Nothing to bring in. The sheet says so and takes the primary away
+    /// rather than offering a merge that would be a no-op — a live Merge
+    /// button beside "Brings in 0 commits." invites a click that does nothing
+    /// and then reports success.
     private var isUpToDate: Bool { commitCount == 0 }
 
     /// The count line, or nil while the count is still being read — a separate

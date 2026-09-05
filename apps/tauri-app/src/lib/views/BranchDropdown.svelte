@@ -260,7 +260,7 @@
           onclick={submitCreate}
           disabled={busy || newBranchName.trim() === ''}
         >
-          {busy ? 'Creating…' : 'Create branch'}
+          {busy ? 'Creating…' : 'Create Branch'}
         </button>
       </div>
     </div>
@@ -286,7 +286,7 @@
         <input
           type="text"
           class="text-input"
-          placeholder="Filter branches…"
+          placeholder="Filter branches"
           bind:value={filter}
           onkeydown={handleListKeyDown}
           use:autofocus
@@ -309,20 +309,20 @@
           {/if}
           <button
             class="branch-item"
-            class:current={branch.name === currentBranch}
-            class:remote={branch.is_remote}
             class:active={i === activeIndex}
             class:destructive={mode === 'delete'}
+            aria-current={branch.name === currentBranch ? 'true' : undefined}
             use:scrollIntoViewWhenActive={i === activeIndex}
             onclick={() => activate(branch)}
             oncontextmenu={(e) => openRowMenu(e, branch)}
             disabled={busy}
           >
-            {#if branch.name === currentBranch}
-              <span class="current-dot" aria-label="Current branch"></span>
-            {:else}
-              <span class="current-dot-spacer" aria-hidden="true"></span>
-            {/if}
+            <!-- The menu's own checkmark: the native `Picker(.inline)` marks
+                 the current branch with one, and the column is on every row
+                 so the names line up. -->
+            <span class="check" class:visible={branch.name === currentBranch} aria-hidden="true">
+              <Icon name="checkmark" size={10} weight="semibold" />
+            </span>
             <span class="branch-name">{branch.name}</span>
           </button>
         {/each}
@@ -340,7 +340,7 @@
       -->
       <div class="footer">
         <button class="footer-btn" onclick={() => (mode = 'create')} disabled={busy}>
-          New branch…
+          New Branch…
         </button>
         <button
           class="footer-btn"
@@ -352,7 +352,7 @@
         </button>
         {#if merging}
           <button class="footer-btn destructive" onclick={onRequestAbortMerge} disabled={busy}>
-            Abort merge…
+            Abort Merge…
           </button>
         {/if}
         <button
@@ -361,7 +361,7 @@
           disabled={busy || !canDelete}
           title={canDelete ? 'Delete a local branch' : 'There is no other local branch to delete'}
         >
-          Delete branch…
+          Delete Branch…
         </button>
       </div>
     {/if}
@@ -382,8 +382,10 @@
     background: var(--bg-elevated);
     border: 1px solid var(--border-inactive);
     border-radius: 10px;
-    width: 300px;
-    max-height: 420px;
+    /* The frame that hangs this under the chip owns the width and hands down
+       how much room the chip leaves below it — see `RepoDropdown`. */
+    width: 100%;
+    max-height: min(440px, var(--popover-max-height, 440px));
     display: flex;
     flex-direction: column;
     box-shadow: var(--shadow-popover);
@@ -469,6 +471,7 @@
 
   .section-title {
     padding: 6px 10px 4px;
+    flex-shrink: 0;
     font-size: 11px;
     font-weight: 500;
     color: var(--text-muted);
@@ -483,12 +486,19 @@
     text-align: center;
   }
 
+  /* The repo picker's row, to the pixel: 26px (the native's 5 + 16 + 5), a
+     14px checkmark column, and `flex-shrink: 0` so a repository with more
+     branches than fit does not collapse every row to its text line — a
+     fixed-height item in a scrolling flex column shrinks before the column
+     overflows. Remote rows take the same primary as local ones: the native
+     menu draws them as plain items, and muting them read as "disabled". */
   .branch-item {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
     padding: 0 10px;
-    height: 24px;
+    height: 26px;
+    flex-shrink: 0;
     background: transparent;
     border: none;
     color: var(--text-primary);
@@ -500,26 +510,19 @@
     transition: background 100ms ease;
   }
 
+  /* Hover and the keyboard cursor: one colour at two alphas, the native
+     row's own device, so the two stay tellable apart. */
   .branch-item:hover:not(:disabled) {
-    background: var(--surface-hover);
+    background: var(--selection-hover);
   }
 
-  .branch-item.current {
-    background: var(--bg-tertiary);
-  }
-
-  .branch-item.current .branch-name {
-    font-weight: 500;
-  }
-
-  .branch-item.remote {
-    color: var(--text-muted);
-  }
-
-  /* Keyboard cursor: a ring rather than a fill, so it composes with the current
-     row's background. Same treatment as the repo pickers. */
-  .branch-item.active {
-    box-shadow: inset 0 0 0 1.5px var(--border-active);
+  /* The hover rule above outranks a bare `.active` (three simple selectors to
+     two) and would downgrade the cursor row to the hover wash the moment the
+     pointer rested on it — the one confusion the two alphas exist to prevent.
+     The hovered form is named so the cursor wins on its own row. */
+  .branch-item.active,
+  .branch-item.active:hover {
+    background: var(--selection-cursor);
   }
 
   /* While picking what to delete, the rows are what the destructive action
@@ -540,17 +543,17 @@
     white-space: nowrap;
   }
 
-  .current-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--border-active);
-    flex-shrink: 0;
+  /* The current-branch column: on every row so the names line up, visible on
+     the one the checkmark belongs to. The one marker a row gets. */
+  .check {
+    flex: 0 0 14px;
+    display: inline-flex;
+    justify-content: center;
+    opacity: 0;
   }
 
-  .current-dot-spacer {
-    width: 6px;
-    flex-shrink: 0;
+  .check.visible {
+    opacity: 1;
   }
 
   /* Actions sit outside the scrolling list, so they survive an empty one — the
@@ -565,7 +568,8 @@
   .footer-btn {
     width: 100%;
     padding: 0 10px;
-    height: 24px;
+    height: 26px;
+    flex-shrink: 0;
     display: flex;
     align-items: center;
     background: transparent;
@@ -585,7 +589,7 @@
   }
 
   .footer-btn:hover:not(:disabled) {
-    background: var(--surface-hover);
+    background: var(--selection-hover);
     color: var(--text-primary);
   }
 

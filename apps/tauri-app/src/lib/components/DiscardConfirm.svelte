@@ -76,7 +76,7 @@
     use:dismissOnEscape={escape}
   >
     <div class="modal-header">
-      <h2>Discard changes</h2>
+      <h2>Discard Changes?</h2>
     </div>
     <div class="modal-body">
       {#if single}
@@ -99,7 +99,7 @@
     <div class="modal-footer">
       <button class="btn-secondary" onclick={onCancel} disabled={isDiscarding}>Cancel</button>
       <button class="btn-danger" onclick={onConfirm} disabled={isDiscarding}>
-        {isDiscarding ? 'Discarding…' : 'Discard changes'}
+        {isDiscarding ? 'Discarding…' : 'Discard Changes'}
       </button>
     </div>
   </div>

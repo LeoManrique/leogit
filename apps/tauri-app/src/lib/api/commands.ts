@@ -55,7 +55,7 @@ export interface RepoStatus {
   has_remote: boolean
   /** SHAs of commits reachable from HEAD but not on the remote. Empty when in sync or no upstream. */
   unpushed_shas: string[]
-  /** True when HEAD is detached (on a commit, not a branch), e.g. after "Checkout commit". */
+  /** True when HEAD is detached (on a commit, not a branch), e.g. after "Check Out Commit…". */
   detached: boolean
   /** Full SHA of HEAD; empty only on an unborn branch. Labels the detached-HEAD state. */
   head_sha: string
@@ -229,7 +229,7 @@ export interface DiffSizeGuard {
 export interface DiffOptions {
   html: boolean
   side_by_side: boolean
-  /** Parse past the size guard — the viewer's "Show diff anyway". */
+  /** Parse past the size guard — the viewer's "Show Diff Anyway". */
   show_anyway: boolean
 }
 
@@ -461,7 +461,7 @@ export const gitApi = {
     invoke<void>('create_branch', { repoPath, name, startPoint }),
   switchBranch: (repoPath: string, branch: string) =>
     invoke<void>('switch_branch', { repoPath, branch }),
-  /** Check out a commit by SHA, detaching HEAD. Mirrors GitHub Desktop's "Checkout commit". */
+  /** Check out a commit by SHA, detaching HEAD. */
   checkoutCommit: (repoPath: string, sha: string) =>
     invoke<void>('checkout_commit', { repoPath, sha }),
   deleteBranch: (repoPath: string, name: string) =>

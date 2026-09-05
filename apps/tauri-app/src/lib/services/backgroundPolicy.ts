@@ -17,8 +17,7 @@ import { activeNetworkOp } from '$lib/stores/networkOps'
  * truth — stale in plain sight is the failure this exists to prevent — and a
  * hidden one keeps refreshing slowly so returning to it reveals a current
  * screen instead of a catch-up in front of the user. The multi-repo fan-out is
- * the only genuinely deferrable work, so it is the only thing that stops, which
- * is GitHub Desktop's model for its own indicator sweep.
+ * the only genuinely deferrable work, so it is the only thing that stops.
  *
  * ## What "hidden" can mean here
  *
@@ -51,13 +50,13 @@ const HIDDEN_FETCH_MULTIPLIER = 3
 /**
  * A once-per-session offset, 0–30 s, added to the *first* automatic fetch.
  *
- * GitHub Desktop's trick, and it earns its keep here for a reason the web
- * clients don't have: LeoGit's two clients read the same repositories from the
- * same machine, so two windows launched together would otherwise fetch, and
- * contend for `index.lock`, in lockstep forever. The status poll is
- * deliberately *not* skewed — delaying the first local read by up to half a
- * minute after launch would be visible, and a `git status` is cheap enough that
- * phase alignment costs nothing.
+ * The skew earns its keep for a reason a single-client app wouldn't have:
+ * LeoGit's two clients read the same repositories from the same machine, so
+ * two windows launched together would otherwise fetch, and contend for
+ * `index.lock`, in lockstep forever. The status poll is deliberately *not*
+ * skewed — delaying the first local read by up to half a minute after launch
+ * would be visible, and a `git status` is cheap enough that phase alignment
+ * costs nothing.
  */
 export const SESSION_FETCH_SKEW_MS = Math.floor(Math.random() * 30_000)
 

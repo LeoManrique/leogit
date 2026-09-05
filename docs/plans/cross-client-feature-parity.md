@@ -1,6 +1,6 @@
 # Plan — Cross-client feature parity (SwiftUI ⇄ Tauri)
 
-> Status: **WS-A…WS-E shipped 2026-08-27, WS-F through WS-J and WS-L…WS-N 2026-08-28, WS-O through WS-T 2026-08-29/30. Two pieces remain: WS-K, which needs a Linux machine rather than a predecessor (§6's sequencing note), and DF-6(T), the Tauri client's multi-line diff copy — a named half with no workstream of its own, whose design is written out in that item. D-22 is deferred by decision (§10); D-21, D-23 and D-24 are open and all Low.**
+> Status: **WS-A…WS-E shipped 2026-08-27, WS-F through WS-J and WS-L…WS-N 2026-08-28, WS-O through WS-T 2026-08-29/30. Two pieces remain: WS-K, which needs a Linux machine rather than a predecessor (§6's sequencing note), and DF-6(T), the Tauri client's multi-line diff copy — a named half with no workstream of its own, whose design is written out in that item. D-22 is deferred by decision (§10); D-21, D-23, D-24 and D-26 are open and Low; **D-27 is open and Medium** — a bare `catch` in the Tauri commit-detail loader presents a failed read as the previously-loaded commit.**
 > The remaining work was re-cut into seventeen smaller workstreams (C…S) on
 > 2026-08-27 after WS-B proved too large to review as one piece — see §6.
 > Accepted 2026-08-27 with every open decision resolved. Per-workstream state
@@ -115,15 +115,17 @@ Kept as a register (IDs are referenced from §4) and trimmed to what each fix
 
 ### 3.2 Defects still open
 
-Five. Four came out of this plan's own work; D-26 came out of the side-by-side
-audit in [`tauri-reskin.md`](tauri-reskin.md) §10, which sent it here because it
-is behaviour rather than paint.
+Six. Four came out of this plan's own work; D-26 and D-27 came out of the
+side-by-side audit in [`tauri-reskin.md`](tauri-reskin.md) §10, which sent them
+here because they are behaviour rather than paint.
 
 | ID | Client | Defect | Severity |
 |---|---|---|---|
 | D-21 | Both | **A directory-backed entry has no content stamp, so its open diff can go stale.** `FileEntry.stat_stamp` is `symlink_metadata` mtime + size (`core/src/git.rs:708-724`), which for a *directory* describes its top-level entry list and not what is inside. Two entries are directories: a **submodule whose recorded pointer moved** (`SC..`, which `is_dirty_submodule` lets through, so a diff *is* read and renders `-Subproject commit A` / `+Subproject commit B`) and an untracked directory or embedded repo. Move that submodule to another commit in a terminal without changing its top-level entries and nothing in the diff's key moves — the pane keeps showing the old target indefinitely, and the poll can't catch it either, since `parse_ordinary_entry` discards porcelain v2's `hH`/`hI` gitlink shas so `RepoStatus` compares equal too. The fix is to keep those two fields and let a submodule entry's stamp be them: they are exactly what the diff renders, they cost nothing (they are already on the line being parsed), and `stat_stamp` is opaque by contract. Narrow — before WS-P narrowed the key, only the native client's unconditional refocus reload caught it, and the Tauri client never did. | Low |
 | D-22 | Native | **A drag through the diff cannot select more than one line.** `.textSelection` makes a `Text` selectable; it does not join separate `Text` views into one selection domain, and the pane draws one `Text` per line, so a drag is confined to the line it began in no matter where the grant is attached. **Deferred by decision — see §10.** Multi-line copying is served by the gutter run instead (click, ⇧-click, *Select All Lines*, ⌘C), which is strictly more faithful than a drag would be, so what is actually missing is only the *gesture*. | Low |
-| D-23 | Native | **A failure of an explicit read is not treated as the user's action.** ⌘R, an open that cannot resolve a repository root, and `refreshWorkingTree` all write `errorMessage` and appear as a dismissable banner with no retry, where the Tauri client sends the same failures to its action modal *with* a retry. FRONTEND §6.13 decides this by "is the user waiting on it", and names an explicit refresh in the class that takes the window; STYLE's *What is not a banner* says the same. The native surface already exists — `ActionFailureSheet` carries a retry closure — so the fix is routing, not new machinery, but ⌘R failing would start showing a modal, which is a visible change wanting its own check. Found in WS-S. | Low || D-26 | Tauri | **`maxlength="200"` silently truncates the commit summary.** `CommitMessage.svelte:463`. The native composer has no cap, and `STYLE.md`'s *Commit composer* forbids one in as many words — "nothing is ever truncated, since a silent hard cap chops pasted and AI-generated summaries with no warning at all". A generated message longer than 200 characters loses its tail with no indication. The character counter already carries the soft 72-column guidance, which is the intended affordance. One attribute. | Low |
+| D-23 | Native | **A failure of an explicit read is not treated as the user's action.** ⌘R, an open that cannot resolve a repository root, and `refreshWorkingTree` all write `errorMessage` and appear as a dismissable banner with no retry, where the Tauri client sends the same failures to its action modal *with* a retry. FRONTEND §6.13 decides this by "is the user waiting on it", and names an explicit refresh in the class that takes the window; STYLE's *What is not a banner* says the same. The native surface already exists — `ActionFailureSheet` carries a retry closure — so the fix is routing, not new machinery, but ⌘R failing would start showing a modal, which is a visible change wanting its own check. Found in WS-S. | Low |
+| D-26 | Tauri | **`maxlength="200"` silently truncates the commit summary.** `CommitMessage.svelte:463`. The native composer has no cap, and `STYLE.md`'s *Commit composer* forbids one in as many words — "nothing is ever truncated, since a silent hard cap chops pasted and AI-generated summaries with no warning at all". A generated message longer than 200 characters loses its tail with no indication. The character counter already carries the soft 72-column guidance, which is the intended affordance. One attribute. | Low |
+| D-27 | Tauri | **The History detail pane is missing three of the five states the native draws, and one of them hides a failure.** The worst is *Couldn't Load Commit* (`HistoryDetailPane.swift:84`): the Tauri loader's `catch {}` at `MainLayout.svelte:897` is **bare**, so a commit whose detail cannot be read leaves the pane showing the previous commit's card with no indication that anything failed — the one class of failure the user is least able to diagnose, presented as success. The other two are absences rather than lies: *Loading History…* (`HistorySidebar.swift:71`, `HistoryDetailPane.swift:25`) has no counterpart, so the pane shows "No Commit Selected" while the log is still loading — and `CommitList` renders nothing at all, though its `loaded` prop is already passed and already gates the sidebar's own line; and *No Changed Files* (`HistoryDetailPane.swift:95`) is absent, so an empty or merge commit shows "Select a file to see its changes." beside an empty list, which is the instruction-you-cannot-follow shape `STYLE.md`'s *Empty states* forbids. All three now have a component to render into (`PaneEmptyState`) and symbols already in the registry (`clock`, `exclamationmark-triangle`, `doc`), so the remaining work is the loader's error channel, not the paint. | **Medium** — the bare `catch` is the medium half; the two absences are Low. |
 | D-24 | Native | **The poll's banner does not say what happened, only what git said.** STYLE's *Status indicators* specifies the shape for both banner conditions: a sentence in `--text-primary` naming the condition, then git's own text after it in 11px mono `--text-muted`, ellipsized. The Tauri strip renders exactly that ("Can't read this repository — it may have been moved, deleted, or unmounted." plus the raw detail); `ErrorBanner` renders the raw error alone at `.callout`, so the one banner a user is least equipped to interpret is the one with no explanation. `ErrorBanner` would take a second, optional line. Found in WS-S. | Low |
 
 ### 3.3 Standing efficiency wastes (quantified)
@@ -178,7 +180,7 @@ and matched, not that it was skipped.
   repository missing from it means the paths are wrong; sending the user to
   Settings fixes the cause and holds next launch, where a one-off open patches
   one symptom and invites the list to disagree with its own configuration. The
-  empty state's "Choose folders to search" CTA is the sanctioned route, and a
+  empty state's "Choose Folders to Search" CTA is the sanctioned route, and a
   repo genuinely outside every scan path still arrives by clone or
   `leogit <dir>` and then keeps its row via RM-3's MRU union. ✅ *WS-C* for the
   switchers, ✅ *WS-L* for Welcome's last entry point — load-bearing only until
@@ -247,7 +249,7 @@ and matched, not that it was skipped.
   looking/none-found(+searched folders)/no-matches; Tauri's dropdown said
   "No repositories" for everything, with the rich state only in the startup
   picker. ✅ *WS-C* for Tauri: one shared `RepoListEmptyState` answers all three
-  in both lists, and the "Choose folders to search" CTA is on **both** dead
+  in both lists, and the "Choose Folders to Search" CTA is on **both** dead
   ends, not only the empty one — "none matched" is what you see when the repo
   you want lives somewhere discovery was never pointed at. (The "looking" state
   is unreachable in the dropdown by construction: the open repo is always
@@ -578,12 +580,12 @@ and matched, not that it was skipped.
   that raised it. Its outcome sentences are Tauri's count-based forms, which work
   at any N, with the question line naming the single file.
 - **CH-9 · Embedded-repo confirm.** Tauri's copy is better (names the outer
-  repo, states the clone consequence, "Commit as link" verb); native's system
+  repo, states the clone consequence, "Commit as Link" verb); native's system
   `confirmationDialog` is the right container. Merge: native container +
   Tauri text. ✅ *WS-D* for the Tauri half: one `canCancel` gate now answers
   the backdrop, Escape and the Cancel button, where only Escape had checked —
   the tell that a per-dismissal list had already drifted once. ✅ *WS-N* for the
-  merge: Tauri's title, body and **Commit as link** verb inside native's
+  merge: Tauri's title, body and **Commit as Link** verb inside native's
   confirmation. D-10's native half rode along — the composer locks while the
   dialog waits, since Confirm commits the files the dialog was *opened* with.
 - **CH-10 · Composer details.** Port to native: the 72-char summary counter
@@ -673,11 +675,11 @@ and matched, not that it was skipped.
   GitHub Desktop solves the exact variable-height
   problem Tauri gave up on (measured-height cache). Neither client has any
   large-diff guard; GH Desktop has three (70 MB buffer / ~4.4 MB "reasonable"
-  / 5 000 chars-per-line → a "Show Diff anyway" state). **Decided: guard only
+  / 5 000 chars-per-line → a "Show Diff Anyway" state). **Decided: guard only
   in this plan** — the two fixes sit at very different sizes, and only the
   guard is cheap. ✅ *WS-B*: `DiffSizeGuard` withholds a patch over 4 MiB, or
   one with a line over 5 000 bytes, and both viewers render the measurements
-  with a "Show diff anyway" button that re-asks with the guard lifted (per
+  with a "Show Diff Anyway" button that re-asks with the guard lifted (per
   request, not sticky — moving to another file gets the guard back), so a
   pathological diff is survivable and explained instead of a hang. The
   long-line limit earns its place separately: a minified bundle is slow at a
@@ -1526,7 +1528,7 @@ is mostly adoption of already-proven native behavior.
    and BR-11, plus SH-4's silently-broken half; the two BR-1 refinements landed
    **natively** in the same change. Per-item state is in §4.4. The dropdown
    became the branch *menu* — filter, keyboard cursor, row context menu, and a
-   footer carrying New branch… / Merge into "…" / Abort merge… / Delete branch…
+   footer carrying New Branch… / Merge into "…" / Abort Merge… / Delete Branch…
    — with `MergeOverlay.svelte` replaced by `MergeBranchDialog.svelte` and the
    delete and abort confirmations sharing a new `ConfirmDialog.svelte`.
 
@@ -1839,7 +1841,7 @@ is mostly adoption of already-proven native behavior.
     `.fileImporter` behind them, RM-2's last entry point), RM-4's native half
     (the persisted clock ⇄ A-Z toggle), RM-5's native half (remote-derived row
     labels, both of them searchable), RM-6 (the ↑/↓ cursor), RM-7's native half
-    (the three empty states and the *Choose folders to search* action), RM-9's
+    (the three empty states and the *Choose Folders to Search* action), RM-9's
     native refinement (walk and badge sweep run concurrently), SH-8 (the
     scan-failure row), and the native halves of CL-1, CL-2, CL-3 and CL-7. Three
     items landed on **both** clients: CL-1's transfer gate moved from the control
@@ -2050,7 +2052,7 @@ is mostly adoption of already-proven native behavior.
       so the mirror is purpose-built at `u32` and saturates rather than
       wrapping. Any future core type with a `usize` field needs the same.
     - **Anything that adds a re-read to a surface has to check what the old
-      read was silently clearing.** The size guard's *Show diff anyway* was a
+      read was silently clearing.** The size guard's *Show Diff Anyway* was a
       per-call flag, so the moment the layout control made the diff re-read from
       inside its own header, revealing a large diff and then switching
       arrangement re-armed the guard and removed the control that had got the

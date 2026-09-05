@@ -691,9 +691,8 @@ struct ContentView: View {
     /// interval instead, so ahead/behind are already right on return.
     ///
     /// The first sleep carries `sessionFetchSkew` so this window's fetches
-    /// don't stay in lockstep with another's — GitHub Desktop's trick, and it
-    /// earns its keep here because LeoGit's two clients read the same
-    /// repositories from the same machine and would otherwise contend for
+    /// don't stay in lockstep with another's: LeoGit's two clients read the
+    /// same repositories from the same machine and would otherwise contend for
     /// `index.lock` on the same beat forever. The warm-up fetch already ran by
     /// then, so the offset costs the user nothing.
     @MainActor

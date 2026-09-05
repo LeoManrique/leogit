@@ -197,8 +197,8 @@ struct DiffLineCell: View {
     }
 
     /// Names what the menu would actually copy, which is the run when this row
-    /// is inside it and this row alone when it is not — the rule Finder and
-    /// every list-with-a-context-menu follows.
+    /// is inside it and this row alone when it is not — the rule every
+    /// list-with-a-context-menu follows.
     private func copyTitle(for rowIndex: Int) -> String {
         guard let selection, selection.contains(rowIndex), selection.range.count > 1 else {
             return "Copy Line"

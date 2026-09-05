@@ -42,7 +42,7 @@ pub struct IntraLineRange {
     pub length: u32,
 }
 
-/// Match GitHub Desktop's safeguard — above this length, the prefix/suffix
+/// Safeguard on intra-line annotation — above this length, the prefix/suffix
 /// match degenerates into noise, so we skip the annotation entirely.
 const MAX_INTRA_LINE_LEN: usize = 1024;
 
@@ -151,8 +151,8 @@ pub struct DiffSizeGuard {
     pub longest_line: u64,
 }
 
-/// Patch size past which the viewer asks before rendering. GitHub Desktop's
-/// "reasonable size" bar, which a diff of this size stops being.
+/// Patch size past which the viewer asks before rendering. Past 4 MiB the
+/// parse, highlight and DOM cost stops being worth paying unprompted.
 const MAX_REASONABLE_DIFF_BYTES: u64 = 4_194_304;
 
 /// Single-line length past which the viewer asks before rendering.
@@ -670,10 +670,10 @@ fn count_changes(hunks: &[Hunk]) -> (u32, u32) {
 
 /// Pairs up consecutive delete/add runs within each hunk and tags each pair
 /// with the character range that actually changed, so the viewer can highlight
-/// `Relay` → `Metrics` inside an otherwise identical line. Matches GitHub
-/// Desktop's approach (`relativeChanges` in `app/src/ui/diff/changed-range.ts`):
-/// only annotate when the delete count equals the add count, then pair by
-/// index. Mismatched counts are left untouched (full-line diff still shows).
+/// `Relay` → `Metrics` inside an otherwise identical line. The pairing rule is
+/// deliberately conservative: only annotate when the delete count equals the
+/// add count, then pair by index. Mismatched counts are left untouched (the
+/// full-line diff still shows).
 fn annotate_intra_line_changes(hunks: &mut [Hunk]) {
     for hunk in hunks.iter_mut() {
         let mut i = 0;
@@ -891,8 +891,9 @@ pub fn generate_inverse_patch(
 ) -> Result<(), String> {
     // Inverse patch is applied to the working tree (no --cached) via
     // `git apply --reverse`. Building the patch in "forward" form and letting
-    // git reverse it keeps the math simple and matches the Go reference's
-    // semantic of "discard from working tree".
+    // git reverse it keeps the math simple: the patch describes the change,
+    // and `--reverse` is what makes applying it a discard from the working
+    // tree.
     let patch_content = build_patch(&file_diff, &selection, false)?;
     if patch_content.is_empty() {
         return Ok(());
@@ -1068,7 +1069,7 @@ fn calculate_global_line_index(hunks: &[Hunk], line_idx_in_current: usize) -> us
     index + line_idx_in_current
 }
 
-/// Pipes a patch to `git apply`. Mirrors the Go reference's flag set:
+/// Pipes a patch to `git apply`. The flag set is deliberate:
 /// `--unidiff-zero` (allow zero-context hunks) and `--whitespace=nowarn`.
 ///
 /// - `reverse=true` applies the patch in reverse (used for discard).

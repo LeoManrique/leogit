@@ -47,6 +47,16 @@
      matching AppKit's number exactly would have cost a state the user relies
      on to buy a texture they do not. See `FileList.svelte`'s `.striped`. */
   --surface-stripe: rgba(255, 255, 255, 0.03);
+  /* The pickers' keyboard cursor and hover: one colour at two alphas, which is
+     how the native row draws them (`RepoPickerList.swift:449-450`, `.selection`
+     at 0.35 and 0.15). Derived from the accent rather than written as an rgba
+     so that whatever `--border-active` becomes, these follow it. Repeated in
+     the light block only to keep the file's one-token-per-theme shape. Both
+     theme blocks select the root, and that is load-bearing: `var()` resolves
+     on the element the declaration applies to, so a theme ever scoped to a
+     descendant would leave these frozen against the root's accent. */
+  --selection-cursor: color-mix(in srgb, var(--border-active) 35%, transparent);
+  --selection-hover: color-mix(in srgb, var(--border-active) 15%, transparent);
 
   --text-primary: #ffffff;
   --text-secondary: rgba(255, 255, 255, 0.65);
@@ -132,6 +142,8 @@
   --border-strong: rgba(0, 0, 0, 0.18);
   --surface-hover: rgba(0, 0, 0, 0.04);
   --surface-stripe: rgba(0, 0, 0, 0.022);
+  --selection-cursor: color-mix(in srgb, var(--border-active) 35%, transparent);
+  --selection-hover: color-mix(in srgb, var(--border-active) 15%, transparent);
 
   --text-primary: #1d1d1f;
   --text-secondary: rgba(0, 0, 0, 0.62);

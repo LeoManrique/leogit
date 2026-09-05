@@ -23,8 +23,8 @@ enum CommitDate {
     /// .named)` renders the near tiers as *yesterday* / *last week*, and the
     /// Tauri client renders them as *1 day ago* — the same commit reading two
     /// different ways in the two clients, which FRONTEND §6.12 pins as one
-    /// vocabulary. GitHub Desktop breaks that tie (the plan's §7 rule) and it
-    /// counts: *5 months ago* is a duration, *last week* is a landmark, and a
+    /// vocabulary. The plan's §7 rule breaks that tie, and it counts:
+    /// *5 months ago* is a duration, *last week* is a landmark, and a
     /// history list is read for durations. The cost is that these strings are
     /// English, where the format style would have been localised — no loss
     /// today, since every other string in both clients is hard-coded English

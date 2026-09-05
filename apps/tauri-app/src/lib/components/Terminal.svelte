@@ -52,12 +52,12 @@
   // grid pushes a ResizePseudoConsole down to the shell, and PSReadLine repaints
   // its whole edit buffer per resize — so an unthrottled observer turns one drag
   // into hundreds of repaints and a visibly corrupted prompt. Coalesce to the
-  // final size instead; Windows Terminal debounces for the same reason.
+  // final size instead.
   const RESIZE_DEBOUNCE_MS = 80
 
   // Which modifier turns a hover into a click-through. ⌘ on macOS because ⌃
-  // there is a right-click, `Ctrl` everywhere else — Terminal.app, iTerm and
-  // VS Code all draw the line in the same place, and SwiftTerm already does.
+  // there is a right-click, `Ctrl` everywhere else — the same line SwiftTerm
+  // already draws.
   const LINK_MODIFIER = isMac() ? '⌘' : 'Ctrl'
 
   onMount(() => {
@@ -116,8 +116,7 @@
       cursorBlink: true,
       // Chosen rather than inherited: xterm defaults to 1 000 and SwiftTerm to
       // 500, which had the two clients remembering different amounts of the
-      // same shell. 1 000 is the one that survives a `git log --stat`, and what
-      // VS Code ships.
+      // same shell. 1 000 is the one that survives a `git log --stat`.
       scrollback: 1000,
       windowsPty,
     })
@@ -144,7 +143,7 @@
     // global handlers make the same cut from their side (`utils/keyboard.ts`),
     // so each of these keys has exactly one owner at any moment.
     //
-    // `Ctrl` only, matching the native client and VS Code: ⌘` is macOS's own
+    // `Ctrl` only, matching the native client: ⌘` is macOS's own
     // window-cycling chord, so answering to it took a system gesture away from
     // every user of a macOS build. The phase is checked because xterm runs this
     // handler for keyup and keypress too, and releasing an event xterm had
@@ -337,9 +336,9 @@
     // first so unmount cleanup skips close_terminal — the backend already
     // dropped the session before sending this. A clean exit lets the parent tear
     // the panel down; anything else keeps the dead terminal on screen with the
-    // reason, VS Code-style, so a shell that dies instantly no longer flashes
-    // its error away. The panel's own ✕ still closes it — unmount cleanup is a
-    // no-op once the pid is null.
+    // reason, so a shell that dies instantly no longer flashes its error away.
+    // The panel's own ✕ still closes it — unmount cleanup is a no-op once the
+    // pid is null.
     sessionClosed = true
     pid = null
     const { exit_code, signal } = message.exit

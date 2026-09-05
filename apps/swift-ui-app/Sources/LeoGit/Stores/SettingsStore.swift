@@ -248,7 +248,7 @@ final class SettingsStore {
             // Discovery hangs off the settings that change what it walks, not
             // off this window closing: the repo list is what a scan-path edit
             // is *for*, and the screen most likely to be showing it — the
-            // picker, with its "Choose folders to search" action — has no
+            // picker, with its "Choose Folders to Search" action — has no
             // switcher to re-open and would otherwise sit on "No repositories
             // found" until the app was restarted.
             if field == .scanPaths || field == .scanDepth {

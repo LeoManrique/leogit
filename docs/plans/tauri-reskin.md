@@ -1197,12 +1197,17 @@ reference wins and the Tauri client moves:
   reasoning that the disabled Commit button states the requirement a second
   way rather than instead.
 
-Two documentation defects, independent of the above: `STYLE.md` states the
+One documentation defect, independent of the above: `STYLE.md` states the
 no-count-capsule rule as an absolute in its anti-patterns while its own toolbar
 paragraph and `FRONTEND.md` §8 both record the Tauri count capsules as
-intentional; and the sync button's sentence-case labels (`Publish branch`,
-`Force push (with lease)…`) against the native's title case are a real,
-defensible platform divergence that nothing writes down.
+intentional.
+
+The sync button's `Publish branch` against the native's `Publish Branch` was
+listed here too, as a platform divergence nothing wrote down. It is not one:
+**P-26** shows it is a single instance of an app-wide capitalisation mismatch
+spanning four categories, with Apple stating the rule outright for two of them.
+It is an ordinary parity item, and it is fixed where the rest of the category
+is.
 
 ### 10.8 Checked and matching — do not re-audit
 
@@ -1222,3 +1227,378 @@ the resolved font file, optical size and tracking are the same on both sides.
 `FileList` row selection's two-tier split, the count-capsule placement, the
 transfer-progress surface and the layout toggle's shape are all already recorded
 in `FRONTEND.md` §8 and are not defects.
+
+### 10.9 Second pass — what the first tranche left
+
+Found by putting the two clients side by side again *after* §10.1–§10.5's items
+landed. Two of the three are that pass's own loose ends rather than new ground,
+which is the reason to write them where the work that caused them is recorded.
+
+**P-23 — the commit list does not alternate its row backgrounds, and the file
+list does. ✅ Landed.** `.alternatingRowBackgrounds()` is called at **two** sites —
+[`ChangedFileList.swift:114`](../../apps/swift-ui-app/Sources/LeoGit/Design/ChangedFileList.swift#L114)
+and
+[`HistorySidebar.swift:109`](../../apps/swift-ui-app/Sources/LeoGit/Screens/HistorySidebar.swift#L109)
+— and P-3 named both. Only the file list was wired, so the two Tauri lists now
+disagree with each other as well as the History list disagreeing with its
+reference; the History sidebar is visibly flat beside the native one.
+
+The fix is `FileList.svelte`'s exactly: `class:striped` keyed on the commit's
+index in the model, `--surface-stripe`, declared *before* `:hover`,
+`.commit-row.selected` and the active row so source order — which is the whole
+of the cascade between four equal-specificity single-class rules — leaves the
+stripe underneath the states. Keying on DOM position is wrong for the same
+reason it was wrong there: `CommitList` virtualizes and absolutely positions its
+rows, so `:nth-child` sees only the slice near the viewport and would restripe
+the list on every scroll. Row 0 stays plain.
+
+**P-24 — the Settings glyph reads as a sunburst, not a gear. ✅ Landed.**
+`Icon.svelte`'s
+`gear` is a `ring(8, 8, 2.35)` plus eight detached radial segments. That cannot
+resolve as a gear at any size, and the size is not what is wrong with it: a gear
+is read from a **closed outer contour whose edge is interrupted by teeth**,
+around a hole. With no rim, eight strokes radiating from a small circle are a
+sun, a sparkle or an asterisk — which is what the header renders at 14 px.
+
+The reasoning that produced it was sound and the conclusion was not: scalloped
+`gearshape`-style outlines genuinely do turn to mush below 14 px, so the teeth
+were dropped to spokes. The answer is to keep a rim and make the teeth coarse —
+six or eight trapezoidal bumps on a closed path, an inner hole large enough to
+survive at 12 px — rather than to remove the shape that carries the meaning.
+This is one of the two glyphs with **no** SF Symbol counterpart at all (the
+native client has no settings icon; macOS puts Settings in the app menu, and a
+Tauri window has no app menu to put it in), so there is nothing to match and the
+only test is whether it reads as a gear at 12, 14 and 16 px.
+
+**P-25 — no pane-level empty state in the Tauri client has an icon, and the
+native draws thirteen. ✅ Landed.** Not one missed case: of the **13**
+`ContentUnavailableView` sites in the native client, **0** have a glyph in their
+Tauri counterpart. The cause is legible in the history — the icon pass was a
+*replacement* sweep over 44 inline `<svg>` blocks, and an empty state never had
+an `<svg>` to replace, so nothing matched and none was reached. Six registry
+symbols (`doc`, `doc-text`, `doc-zipper`, `doc-text-magnifyingglass`,
+`arrow-turn-down-right`, `exclamationmark-triangle`) have **no call site
+anywhere in the client**; they were drawn for these states and never wired to
+them. **Every symbol needed already exists — nothing has to be drawn.**
+
+| Native | Symbol | Tauri |
+|---|---|---|
+| `DiffView.swift:359` Submodule Changes | `arrow.turn.down.right` | `MainLayout.svelte:2292` |
+| `DiffView.swift:372` Couldn't Load Diff | `exclamationmark.triangle` | `:2287`, `:2378` |
+| `DiffView.swift:378` Binary File | `doc.zipper` | `DiffViewer.svelte:303` |
+| `DiffView.swift:386` Large Diff | `doc.text.magnifyingglass` | `:2315`, `:2401` |
+| `DiffView.swift:404` No/Whitespace/No Textual Changes | `doc` | `:2330`, `:2411` |
+| `ChangesDetailPane.swift:21` No Changes | `checkmark.circle` | `:2338` (`files.length === 0` branch only) |
+| `ChangesDetailPane.swift:27`, `HistoryDetailPane.swift:119` No File Selected | `doc.text` | `:2343`, `:2419` |
+| `HistoryDetailPane.swift:25,29,35` history states | `clock` | `:2430`, `:2435` |
+
+**Apple publishes no metrics for `ContentUnavailableView` — none, on any
+platform.** No size, colour, gap or width, and macOS 26 adds no API (there is no
+`ContentUnavailableViewStyle`). The numbers below were extracted from the
+shipping SwiftUI binary on this machine (7.5.3, macOS 26.6.2) by resolving the
+compiled constants, so they are **observed rather than documented and Apple may
+change them in any update** — which is itself the reason to keep them in one
+component rather than spread across call sites:
+
+- content capped at `maxWidth: 400`, `padding(20)` all round, centred, text
+  centre-aligned;
+- outer stack spacing **12** (label block → description), description → actions
+  **12**, between action buttons **6**;
+- icon `HierarchicalShapeStyle.tertiary`; title `.bold`; description
+  `Color.secondary`.
+
+Two complete metric sets sit behind one size-class branch, and the binary work
+could not prove which a normal Mac window takes. The screenshots settle it:
+the branch giving **icon 36, icon→title 22, title `.largeTitle` (26 pt),
+description `.body` (13 pt)** is the one where the heading is about twice the
+description's size, which is what the native pane visibly shows. The other
+branch puts the title at `.headline` (13 pt) against an 11 pt description —
+near-identical sizes, which is not what renders. Confirm it against a build
+before treating the four numbers as settled.
+
+**The Tauri side draws this pattern 13 times across 2 files with 4 CSS
+definitions that disagree** — `.diff-empty` (15 px, `--text-secondary`, weight
+400), `.submodule-title` (15 px, `--text-primary`, weight **600**),
+`DiffViewer`'s `.empty-state` (15 px, `--text-faint`) and `.binary-state` (**13
+px**, `--text-faint`). The native draws all thirteen with one stock view. So the
+fix is **extract `PaneEmptyState.svelte` first, then use it** — not "add an icon
+in eight places": the icon is a glyph *plus* its own colour tier *plus* a
+non-uniform gap that the current uniform `gap: 6px` cannot express, and the
+metrics above are unpublished and therefore likely to be revised, which is an
+argument for having exactly one place to revise them. This repo has made the
+same call three times already (`RepoListEmptyState`, `ConfirmDialog`,
+`SeamlessDiffPane`), each time after the duplicates had drifted.
+
+Two smaller divergences fall out of the same audit. `FileList.svelte`'s empty
+line is `--text-muted` where `CommitList.svelte`'s is `--text-faint`, though
+both stand in for the same `EmptyListPlaceholder`'s `.tertiary`; `--text-faint`
+is the closer match and `STYLE.md` independently assigns it to empty-state
+hints. And `RepoListEmptyState`'s action is `.buttonStyle(.link)` natively —
+blue link text — against Tauri's bordered `--bg-tertiary` button.
+
+`PaneEmptyState.svelte` is that component and all thirteen sites now use it,
+each with the symbol its native counterpart draws. Two sites gained the
+heading they were missing rather than only a glyph — `Select a file to view its
+diff` was one line where the native has `No File Selected` over `Select a file
+to see its changes.`, and the binary state had no heading at all against the
+native's `Binary File`. One wrapper survives the extraction and is worth
+knowing about: the two loading-gated panes withhold the state itself under a
+150 ms threshold, so something must still hold the pane open and paint it, and
+that is `.diff-empty-hold` — `flex`, a column, and `--bg-primary`, nothing
+else. Dropping it would flash a transparent pane on every quick file switch,
+which is the same defect the threshold exists to prevent, from the other side.
+
+**Three native states have no Tauri counterpart at all**, and those are
+behaviour rather than paint, so they belong to
+[`cross-client-feature-parity.md`](cross-client-feature-parity.md) and not
+here: `Loading History…` (Tauri renders nothing while `!loaded`, though the prop
+is already passed), `Couldn't Load Commit` (`MainLayout.svelte:897` is a bare
+`catch {}` — the failure is swallowed), and `No Changed Files` on an empty or
+merge commit (Tauri shows "select a file" beside an empty list).
+
+**P-26 — the two clients capitalise user-visible text differently, and it is a
+convention rather than a set of typos. ✅ Landed**, on both sides, with the
+table now written into `STYLE.md`'s *Typography* so it stops being an unwritten
+practice that only a census could recover. Found by pulling the thread on
+`Large Diff` / `Large diff`. A census of both clients puts the disagreement in
+**four categories out of eleven** — the other seven already agree exactly:
+
+| Category | Native | Tauri |
+|---|---|---|
+| Buttons | Title, 14/17 | Sentence, 14/19 |
+| Dialog / sheet / alert titles | **Conditional, 12/12** | Sentence, 10/14 |
+| Pane-level empty-state headings | Title, **13/13** | Sentence, **13/13** |
+| Context / menu-bar items | Title, 28/32 | No convention — 11 Title / 9 Sentence, split by *file* |
+| Field labels, placeholders, tooltips, footers, body copy, progress labels, list-empty lines, Settings and branch section headings | *agree* | *agree* |
+
+Each client's exceptions are almost all deliberate cross-copies: Tauri's five
+title-cased strings are the ones ported from the native (`Commit N Files`,
+`Amend Commit`, `Stop Amending`, `Clone Repository…`, `Squash & Merge`), and
+`CommitMessage.svelte` carries a comment saying so.
+
+**Apple states the rule outright for two of the four** — "As with all button
+titles, use title-style capitalization and no ending punctuation" (*Alerts*) and
+"To be consistent with platform experiences, use title-style capitalization"
+(*Menus*) — and says **nothing at all** about sheet titles, tab labels, section
+headings or empty states, which is exactly the case §8's "the native client
+wins" exists to settle. The current HIG has no capitalisation table and no
+per-element list; its only general statement is "choose a style for each UI
+element type and use it consistently". The archived OS X HIG table that used to
+carry one now redirects and must not be cited.
+
+**The native's title rule is worth naming because it is already right, 12 of
+12.** A fragment takes title case and no ending punctuation (`Clone Repository`,
+`Discard Changes?`, `Force Push with Lease?`); a complete sentence takes
+sentence case and its own punctuation (`Create a repository here?`, `Commit
+nested repository as a link?`). That is Apple's alerts rule verbatim, followed
+without ever having been written down.
+
+Three things this turns up that are **not** casing and must not be fixed as if
+they were:
+
+- **`Merge into “main”…` is already correct in both clients.** `into` is a
+  four-letter preposition and stays lowercase in title style. It looks
+  sentence-cased and is not; "fixing" it to `Merge Into` would be the error.
+- **`Checkout commit?` is two defects.** `Checkout` as one word is a noun; the
+  verb is `check out`, so casing it alone yields the ungrammatical `Checkout
+  Commit?`. The native's `Check Out This Commit?` / `Check Out` is the string to
+  take wholesale.
+- **`Select a file to view its diff` is a structural gap, not a casing one.**
+  The native answers that state with a heading *and* a body sentence
+  (`No File Selected` + `Select a file to see its changes.`); Tauri collapses
+  both into one line. It belongs with P-25, not here.
+
+`STYLE.md` currently contradicts itself on this, which is why nothing caught it:
+`Create Branch` appears at line 87 and `Create branch` at lines 197 and 308.
+Whatever lands has to reconcile those three plus the branch-menu list at line
+245. This also closes §10.7's second documentation defect — the sync button's
+`Publish branch` against the native's `Publish Branch` is one instance of the
+category, not a special case.
+
+**Decided: all four categories move, on both sides.** The Tauri client takes
+title case for buttons, context-menu items and empty-state headings, and the
+conditional rule for dialog titles. The **native** changes too, in the six
+strings where it disagrees with its own 14/17, 28/32 and 13/13 pattern —
+`Create repository`, `Commit as link`, `Choose folders to search`
+(`InitRepoSheet.swift:67`, `ChangesSidebar.swift:145`,
+`RepoListEmptyState.swift:58`) and three of the four update-chip menu items
+(`UpdateChip.swift:30,33,40`; `Download from GitHub` is already correct, since
+`from` is a four-letter preposition and stays lowercase). That is not the
+reference bending to the copy: it is the reference agreeing with itself, and
+those three menu items break Apple's stated *Menus* rule outright. Leaving them
+would have been the worse option in a way worth recording — Tauri currently
+*matches* five of the six, so title-casing only the Tauri side would have
+repaired forty strings and broken five that already agreed.
+
+### 10.10 Third pass — the two pickers, and one line in the sidebar
+
+Found with the clients side by side a third time, after §10.9 landed, this time
+with the repository switcher and the branch menu open in both. The pickers had
+not been looked at by any earlier pass — §10.8's "checked and matching" list
+never named them — and they turn out to carry the largest single divergence
+left in the chrome, plus one real layout defect that the screenshot shows
+directly and that no reading of the CSS would have predicted.
+
+**P-27 — both pickers float in the middle of the window; the native hangs each
+one under its chip, and `STYLE.md` already says so. ✅ Landed.** `MainLayout.svelte:3064`'s
+`.overlay-backdrop` is a fixed, window-filling flex box with
+`justify-content: center` and `padding-top: 60px`, painted with
+`--overlay-backdrop` — the *modal* backdrop — and both `<RepoDropdown>` (`:2545`)
+and `<BranchDropdown>` (`:2573`) mount inside it. So each opens centred across
+the window, sixty pixels down, over a dimmed repository, with nothing
+connecting it to the chip that was clicked. The native repo chip presents an
+`NSPopover` (`RepoSwitcher.swift:44`, `.popover(arrowEdge: .bottom)`): centred
+on the chip, an arrow pointing back at it, no dimming. The native branch chip
+is a pull-down `Menu` (`BranchMenu.swift:56`), which AppKit hangs from the
+control's leading edge — no arrow, no dimming. `STYLE.md`'s *Branch picker*
+section opens with "Popover anchored to the branch button in the header", so
+this is the Tauri client contradicting its own stylesheet rather than a
+decision nobody made. The repo popover is also 340 × ≤420 where the native
+declares 320 × 440 (`RepoSwitcher.swift:68`).
+
+The fix is geometry, not a new surface: the chip hands its rect to the opener,
+the backdrop becomes a transparent click-catcher (it still dismisses, and the
+overlay stack's Escape handling is untouched), and the content is placed at the
+chip's bottom edge — centred on it for the repo popover, with an arrow that
+stays on the chip when the viewport clamps the box, and leading-aligned for the
+branch popover, which is standing in for a menu. FRONTEND.md §8 already records
+the branch surface's *shape* as a deliberate divergence (popover with a filter
+and footer against a stock menu); its *placement* was never part of that
+divergence and now matches. The arrow and the popover's own metrics are the
+part nothing publishes, and are recorded at the end of this section.
+
+**P-28 — the picker rows collapse to their text height the moment the list
+overflows, which is the half-height rows in the screenshot. ✅ Landed.** Not a density
+choice: `RepoDropdown.svelte:376`'s `.repo-item` is `height: 24px`, and the
+screenshot shows about sixteen. `.repo-list` (`:336`) is a flex column of
+*definite* height (`flex: 1; min-height: 0`), and a flex item's automatic
+minimum size is its content size capped at its specified size (CSS Flexbox
+§4.5) — with a specified 24 px and a 13 px line inside, the floor is the line.
+So once the rows' total exceeds the column's height, the default
+`flex-shrink: 1` takes every row toward its text *before* the column has
+anything to scroll. (The column's own `overflow-y: auto` plays no part in
+that; it is the definite height that forces the shrink.) The effect is invisible with a
+handful of repositories and total with forty, which is why the list read fine
+on the machine it was written on. `BranchDropdown.svelte:461/:486` has the same
+structure and fails the same way the first time a repository has more branches
+than fit; the Welcome picker (`RepoPicker.svelte:280`) escapes only because its
+rows have no `height` and so no basis to shrink from. The fix is
+`flex-shrink: 0` on every fixed-height row and heading. Turning the lists into
+block scrollers instead would lose the stretch that lets `RepoListEmptyState`
+fill the popover, which is the native's `placeholderMaxHeight`.
+
+**P-29 — inside the popovers, the native draws six things differently, and
+`STYLE.md` had written three of the Tauri versions down as rules. ✅ Landed,
+all seven rows, in both pickers and the Welcome list.**
+
+| | Native | Tauri | `STYLE.md` |
+|---|---|---|---|
+| Current item | a fixed 14 pt checkmark column on every row, visible on the open one (`RepoPickerList.swift:404-407`); the menu's own ✓ for the branch (`Picker(.inline)`). No fill, no weight change | repo: `--bg-tertiary` fill + weight 500, no glyph (`RepoDropdown.svelte:394,426`); branch: 6 px accent dot + fill + 500 (`BranchDropdown.svelte:507-513,543`) | documents the dot (*Branch picker*) |
+| Keyboard cursor / hover | `.selection` at 35 % / 15 % (`RepoPickerList.swift:449-450`) — two alphas of one colour | inset 1.5 px `--border-active` ring / neutral `--surface-hover` (`:400`, `:521`) | documents the ring as the web's stand-in (*Repo pickers*), reasoned from composing with the current row's fill |
+| Dirty dot | `Circle().fill(.tint)` — the accent (`:466-467`) | `--text-muted`, brightening on hover (`:468-479`) | documents the grey (*Status indicators*) |
+| Row height | `padding(.vertical, 5)` around the 13 pt line (`:421`) = 26 | 24 (`:381`, `:491`) | 24 / 22–24 |
+| Sync badges | `.caption.monospacedDigit()` in `.secondary` — 10 pt regular (`:480`) | 11 px **600** `--text-muted` (`:445-455`) | — |
+| Remote branch rows | plain `Button`s, primary (`BranchMenu.swift:326`) | `--text-muted` (`:515`) | documents the muting |
+| Filter placeholder | `Filter repositories` (`:128`) | `Filter repositories…` (`:207`), `Filter branches…` (`:289`) | writes the ellipsis in |
+
+Under §8 the reference wins on a control's look, and each row above is that.
+Two are worth a sentence beyond "match it". The ring's documented reason was
+that it composes with the current row's fill; with the fill gone — the native
+marks the open item with the checkmark alone — there is nothing left to
+compose with, and the native's own device is available: one colour at two
+alphas, `color-mix(in srgb, var(--border-active) 35%, transparent)` for the
+cursor and 15 % for hover, which `color-mix` already does at five sites in the
+client. And the placeholder's ellipsis is not a typo in one string but a
+category error: `…` means "this opens something" (*Typography*), and a
+placeholder is a hint inside a field, which opens nothing. The "one marker,
+never a dot *and* a bar" rule survives the checkmark unchanged.
+
+**P-30 — the Changes sidebar's empty line sits at the top of the list; the
+native centres it. ✅ Landed.** `EmptyListPlaceholder.swift:15` claims the whole slot
+(`maxWidth: .infinity, maxHeight: .infinity`). `FileList.svelte:609`'s
+`.empty-state` asks for the same with `flex: 1` — but its parent
+`.rows-viewport` (`:587`) is a block scroller, not a flex container, so the
+declaration is inert and the box is as tall as its one line.
+`CommitList.svelte:474` draws the same placeholder in the same structure with
+`height: 100%` and centres, and `STYLE.md` already says "one faint **centred**
+line". `height: 100%` it is; the viewport is a definite-height flex item so the
+percentage resolves.
+
+**P-31 — the toolbar's glyphs are about two-thirds the size of the native's,
+and it is the whole bar, not the two chips. ✅ Landed.** `Icon` defaults to
+`size = 12` (`Icon.svelte:391`); neither chip passes one (`Header.svelte:511`,
+`:526`), nor do the sync button's six glyphs, and Settings and Help pass 14. A
+macOS toolbar renders a `Label`'s symbol at the **large symbol scale of the
+13 pt text beside it**, not at the text's size — the configuration is
+unpublished (see the metrics note), but the rendered ink is measurable, and on
+this machine `folder` inks 18.5 × 15, `arrow.triangle.branch` 14.5 × 15.5,
+`arrow.triangle.2.circlepath` 20.5 × 16.5, `arrow.up.circle` and
+`questionmark.circle` 16.5, `gearshape` 17.5, the plain arrows 12.5 × 15.5.
+The registry's glyphs ink at roughly twelve of their sixteen grid units, so one
+size, **21**, puts each within about two pixels of its counterpart; it is one
+constant in `Header.svelte` on every `<Icon>` in the bar, and `Icon`'s default
+stays 12, which is right for the affordance glyphs it was chosen for. What 21
+cannot fix is P-33.
+
+**P-33 — the registry draws every glyph near-square, and SF Symbols are not.**
+A symbol's point size is typographic: the scales are defined against the text's
+cap height, so symbols share a cap height and a baseline, *not* a bounding box,
+and a wide symbol is genuinely wider than tall — `folder` 18.5 × 15,
+`arrow.triangle.2.circlepath` 20.5 × 16.5 at the toolbar's scale. `Icon.svelte`
+draws its `folder` 11.4 × 9.4 units and its sync loop as a 10.3-unit circle,
+so at any one size the wide symbols come out narrower than the native's while
+the round ones match. The stroke follows: a glyph filling less of its box needs
+a bigger `size` for the same ink, and `Icon` scales the stroke with `size`, so
+the toolbar's strokes run about 1.6 px where the native's are about 1.35. The
+fix is a normalisation pass over the registry — draw each glyph to SF's
+proportions with a shared cap band, which the documented template puts at
+0.705 of the point size — after which the toolbar size drops back toward the
+text's and the strokes fall in line. Not this pass: it touches all 33 glyphs
+and is worth its own before-and-after.
+
+**P-32 — the two Tauri repo lists are two copies, and the native's are one
+view.** `STYLE.md`'s *Repo pickers* says "anything shown in both is shared
+code" and names the empty state, the row labels and the footer — and those
+are. The *rows* are not: `RepoDropdown.svelte:376-479` and
+`RepoPicker.svelte:280-319` each draw their own, at different heights, with
+indicators in one and not the other, a current marker in one and not the
+other, and two copies of the sort, the core-ranked filter and the keyboard
+cursor above them. `RepoPickerList.swift` is one view for both native surfaces,
+parameterised by `activePath` and `RepoPickerHeight`. Every row in P-29 has to
+be applied twice until that is true here too. **Deferred, deliberately**: it is
+a structural change with its own behaviour to verify (the Welcome list gaining
+the indicators the native already shows there), and it does not belong in a
+paint pass. This pass hardens the Welcome copy against P-28 and gives it the
+same cursor so the two do not drift further; extracting `RepoList.svelte` is
+the next structural item.
+
+**Metrics nothing publishes.** As with `ContentUnavailableView` in P-25, Apple
+documents neither `NSPopover`'s geometry nor the toolbar's symbol
+configuration — a research pass over the current HIG, the AppKit and SwiftUI
+references and the WWDC sessions found the arrow's *existence* documented and
+not one of its numbers, and Apple stopped publishing AppKit release notes after
+macOS 14. So the numbers were read off this machine (macOS 26.6) and are kept
+in one place each:
+
+- **The popover.** A live `NSPopover` reports `anchorSize` **27.5 × 13**, its
+  window centred on the anchor to the point, the arrow's tip one point off the
+  anchor's edge, and the content inset 13 on every side — the arrow region,
+  as `hasFullSizeContent`'s documentation says. The body's corner radius is
+  drawn by the `NSGlassView` inside the frame and exposes no value, so the
+  popover keeps `STYLE.md`'s 10. All of it lives in `MainLayout.svelte`'s
+  anchoring constants; the arrow is a turned square, so its base is 26 for a
+  height of 13. One simplification, stated: the web popover draws the arrow
+  and nothing else of that 13-point inset — on the other three sides it is
+  the native's shadow margin, which `box-shadow` supplies without a box.
+- **The toolbar symbols.** The ink of each symbol at 13 pt / `.large` is the
+  table in P-31, and the size chosen from it is one constant in
+  `Header.svelte`. That the toolbar uses the large scale is inferred from
+  three agreeing observations — the native chip's glyph in the side-by-side
+  is about 1.6 × the Tauri 12 px one, a published 2× measurement of real
+  toolbars found ~20 pt symbol boxes, and 13 pt / `.large` is the one
+  configuration that produces both — not from any statement of Apple's.
+- **The row.** The one documented number: the macOS type table gives the 13 pt
+  body a **16 pt line height**, so the row is 5 + 16 + 5 = 26. One caveat
+  recorded rather than acted on: SwiftUI lays text out at the font's natural
+  line height, which a forum measurement puts about 1.5 pt under the table's
+  figure at 17 pt, so the native row may render a point or so under 26.

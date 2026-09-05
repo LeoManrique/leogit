@@ -164,7 +164,7 @@ final class DiffStore {
     private(set) var phase: Phase = .idle
 
     /// How long a load may run before the pane says so — the Tauri client's
-    /// `SLOW_DIFF_THRESHOLD_MS` (150), itself ported from GitHub Desktop.
+    /// `SLOW_DIFF_THRESHOLD_MS` (150), so both clients call the same load slow.
     /// Crossing it dims the diff on screen; the payload is kept either way, so
     /// a slow load that lands unchanged is absorbed by the equality skip and
     /// the user keeps their scroll position.

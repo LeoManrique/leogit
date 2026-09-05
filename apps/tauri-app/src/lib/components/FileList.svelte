@@ -66,8 +66,7 @@
   // Render only the rows currently in view (plus a small buffer) instead of
   // pushing every changed file into the DOM. Without this, switching back to
   // the Changes tab with a 1000+ file changeset blocks the main thread for
-  // hundreds of ms while the browser lays out every row. Mirrors the
-  // approach GitHub Desktop takes via react-virtualized's Grid.
+  // hundreds of ms while the browser lays out every row.
   //
   // ROW_HEIGHT is the row's pitch *and* its CSS height, and the two may never
   // disagree — a stylesheet row taller or shorter than the step this file
@@ -159,9 +158,8 @@
   }
 
   /**
-   * Move keyboard focus + activation to another row by index. Mirrors GH
-   * Desktop's `List.moveSelection` / `scrollRowToVisible`: focus the new row
-   * (so the next arrow press continues navigating) and nudge it into view.
+   * Move keyboard focus + activation to another row by index: focus the new
+   * row (so the next arrow press continues navigating) and nudge it into view.
    *
    * With virtualization the target row may not be in the DOM yet, so we
    * first compute and apply the scrollTop that would bring it into view,
@@ -598,16 +596,25 @@
     width: 100%;
   }
 
-  /* `.tertiary`, which is `--text-muted` — `EmptyListPlaceholder.swift` draws
-     this line with `.foregroundStyle(.tertiary)`. One step below the directory
-     prefix beside it, not two: the line is the only thing in the pane, so it
-     has to be readable as well as quiet. */
+  /* `EmptyListPlaceholder.swift` draws this line with
+     `.foregroundStyle(.tertiary)`, and this client's stand-in for `.tertiary`
+     is `--text-faint`: `STYLE.md`'s colour table names it for exactly this
+     ("Empty-state hints"), and `CommitList.svelte` — the other caller of the
+     same native placeholder — already uses it. `--text-muted` is the register
+     for secondary *information* that is still being read (authors, dates,
+     paths), which this line is not; it is a note saying there is nothing to
+     read. */
   .empty-state {
     display: flex;
     align-items: center;
     justify-content: center;
-    flex: 1;
-    color: var(--text-muted);
+    /* `height: 100%`, not `flex: 1`: the viewport this sits in is a block
+       scroller, so a flex property here is inert and the box would be one
+       line tall at the top of the list — which is where this line sat while
+       `CommitList`'s, written this way, centred. The native placeholder
+       claims the whole slot (`EmptyListPlaceholder.swift:15`). */
+    height: 100%;
+    color: var(--text-faint);
     font-size: 13px;
   }
 

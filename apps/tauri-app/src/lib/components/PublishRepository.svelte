@@ -55,7 +55,7 @@
 >
   <div class="modal" role="dialog" aria-modal="true" tabindex="-1" use:dismissOnEscape={escape}>
     <div class="modal-header">
-      <h2>Publish repository</h2>
+      <h2>Publish Repository</h2>
       <button class="close-btn" onclick={onCancel} disabled={isPublishing} aria-label="Close">
         <Icon name="xmark" size={14} weight="medium" />
       </button>
@@ -103,7 +103,7 @@
     <div class="modal-footer">
       <button class="btn-secondary" onclick={onCancel} disabled={isPublishing}>Cancel</button>
       <button class="btn-primary" onclick={submit} disabled={!canPublish}>
-        {isPublishing ? 'Publishing…' : 'Publish repository'}
+        {isPublishing ? 'Publishing…' : 'Publish Repository'}
       </button>
     </div>
   </div>

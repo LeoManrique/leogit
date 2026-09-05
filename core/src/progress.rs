@@ -1,12 +1,12 @@
 //! Parser for the progress lines git writes to stderr during network work.
 //!
-//! Modeled on GitHub Desktop's step-weighted approach: each operation
-//! ([`GitOp`]) walks a fixed sequence of weighted steps ("Compressing
-//! objects", "Writing objects", …). A stderr line that reports progress for
-//! one of those steps maps onto an aggregate 0.0..=1.0 fraction for the whole
-//! operation; every other line is "context" — it leaves the bar where it is
-//! but still carries text worth showing. The fraction never decreases over
-//! the parser's lifetime, so the bar can only move forward.
+//! Progress is step-weighted: each operation ([`GitOp`]) walks a fixed
+//! sequence of weighted steps ("Compressing objects", "Writing objects", …).
+//! A stderr line that reports progress for one of those steps maps onto an
+//! aggregate 0.0..=1.0 fraction for the whole operation; every other line is
+//! "context" — it leaves the bar where it is but still carries text worth
+//! showing. The fraction never decreases over the parser's lifetime, so the
+//! bar can only move forward.
 //!
 //! The caller is expected to split git's stderr on `\r` and `\n` and feed the
 //! resulting lines to [`GitProgressParser::parse_line`] one at a time.

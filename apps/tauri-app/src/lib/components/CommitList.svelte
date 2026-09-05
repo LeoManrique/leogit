@@ -10,7 +10,7 @@
     unpushedShas?: Set<string>
     /**
      * Whether the backend was able to resolve an upstream ref (explicit or
-     * inferred) for the current branch. Used to gate "Undo last commit…" —
+     * inferred) for the current branch. Used to gate "Undo Last Commit" —
      * when an upstream is known, we only allow undo on unpushed commits;
      * when no upstream is resolvable (brand new repo, no remote), we can't
      * prove a commit is pushed, so we allow undo unconditionally on the top.
@@ -101,7 +101,7 @@
       ? []
       : [
           {
-            label: 'Amend last commit…',
+            label: 'Amend Last Commit…',
             // Only HEAD can be amended without rewriting earlier history.
             enabled: isHeadCommit && onAmendCommit !== undefined,
             action: () => {
@@ -113,7 +113,7 @@
             // composer and the working tree don't now hold. The ellipsis its
             // neighbours carry is a promise of a dialog, and this one never
             // had a dialog to open.
-            label: 'Undo last commit',
+            label: 'Undo Last Commit',
             // HEAD only, and only when we believe it's still local — either we
             // can prove it's unpushed, or we couldn't resolve an upstream at
             // all (so we can't prove it's pushed either).
@@ -128,9 +128,9 @@
           {
             // The other half of the same rule: this one *does* confirm first,
             // so it says so.
-            label: 'Checkout commit…',
+            label: 'Check Out Commit…',
             // Any commit except the current HEAD — checking out HEAD is a
-            // no-op. Lands the user in a detached HEAD, matching GitHub Desktop.
+            // no-op. Lands the user in a detached HEAD.
             enabled: isPastCommit && onCheckoutCommit !== undefined,
             action: () => {
               if (contextMenu) onCheckoutCommit?.(contextMenu.commit)
@@ -251,9 +251,9 @@
     return () => clearInterval(id)
   })
 
-  // Relative timestamp for every commit, regardless of age. Matches GitHub
-  // Desktop's tiering so old commits read as "5 months ago" instead of an
-  // absolute date the user has to mentally diff against today.
+  // Relative timestamp for every commit, regardless of age. Tiered so old
+  // commits read as "5 months ago" instead of an absolute date the user has to
+  // mentally diff against today.
   function formatDate(dateStr: string): string {
     const date = new Date(dateStr)
     const diffMs = now - date.getTime()
@@ -394,6 +394,7 @@
         <div
           class="commit-row"
           class:selected={commit.sha === selectedSha}
+          class:striped={rowIndex % 2 === 1}
           data-commit-row-index={rowIndex}
           title={formatDateAbsolute(commit.author_date)}
           onclick={() => onSelect(commit)}
@@ -509,6 +510,28 @@
     transition: background 100ms ease;
     user-select: none;
     overflow: hidden;
+  }
+
+  /*
+    Alternating row backgrounds, as the native History list has
+    (`HistorySidebar.swift:109` — the same `.alternatingRowBackgrounds()` the
+    changed-file list calls, and the reason both Tauri lists stripe or neither
+    does). Row 0 is the plain one.
+
+    Keyed on the commit's index in the model, never on DOM position: this list
+    is virtualized and its rows are translated as a block, so `:nth-child` sees
+    only the slice near the viewport and would restripe the whole list on every
+    scroll. `FileList.svelte` carries the same rule for the same reason, and
+    the alpha is deliberately about half `--surface-hover` — AppKit's own ~4.7 %
+    would land close enough to the hover fill to cost a state these lists have
+    and the native ones do not.
+
+    Declared before the three state fills: all four weigh (0,2,0), so source
+    order is the whole of the cascade here and a stripe written later would
+    paint over the row the pointer is on.
+  */
+  .commit-row.striped {
+    background: var(--surface-stripe);
   }
 
   .commit-row:hover {

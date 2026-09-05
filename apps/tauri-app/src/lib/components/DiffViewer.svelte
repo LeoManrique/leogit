@@ -9,6 +9,7 @@
   } from '$lib/api/commands'
   import { highlightApi } from '$lib/api/commands'
   import Icon from './Icon.svelte'
+  import PaneEmptyState from './PaneEmptyState.svelte'
 
   interface Props {
     diff: ParsedDiff | null
@@ -300,9 +301,17 @@
     </div>
 
     {#if fileDiff.is_binary}
-      <div class="binary-state">
-        <p>This binary file has changed.</p>
-      </div>
+      <!--
+        Shown in place of hunk rows when the diff is for a binary file. Git
+        can't produce a line-by-line diff for binaries, so we render a labelled
+        stand-in while still keeping the file header above it, so the user can
+        see the path.
+      -->
+      <PaneEmptyState
+        icon="doc-zipper"
+        title="Binary File"
+        detail="This change has no line-by-line diff."
+      />
     {:else}
       <!--
         One scroll container for both arrangements, never one per branch:
@@ -402,9 +411,12 @@
     {/if}
   </div>
 {:else}
-  <div class="empty-state">
-    <p>No diff to display</p>
-  </div>
+  <!-- Not reachable today: both consumers gate on `hasRenderableDiff()` and
+       pass a non-null diff, and `ParsedDiff.file_diff` is not optional. Kept
+       as the fallback it was, but drawn by the shared component rather than by
+       a fourteenth hand-rolled variant — a dead branch styling itself is
+       exactly how the four that this component replaced came to disagree. -->
+  <PaneEmptyState icon="doc" title="No Diff to Display" />
 {/if}
 
 <style>
@@ -419,34 +431,6 @@
     font-variant-numeric: tabular-nums;
     tab-size: var(--tab-size, 4);
     -moz-tab-size: var(--tab-size, 4);
-  }
-
-  /* A pane-level empty state, so it takes the pane register (15px) rather than
-     the 13px body size a list's empty line uses. Sans, not the viewer's mono:
-     it is prose about the pane, not diff content. */
-  .empty-state {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex: 1;
-    color: var(--text-faint);
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    font-size: 15px;
-  }
-
-  /*
-    Shown in place of hunk rows when the diff is for a binary file. Git can't
-    produce a line-by-line diff for binaries, so we render a labelled stand-in
-    while still keeping the file-header above so the user can see the path.
-  */
-  .binary-state {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex: 1;
-    color: var(--text-faint);
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    font-size: 13px;
   }
 
   /* Canvas, not chrome: the native header fills nothing and separates itself

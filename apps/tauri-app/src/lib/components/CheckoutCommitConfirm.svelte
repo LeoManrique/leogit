@@ -35,7 +35,7 @@
     use:dismissOnEscape={escape}
   >
     <div class="modal-header">
-      <h2>Checkout commit?</h2>
+      <h2>Check Out This Commit?</h2>
     </div>
     <div class="modal-body">
       <p class="target">
@@ -53,7 +53,7 @@
     <div class="modal-footer">
       <button class="btn-secondary" onclick={onCancel} disabled={isCheckingOut}>Cancel</button>
       <button class="btn-primary" onclick={onConfirm} disabled={isCheckingOut}>
-        {isCheckingOut ? 'Checking out…' : 'Checkout'}
+        {isCheckingOut ? 'Checking out…' : 'Check Out'}
       </button>
     </div>
   </div>

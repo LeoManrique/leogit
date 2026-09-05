@@ -55,7 +55,7 @@
     <div class="modal-footer">
       <button class="btn-secondary" onclick={onCancel} disabled={isInitializing}>Cancel</button>
       <button class="btn-primary" onclick={onConfirm} disabled={isInitializing} use:autofocus>
-        {isInitializing ? 'Creating…' : 'Create repository'}
+        {isInitializing ? 'Creating…' : 'Create Repository'}
       </button>
     </div>
   </div>

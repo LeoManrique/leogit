@@ -20,7 +20,7 @@ struct PublishSheet: View {
 
     @State private var name: String
     @State private var repoDescription = ""
-    /// Private by default, matching the Tauri dialog (and GitHub Desktop).
+    /// Private by default, matching the Tauri dialog.
     @State private var isPrivate = true
     @State private var errorMessage: String?
     @FocusState private var isNameFocused: Bool

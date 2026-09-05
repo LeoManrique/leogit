@@ -204,7 +204,7 @@
     <input
       type="text"
       class="filter-input"
-      placeholder="Filter repositories…"
+      placeholder="Filter repositories"
       bind:value={filter}
       onkeydown={handleKeyDown}
       use:autofocus
@@ -231,8 +231,8 @@
         {@const sync = $repoSync.get(repo)}
         <button
           class="repo-item"
-          class:current={isCurrent}
           class:active={i === activeIndex}
+          aria-current={isCurrent ? 'true' : undefined}
           use:scrollIntoViewWhenActive={i === activeIndex}
           onclick={() => handleSelect(repo)}
           onmouseenter={(e) => showTooltip(e, repo)}
@@ -243,6 +243,13 @@
           aria-disabled={switchBlockedReason !== undefined}
           title={switchBlockedReason}
         >
+          <!-- The native row keeps a checkmark column on every row and shows
+               it on the open one (`RepoPickerList.swift:404-407`), so the
+               names line up whether or not a row is current. Hidden by
+               opacity, not removed, for the same reason. -->
+          <span class="check" class:visible={isCurrent} aria-hidden="true">
+            <Icon name="checkmark" size={10} weight="semibold" />
+          </span>
           <span class="repo-name">
             {#if prefix}<span class="repo-owner">{prefix}</span>{/if}{label}
           </span>
@@ -255,13 +262,13 @@
                the header's Pull/Push glyphs. Shown only when non-zero. -->
           {#if sync && sync.behind > 0}
             <span class="sync-badge behind" title={`${sync.behind} commit${sync.behind === 1 ? '' : 's'} to pull`}>
-              <Icon name="arrow-down" size={11} weight="medium" />
+              <Icon name="arrow-down" size={10} />
               {sync.behind}
             </span>
           {/if}
           {#if sync && sync.ahead > 0}
             <span class="sync-badge ahead" title={`${sync.ahead} commit${sync.ahead === 1 ? '' : 's'} to push`}>
-              <Icon name="arrow-up" size={11} weight="medium" />
+              <Icon name="arrow-up" size={10} />
               {sync.ahead}
             </span>
           {/if}
@@ -297,8 +304,12 @@
     background: var(--bg-elevated);
     border: 1px solid var(--border-inactive);
     border-radius: 10px;
-    width: 340px;
-    max-height: 420px;
+    /* The frame that hangs this under the chip owns the width — it needs the
+       number to centre and clamp the box — and hands down how much room the
+       chip leaves below it. 440 is the native popover's declared height
+       (`RepoSwitcher.swift:68`). */
+    width: 100%;
+    max-height: min(440px, var(--popover-max-height, 440px));
     display: flex;
     flex-direction: column;
     box-shadow: var(--shadow-popover);
@@ -378,7 +389,15 @@
     align-items: center;
     gap: 8px;
     padding: 0 10px;
-    height: 24px;
+    /* `padding(.vertical, 5)` around the 13pt line (`RepoPickerList.swift:421`):
+       5 + 16 + 5. */
+    height: 26px;
+    /* A fixed-height item in a scrolling flex column shrinks toward its
+       *content* height before the column overflows — the automatic minimum is
+       the smaller of the specified and the content size — so without this,
+       every row collapsed to its text line as soon as the list had more rows
+       than room, and forty repositories rendered at sixteen pixels each. */
+    flex-shrink: 0;
     background: transparent;
     border: none;
     border-radius: 6px;
@@ -387,31 +406,46 @@
     transition: background 100ms ease;
   }
 
+  /* Hover and the keyboard cursor are one colour at two alphas, as the native
+     row draws them (`.selection` at 0.15 and 0.35): the cursor reads as a
+     selection, hover as the lighter wash, and the two stay tellable apart
+     when the pointer rests on a row the cursor is not on. */
   .repo-item:hover {
-    background: var(--surface-hover);
+    background: var(--selection-hover);
   }
 
-  .repo-item.current {
-    background: var(--bg-tertiary);
-  }
-
-  /* Keyboard cursor (arrow-key highlight). A ring rather than a fill so it
-     composes with the .current row's background and reads as "focused". */
   .repo-item.active {
-    box-shadow: inset 0 0 0 1.5px var(--border-active);
+    background: var(--selection-cursor);
   }
 
   /* Held back by a transfer. `aria-disabled` rather than the `disabled`
      attribute, deliberately: a disabled button fires no pointer events, so
      the title explaining *why* the row can't be picked would never appear —
-     which is the whole reason the row is dimmed rather than hidden. */
+     which is the whole reason the row is dimmed rather than hidden. Neither
+     wash is drawn on it: the native returns `.clear` for a blocked row
+     whatever the cursor is doing. */
   .repo-item.blocked {
     cursor: default;
     opacity: 0.55;
   }
 
-  .repo-item.blocked:hover {
+  .repo-item.blocked:hover,
+  .repo-item.blocked.active {
     background: transparent;
+  }
+
+  /* The current-item column: on every row so the names line up, and the one
+     marker the open row gets — never a fill or a weight on top of it. */
+  .check {
+    flex: 0 0 14px;
+    display: inline-flex;
+    justify-content: center;
+    color: var(--text-primary);
+    opacity: 0;
+  }
+
+  .check.visible {
+    opacity: 1;
   }
 
   .repo-name {
@@ -421,10 +455,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .repo-item.current .repo-name {
-    font-weight: 500;
   }
 
   /*
@@ -438,44 +468,36 @@
 
   /*
     Per-repo pull/push badges. Behind (pull) and ahead (push) reuse the header
-    Pull/Push arrow glyphs so the whole app speaks one visual language. Kept
-    muted and compact so a scan of the list reads as names first, counts second;
-    they brighten with the row on hover.
+    Pull/Push arrow glyphs so the whole app speaks one visual language. The
+    register is the native's `.caption.monospacedDigit()` in `.secondary`
+    (`RepoPickerList.swift:480`): 10px, regular, and the same on hover — a
+    scan of the list reads names first, counts second, without the counts
+    changing as the pointer passes.
   */
   .sync-badge {
     flex: 0 0 auto;
     display: inline-flex;
     align-items: center;
     gap: 2px;
-    font-size: 11px;
-    font-weight: 600;
+    font-size: 10px;
     font-variant-numeric: tabular-nums;
-    color: var(--text-muted);
-    line-height: 1;
-  }
-
-  .repo-item:hover .sync-badge,
-  .repo-item.current .sync-badge {
     color: var(--text-secondary);
+    line-height: 1;
   }
 
   /*
     Dirty dot: uncommitted changes in that repo's working tree — the picker's
-    miniature of the Changes tab, shown iff the tab would list files. Same
-    muted-then-brighten treatment as the sync badges so a scan still reads
-    names first, indicators second.
+    miniature of the Changes tab, shown iff the tab would list files. The
+    accent, as the native's `Circle().fill(.tint)`: it is the one indicator in
+    the row that means "something of yours is waiting here", and grey read as
+    decoration.
   */
   .dirty-dot {
     flex: 0 0 auto;
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: var(--text-muted);
-  }
-
-  .repo-item:hover .dirty-dot,
-  .repo-item.current .dirty-dot {
-    background: var(--text-secondary);
+    background: var(--border-active);
   }
 
 </style>

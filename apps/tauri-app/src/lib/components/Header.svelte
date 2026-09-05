@@ -32,6 +32,16 @@
     onOpenRepos?: () => void
     /** Optional: only reachable via the branch chip, hidden with no repo. */
     onOpenBranches?: () => void
+    /**
+     * The two chips' elements, bound out so the owner can hang each picker
+     * from the control that opens it. The owner measures them at open time
+     * rather than being handed a rect from the click, because ⌘B opens the
+     * branch menu with no click to measure from — one anchoring path, not
+     * two. Unset while the chips are hidden (no repository open): `undefined`
+     * before they first mount, `null` after `bind:this` tears them down.
+     */
+    repoChip?: HTMLElement | null
+    branchChip?: HTMLElement | null
     onOpenSettings: () => void
     onOpenHelp: () => void
     /**
@@ -55,10 +65,25 @@
   let {
     onOpenRepos,
     onOpenBranches,
+    repoChip = $bindable(),
+    branchChip = $bindable(),
     onOpenSettings,
     onOpenHelp,
     onTransferFinished,
   }: Props = $props()
+
+  /**
+   * Every glyph in this bar. A macOS toolbar renders a `Label`'s symbol at the
+   * *large* symbol scale of the 13pt body text, not at the text's own size —
+   * measured on macOS 26.6, the toolbar symbols ink at 16.5–18.5px (`folder`
+   * 18.5 × 15, `arrow.triangle.branch` 14.5 × 15.5, `gearshape` 17.5,
+   * `questionmark.circle` 16.5). The registry's glyphs ink at roughly twelve
+   * of their sixteen grid units, so 21 puts each within about two pixels of
+   * its counterpart; the two wide symbols (the folder, the sync loop) come out
+   * narrower than the native's, which are wider than they are tall where ours
+   * are square — a registry matter (reskin plan, P-33), not a size one.
+   */
+  const TOOLBAR_GLYPH = 21
 
   /**
    * Whether a repository is open. The header also renders in the pre-main
@@ -133,7 +158,7 @@
   const ahead = $derived($repoState.status.ahead)
   const behind = $derived($repoState.status.behind)
   const hasUpstream = $derived($repoState.status.hasUpstream)
-  // Detached HEAD (after "Checkout commit"): the chip shows the short SHA instead
+  // Detached HEAD (after "Check Out Commit…"): the chip shows the short SHA instead
   // of a branch name. The user returns to a branch via the branch picker.
   const detached = $derived($repoState.status.detached)
   const detachedShort = $derived($repoState.status.headSha.slice(0, 7))
@@ -166,10 +191,10 @@
   const isActionable = $derived(proposal !== 'Loading' && proposal !== 'Detached')
 
   /**
-   * Which states earn a chevron — GitHub Desktop's rule and native's: only
-   * where the menu offers something the face doesn't. Publishing a repository
-   * has no secondary action, and in the Fetch state the menu's one item *is*
-   * the face.
+   * Which states earn a chevron, as in the native client: only where the menu
+   * offers something the face doesn't. Publishing a repository has no
+   * secondary action, and in the Fetch state the menu's one item *is* the
+   * face.
    */
   const hasMenu = $derived(
     proposal === 'PublishBranch' || proposal === 'Pull' || proposal === 'Push',
@@ -178,14 +203,14 @@
   // Force-push is only meaningful once the branch has diverged from its upstream
   // (commits on both sides). A plain ahead-only branch fast-forwards, so offering
   // it there is noise — and by the ladder this can only be true in the Pull
-  // state, which is exactly where GitHub Desktop puts the item.
+  // state, so that is the only menu carrying the item.
   const hasDiverged = $derived(hasUpstream && ahead > 0 && behind > 0)
 
   const PROPOSAL_LABEL: Record<SyncProposal, string> = {
     Loading: 'Fetch',
     Detached: 'Push',
     PublishRepository: 'Publish',
-    PublishBranch: 'Publish branch',
+    PublishBranch: 'Publish Branch',
     Pull: 'Pull',
     Push: 'Push',
     Fetch: 'Fetch',
@@ -280,7 +305,7 @@
       if (!remote) throw new Error('This repository has no remote to push to.')
       // Derived at click time from real tracking configuration, never
       // synthesised: this is what makes a first push `--set-upstream`, and it
-      // is why Publish branch and Push are one handler.
+      // is why Publish Branch and Push are one handler.
       const setUpstream = !$repoState.status.hasUpstream
       await gitApi.push(repoPath, remote, branch, setUpstream, false)
       await onTransferFinished?.()
@@ -412,12 +437,12 @@
     const cmd = info.install_command
     return [
       cmd
-        ? { label: 'Copy update command', action: () => void copyInstallCommand(cmd) }
+        ? { label: 'Copy Update Command', action: () => void copyInstallCommand(cmd) }
         : { label: 'Download from GitHub', action: () => openReleasePage(info.url) },
       // With a command the release page is still worth a link (notes, assets);
       // without one it IS the download item above, so don't repeat it.
-      ...(cmd ? [{ label: 'View release on GitHub', action: () => openReleasePage(info.url) }] : []),
-      { label: 'Dismiss for this session', action: () => updateDismissed.set(true) },
+      ...(cmd ? [{ label: 'View Release on GitHub', action: () => openReleasePage(info.url) }] : []),
+      { label: 'Dismiss for This Session', action: () => updateDismissed.set(true) },
     ]
   })
 
@@ -478,7 +503,7 @@
     ...(hasDiverged
       ? [
           {
-            label: 'Force push (with lease)…',
+            label: 'Force Push (with Lease)…',
             action: () => {
               forcePushError = undefined
               showForcePushConfirm = true
@@ -501,6 +526,7 @@
          doing. -->
     <button
       class="chip-button"
+      bind:this={repoChip}
       onclick={() => { hideChipTooltip(); onOpenRepos?.() }}
       onmouseenter={showChipTooltip}
       onmouseleave={hideChipTooltip}
@@ -508,11 +534,12 @@
       onblur={hideChipTooltip}
       aria-label="Switch repository"
     >
-      <Icon name="folder" class="chip-icon" />
+      <Icon name="folder" size={TOOLBAR_GLYPH} class="chip-icon" />
       <span class="chip-label">{repoName || '…'}</span>
     </button>
     <button
       class="chip-button"
+      bind:this={branchChip}
       onclick={onOpenBranches}
       title={detached ? 'Detached HEAD — pick a branch to return to' : 'Switch branch (Ctrl+B)'}
     >
@@ -523,7 +550,7 @@
         detached HEAD look like a different control rather than the same one
         saying something else.
       -->
-      <Icon name="branch" class="chip-icon" />
+      <Icon name="branch" size={TOOLBAR_GLYPH} class="chip-icon" />
       <!--
         An unfinished merge reads as a suffix on the branch, not as a badge
         somewhere else in the bar — `BranchMenu.swift:170` appends the same
@@ -599,17 +626,17 @@
                `.fetch` (`SyncControls.swift:154`): a two-arrow sync loop, which
                is a different statement from the one-arrow refresh the Clone
                sheet uses. -->
-          <Icon name="arrow-2-circlepath" class="icon" spin />
+          <Icon name="arrow-2-circlepath" size={TOOLBAR_GLYPH} class="icon" spin />
         {:else if proposal === 'PublishRepository'}
-          <Icon name="icloud-arrow-up" class="icon" />
+          <Icon name="icloud-arrow-up" size={TOOLBAR_GLYPH} class="icon" />
         {:else if proposal === 'PublishBranch'}
-          <Icon name="arrow-up-circle" class="icon" />
+          <Icon name="arrow-up-circle" size={TOOLBAR_GLYPH} class="icon" />
         {:else if proposal === 'Pull'}
-          <Icon name="arrow-down" class="icon" />
+          <Icon name="arrow-down" size={TOOLBAR_GLYPH} class="icon" />
         {:else if proposal === 'Push' || proposal === 'Detached'}
-          <Icon name="arrow-up" class="icon" />
+          <Icon name="arrow-up" size={TOOLBAR_GLYPH} class="icon" />
         {:else}
-          <Icon name="arrow-2-circlepath" class="icon" />
+          <Icon name="arrow-2-circlepath" size={TOOLBAR_GLYPH} class="icon" />
         {/if}
         <span>{actionLabel}</span>
         <!-- Both pending counts ride the one button, GitHub-Desktop style: with
@@ -654,10 +681,10 @@
       the rest rather than matched to a symbol that does not exist.
     -->
     <button class="icon-button" onclick={onOpenSettings} title="Settings (Ctrl+,)" aria-label="Settings">
-      <Icon name="gear" size={14} class="icon" />
+      <Icon name="gear" size={TOOLBAR_GLYPH} class="icon" />
     </button>
     <button class="icon-button" onclick={onOpenHelp} title="Help (?)" aria-label="Help">
-      <Icon name="question-circle" size={14} class="icon" />
+      <Icon name="question-circle" size={TOOLBAR_GLYPH} class="icon" />
     </button>
   </div>
 </header>

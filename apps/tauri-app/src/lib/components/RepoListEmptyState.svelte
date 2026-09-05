@@ -48,7 +48,7 @@
          "None matched" is what a user sees when the repo they are looking for
          lives somewhere discovery was never pointed at — which is the same
          problem, reached by typing its name. -->
-    <button class="action" onclick={onOpenSettings}>Choose folders to search</button>
+    <button class="action" onclick={onOpenSettings}>Choose Folders to Search</button>
   {/if}
 </div>
 

@@ -56,7 +56,8 @@ pub fn load_ai_config() -> Result<AiProviderConfig, String> {
     Ok(provider_config(&super::config::load_config()?))
 }
 
-// Limits per Go reference
+// Upper bounds on the diff handed to a provider, so an enormous change is
+// refused here at once instead of timing out inside the provider's request.
 const CLAUDE_MAX_DIFF: usize = 20_971_520; // 20MB
 const OLLAMA_MAX_DIFF: usize = 52_428_800; // 50MB
 // Cap the claude CLI's internal request retries. By default a transient

@@ -22,10 +22,10 @@
   let { source, target, commitCount, isMerging, onMerge, onSquashMerge, onCancel }: Props = $props()
 
   /*
-    Nothing to bring in. GitHub Desktop says so and disables its primary rather
-    than offering a merge that would be a no-op; the native client used to
-    print "Brings in 0 commits." beside a live Merge button, which invites a
-    click that does nothing and then reports success.
+    Nothing to bring in. Say so and disable the primary rather than offering a
+    merge that would be a no-op; the native client used to print "Brings in 0
+    commits." beside a live Merge button, which invites a click that does
+    nothing and then reports success.
   */
   const upToDate = $derived(commitCount === 0)
 

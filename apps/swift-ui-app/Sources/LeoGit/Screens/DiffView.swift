@@ -316,11 +316,11 @@ struct DiffView: View {
     }
 
     /// Unified or split, in the diff's own header rather than in Settings:
-    /// GitHub Desktop treats the arrangement as a property of the diff you are
-    /// reading, and a reader who wants the other one wants it *here*, not
-    /// after a detour through a settings window. It still persists — into the
-    /// same shared `side_by_side_diff` both clients read — so the choice
-    /// outlives the file, the repository and the app.
+    /// the arrangement is a property of the diff you are reading, and a
+    /// reader who wants the other one wants it *here*, not after a detour
+    /// through a settings window. It still persists — into the same shared
+    /// `side_by_side_diff` both clients read — so the choice outlives the
+    /// file, the repository and the app.
     private var layoutPicker: some View {
         Picker("Diff layout", selection: layoutBinding) {
             Image(systemName: "rectangle.grid.1x2")
@@ -414,9 +414,8 @@ struct DiffView: View {
         }
     }
 
-    /// The change itself. Long lines always wrap — the GitHub Desktop model,
-    /// shared by both clients — so there is vertical scrolling only, in both
-    /// arrangements.
+    /// The change itself. Long lines always wrap — shared by both clients —
+    /// so there is vertical scrolling only, in both arrangements.
     ///
     /// The two arrangements are branches *inside* one `ScrollView`, never two
     /// scroll views: swapping the whole pane would destroy the scroller and

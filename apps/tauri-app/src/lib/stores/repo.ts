@@ -23,7 +23,7 @@ export interface RepoStatus {
   hasRemote: boolean
   /** SHAs of commits the user still needs to push, used to mark History rows. */
   unpushedShas: Set<string>
-  /** True when HEAD is detached (on a commit, not a branch), e.g. after "Checkout commit". */
+  /** True when HEAD is detached (on a commit, not a branch), e.g. after "Check Out Commit…". */
   detached: boolean
   /** Full SHA of HEAD; empty only on an unborn branch. Labels the detached-HEAD state. */
   headSha: string
@@ -90,7 +90,7 @@ export interface RepoState {
    * Flips true once a diff fetch has been pending for ≥150 ms. The viewer keeps
    * showing the previous diff while `isDiffLoading && !isDiffLoadingSlow`, so
    * sub-150 ms fetches (the common case) swap in place with no "Loading…"
-   * flash. Mirrors GH Desktop's SeamlessDiffSwitcher.SlowDiffLoadingThreshold.
+   * flash — 150 ms being the point below which a swap still reads as instant.
    */
   isDiffLoadingSlow: boolean
   activeTab: ActiveTab

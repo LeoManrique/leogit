@@ -1,16 +1,15 @@
 import SwiftUI
 
-/// The toolbar's sync control — one adaptive split button, the GitHub
-/// Desktop model running on LeoGit's own workflow machinery.
+/// The toolbar's sync control — one adaptive split button running on
+/// LeoGit's own workflow machinery.
 ///
 /// A strict precedence ladder picks the single action that makes sense right
-/// now (GitHub Desktop's order, adapted): detached HEAD → publish repository
-/// (no remote) → publish branch (no upstream) → pull (behind) → push (ahead)
-/// → fetch (in sync). Pull outranks push, so a diverged branch proposes the
-/// step that must happen first — the ahead count stays visible in the toolbar
-/// counts beside this control meanwhile. Force push with lease is menu-only,
-/// offered only
-/// while diverged, and behind a destructive confirmation. Fetch is the
+/// now: detached HEAD → publish repository (no remote) → publish branch (no
+/// upstream) → pull (behind) → push (ahead) → fetch (in sync). Pull outranks
+/// push, so a diverged branch proposes the step that must happen first — the
+/// ahead count stays visible in the toolbar counts beside this control
+/// meanwhile. Force push with lease is menu-only, offered only while
+/// diverged, and behind a destructive confirmation. Fetch is the
 /// primary action once nothing needs pulling or pushing — the manual "check
 /// the remote" — and a menu item in every split state, which is what let the
 /// separate toolbar Refresh button go (⌘R in the View menu still forces the
@@ -42,8 +41,8 @@ struct SyncControls: View {
 
     /// Force push is offered only for a truly diverged branch: real upstream
     /// tracking plus commits on both sides. By the precedence ladder this can
-    /// only be true in the `.pull` state, so the menu item appears exactly
-    /// where GitHub Desktop puts it.
+    /// only be true in the `.pull` state, which is where the menu item
+    /// appears.
     private var hasDiverged: Bool { hasUpstream && ahead > 0 && behind > 0 }
 
     private var isBusy: Bool { store.activeOperation != nil }
@@ -98,8 +97,7 @@ struct SyncControls: View {
         }
     }
 
-    /// The states with no meaningful secondary action — GitHub Desktop's
-    /// no-dropdown states.
+    /// The states with no meaningful secondary action, so no dropdown.
     private func plainButton(action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Label(title, systemImage: icon)

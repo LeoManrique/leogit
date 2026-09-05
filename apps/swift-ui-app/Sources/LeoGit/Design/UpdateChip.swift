@@ -27,17 +27,17 @@ struct UpdateChip: View {
     var body: some View {
         Menu {
             if let command = info.installCommand {
-                Button("Copy update command") { copy(command) }
+                Button("Copy Update Command") { copy(command) }
                 // With a command the release page is still worth a link —
                 // notes, assets. Without one it *is* the download, below.
-                Button("View release on GitHub") { openReleasePage() }
+                Button("View Release on GitHub") { openReleasePage() }
             } else {
                 Button("Download from GitHub") { openReleasePage() }
             }
 
             Divider()
 
-            Button("Dismiss for this session", action: onDismiss)
+            Button("Dismiss for This Session", action: onDismiss)
         } label: {
             Label(
                 "Update v\(info.version)",

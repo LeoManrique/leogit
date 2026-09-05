@@ -60,6 +60,7 @@
 
   import Header from '$lib/components/Header.svelte'
   import Icon from '$lib/components/Icon.svelte'
+  import PaneEmptyState from '$lib/components/PaneEmptyState.svelte'
   import TabBar from '$lib/components/TabBar.svelte'
   import FileList from '$lib/components/FileList.svelte'
   import DiscardConfirm from '$lib/components/DiscardConfirm.svelte'
@@ -94,6 +95,101 @@
   let showSettings = $state(false)
   let showHelp = $state(false)
 
+  // The header's two chips, bound out of it so each picker can hang from the
+  // control that opens it. Measured when a picker opens rather than handed a
+  // rect by the click, because ⌘B opens the branch menu with no click to
+  // measure from — one anchoring path, not two. `null` once the chips unmount:
+  // that is what `bind:this` writes on teardown, not `undefined`.
+  let repoChip = $state<HTMLElement | null | undefined>()
+  let branchChip = $state<HTMLElement | null | undefined>()
+  // Bumped on resize so an open picker follows its chip, instead of staying at
+  // the coordinates it opened at while the window resizes under it.
+  let viewportVersion = $state(0)
+
+  /*
+    Where a picker hangs. The native repo chip presents an `NSPopover`
+    (`RepoSwitcher.swift:44`): centred on the chip, an arrow pointing back at
+    it, no scrim. The native branch chip is a pull-down `Menu`
+    (`BranchMenu.swift:56`), which AppKit hangs from the control's leading edge
+    with no arrow. Each surface here takes its counterpart's geometry — the
+    branch popover's *shape* is a recorded divergence (FRONTEND.md §8); its
+    placement never was.
+
+    The arrow's numbers are `NSPopover`'s, which Apple does not publish. They
+    were read off a live popover on macOS 26.6 (`NSPopoverFrame.anchorSize`
+    27.5 × 13, the tip one point off the anchor, the box centred on it) and
+    are kept here, in the one place that draws the arrow. The arrow is drawn
+    as a turned square, so its base is twice its height: 26 against 27.5.
+  */
+  /** `RepoSwitcher.swift:68` declares 320 × 440. */
+  const REPO_POPOVER_WIDTH = 320
+  const BRANCH_POPOVER_WIDTH = 300
+  const POPOVER_ARROW_HEIGHT = 13
+  const POPOVER_ARROW_WIDTH = POPOVER_ARROW_HEIGHT * 2
+  /** Chip bottom edge → arrow tip. */
+  const POPOVER_GAP = 1
+  /** Chip bottom edge → menu top edge. */
+  const MENU_GAP = 4
+  /** The least a box may sit from the window's edge. */
+  const VIEWPORT_MARGIN = 8
+  /** The arrow may not ride onto the box's 10px rounded corner. */
+  const ARROW_CORNER_INSET = 10 + POPOVER_ARROW_WIDTH / 2
+
+  type Placement = {
+    left: number
+    top: number
+    /** The chip's centre in the frame's coordinates; `null` for a menu. */
+    arrowX: number | null
+    maxHeight: number
+  }
+
+  function placeUnder(
+    chip: HTMLElement | null | undefined,
+    width: number,
+    arrowed: boolean,
+  ): Placement | null {
+    if (!chip) return null
+    const rect = chip.getBoundingClientRect()
+    const centre = rect.left + rect.width / 2
+    const top = rect.bottom + (arrowed ? POPOVER_GAP + POPOVER_ARROW_HEIGHT : MENU_GAP)
+    const wanted = arrowed ? centre - width / 2 : rect.left
+    const rightmost = Math.max(VIEWPORT_MARGIN, window.innerWidth - width - VIEWPORT_MARGIN)
+    const left = Math.min(Math.max(wanted, VIEWPORT_MARGIN), rightmost)
+    // The arrow stays on the chip even when the window's edge pushed the box
+    // off centre — it points at what was clicked, not at its own middle.
+    const arrowX = arrowed
+      ? Math.min(Math.max(centre - left, ARROW_CORNER_INSET), width - ARROW_CORNER_INSET)
+      : null
+    // Floored so a window shorter than its own header still gets a box rather
+    // than a zero-height one.
+    const maxHeight = Math.max(120, window.innerHeight - top - VIEWPORT_MARGIN)
+    return { left, top, arrowX, maxHeight }
+  }
+
+  const repoPlacement = $derived.by(() => {
+    void viewportVersion
+    return showRepos ? placeUnder(repoChip, REPO_POPOVER_WIDTH, true) : null
+  })
+
+  const branchPlacement = $derived.by(() => {
+    void viewportVersion
+    return showBranches ? placeUnder(branchChip, BRANCH_POPOVER_WIDTH, false) : null
+  })
+
+  /** The frame's inline style. With no placement it keeps only its width and
+   *  falls back to the layer's centring. */
+  function placementStyle(placement: Placement | null, width: number): string {
+    if (!placement) return `width: ${width}px`
+    const arrow =
+      placement.arrowX === null
+        ? ''
+        : `; --popover-arrow-x: ${placement.arrowX}px; --popover-arrow-height: ${POPOVER_ARROW_HEIGHT}px`
+    return (
+      `left: ${placement.left}px; top: ${placement.top}px; width: ${width}px; ` +
+      `--popover-max-height: ${placement.maxHeight}px${arrow}`
+    )
+  }
+
   // The mounted composer, so the window-level key handler can reach ⌘↩ / ⌘G
   // without the fields owning them (CommitMessage explains why).
   let composer = $state<{ requestCommit: () => void; requestGenerate: () => void } | null>(null)
@@ -104,9 +200,8 @@
   let lastHeadSha: string | null = null
 
   // Defer the "Loading diff…" placeholder so sub-150 ms fetches swap the
-  // diff in place with no flash. If the fetch outlives the threshold, the
-  // viewer falls back to the spinner. Mirrors GH Desktop's
-  // SeamlessDiffSwitcher.SlowDiffLoadingThreshold.
+  // diff in place with no flash — below that a swap still reads as instant.
+  // If the fetch outlives the threshold, the viewer falls back to the spinner.
   const SLOW_DIFF_THRESHOLD_MS = 150
   let diffLoadingTimer: ReturnType<typeof setTimeout> | null = null
   let commitDiffLoadingTimer: ReturnType<typeof setTimeout> | null = null
@@ -311,15 +406,15 @@
   */
   const EMPTY_DIFF_COPY: Record<EmptyDiffReason, { title: string; detail: string }> = {
     NoChanges: {
-      title: 'No changes',
+      title: 'No Changes',
       detail: 'This file matches its committed state.',
     },
     WhitespaceOnly: {
-      title: 'Whitespace only',
+      title: 'Whitespace Only',
       detail: 'Every change here is whitespace, and Settings is set to hide those.',
     },
     NoTextualChanges: {
-      title: 'No textual changes',
+      title: 'No Textual Changes',
       detail:
         'The file changed without changing any lines — a mode change or rename, for example.',
     },
@@ -1305,7 +1400,7 @@
     repoState.update((s) => ({ ...s, commitToAmend: null }))
   }
 
-  // ---- Checkout commit (detached HEAD) -------------------------------------
+  // ---- Check Out Commit (detached HEAD) ------------------------------------
   // Commit pending a checkout confirmation; null when the dialog is closed.
   let checkoutTarget = $state<CommitInfo | null>(null)
   let isCheckingOut = $state(false)
@@ -1919,8 +2014,8 @@
     // and it has to be handled *before* the `inField` bail below, because
     // xterm's input sink is a <textarea>. See `utils/keyboard.ts`.
     //
-    // The toggle is `Ctrl` on every platform, VS Code's binding and the native
-    // client's: ⌘` belongs to macOS's window cycling. This test and the one
+    // The toggle is `Ctrl` on every platform, as in the native client: ⌘`
+    // belongs to macOS's window cycling. This test and the one
     // xterm's own handler makes have to keep agreeing, or the chord stops
     // working from inside the panel — the one place it is most wanted.
     if (isFromTerminal(e)) {
@@ -1945,9 +2040,9 @@
     // no reason to refuse it — and the terminal is exactly where you go *from*
     // the composer, to run the thing you are about to describe. The native
     // client binds it as a key equivalent, which fires ahead of the first
-    // responder and so was never gated on focus at all; VS Code draws the same
-    // line. This is the second of the two tests that own the chord (the first
-    // is a few lines up, for events raised inside the panel).
+    // responder and so was never gated on focus at all. This is the second of
+    // the two tests that own the chord (the first is a few lines up, for
+    // events raised inside the panel).
     if (e.ctrlKey && e.key === '`') {
       e.preventDefault()
       toggleTerminalMinimize()
@@ -2139,6 +2234,8 @@
   })
 </script>
 
+<svelte:window onresize={() => (viewportVersion += 1)} />
+
 <div class="main-layout" style="--sidebar-width: {sidebarWidth}px;">
   <!--
     The toolbar spans the window, above the sidebar/detail split, because that
@@ -2157,6 +2254,8 @@
     <Header
       onOpenRepos={openRepos}
       onOpenBranches={openBranches}
+      bind:repoChip
+      bind:branchChip
       onOpenSettings={() => (showSettings = true)}
       onOpenHelp={() => (showHelp = true)}
       onTransferFinished={reloadAfterHeadMove}
@@ -2284,19 +2383,23 @@
                  with the stale payload already cleared by the loader — a
                  modal over the previous file's rows described one diff while
                  rendering another. Clicking the row again re-reads. -->
-            <div class="diff-empty">
-              <p>Couldn't load diff</p>
-              <p class="muted detail">{$repoState.activeFileDiffError}</p>
-            </div>
+            <PaneEmptyState
+              icon="exclamationmark-triangle"
+              title="Couldn't Load Diff"
+              verbatim={$repoState.activeFileDiffError}
+            />
           {:else if $repoState.activeFile?.submodule_dirty}
-            <div class="diff-empty submodule-changes">
-              <p class="submodule-title">Submodule changes</p>
-              <p class="muted">
-                This submodule has modified content that hasn't been committed. Those changes
-                must be committed inside the submodule before they can be part of this
-                repository.
-              </p>
-            </div>
+            <!-- Submodule whose inner working tree is dirty but whose pointer
+                 hasn't moved: the raw diff is just an opaque `Subproject commit
+                 …-dirty` line, so we explain it instead, mirroring the checkbox
+                 being disabled in the file list. -->
+            <PaneEmptyState
+              icon="arrow-turn-down-right"
+              title="Submodule Changes"
+              detail={"This submodule has modified content that hasn't been committed. Those " +
+                'changes must be committed inside the submodule before they can be part of ' +
+                'this repository.'}
+            />
           {:else if hasRenderableDiff($repoState.activeFileDiff)}
             <DiffViewer
               diff={$repoState.activeFileDiff!}
@@ -2312,13 +2415,15 @@
           {:else if $repoState.activeFileDiff?.size_guard}
             <!-- Withheld rather than empty: rendering it would be slow, so the
                  pane explains and offers it instead of hanging on it. -->
-            <div class="diff-empty">
-              <p>Large diff</p>
-              <p class="muted">{sizeGuardCopy($repoState.activeFileDiff.size_guard!)}</p>
-              <button class="show-anyway" onclick={() => showActiveDiffAnyway()}>
-                Show diff anyway
-              </button>
-            </div>
+            <PaneEmptyState
+              icon="doc-text-magnifyingglass"
+              title="Large Diff"
+              detail={sizeGuardCopy($repoState.activeFileDiff.size_guard!)}
+            >
+              {#snippet actions()}
+                <button onclick={() => showActiveDiffAnyway()}>Show Diff Anyway</button>
+              {/snippet}
+            </PaneEmptyState>
           {:else if $repoState.activeFile}
             <!--
               A file IS selected but there is nothing to render. Core says which
@@ -2327,22 +2432,30 @@
               already selected. Stays blank while the fetch is in flight so a
               sub-threshold load doesn't flash this state on its way to the diff.
             -->
-            <div class="diff-empty">
+            <div class="diff-empty-hold">
               {#if !$repoState.isDiffLoading}
                 {@const copy = emptyDiffCopy($repoState.activeFileDiff)}
-                <p>{copy.title}</p>
-                <p class="muted">{copy.detail}</p>
+                <PaneEmptyState icon="doc" title={copy.title} detail={copy.detail} />
               {/if}
             </div>
           {:else}
-            <div class="diff-empty">
-              {#if $repoState.status.files.length === 0}
-                <p>No changes</p>
-                <p class="muted">Working tree is clean</p>
-              {:else}
-                <p>Select a file to view its diff</p>
-              {/if}
-            </div>
+            <!-- Two unrelated states, not one: nothing to select and nothing
+                 selected read as different sentences and take different
+                 glyphs — a clean tree is an outcome (`checkmark.circle`), an
+                 unmade selection is an instruction (`doc.text`). -->
+            {#if $repoState.status.files.length === 0}
+              <PaneEmptyState
+                icon="checkmark-circle"
+                title="No Changes"
+                detail="The working tree is clean."
+              />
+            {:else}
+              <PaneEmptyState
+                icon="doc-text"
+                title="No File Selected"
+                detail="Select a file to see its changes."
+              />
+            {/if}
           {/if}
         </SeamlessDiffPane>
       {:else if $repoState.activeCommit}
@@ -2375,10 +2488,11 @@
           <div class="commit-diff-pane">
             <SeamlessDiffPane stale={$repoState.isCommitDiffLoadingSlow}>
               {#if $repoState.activeCommitFileDiffError}
-                <div class="diff-empty">
-                  <p>Couldn't load diff</p>
-                  <p class="muted detail">{$repoState.activeCommitFileDiffError}</p>
-                </div>
+                <PaneEmptyState
+                  icon="exclamationmark-triangle"
+                  title="Couldn't Load Diff"
+                  verbatim={$repoState.activeCommitFileDiffError}
+                />
               {:else if hasRenderableDiff($repoState.activeCommitFileDiff)}
                 <DiffViewer
                   diff={$repoState.activeCommitFileDiff!}
@@ -2398,27 +2512,30 @@
                   tabSize={$config?.tab_size ?? 4}
                 />
               {:else if $repoState.activeCommitFileDiff?.size_guard}
-                <div class="diff-empty">
-                  <p>Large diff</p>
-                  <p class="muted">{sizeGuardCopy($repoState.activeCommitFileDiff.size_guard!)}</p>
-                  <button class="show-anyway" onclick={() => showActiveCommitDiffAnyway()}>
-                    Show diff anyway
-                  </button>
-                </div>
+                <PaneEmptyState
+                  icon="doc-text-magnifyingglass"
+                  title="Large Diff"
+                  detail={sizeGuardCopy($repoState.activeCommitFileDiff.size_guard!)}
+                >
+                  {#snippet actions()}
+                    <button onclick={() => showActiveCommitDiffAnyway()}>Show Diff Anyway</button>
+                  {/snippet}
+                </PaneEmptyState>
               {:else if $repoState.activeCommitFile}
                 <!-- Same split as the changes pane above: selected, but nothing
                      to render, and core names which reason. -->
-                <div class="diff-empty">
+                <div class="diff-empty-hold">
                   {#if !$repoState.isCommitDiffLoading}
                     {@const copy = emptyDiffCopy($repoState.activeCommitFileDiff)}
-                    <p>{copy.title}</p>
-                    <p class="muted">{copy.detail}</p>
+                    <PaneEmptyState icon="doc" title={copy.title} detail={copy.detail} />
                   {/if}
                 </div>
               {:else}
-                <div class="diff-empty">
-                  <p>Select a file to view its diff</p>
-                </div>
+                <PaneEmptyState
+                  icon="doc-text"
+                  title="No File Selected"
+                  detail="Select a file to see its changes."
+                />
               {/if}
             </SeamlessDiffPane>
           </div>
@@ -2426,16 +2543,22 @@
       {:else if $repoState.log.loaded && $repoState.log.commits.length === 0}
         <!-- A repository with no history at all. Inviting the user to select a
              commit from a list that has none is an instruction they cannot
-             follow; the list beside this pane already says "No commits yet". -->
-        <div class="diff-empty">
-          <p>No commits</p>
-          <p class="muted">This repository has no commit history yet.</p>
-        </div>
+             follow, which is why this state exists separately from the one
+             below it. It names the same fact the list beside it names, and
+             deliberately so — `HistoryDetailPane.swift:29` and
+             `HistorySidebar.swift:68` do the same — because the pane's job is
+             to answer with the sentence the list has no room for. -->
+        <PaneEmptyState
+          icon="clock"
+          title="No Commits Yet"
+          detail="This repository has no commit history yet."
+        />
       {:else}
-        <div class="diff-empty">
-          <p>No commit selected</p>
-          <p class="muted">Select a commit to see its changes.</p>
-        </div>
+        <PaneEmptyState
+          icon="clock"
+          title="No Commit Selected"
+          detail="Select a commit to see its changes."
+        />
       {/if}
     </div>
 
@@ -2510,13 +2633,19 @@
 
   {#if showRepos}
     <div
-      class="overlay-backdrop"
+      class="popover-layer"
       role="presentation"
       onclick={(e) => {
         if (e.target === e.currentTarget) showRepos = false
       }}
     >
-      <div class="overlay-content" role="dialog" aria-modal="true" tabindex="-1">
+      <div
+        class="popover-frame arrowed"
+        class:anchored={repoPlacement !== null}
+        style={placementStyle(repoPlacement, REPO_POPOVER_WIDTH)}
+        role="dialog"
+        tabindex="-1"
+      >
         <RepoDropdown
           repos={$appState.repos}
           currentRepo={$appState.repoPath}
@@ -2538,13 +2667,19 @@
 
   {#if showBranches}
     <div
-      class="overlay-backdrop"
+      class="popover-layer"
       role="presentation"
       onclick={(e) => {
         if (e.target === e.currentTarget) showBranches = false
       }}
     >
-      <div class="overlay-content" role="dialog" aria-modal="true" tabindex="-1">
+      <div
+        class="popover-frame"
+        class:anchored={branchPlacement !== null}
+        style={placementStyle(branchPlacement, BRANCH_POPOVER_WIDTH)}
+        role="dialog"
+        tabindex="-1"
+      >
         <BranchDropdown
           branches={$repoState.branches}
           currentBranch={$repoState.status.branch}
@@ -2579,7 +2714,7 @@
   {#if deleteTarget}
     {@const branchName = deleteTarget}
     <ConfirmDialog
-      title="Delete branch?"
+      title="Delete Branch?"
       confirmLabel="Delete"
       busyLabel="Deleting…"
       isBusy={branchOp === 'delete'}
@@ -2598,8 +2733,8 @@
 
   {#if showAbortMerge}
     <ConfirmDialog
-      title="Abort merge?"
-      confirmLabel="Abort merge"
+      title="Abort Merge?"
+      confirmLabel="Abort Merge"
       busyLabel="Aborting…"
       isBusy={branchOp === 'abort'}
       destructive
@@ -2912,73 +3047,23 @@
     overflow: hidden;
   }
 
-  /* Pane-level empty state. 15px is the register for a title that fills a pane
-     rather than a row, and it is set here because the block's title line is the
-     one child with no size of its own — the sub-lines and the action below
-     carry theirs. */
-  .diff-empty {
+  /*
+    Holds the pane open across a diff load that has not yet resolved into an
+    empty state. The state itself is withheld until the read lands — most reads
+    finish well inside the slow threshold, and a glyph-and-heading block that
+    appears and vanishes on every quick file switch is worse than a still pane.
+
+    So this carries nothing but the two declarations that stop the pane
+    collapsing: `flex: 1` and the surface. `.content-area` paints no background
+    of its own, so without the second one the loading pane shows through to
+    whatever is behind it and the swap flashes anyway — for the same reason,
+    just in the other direction.
+  */
+  .diff-empty-hold {
     flex: 1;
     display: flex;
     flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    color: var(--text-secondary);
     background: var(--bg-primary);
-    font-size: 15px;
-  }
-
-  .diff-empty .muted {
-    color: var(--text-faint);
-    font-size: 12px;
-    /* A pane-wide single line reads as a banner; wrap the explanatory ones to
-       a column under their title. */
-    max-width: 420px;
-    text-align: center;
-    line-height: 1.5;
-  }
-
-  /* Git's own words under a failed load. Mono and selectable because it is
-     data, not prose — the same treatment the error modal gives it, since this
-     pane is now where a diff failure is reported. */
-  .diff-empty .detail {
-    max-width: 520px;
-    padding: 8px 10px;
-    border-radius: 6px;
-    background: var(--bg-secondary);
-    color: var(--text-muted);
-    font-family: var(--font-mono);
-    font-size: 11px;
-    text-align: left;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    user-select: text;
-  }
-
-  /* The pane's title register does not reach its action: a button is a control
-     and keeps the 13px body size, so it is pinned here against the global
-     `button { font-size: inherit }`. */
-  .diff-empty .show-anyway {
-    font-size: 13px;
-  }
-
-  /* Submodule whose inner working tree is dirty but pointer hasn't moved: the
-     raw diff is just an opaque `Subproject commit …-dirty` line, so we explain
-     it instead, mirroring the checkbox being disabled in the file list. */
-  .submodule-changes {
-    padding: 0 32px;
-  }
-
-  .submodule-changes .submodule-title {
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--text-primary);
-  }
-
-  .submodule-changes .muted {
-    max-width: 420px;
-    text-align: center;
-    line-height: 1.5;
   }
 
   .terminal-section {
@@ -3086,13 +3171,16 @@
     background: #000000;
   }
 
-  .overlay-backdrop {
+  /*
+    The pickers' layer: a click-catcher that dismisses, never a scrim. A
+    popover is transient, not modal, and the native dims nothing under one —
+    `--overlay-backdrop` is the dialogs'. The centring is the fallback for a
+    frame with no chip to hang from; an anchored frame ignores it and takes
+    the coordinates `placeUnder` computed.
+  */
+  .popover-layer {
     position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: var(--overlay-backdrop);
+    inset: 0;
     display: flex;
     align-items: flex-start;
     justify-content: center;
@@ -3100,7 +3188,58 @@
     z-index: 1000;
   }
 
-  .overlay-content {
-    background: transparent;
+  .popover-frame {
+    position: relative;
+  }
+
+  .popover-frame.anchored {
+    position: fixed;
+  }
+
+  /*
+    The popover's arrow, pointing back at the chip: a square turned 45° with
+    the surface's own fill and hairline on its two upper edges, clipped to the
+    triangle that stands above the box. Its lower half is not left to lie over
+    the box — at this height it would reach the filter field — so a one-pixel
+    strip of the same fill (the `::after`) covers the box's top border between
+    the arrow's feet instead, which is all the overlap was ever for. Drawn on a
+    frame this file owns because the dropdown clips its own overflow and could
+    not draw outside itself. `--popover-arrow-x` is the chip's centre in the
+    frame's coordinates — the box may have been pushed off centre by the
+    window's edge, and the arrow must not go with it. The side is the height
+    times √2: the square's diagonal is what stands up as the arrow, so its
+    feet sit one height either side of the tip. `box-sizing` is stated because
+    the universal reset does not reach pseudo-elements, and a content-box
+    square would put the hairlines outside the side and the tip half a pixel
+    off the chip's centre.
+  */
+  .popover-frame.arrowed.anchored::before {
+    --arrow-side: calc(var(--popover-arrow-height) * 1.4142);
+    content: '';
+    position: absolute;
+    z-index: 1;
+    box-sizing: border-box;
+    top: calc(var(--arrow-side) / -2);
+    left: calc(var(--popover-arrow-x) - var(--arrow-side) / 2);
+    width: var(--arrow-side);
+    height: var(--arrow-side);
+    background: var(--bg-elevated);
+    border-top: 1px solid var(--border-inactive);
+    border-left: 1px solid var(--border-inactive);
+    clip-path: polygon(0 0, 100% 0, 0 100%);
+    transform: rotate(45deg);
+    pointer-events: none;
+  }
+
+  .popover-frame.arrowed.anchored::after {
+    content: '';
+    position: absolute;
+    z-index: 1;
+    top: 0;
+    left: calc(var(--popover-arrow-x) - var(--popover-arrow-height) + 1px);
+    width: calc(var(--popover-arrow-height) * 2 - 2px);
+    height: 1px;
+    background: var(--bg-elevated);
+    pointer-events: none;
   }
 </style>

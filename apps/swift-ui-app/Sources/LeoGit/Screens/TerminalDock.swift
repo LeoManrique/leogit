@@ -68,11 +68,10 @@ struct TerminalDock: View {
     }
 
     /// A macOS accessory bar — the control class AppKit draws recessed for
-    /// scope bars (Finder's search scopes, Safari's favourites bar), which is
-    /// what a docked panel's strip is. `.accessoryBar` supplies the hover,
-    /// press, and on-state treatments, so nothing here paints its own: the
-    /// previous hand-styled `.plain`/`.borderless` buttons were inert glyphs
-    /// with no feedback at all.
+    /// scope bars, which is what a docked panel's strip is. `.accessoryBar`
+    /// supplies the hover, press, and on-state treatments, so nothing here
+    /// paints its own: the previous hand-styled `.plain`/`.borderless`
+    /// buttons were inert glyphs with no feedback at all.
     private var header: some View {
         HStack(spacing: 2) {
             // The shell name doubles as the panel toggle. The first expand

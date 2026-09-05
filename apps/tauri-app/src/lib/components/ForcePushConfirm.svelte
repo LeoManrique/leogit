@@ -44,7 +44,7 @@
     use:dismissOnEscape={escape}
   >
     <div class="modal-header">
-      <h2>Force push with lease</h2>
+      <h2>Force Push with Lease?</h2>
     </div>
     <div class="modal-body">
       <p>
@@ -62,7 +62,7 @@
     <div class="modal-footer">
       <button class="btn-secondary" onclick={onCancel} disabled={isPushing}>Cancel</button>
       <button class="btn-danger" onclick={onConfirm} disabled={isPushing}>
-        {isPushing ? 'Force-pushing…' : 'Force push'}
+        {isPushing ? 'Force-pushing…' : 'Force Push'}
       </button>
     </div>
   </div>

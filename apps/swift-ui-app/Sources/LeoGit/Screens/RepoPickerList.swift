@@ -210,9 +210,9 @@ struct RepoPickerList: View {
                         RepoListRow(
                             path: path,
                             label: label,
-                            // GitHub Desktop's disambiguation rule: a row shows
-                            // its owner only when another row shares its name,
-                            // and only when there is an owner to show.
+                            // Disambiguation rule: a row shows its owner only
+                            // when another row shares its name, and only when
+                            // there is an owner to show.
                             owner: collidingLabels.contains(label)
                                 ? identifiers.identifier(of: path)?.owner : nil,
                             fullLabel: identifiers.fullLabel(of: path),

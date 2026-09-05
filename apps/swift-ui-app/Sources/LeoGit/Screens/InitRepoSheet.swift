@@ -64,7 +64,7 @@ struct InitRepoSheet: View {
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.cancelAction)
                     .disabled(isCreating)
-                Button(isCreating ? "Creating…" : "Create repository", action: create)
+                Button(isCreating ? "Creating…" : "Create Repository", action: create)
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
                     .disabled(isCreating)

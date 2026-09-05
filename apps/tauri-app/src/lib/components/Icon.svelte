@@ -202,12 +202,21 @@
     // No native counterpart: macOS puts Settings in the app menu, so the
     // SwiftUI client never draws a gear at all. Radial teeth rather than a
     // scalloped outline, because scallops turn to mush below 14px.
+    // A cog is read from a closed rim whose edge is interrupted by teeth,
+    // around a hole. All three parts are load-bearing: an earlier version drew
+    // the hole and eight detached spokes with no rim between them, which is a
+    // sunburst at every size — the eye has nothing to close into a wheel. Teeth
+    // sit *on* the rim (they start at its radius, not past a gap) so the two
+    // read as one body, and the hole stays wide enough to survive at 12px,
+    // where a smaller one silts up into a dot and takes the wheel with it.
     gear: [
-      { path: ring(8, 8, 2.35) },
+      { path: ring(8, 8, 4.4) },
+      { path: ring(8, 8, 1.9) },
       {
         path:
-          'M8 1.85v1.9M8 12.25v1.9M14.15 8h-1.9M3.75 8h-1.9M12.35 3.65 11 5M5 11 ' +
-          '3.65 12.35M12.35 12.35 11 11M5 5 3.65 3.65',
+          'M12.4 8h1.75M8 3.6V1.85M3.6 8H1.85M8 12.4v1.75' +
+          'M11.11 4.89 12.35 3.65M4.89 4.89 3.65 3.65' +
+          'M4.89 11.11 3.65 12.35M11.11 11.11 12.35 12.35',
       },
     ],
     // Also no native counterpart — the shortcut sheet is a Tauri-only surface.

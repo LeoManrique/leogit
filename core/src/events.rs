@@ -32,9 +32,9 @@ pub struct GitProgress {
 /// reaches EOF. Serialized verbatim by the Tauri host, so the field names are
 /// load-bearing.
 ///
-/// The UIs key off it VS Code-style: a clean exit closes the panel, anything
-/// else keeps the dead terminal on screen with the reason, so a shell that
-/// dies instantly (a broken `.zshrc`) no longer flashes its error away.
+/// The UIs key off it: a clean exit closes the panel, anything else keeps the
+/// dead terminal on screen with the reason, so a shell that dies instantly (a
+/// broken `.zshrc`) no longer flashes its error away.
 #[derive(Debug, Clone, Serialize)]
 pub struct TerminalExit {
     /// The child's exit code. When the child died to a signal this is a

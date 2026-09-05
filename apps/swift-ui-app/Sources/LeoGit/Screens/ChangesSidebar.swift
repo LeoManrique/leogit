@@ -142,7 +142,7 @@ struct ChangesSidebar: View {
             await commitStore.refreshProviderStatus()
         }
         .confirmationDialog(embeddedTitle, isPresented: $isConfirmingEmbedded) {
-            Button("Commit as link") { performCommit(pendingFiles) }
+            Button("Commit as Link") { performCommit(pendingFiles) }
             Button("Cancel", role: .cancel) { pendingFiles = [] }
         } message: {
             Text(embeddedWarning)

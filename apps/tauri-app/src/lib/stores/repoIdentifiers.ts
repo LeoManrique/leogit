@@ -104,7 +104,7 @@ export function repoSearchLabels(path: string, ids: Identifiers): string[] {
 }
 
 /**
- * Labels more than one row would show — GH Desktop's `needsDisambiguation`.
+ * Labels more than one row would show, and so need disambiguating.
  * A row in this set earns a muted `owner/` prefix, and only then: a repository
  * with no remote has no owner to disambiguate with.
  */

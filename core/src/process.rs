@@ -61,9 +61,9 @@ pub fn prepare_child_async(cmd: &mut tokio::process::Command) -> &mut tokio::pro
 /// macOS/Linux apps launched from Finder or a `.desktop` entry inherit a
 /// minimal `PATH` (e.g. `/usr/bin:/bin:/usr/sbin:/sbin`) and miss
 /// user-installed binaries like `claude`, `gh`, or homebrew tools. Spawning
-/// the user's shell once resolves the `PATH` their terminal would have,
-/// mirroring what VS Code's `fix-path` does. No-op on Windows, where GUI
-/// launches inherit the full user environment already.
+/// the user's shell once resolves the `PATH` their terminal would have.
+/// No-op on Windows, where GUI launches inherit the full user environment
+/// already.
 ///
 /// The probe shell goes through [`prepare_child`] like any other child, which
 /// matters for more than tidiness: a login shell appends to the `PATH` it

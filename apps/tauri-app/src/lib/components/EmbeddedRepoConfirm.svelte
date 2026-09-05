@@ -67,7 +67,7 @@
     <div class="modal-footer">
       <button class="btn-secondary" onclick={onCancel} disabled={!canCancel}>Cancel</button>
       <button class="btn-primary" onclick={onConfirm} disabled={isCommitting}>
-        {isCommitting ? 'Committing…' : 'Commit as link'}
+        {isCommitting ? 'Committing…' : 'Commit as Link'}
       </button>
     </div>
   </div>

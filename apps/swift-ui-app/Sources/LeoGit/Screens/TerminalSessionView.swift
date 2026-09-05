@@ -170,7 +170,7 @@ final class TerminalController {
     /// distinct grid is a `SIGWINCH` the shell redraws its whole edit buffer
     /// for — so an uncoalesced drag becomes hundreds of repaints and a visibly
     /// corrupted prompt. The Tauri panel debounces its `ResizeObserver` by the
-    /// same 80 ms, and Windows Terminal does it for the same reason.
+    /// same 80 ms.
     ///
     /// Deliberately here rather than in the delegate: the initial push has
     /// nothing to coalesce with and must not be delayed behind a timer, so it
@@ -262,11 +262,11 @@ final class TerminalController {
     }
 
     /// The child exited. A clean exit tears the panel down as before;
-    /// anything else keeps the dead terminal on screen with the reason,
-    /// VS Code-style, so a shell that dies instantly (a broken `.zshrc`) no
-    /// longer flashes its error away. Either way the pid is nulled first, so
-    /// `shutdown()` — and the dock's ✕, which unmounts this view — never
-    /// double-closes a session core has already dropped.
+    /// anything else keeps the dead terminal on screen with the reason, so a
+    /// shell that dies instantly (a broken `.zshrc`) no longer flashes its
+    /// error away. Either way the pid is nulled first, so `shutdown()` — and
+    /// the dock's ✕, which unmounts this view — never double-closes a session
+    /// core has already dropped.
     private func sessionDidClose(_ exit: TerminalExit) {
         pid = nil
         if exit.exitCode == 0, exit.signal == nil {
@@ -351,8 +351,7 @@ private struct TerminalHostView: NSViewRepresentable {
     ///
     /// Chosen rather than inherited: SwiftTerm defaults to 500 and xterm.js to
     /// 1 000, which had the two clients remembering different amounts of the
-    /// same shell. 1 000 is the one that survives a `git log --stat`, and what
-    /// VS Code ships.
+    /// same shell. 1 000 is the one that survives a `git log --stat`.
     private static let scrollbackLines = 1000
 
     func makeNSView(context: Context) -> TerminalView {

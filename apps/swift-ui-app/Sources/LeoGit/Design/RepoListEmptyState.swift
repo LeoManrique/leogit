@@ -55,7 +55,7 @@ struct RepoListEmptyState: View {
                         .frame(maxWidth: .infinity)
                     }
                 }
-                Button("Choose folders to search", action: onChooseFolders)
+                Button("Choose Folders to Search", action: onChooseFolders)
                     .buttonStyle(.link)
                     .font(.callout)
             }

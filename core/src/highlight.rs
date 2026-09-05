@@ -443,14 +443,14 @@ fn fence_role(line: &str, ops: &[(usize, ScopeStackOp)], stack_before: &ScopeSta
 /// Byte ranges on `line` that the grammar struck through but no real Markdown
 /// renderer would, so the caller can put them back to plain.
 ///
-/// Sublime's grammar opens a strikethrough on a run of ONE or two tildes, while
-/// `GitHub` (cmark-gfm) and markdown-it (`VS` Code's preview) both require two —
-/// markdown-it bails outright on a run shorter than two. With one tilde the
-/// grammar closes on the next stray `~`, or, finding none, strikes the rest of
-/// the paragraph, so ordinary prose like `~25 min · ~2 h` or `~/leogit` renders
-/// struck through. The syntax set ships pre-compiled, so the grammar itself is
-/// not ours to correct — its own delimiter scopes are, and a run whose opener
-/// measures a single tilde is dropped here.
+/// The bundled grammar opens a strikethrough on a run of ONE or two tildes,
+/// while GitHub Flavored Markdown — the spec every Markdown renderer we care
+/// about implements — recognises a strikethrough only on a run of two. With one
+/// tilde the grammar closes on the next stray `~`, or, finding none, strikes the
+/// rest of the paragraph, so ordinary prose like `~25 min · ~2 h` or `~/leogit`
+/// renders struck through. The syntax set ships pre-compiled, so the grammar
+/// itself is not ours to correct — its own delimiter scopes are, and a run whose
+/// opener measures a single tilde is dropped here.
 ///
 /// `open_run` carries "inside a single-tilde run" across lines, because a run
 /// may open on a line the caller never records; it is updated in place. Runs
@@ -657,9 +657,10 @@ static SCOPE_TABLE: LazyLock<Vec<(Scope, TokenClass)>> = LazyLock::new(|| {
         (s("constant"), TokenClass::Constant),
         (s("keyword.operator"), TokenClass::Operator),
         (s("punctuation.operator"), TokenClass::Operator),
-        // VS Code / GitHub themes colour `storage.*` (storage.type,
-        // storage.modifier, storage.type.function, …) with the keyword colour.
-        // Bare type NAMES live under `entity.name.type` / `support.type`.
+        // `storage.*` (storage.type, storage.modifier, storage.type.function,
+        // …) scopes declarators — `let`, `static`, `fn` — not type names, so
+        // they take the keyword colour. Bare type NAMES live under
+        // `entity.name.type` / `support.type`.
         (s("keyword"), TokenClass::Keyword),
         (s("storage"), TokenClass::Keyword),
         (s("entity.name.function"), TokenClass::Function),
@@ -1263,10 +1264,10 @@ mod tests {
         );
     }
 
-    /// Sublime's Markdown grammar strikes through a run opened by a SINGLE
-    /// tilde; GitHub and VS Code both require two, so prose full of `~25 min`
-    /// and `~/paths` came back struck through and muted. Only a `~~` run may
-    /// survive `single_tilde_strikes`.
+    /// The bundled Markdown grammar strikes through a run opened by a SINGLE
+    /// tilde; GitHub Flavored Markdown requires two, so prose full of
+    /// `~25 min` and `~/paths` came back struck through and muted. Only a `~~`
+    /// run may survive `single_tilde_strikes`.
     #[test]
     fn single_tilde_does_not_strike_through() {
         let struck = |classes: &[(String, TokenClass)]| {

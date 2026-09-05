@@ -618,7 +618,7 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
      cursor's row. A new query snaps the cursor back to the top match.
    - **Emptiness says which one it is** — still looking, nothing found anywhere (with
      the folders that were searched), or nothing matched the filter. The last two both
-     carry *Choose folders to search*, because "none matched" is what you see when the
+     carry *Choose Folders to Search*, because "none matched" is what you see when the
      repository you want lives somewhere discovery was never pointed at. A failed walk
      is one inline row with a Retry above the rows a previous walk found, never a
      screen that replaces them.

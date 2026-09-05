@@ -140,7 +140,7 @@
       <input
         type="text"
         class="search-input"
-        placeholder="Search repositories... (fuzzy match)"
+        placeholder="Search repositories… (fuzzy match)"
         bind:value={searchInput}
         onkeydown={handleKeyDown}
         use:autofocus
@@ -277,10 +277,16 @@
     background: var(--surface-hover);
   }
 
+  /* The switcher's row geometry (`RepoDropdown.svelte`), until the two lists
+     are one component: 26px — the native's 5 + 16 + 5 — and `flex-shrink: 0`,
+     because a fixed-height item in a scrolling flex column shrinks toward its
+     text before the column overflows. */
   .repo-item {
     display: flex;
     align-items: center;
-    padding: 6px 10px;
+    padding: 0 10px;
+    height: 26px;
+    flex-shrink: 0;
     background: transparent;
     border: none;
     border-radius: 6px;
@@ -290,18 +296,18 @@
     font-size: 13px;
   }
 
+  /* Hover and the keyboard cursor: one colour at two alphas, the native row's
+     own device, so the two are tellable apart and neither is a ring. */
   .repo-item:hover {
-    background: var(--surface-hover);
+    background: var(--selection-hover);
   }
 
   .repo-item:active {
     background: var(--bg-tertiary);
   }
 
-  /* Keyboard cursor (arrow-key highlight); a ring so it reads as "focused"
-     and stays distinct from the hover fill. */
   .repo-item.active {
-    box-shadow: inset 0 0 0 1.5px var(--border-active);
+    background: var(--selection-cursor);
   }
 
   .repo-name {

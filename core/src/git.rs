@@ -254,9 +254,9 @@ pub struct RepoStatus {
 /// What the sync control should offer to do next.
 ///
 /// One state at a time, picked by a strict precedence ladder over
-/// [`RepoStatus`] — GitHub Desktop's `PushPullButton` cascade, adapted. Pull
-/// outranks push, so a diverged branch proposes the step that has to happen
-/// first; the pending counts stay visible beside the control meanwhile.
+/// [`RepoStatus`]. Pull outranks push, so a diverged branch proposes the step
+/// that has to happen first; the pending counts stay visible beside the
+/// control meanwhile.
 ///
 /// It lives in core because four surfaces read it: each client's sync control
 /// and each client's keyboard/menu route to the same action. Written twice it
@@ -305,9 +305,9 @@ pub fn sync_proposal(status: &RepoStatus) -> SyncProposal {
         return SyncProposal::Loading;
     }
     if status.detached {
-        // Deliberately ahead of the remote checks, where GitHub Desktop puts
-        // them the other way round: publishing would offer to push a branch
-        // that does not exist, and the honest state wins.
+        // Deliberately ahead of the remote checks: on a detached HEAD,
+        // publishing would offer to push a branch that does not exist, and
+        // the honest state wins.
         SyncProposal::Detached
     } else if !status.has_remote {
         SyncProposal::PublishRepository
@@ -328,8 +328,8 @@ pub fn sync_proposal(status: &RepoStatus) -> SyncProposal {
 
 /// Build a Command for `git` with the standard env vars set.
 /// TERM=dumb suppresses pagers/color; GIT_TERMINAL_PROMPT=0 prevents credential prompts
-/// from blocking the process indefinitely. GIT_OPTIONAL_LOCKS=0 (as GitHub
-/// Desktop sets globally) keeps read-only commands like `status`/`diff` from
+/// from blocking the process indefinitely. GIT_OPTIONAL_LOCKS=0 is set for
+/// every command here; it keeps read-only commands like `status`/`diff` from
 /// opportunistically refreshing the index under `index.lock` — commands now run
 /// concurrently on worker threads, so a poll-time `diff` taking that lock could
 /// otherwise make a simultaneous `commit` fail with "index.lock exists".
@@ -1027,9 +1027,8 @@ fn read_status(repo_path: String) -> Result<RepoStatus, String> {
     // git status only emits `# branch.ab` when `branch.<name>.{merge,remote}` are
     // set, so a freshly created local branch (or a clone that never ran
     // `push -u`) will report ahead=behind=0 even when a matching remote ref
-    // exists. Match GitHub Desktop: if there's a remote ref at
-    // `refs/remotes/<first-remote>/<branch>`, compute ahead/behind against it
-    // manually so the Push badge updates.
+    // exists. Where a `refs/remotes/<first-remote>/<branch>` ref exists,
+    // compute ahead/behind against it manually so the Push badge updates.
     //
     // Don't synthesise `has_upstream = true` — that flag still drives whether
     // the next push needs `--set-upstream`, and lying about it would break
@@ -1050,7 +1049,7 @@ fn read_status(repo_path: String) -> Result<RepoStatus, String> {
     }
 
     // List unpushed commit SHAs so the History view can mark them with an
-    // up-arrow, matching GitHub Desktop. Two cases:
+    // up-arrow. Two cases:
     //
     //  - The branch tracks an upstream (real or inferred) and is ahead: the
     //    unpushed set is `HEAD ^<upstream>` — exactly the commits ahead of it.
@@ -1070,8 +1069,8 @@ fn read_status(repo_path: String) -> Result<RepoStatus, String> {
     // never FALSE-mark a commit that's already pushed. Scoping to a single guessed
     // remote (e.g. the alphabetically-first one) would draw a false arrow on an
     // already-pushed commit whenever that guess isn't the real push target — a
-    // worse error than the rare under-mark. The only divergence from GitHub Desktop
-    // is a multi-remote/fork setup where a commit was pushed to a non-default
+    // worse error than the rare under-mark. That under-mark only shows up in a
+    // multi-remote/fork setup where a commit was pushed to a non-default
     // remote only; accepted as a known limitation.
     //
     // Both are skipped when there's nothing to compute (an in-sync upstream
@@ -1737,10 +1736,10 @@ pub fn get_commit_detail(repo_path: String, sha: String) -> Result<CommitDetail,
 ///      Mental model: treat the repo root as `.`, which sorts before any
 ///      directory name. So `README.md` lands at the top, then everything
 ///      under `blackbox-e2e/`, `desktop/`, etc.
-///   2. Within each group, case-insensitive path order so the list reads
-///      like Finder / VS Code / GitHub.com instead of git's byte-sorted
-///      output (which puts uppercase names ahead of lowercase ones, and
-///      dot-prefixed dirs before everything else).
+///   2. Within each group, case-insensitive path order, so a name lands where
+///      the reader expects it rather than where git's byte-sorted output puts
+///      it (uppercase names ahead of lowercase ones, and dot-prefixed dirs
+///      before everything else).
 fn sort_file_entries(files: &mut [FileEntry]) {
     files.sort_by(|a, b| {
         let a_root = !a.path.contains('/');
@@ -1887,10 +1886,10 @@ fn checkout_tracking_branch(repo_path: &str, remote_branch: &str) -> Result<(), 
 
 /// Check out a commit by SHA, detaching HEAD onto it.
 ///
-/// Mirrors GitHub Desktop's "Checkout commit": runs `git checkout <sha>`, which
-/// leaves the working tree on a detached HEAD pointing at that commit. The user
-/// can inspect or branch from it, then reattach to a branch via the branch
-/// picker. `get_status` reports the result with `detached = true`.
+/// Runs `git checkout <sha>`, which leaves the working tree on a detached HEAD
+/// pointing at that commit. The user can inspect or branch from it, then
+/// reattach to a branch via the branch picker. `get_status` reports the result
+/// with `detached = true`.
 ///
 /// The caller passes a full SHA from the History list, so there's no ambiguity
 /// with a branch or file name.
@@ -2347,8 +2346,8 @@ pub fn discard_files(repo_path: &str, files: Vec<FileEntry>) -> Result<(), Strin
 }
 
 /// Escape the glob metacharacters in a literal path so `.gitignore` matches it
-/// verbatim rather than as a pattern. Mirrors GitHub Desktop's
-/// `escapeGitSpecialCharacters` — the set is `[ ] ! * # ?`.
+/// verbatim rather than as a pattern. The escaped set is `[ ] ! * # ?` — every
+/// character `.gitignore` reads as syntax rather than as part of a name.
 fn escape_gitignore_path(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     for c in path.chars() {
@@ -2709,8 +2708,8 @@ pub fn get_ahead_behind(repo_path: String, upstream: String) -> Result<AheadBehi
     )?;
 
     // Output: "<ahead>\t<behind>\n" — left side is HEAD, right side is upstream
-    // (this is the inverse of what the old code assumed). See Go reference:
-    // ahead = HEAD-only count, behind = upstream-only count.
+    // (this is the inverse of what the old code assumed): ahead = HEAD-only
+    // count, behind = upstream-only count.
     let parts: Vec<&str> = output.split_whitespace().collect();
     if parts.len() == 2 {
         let ahead: i32 = parts[0].parse().unwrap_or(0);
@@ -3850,8 +3849,8 @@ mod tests {
     /// then committed — the History view must still mark the new local commit as
     /// unpushed (the up-arrow), while leaving the shared base (on `origin/<def>`)
     /// unmarked. `ahead` stays 0 without an upstream, so the unpushed list falls
-    /// back to `HEAD --not --remotes`. Mirrors GitHub Desktop; previously leogit
-    /// computed nothing here and showed no arrows at all.
+    /// back to `HEAD --not --remotes`; previously leogit computed nothing here
+    /// and showed no arrows at all.
     #[test]
     fn unpushed_shas_marks_local_commits_on_unpublished_branch() {
         let tmp = tempdir().expect("tempdir");
@@ -4348,7 +4347,7 @@ mod tests {
         );
     }
 
-    /// The full GitHub-Desktop escape set — `[ ] ! * # ?` — and nothing else.
+    /// The full `.gitignore` escape set — `[ ] ! * # ?` — and nothing else.
     #[test]
     fn escape_gitignore_path_covers_the_full_set() {
         assert_eq!(

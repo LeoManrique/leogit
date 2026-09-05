@@ -20,10 +20,10 @@ import SwiftUI
 /// rather than trusting one), and a
 /// hidden window keeps refreshing slowly so refocusing reveals a current
 /// screen instead of a sudden catch-up — the cadence ladder makes hidden
-/// work cheap rather than absent (GH Desktop fetches at one flat interval
-/// regardless; we stretch it). The multi-repo fetch fan-out is the only
-/// genuinely deferrable work, and the refocus resync remains its catch-up
-/// path.
+/// work cheap rather than absent — one flat interval regardless of
+/// visibility would be either wasteful or stale. The multi-repo fetch
+/// fan-out is the only genuinely deferrable work, and the refocus resync
+/// remains its catch-up path.
 ///
 /// Also owns the App Nap side effect: the `AppNapSuppressor` assertion is
 /// held exactly while a repo is open and some background work is allowed to
@@ -84,8 +84,8 @@ final class BackgroundSchedulingPolicy {
     var canAutoFetch: Bool { !networkOpInFlight }
 
     /// The other repos' badge machinery — tier scheduler, visible-row sweep,
-    /// refocus sweep: the deferrable fan-out, paused on blur like GH
-    /// Desktop's indicator sweep; the refocus resync is its catch-up path.
+    /// refocus sweep: the deferrable fan-out, paused on blur; the refocus
+    /// resync is its catch-up path.
     var canRunRepoSweeps: Bool { !networkOpInFlight && isWindowVisible && isAppActive }
 
     /// Status poll cadence ladder: 2 s frontmost, 10 s visible-but-inactive,
@@ -100,7 +100,7 @@ final class BackgroundSchedulingPolicy {
 
     /// Auto-fetch cadence: the configured interval while the window is on
     /// screen, stretched ×3 while hidden — fresher than pausing, cheaper
-    /// than GH Desktop's flat always-on interval.
+    /// than a flat always-on interval.
     func autoFetchInterval(configured: Duration) -> Duration {
         isWindowVisible ? configured : configured * 3
     }
