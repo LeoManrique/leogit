@@ -11,7 +11,18 @@ import SwiftUI
 struct BranchMenu: View {
     let store: BranchStore
     let repoPath: String
+
+    /// The live status — `nil` until the open repository's first read lands.
+    /// Everything this control *does* reads from here, so a menu opened in that
+    /// window offers nothing about a repository nobody has read yet.
     let status: RepoStatus?
+
+    /// What the label draws, which is the last read that landed rather than the
+    /// live one — see `ToolbarStatus`. Display only: the branch name on a
+    /// toolbar chip is not a control, while losing it for 100–500 ms on every
+    /// switch resizes the leading cluster twice.
+    let shown: ToolbarStatus
+
     let isMerging: Bool
     /// Called after any operation that may move HEAD or touch the working
     /// tree (switch, create, merge, abort) — the owner reloads status/log.
@@ -33,6 +44,11 @@ struct BranchMenu: View {
 
     /// Current branch by name comparison against status, like the Tauri
     /// client — empty while detached, so no row gets the checkmark.
+    ///
+    /// The *live* status, never the held one: this decides which row is ticked
+    /// and which branch a merge merges into, and a menu opened before the new
+    /// repository's first read must tick nothing rather than the branch the
+    /// previous one was on.
     private var currentBranch: String { status?.branch ?? "" }
     private var isDetached: Bool { status?.detached ?? false }
 
@@ -157,16 +173,21 @@ struct BranchMenu: View {
     /// label has the width it has — but a coloured run survives being clipped
     /// far better than a grey one, and the conflicted files in the Changes
     /// tab wear the same colour.
+    ///
+    /// Every state here — the detached label, the merge suffix, the name
+    /// itself — is drawn from `shown`, the held read, so none of them can drop
+    /// to the bare "Branches" for the window in which the newly opened
+    /// repository has no status.
     private var menuLabel: AttributedString {
-        if isDetached {
-            if let sha = status?.headSha, !sha.isEmpty {
-                return AttributedString("Detached at \(String(sha.prefix(7)))")
+        if shown.isDetached {
+            if !shown.headSha.isEmpty {
+                return AttributedString("Detached at \(String(shown.headSha.prefix(7)))")
             }
             return AttributedString("Detached")
         }
-        guard !currentBranch.isEmpty else { return AttributedString("Branches") }
-        var label = AttributedString(currentBranch)
-        guard isMerging else { return label }
+        guard !shown.branch.isEmpty else { return AttributedString("Branches") }
+        var label = AttributedString(shown.branch)
+        guard shown.isMerging else { return label }
         var suffix = AttributedString(" · merging")
         suffix.foregroundColor = .merging
         label.append(suffix)

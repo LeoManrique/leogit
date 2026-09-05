@@ -5,11 +5,17 @@
     clippy::must_use_candidate
 )]
 
+use leogit_core::process;
 use leogit_core::repos::{self, CloneTarget, RepoRow};
 
-#[tauri::command(async)]
-pub fn known_repos(scan_paths: Vec<String>, max_depth: u32) -> Result<Vec<String>, String> {
-    repos::known_repos(scan_paths, max_depth)
+/// Async over [`process::run_blocking`], not `#[tauri::command(async)]`: the
+/// walk spawns nothing but stats every entry under each scan root, which at the
+/// configured depth is tens of thousands of syscalls on a cold page cache. That
+/// wait belongs on the blocking pool rather than on a tokio core worker, which
+/// is the hop the `SwiftUI` bridge already makes for this call.
+#[tauri::command]
+pub async fn known_repos(scan_paths: Vec<String>, max_depth: u32) -> Result<Vec<String>, String> {
+    process::run_blocking(move || repos::known_repos(scan_paths, max_depth)).await?
 }
 
 /// One crossing per keystroke, not one per row — see `repos::filter_repos`.

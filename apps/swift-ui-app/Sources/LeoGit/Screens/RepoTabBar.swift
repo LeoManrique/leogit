@@ -10,6 +10,11 @@ struct RepoTabBar: View {
     /// The working-tree file count shown on the Changes tab — every row the
     /// list shows, untracked and conflicted included, hidden at zero and
     /// never capped, visible from any tab (the Tauri badge's semantics).
+    ///
+    /// A plain number, never an optional: what to show while a repository has
+    /// no status yet is the caller's decision, not the strip's, and the caller
+    /// keeps the last known count — see `ToolbarStatus` for why this badge is
+    /// among the readers that do.
     let changesCount: Int
 
     @State private var hoveredTab: RepoTab?

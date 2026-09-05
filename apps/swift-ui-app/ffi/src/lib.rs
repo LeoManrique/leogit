@@ -187,7 +187,7 @@ pub struct CommitInfo {
     pub parents: Vec<String>,
     pub trailers: Vec<String>,
     pub co_authors: Vec<String>,
-    pub body_without_coauthors: String,
+    pub body_without_coauthors: Option<String>,
     pub tags: Vec<String>,
 }
 
@@ -496,6 +496,19 @@ impl From<diff::ParsedDiff> for DiffPayload {
 #[uniffi::export]
 pub fn fix_path_env() {
     process::fix_path_env();
+}
+
+/// Ask the login shell for the real `PATH` in the background, once the window
+/// is up, and apply anything it finds to the children spawned from then on.
+///
+/// The call above almost always installs a *cached* `PATH`, because probing the
+/// shell costs ~430 ms that the user would spend looking at no window at all.
+/// This is the other half of that trade, and unlike `fix_path_env` it carries
+/// no ordering contract: it never writes the process environment, so the main
+/// window calls it from a `.task` after the first frame.
+#[uniffi::export]
+pub fn spawn_path_reprobe() {
+    process::spawn_path_reprobe();
 }
 
 // ---------------------------------------------------------------------------
@@ -1597,8 +1610,9 @@ pub fn load_state() -> Result<ReposState, GitError> {
 }
 
 /// Apply a field-wise patch to the repos-state file and return the result.
-/// The native client patches `last_opened_repo` on every switch, so the next
-/// launch — of either client — restores it.
+/// Carries the sort modes and the clone destination; the repo to restore on
+/// the next launch is written by [`record_recent_repo`], alongside the
+/// recency that always accompanied it.
 ///
 /// # Errors
 ///
@@ -1608,8 +1622,14 @@ pub fn patch_state(patch: ReposStatePatch) -> Result<ReposState, GitError> {
     config::patch_state(patch).map_err(GitError::from)
 }
 
-/// Move `path` to the front of the most-recently-used list (de-duped,
-/// capped inside core) and return the updated state.
+/// Mark `path` as just-opened: front of the most-recently-used list
+/// (de-duped, capped inside core) *and* the repo to restore on the next
+/// launch — of either client, since the file is shared. Returns the updated
+/// state.
+///
+/// One write rather than two: every caller of this is an open, so the
+/// recency and the restore point are the same fact, and splitting them cost a
+/// second full rewrite of the file on every repo switch.
 ///
 /// # Errors
 ///
@@ -1628,8 +1648,8 @@ pub fn record_recent_repo(path: String) -> Result<ReposState, GitError> {
 /// core's walk is synchronous and, over several roots at the configured
 /// depth, stats enough directories to hold its thread for a noticeable
 /// stretch. Swift's cooperative pool has one thread per core, so that wait
-/// belongs on a blocking thread — the hop `#[tauri::command(async)]` performs
-/// implicitly for the Tauri host.
+/// belongs on a blocking thread — the same hop the Tauri host makes through
+/// `process::run_blocking`.
 ///
 /// # Errors
 ///
@@ -1726,8 +1746,9 @@ pub async fn repo_identifier(repo_path: String) -> Option<RepoIdentifier> {
 ///
 /// Async over `spawn_blocking` even though core's function is synchronous:
 /// that fetch can hold its thread for the full timeout, which must never be
-/// a Swift cooperative thread. The Tauri host makes the same hop implicitly
-/// via `#[tauri::command(async)]`.
+/// a Swift cooperative thread. The Tauri host makes the same hop explicitly,
+/// through `process::run_blocking` — `#[tauri::command(async)]` does *not*
+/// supply it, because it runs a sync body inline on a tokio core worker.
 ///
 /// # Errors
 ///

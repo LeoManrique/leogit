@@ -7,11 +7,7 @@
   import { basename } from '$lib/utils/path'
   import { loadFileStatusStyles, refreshConfig, scanFolders } from '$lib/stores/config'
   import { gitApi, configApi, appApi, reposApi, type LaunchTarget } from '$lib/api/commands'
-  import {
-    hydrateReposState,
-    patchReposState,
-    recordRecentRepo,
-  } from '$lib/stores/reposState'
+  import { hydrateReposState } from '$lib/stores/reposState'
   import { resolveCloneDefaultDir, rememberCloneDir } from '$lib/services/cloneFlow'
   import { updateChecker } from '$lib/services/updateChecker'
   import { dismissTopOverlay } from '$lib/actions/overlayStack'
@@ -78,7 +74,22 @@
     enterRepo(target.path)
   }
 
-  /** Switch the app into `main` on a repo, adding it if it wasn't discovered. */
+  /**
+   * Switch the app into `main` on a repo, adding it if it wasn't discovered.
+   *
+   * Deliberately does not persist anything. Entering `main` mounts MainLayout,
+   * whose `initialize()` records the open repo — so a write here would be the
+   * second of two full read-modify-writes of `repos-state.json` for one open,
+   * with a window between them where the most-recent repo and the one that
+   * would reopen disagreed.
+   *
+   * The mount always follows, because this is only ever reached while
+   * MainLayout is *not* mounted: `handleLaunchTarget` returns early in `main`,
+   * and `confirmInit` hands off to `openExternalRepo` whenever `mainLayout` is
+   * bound — and `mainLayout` is bound exactly when the component exists. So a
+   * caller that gets here has no mounted MainLayout, and setting the phase
+   * gives it one.
+   */
   function enterRepo(path: string) {
     appState.update((s) => ({
       ...s,
@@ -86,8 +97,6 @@
       repos: s.repos.includes(path) ? s.repos : [...s.repos, path],
       repoPath: path,
     }))
-    patchReposState({ last_opened_repo: path })
-    recordRecentRepo(path)
   }
 
   function promptInit(path: string) {
@@ -181,9 +190,9 @@
         }
       }
       if (repos.length === 1) {
+        // No persistence here either: the mount that follows records this open
+        // once, `last_opened_repo` included. See `enterRepo`.
         appState.update((s) => ({ ...s, phase: 'main', repos, repoPath: repos[0] }))
-        // Read-modify-write so we don't clobber sort modes / recent_repos.
-        patchReposState({ last_opened_repo: repos[0] })
         return
       }
 
@@ -194,9 +203,9 @@
   }
 
   function handleRepoSelect(repo: string) {
+    // Picking from the picker is an open like any other, and MainLayout's mount
+    // is where an open is recorded. See `enterRepo`.
     appState.update((s) => ({ ...s, phase: 'main', repoPath: repo }))
-    // Read-modify-write so we don't clobber sort modes / recent_repos.
-    patchReposState({ last_opened_repo: repo })
   }
 
   async function openClone() {

@@ -125,6 +125,25 @@ check:
     cd {{app}} && pnpm check
     cargo check --workspace
 
+# Run the Rust test suite (core + both hosts)
+test:
+    cargo test --workspace
+
+# Lint the whole workspace, examples and tests included (clippy pedantic)
+lint:
+    cargo clippy --workspace --all-targets
+
+# Every git question LeoGit asks is a subprocess, and a subprocess costs the
+# same whatever it asks — so this reports spawns per call next to wall time, and
+# spawn count is the number to optimise against. Release build: a debug core
+# measures rustc's inlining choices, not git's cost.
+#
+# `--fetch` adds the network round of repo_sync_status; `--scan <dir>` times a
+# discovery walk over a real folder of repos.
+# Time the core git operations against a real repo (flags: --fetch, --scan <dir>)
+bench repo *flags:
+    cargo run -p leogit-core --release --example bench -- {{repo}} {{flags}}
+
 # Format code with prettier and rustfmt (whole workspace)
 format:
     cd {{app}} && pnpm format

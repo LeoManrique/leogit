@@ -43,7 +43,24 @@ use crate::events::{CoreEvent, EventSink, TerminalExit};
 struct PtySession {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
-    child: Box<dyn Child + Send + Sync>,
+    /// Behind a lock of its own, reachable without the session's.
+    ///
+    /// The two things this struct holds are wanted by callers with opposite
+    /// deadlines. `kill()` is `portable-pty`'s SIGHUP → grace loop → SIGKILL
+    /// escalation and blocks for up to ~250 ms; `write_terminal` is sync on the
+    /// host's main thread on purpose, because a keystroke has to keep its place
+    /// in the IPC queue. While they shared one mutex, closing a panel parked
+    /// every keystroke behind the escalation — narrow (typing during a close)
+    /// but a hitch the user types into. Splitting the child out lets a close
+    /// hold a lock for that quarter of a second while `write_terminal` and
+    /// `resize_terminal` take the session's and never wait on it.
+    ///
+    /// `clone_killer()` — signalling from a second handle, which is what the
+    /// trait offers for exactly this — is deliberately *not* used: on unix the
+    /// handle it returns sends a bare SIGHUP with no grace loop and no SIGKILL
+    /// behind it, so a shell that ignores the signal would outlive the panel
+    /// that closed it and never reach `reap_child`.
+    child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
 }
 
 static SESSIONS: LazyLock<Mutex<HashMap<u32, Arc<Mutex<PtySession>>>>> =
@@ -230,7 +247,7 @@ pub fn start_terminal(
     let mut cmd = CommandBuilder::new(&chosen.path);
     cmd.args(&chosen.args);
     cmd.cwd(&cwd);
-    crate::appimage::sanitize(&mut cmd);
+    crate::process::prepare_child_pty(&mut cmd);
     for (key, value) in session_env(&chosen) {
         cmd.env(key, value);
     }
@@ -251,7 +268,7 @@ pub fn start_terminal(
     let session = Arc::new(Mutex::new(PtySession {
         master: pair.master,
         writer,
-        child,
+        child: Arc::new(Mutex::new(child)),
     }));
     SESSIONS
         .lock()
@@ -401,20 +418,26 @@ fn emit_coalesced(pid: u32, rx: &mpsc::Receiver<String>, sink: &dyn EventSink) {
 /// Reap the exited child and translate its status for the close event.
 ///
 /// Runs on the reader thread after EOF, once the session is out of the map —
-/// so nothing else can reach this mutex and the `wait()` cannot block anyone:
-/// at EOF the child is already dead (or its status was cached by a kill's
-/// internal `try_wait`), making the wait effectively instant. This is also
-/// what reaps the zombie the old teardown left behind — the child used to be
-/// dropped without ever being waited on.
+/// so the only other caller that can hold the child's lock is a `close_terminal`
+/// still escalating, and the `wait()` is what collects the child it just
+/// killed. At EOF the child is already dead (or its status was cached by a
+/// kill's internal `try_wait`), making the wait itself effectively instant.
+/// This is also what reaps the zombie the old teardown left behind — the child
+/// used to be dropped without ever being waited on.
+///
+/// The session's own lock is released before the wait, not held across it: an
+/// entry out of the map can still be held by a `write_terminal` that looked it
+/// up a moment earlier, and a keystroke has no business waiting on a reap.
 ///
 /// The deliberate ordering — EOF first, then `wait()` — matters for the one
 /// case where they diverge: a detached background process holding the PTY
 /// open keeps the master readable after the shell itself exited, and waiting
 /// on EOF first keeps "session over" meaning "output over".
 fn reap_child(pid: u32, session: Option<&Arc<Mutex<PtySession>>>) -> TerminalExit {
-    let status = session
-        .and_then(|session| session.lock().ok())
-        .and_then(|mut s| s.child.wait().ok());
+    let status = child_of(session).and_then(|child| {
+        let mut child = child.lock().ok()?;
+        child.wait().ok()
+    });
     if let Some(status) = status {
         TerminalExit {
             exit_code: status.exit_code(),
@@ -430,6 +453,17 @@ fn reap_child(pid: u32, session: Option<&Arc<Mutex<PtySession>>>) -> TerminalExi
             signal: None,
         }
     }
+}
+
+/// The child handle out of a session, releasing the session's own lock before
+/// the caller does anything with it. Both callers then hold the child's lock
+/// for as long as a `wait()` or a `kill()` takes, which is the whole reason the
+/// two locks are separate.
+fn child_of(
+    session: Option<&Arc<Mutex<PtySession>>>,
+) -> Option<Arc<Mutex<Box<dyn Child + Send + Sync>>>> {
+    let session = session?.lock().ok()?;
+    Some(Arc::clone(&session.child))
 }
 
 /// Look up a live session by id, releasing the map lock before the caller
@@ -492,8 +526,11 @@ pub fn resize_terminal(pid: u32, cols: u16, rows: u16) -> Result<(), String> {
 /// without the child handle and lose the status.
 ///
 /// `kill()` is `portable-pty`'s escalation — SIGHUP, a short `try_wait`
-/// grace loop, then SIGKILL — and can block ~250 ms, so the map lock is
-/// released first; only this session's mutex is held across it.
+/// grace loop, then SIGKILL — and can block ~250 ms, so neither the map lock
+/// nor the session's is held across it: only the child's own, which nothing on
+/// a keystroke's path ever takes — see the field's own comment for why the
+/// child sits behind a second lock rather than being signalled from a
+/// `clone_killer()` handle.
 ///
 /// # Errors
 /// Returns `Err` only if the session map lock is poisoned.
@@ -503,10 +540,10 @@ pub fn close_terminal(pid: u32) -> Result<(), String> {
         .map_err(|_| "sessions lock poisoned")?
         .get(&pid)
         .cloned();
-    if let Some(session) = session
-        && let Ok(mut s) = session.lock()
+    if let Some(child) = child_of(session.as_ref())
+        && let Ok(mut child) = child.lock()
     {
-        let _ = s.child.kill();
+        let _ = child.kill();
     }
     Ok(())
 }
@@ -629,6 +666,67 @@ mod tests {
                 "{id} must inherit PATH, not set it"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Session locking
+    // -----------------------------------------------------------------------
+
+    /// Closing a panel must not park a keystroke. `close_terminal` blocks for
+    /// `portable-pty`'s SIGHUP → grace → SIGKILL escalation — up to ~250 ms —
+    /// and `write_terminal` is sync on the host's main thread by design, so
+    /// while the two shared one mutex, typing during a close typed into a
+    /// frozen window.
+    ///
+    /// Asserted against the lock rather than against the clock: the test holds
+    /// the child's lock itself, which is exactly the state a kill mid-grace
+    /// leaves the session in, and a timing test against a real escalation would
+    /// be racing a sleep loop. `cat` is the child because it reads its pty until
+    /// the pty goes away, so it stays alive for the whole test with no timer to
+    /// lose to.
+    #[cfg(unix)]
+    #[test]
+    fn a_close_in_progress_does_not_block_a_write() {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("open a pty");
+        let spawned = pair
+            .slave
+            .spawn_command(CommandBuilder::new("/bin/cat"))
+            .expect("spawn cat");
+        drop(pair.slave);
+        let writer = pair.master.take_writer().expect("take the writer");
+
+        let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
+        let child = Arc::new(Mutex::new(spawned));
+        SESSIONS.lock().expect("sessions lock").insert(
+            pid,
+            Arc::new(Mutex::new(PtySession {
+                master: pair.master,
+                writer,
+                child: Arc::clone(&child),
+            })),
+        );
+
+        let held = child.lock().expect("child lock");
+        let start = Instant::now();
+        let wrote = write_terminal(pid, "hello\n");
+        let waited = start.elapsed();
+        drop(held);
+
+        SESSIONS.lock().expect("sessions lock").remove(&pid);
+        let _ = child.lock().expect("child lock").kill();
+
+        assert!(wrote.is_ok(), "the write must go through: {wrote:?}");
+        assert!(
+            waited < Duration::from_millis(50),
+            "a keystroke waited {waited:?} on a close in progress"
+        );
     }
 
     // -----------------------------------------------------------------------

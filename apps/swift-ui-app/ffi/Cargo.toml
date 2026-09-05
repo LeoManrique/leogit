@@ -15,8 +15,8 @@ crate-type = ["lib", "staticlib"]
 leogit-core = { path = "../../../core" }
 # `rt` provides `spawn_blocking`, which `repo_sync_status` uses to keep its
 # synchronous core call (a background fetch can hold a thread for up to 12 s)
-# off Swift's cooperative pool — the same worker-thread hop Tauri's
-# `#[tauri::command(async)]` performs implicitly.
+# off Swift's cooperative pool — the same worker-thread hop the Tauri host
+# makes explicitly through `process::run_blocking`.
 tokio = { version = "1", features = ["rt"] }
 # The `tokio` feature enables `async_runtime = "tokio"` on async exports:
 # core's network ops run via `spawn_blocking`, which panics without a live

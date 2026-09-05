@@ -17,6 +17,16 @@ struct ChangesSidebar: View {
     let repoPath: String
     let files: [FileEntry]
 
+    /// Whether this repository's first `git status` has landed.
+    ///
+    /// `files.isEmpty` cannot tell "nothing has changed" from "we haven't
+    /// looked yet", and the list asserts the first of those out loud. Opening a
+    /// repository drops the previous one's status with its path, so without
+    /// this the pane would claim *No changes* for the width of that first read
+    /// — a false statement, on every switch. `RepoStore.historyLoaded` is the
+    /// same gate on the History side, and exists for the same sentence.
+    let statusLoaded: Bool
+
     /// Owned by the repository screen, not by this view: the tab bar swaps
     /// tabs by rebuilding the pane, which would take an in-progress draft —
     /// and amend mode, which the History tab is what puts the composer into —
@@ -95,7 +105,30 @@ struct ChangesSidebar: View {
                 // No header either: "0 of 0 files included" is a sentence
                 // about nothing, and the Tauri sidebar drops its select-all
                 // row the same way.
-                EmptyListPlaceholder(text: "No changes")
+                //
+                // Before the first status lands there is no sentence to say:
+                // the pane holds the space and stays quiet. Deliberately not a
+                // spinner or a "Loading…" line — a `git status` usually answers
+                // in a few hundred milliseconds, and a placeholder that flashes
+                // for that long on every repo switch is more visible than the
+                // wrong word it replaces.
+                //
+                // It is not a bounded wait, though: a repository whose *first*
+                // status read fails stays blank until one succeeds, which for a
+                // deleted or unreadable folder is indefinitely. That is the
+                // right silence rather than a missing state — the pane cannot
+                // say what is wrong, and the thing that can is already saying
+                // it, in the error banner above the split.
+                //
+                // `Color.clear` takes the same flexible space
+                // `EmptyListPlaceholder` does, so the composer below it does not
+                // move when the answer arrives. Nothing sits behind it to click
+                // through to, so it is left as it is.
+                if statusLoaded {
+                    EmptyListPlaceholder(text: "No changes")
+                } else {
+                    Color.clear
+                }
             } else {
                 listHeader
                 Divider()

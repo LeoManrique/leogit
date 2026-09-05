@@ -154,8 +154,9 @@ pub fn tokenize_diff(file_diff: &FileDiff, source: Option<&BlobSource>) -> Vec<T
 /// Because the two sides never share a `ParseState`, a deleted line's text can
 /// no longer poison the line that replaced it.
 ///
-/// Returns `None` when a blob this diff needs can't be read (or the file is too
-/// large), so the caller can fall back.
+/// Returns `None` when the diff reaches past `MAX_HIGHLIGHT_FILE_LINES` — which
+/// is decided before any read, so the cap costs nothing to enforce — or when a
+/// blob this diff needs can't be read, so the caller can fall back either way.
 fn highlight_from_blobs(
     file_diff: &FileDiff,
     syntax: &SyntaxReference,
@@ -188,6 +189,18 @@ fn highlight_from_blobs(
                 LineType::Hunk | LineType::NoNewline => {}
             }
         }
+    }
+
+    // The line cap decides this before a single byte is read. It used to be
+    // asked inside `tokenize_file`, which runs on text `read_blob` has already
+    // buffered — so the guard that exists to stop us spending on a generated or
+    // minified file was spending the whole `git show` first, for every file,
+    // always. Nothing between here and there can change the answer: `wanted` is
+    // final, and the cap is a constant.
+    let past_cap =
+        |wanted: &BTreeSet<u32>| wanted.last().is_some_and(|&n| n > MAX_HIGHLIGHT_FILE_LINES);
+    if past_cap(&want_old) || past_cap(&want_new) {
+        return None;
     }
 
     // An added file has no old side and a deleted file no new side; skipping the
@@ -242,16 +255,16 @@ fn highlight_from_blobs(
 /// string ourselves and running the language's own parser over the body covers
 /// every language uniformly.
 ///
-/// Returns `None` for files past `MAX_HIGHLIGHT_FILE_LINES`.
+/// Returns `None` only for an empty `wanted`, which its one caller never
+/// passes. `MAX_HIGHLIGHT_FILE_LINES` is not tested here: it is the caller's
+/// gate now, asked before the blob is read rather than after, and asking it
+/// again on text already in memory would be a check that can no longer fail.
 fn tokenize_file(
     syntax: &SyntaxReference,
     text: &str,
     wanted: &BTreeSet<u32>,
 ) -> Option<HashMap<u32, TokenLine>> {
     let last_wanted = *wanted.iter().next_back()?;
-    if last_wanted > MAX_HIGHLIGHT_FILE_LINES {
-        return None;
-    }
 
     // Only Markdown emits the code-fence scopes `fence_role` looks for, so the
     // fence machinery is dead weight (and an extra per-line walk) for source
@@ -902,6 +915,65 @@ mod tests {
             .expect("spawn git")
             .success();
         assert!(ok, "git {args:?} failed");
+    }
+
+    /// The line cap has to be answered *before* the blob is read, and there is
+    /// no way to see that in the tokens: the fallback is what comes out either
+    /// way. What changes is the `git show` — the guard used to sit inside
+    /// `tokenize_file`, which only ever runs on text `read_blob` has already
+    /// spawned a subprocess to buffer, so the check that exists to avoid
+    /// spending on a generated file spent the read first, every time.
+    ///
+    /// The spawn counter is process-wide and the rest of the suite runs beside
+    /// this, so a parallel test's child can only *inflate* a reading — hence
+    /// the minimum of several, the same technique `process`'s own counter test
+    /// uses.
+    #[test]
+    fn a_diff_past_the_line_cap_falls_back_without_reading_a_blob() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        init_repo(repo);
+        fs::write(repo.join("main.rs"), "fn main() {}\n").expect("write");
+        git_in(repo, &["add", "main.rs"]);
+        git_in(repo, &["commit", "-qm", "add"]);
+
+        // One deleted row past the cap is enough — the old side is the one that
+        // reaches `git show`, and the blob it names really is readable, so a
+        // read that happened would succeed rather than fail into the fallback
+        // by accident.
+        let mut diff = rust_diff();
+        diff.hunks[0].lines.push(DiffLine {
+            text: None,
+            content: "let y = 2;".into(),
+            line_type: LineType::Delete,
+            old_line_no: Some(
+                i32::try_from(MAX_HIGHLIGHT_FILE_LINES + 1).expect("the cap fits an i32"),
+            ),
+            new_line_no: None,
+            intra_line_diff: None,
+        });
+        let source = BlobSource::WorkingTree {
+            repo_path: repo.to_str().expect("utf-8 path").to_string(),
+        };
+
+        let spawned = (0..8)
+            .map(|_| {
+                let before = crate::process::spawn_count();
+                let _ = tokenize_diff(&diff, Some(&source));
+                crate::process::spawn_count() - before
+            })
+            .min()
+            .expect("eight readings");
+        assert_eq!(
+            spawned, 0,
+            "the cap must be answered before `git show` runs"
+        );
+
+        assert_eq!(
+            format!("{:?}", tokenize_diff(&diff, Some(&source))),
+            format!("{:?}", tokenize_diff(&diff, None)),
+            "a capped diff must tokenize exactly as the fallback does"
+        );
     }
 
     /// A .svelte file whose script block opens on line 1. The lines the diff

@@ -18,7 +18,17 @@ import SwiftUI
 struct SyncControls: View {
     let store: SyncStore
     let repoPath: String
+
+    /// The live status — `nil` until the open repository's first read lands.
+    /// Everything this control *runs*, and everything that decides whether it
+    /// may run at all, reads from here.
     let status: RepoStatus?
+
+    /// What the control draws, which is the last read that landed rather than
+    /// the live one — see `ToolbarStatus`. Display only: it picks the title,
+    /// the symbol, whether the button wears a chevron, and the tooltip's
+    /// counts, none of which can act.
+    let shown: ToolbarStatus
     /// Called after any network operation: pull moves HEAD and the working
     /// tree, push/fetch move the ahead/behind counts.
     let onWorkingTreeChanged: () async -> Void
@@ -34,6 +44,11 @@ struct SyncControls: View {
     @State private var isConfirmingForcePush = false
     @State private var isPublishSheetPresented = false
 
+    /// The live reads the *actions* are built from: what gets pushed, whether
+    /// that push sets an upstream, and whether the divergence that unlocks
+    /// force push is real. All four fall to their empty values while the open
+    /// repository has no status, which is what makes those actions unavailable
+    /// rather than wrong.
     private var branch: String { status?.branch ?? "" }
     private var hasUpstream: Bool { status?.hasUpstream ?? false }
     private var ahead: Int32 { status?.ahead ?? 0 }
@@ -47,20 +62,34 @@ struct SyncControls: View {
 
     private var isBusy: Bool { store.activeOperation != nil }
 
-    /// The ladder's answer, decided in core and carried on the status itself.
-    /// `nil` status means the first read hasn't landed — a fact about this
-    /// view's own load, which is why it is the one case decided here.
+    /// The ladder's answer as the button *runs* it, decided in core and carried
+    /// on the status itself. `nil` status means the first read hasn't landed —
+    /// a fact about this view's own load, which is why it is the one case
+    /// decided here — and `.loading` is not actionable, so nothing can fire
+    /// against a repository nobody has read yet (F18).
     private var action: SyncProposal { status?.proposal ?? .loading }
+
+    /// The ladder's answer as the button *draws* it: the same one while there
+    /// is a status, the last that landed while there is not. Holding it is what
+    /// keeps the control from collapsing to a narrower plain "Fetch" — chevron
+    /// and all — on every switch, for the 100–500 ms the first read takes.
+    private var face: SyncProposal { shown.proposal }
+
+    /// Whether the control may act: not while a transfer holds the slot, and
+    /// not before this repository's own status has landed. The second half is
+    /// what today's `nil` → `.loading` → disabled did, said once so that
+    /// holding the face above cannot loosen it.
+    private var isEnabled: Bool { !isBusy && status != nil }
 
     var body: some View {
         Group {
-            switch action {
+            switch face {
             case .loading, .detached:
                 plainButton(action: perform)
                     .disabled(true)
             case .publishRepository, .fetch:
                 plainButton(action: perform)
-                    .disabled(isBusy)
+                    .disabled(!isEnabled)
             case .publishBranch, .push, .pull:
                 splitButton(primaryAction: perform)
             }
@@ -79,8 +108,9 @@ struct SyncControls: View {
         // state — so it posts, and this view runs the exact click path.
         .onReceive(NotificationCenter.default.publisher(for: .leogitSyncActionRequested)) { _ in
             // The buttons express this as `.disabled`; the notification
-            // path has to guard it itself.
-            guard !isBusy else { return }
+            // path has to guard it itself — including the half that says the
+            // face on screen may not be this repository's yet.
+            guard isEnabled else { return }
             perform()
         }
         .sheet(isPresented: $isPublishSheetPresented) {
@@ -118,21 +148,21 @@ struct SyncControls: View {
     private func splitButton(primaryAction: @escaping () -> Void) -> some View {
         Menu {
             Button("Fetch", action: fetch)
-                .disabled(isBusy)
+                .disabled(!isEnabled)
 
             if hasDiverged {
                 Divider()
                 Button("Force Push (with Lease)…", role: .destructive) {
                     isConfirmingForcePush = true
                 }
-                .disabled(isBusy)
+                .disabled(!isEnabled)
             }
         } label: {
             Label(title, systemImage: icon)
         } primaryAction: {
             primaryAction()
         }
-        .disabled(isBusy)
+        .disabled(!isEnabled)
     }
 
     private var title: String {
@@ -144,11 +174,11 @@ struct SyncControls: View {
             case .publish: return "Publishing…"
             }
         }
-        return action.title
+        return face.title
     }
 
     private var icon: String {
-        switch action {
+        switch face {
         case .loading, .fetch: "arrow.triangle.2.circlepath"
         case .detached, .push: "arrow.up"
         case .publishRepository: "icloud.and.arrow.up"
@@ -157,8 +187,11 @@ struct SyncControls: View {
         }
     }
 
+    /// The tooltip explains the face, so its counts come from the same held
+    /// read — a "Pull 0 commits" while the live status is still nil would be
+    /// the one place the bar contradicted itself.
     private var helpText: String {
-        switch action {
+        switch face {
         case .loading:
             "Loading repository status"
         case .detached:
@@ -168,9 +201,9 @@ struct SyncControls: View {
         case .publishBranch:
             "Publish this branch to the remote and start tracking it"
         case .pull:
-            "Pull \(behind) commit\(behind == 1 ? "" : "s") from the remote"
+            "Pull \(shown.behind) commit\(shown.behind == 1 ? "" : "s") from the remote"
         case .push:
-            "Push \(ahead) commit\(ahead == 1 ? "" : "s") to the remote"
+            "Push \(shown.ahead) commit\(shown.ahead == 1 ? "" : "s") to the remote"
         case .fetch:
             "Fetch from the remote — updates the ahead/behind counts without touching your files"
         }
@@ -179,6 +212,11 @@ struct SyncControls: View {
     /// Runs whatever the ladder proposes. The single entry point for the
     /// button face, the split button's primary action, and the menu command,
     /// so a state can never be reachable by one and not the others.
+    ///
+    /// Switches on `action`, the live proposal, and never on the face: a click
+    /// cannot reach here while the two differ — `isEnabled` is false for
+    /// exactly that window — and if one ever did, `.loading` does nothing
+    /// rather than the previous repository's something.
     private func perform() {
         switch action {
         case .loading, .detached: break

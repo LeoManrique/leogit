@@ -251,7 +251,7 @@
       lastAmendSha = target.sha
       amendCoAuthors = target.co_authors
       summary = target.summary
-      description = target.body_without_coauthors
+      description = target.body_without_coauthors ?? target.body
     } else if (target === null && lastAmendSha !== null) {
       lastAmendSha = null
       amendCoAuthors = []

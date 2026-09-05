@@ -12,6 +12,7 @@ use leogit_core::git::{
     self, BranchInfo, CommitDetail, CommitInfo, DiscardPlan, FileEntry, FileStatusStyle,
     LogOptions, MergeResult, RepoIdentifier, RepoStatus, RepoSync,
 };
+use leogit_core::process;
 use tauri::AppHandle;
 
 use crate::event_sink::ProgressSink;
@@ -120,9 +121,15 @@ pub fn format_commit_message(
 
 // ── Sync (fetch / pull / push) ─────────────────────────────────────────────
 
-#[tauri::command(async)]
-pub fn repo_sync_status(repo_path: String, do_fetch: bool) -> Result<RepoSync, String> {
-    git::repo_sync_status(repo_path, do_fetch)
+/// Async over [`process::run_blocking`], not `#[tauri::command(async)]`: with
+/// `do_fetch` this runs a `git fetch` that may hold its thread for core's full
+/// 12 s background budget, and `(async)` on a *sync* fn runs that body inline
+/// on a tokio **core** worker (one per CPU), where it would queue the status
+/// poll and every diff load behind it. The blocking pool is where such a wait
+/// belongs — the same hop the `SwiftUI` bridge makes for this function.
+#[tauri::command]
+pub async fn repo_sync_status(repo_path: String, do_fetch: bool) -> Result<RepoSync, String> {
+    process::run_blocking(move || git::repo_sync_status(repo_path, do_fetch)).await?
 }
 
 #[tauri::command]

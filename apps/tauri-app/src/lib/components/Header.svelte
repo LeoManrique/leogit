@@ -17,6 +17,7 @@
     type GitProgressEvent,
     type SyncProposal,
   } from '$lib/api/commands'
+  import { noteFetched } from '$lib/stores/repoSync'
   import { availableUpdate, updateDismissed } from '$lib/stores/update'
   import { ensureRepoIdentifiers, repoIdentifiers } from '$lib/stores/repoIdentifiers'
   import { basename } from '$lib/utils/path'
@@ -265,8 +266,11 @@
       if (!remote) throw new Error('This repository has no remote to fetch from.')
       // The user asked for this one and is waiting on it, so it keeps the
       // generous budget a real transfer needs; the fail-fast background budget
-      // belongs to the fetches nobody is watching.
+      // belongs to the fetches nobody is watching. It never consults the fetch
+      // cooldown either — asking is the user saying the answer might be stale —
+      // but it does start one, because the answer it brings back is fresh.
       await gitApi.fetch(repoPath, remote, false)
+      noteFetched(repoPath)
       await onTransferFinished?.()
     } catch (error) {
       reportActionError(error, handleFetch)
@@ -284,6 +288,10 @@
       const remote = await gitApi.getRemote(repoPath)
       if (!remote) throw new Error('This repository has no remote to pull from.')
       await gitApi.pull(repoPath, remote)
+      // A pull is a fetch and a merge, so its fetch half starts a cooldown just
+      // as a bare fetch does. A push does not: it sends, it learns nothing new
+      // about the remote's other branches.
+      noteFetched(repoPath)
       await onTransferFinished?.()
     } catch (error) {
       reportActionError(error, handlePull)

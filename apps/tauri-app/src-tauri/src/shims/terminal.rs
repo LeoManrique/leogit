@@ -33,15 +33,21 @@ pub fn start_terminal(
 // the async runtime would let two keystrokes race, which is the one thing a
 // terminal may never do. The write itself is a `write_all` to a PTY master —
 // microseconds, and the main thread is where the keystroke already is.
+//
+// That "microseconds" is only true because the session's mutex is never held
+// across anything slow: core keeps the child process behind a second lock of
+// its own precisely so `close_terminal`'s ~250 ms kill cannot end up in front
+// of a keystroke on this thread.
 #[tauri::command]
 pub fn write_terminal(pid: u32, data: &str) -> Result<(), String> {
     terminal::write_terminal(pid, data)
 }
 
-// Takes the session mutex, which `close_terminal` can hold for a quarter of a
-// second; off the main thread so a resize landing mid-teardown cannot hitch the
-// window. Ordering does not matter here — a resize is a level, not an edge, and
-// the frontend debounces a drag down to its final size before sending one.
+// Takes the session mutex, and a PTY resize is an ioctl on a handle the reader
+// thread is blocked on; off the main thread so nothing about a teardown in
+// flight can hitch the window. Ordering does not matter here — a resize is a
+// level, not an edge, and the frontend debounces a drag down to its final size
+// before sending one.
 #[tauri::command(async)]
 pub fn resize_terminal(pid: u32, cols: u16, rows: u16) -> Result<(), String> {
     terminal::resize_terminal(pid, cols, rows)

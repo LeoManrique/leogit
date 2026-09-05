@@ -10,6 +10,57 @@ enum RepoTab: String, CaseIterable, Identifiable {
     var id: Self { self }
 }
 
+/// What the toolbar *draws* about the repository: every field the bar's faces
+/// read out of `RepoStatus`, and nothing else.
+///
+/// It exists for the window in which a newly opened repository has no status
+/// yet — the 100–500 ms the first read takes. Every reader of `status` that can
+/// act was made to say nothing rather than something wrong when the status is
+/// cleared on a switch; the toolbar's faces are the deliberate exception,
+/// because each of their empty forms is a *different width* than what it
+/// replaces. "Branches" is narrower than most branch names, a disabled plain
+/// "Fetch" drops the split button's chevron, the ahead/behind text vanishes
+/// outright, and the count badge sits inside the tab's own `HStack` where
+/// hiding it slides the whole tab strip sideways. Held, the bar moves once per
+/// switch — when the new repository's real answer arrives — instead of
+/// collapsing and re-expanding on every one.
+///
+/// Holding is safe here precisely because none of it is actionable: a label, a
+/// count, a symbol and two numbers cannot be clicked. What a click or ⌘P
+/// *runs* is read from the live status and stays disabled while there is none.
+///
+/// A value type of exactly the fields the bar reads, rather than the status
+/// itself, so mirroring it compares eight scalars per pass rather than the
+/// whole working-tree file list on every tick of a 2 s poll.
+struct ToolbarStatus: Equatable, Sendable {
+    var branch = ""
+    var isDetached = false
+    var headSha = ""
+    var isMerging = false
+    var changesCount = 0
+    var ahead: Int32 = 0
+    var behind: Int32 = 0
+    var proposal: SyncProposal = .loading
+
+    /// No status has ever landed: a fresh launch, and where a repository whose
+    /// first read *failed* is put back. Every face shows its empty form, which
+    /// is the honest answer when there is nothing behind it.
+    static let unknown = ToolbarStatus()
+
+    private init() {}
+
+    init(_ status: RepoStatus) {
+        branch = status.branch
+        isDetached = status.detached
+        headSha = status.headSha
+        isMerging = status.merging
+        changesCount = status.files.count
+        ahead = status.ahead
+        behind = status.behind
+        proposal = status.proposal
+    }
+}
+
 /// Root view: the welcome screen until a repository is open, the repository
 /// screen afterwards.
 ///
@@ -91,6 +142,15 @@ struct ContentView: View {
 
     @State private var tab: RepoTab = .changes
 
+    /// The last toolbar read that landed, drawn while the newly opened
+    /// repository has none of its own — see `ToolbarStatus` for why the bar's
+    /// faces are the one family of readers that keeps a previous value.
+    ///
+    /// What each of them showed briefly before the status started being cleared
+    /// on a switch is exactly this, so holding it preserves the baseline rather
+    /// than inventing a behaviour.
+    @State private var heldStatus: ToolbarStatus = .unknown
+
     /// Each tab's selection, keyed by path / sha so a reload that replaces
     /// every row value keeps it. Held here because each tab's list and its
     /// detail sit on opposite sides of the split — and so a round trip
@@ -129,9 +189,18 @@ struct ContentView: View {
     init(appConfig: AppConfigStore) {
         self.appConfig = appConfig
         let policy = BackgroundSchedulingPolicy()
+        // Built before the sync store so the one fetch cooldown it owns can be
+        // handed over: the open repository's silent fetch and the tier sweeps
+        // have to consult the same stamps, not two maps that disagree.
+        let directory = RepoDirectoryStore(config: appConfig)
         _schedulingPolicy = State(initialValue: policy)
-        _syncStore = State(initialValue: SyncStore(schedulingPolicy: policy))
-        _directoryStore = State(initialValue: RepoDirectoryStore(config: appConfig))
+        _syncStore = State(
+            initialValue: SyncStore(
+                schedulingPolicy: policy,
+                fetchCooldown: directory.fetchCooldown
+            )
+        )
+        _directoryStore = State(initialValue: directory)
         _cloneStore = State(initialValue: CloneStore(config: appConfig))
         _commitStore = State(initialValue: CommitStore(config: appConfig))
     }
@@ -274,7 +343,10 @@ struct ContentView: View {
             // alone.
             if preparedRepo != repoPath {
                 preparedRepo = repoPath
-                branchStore.reset()
+                // Named, not merely bumped: the store drops a listing that
+                // describes any other repository, and this is where it is told
+                // which one it now speaks for.
+                branchStore.reset(for: repoPath)
                 syncStore.reset()
                 actionFailure = nil
                 // The sidebars re-seed these from the new repository's lists.
@@ -326,6 +398,23 @@ struct ContentView: View {
             guard current > previous else { return }
             Task { await resyncOnWake() }
         }
+        // The held read's one writer, kept here rather than in the toolbar so
+        // the values survive a tab switch rebuilding the sidebar. `nil` is "we
+        // have not looked yet", which is the whole window `heldStatus` exists
+        // to cover, so only a real answer writes — and it writes *after* the
+        // pass that already drew that answer live, so the copy can never be
+        // read in preference to a fresher one.
+        .onChange(of: liveStatus, initial: true) { _, live in
+            if let live { heldStatus = live }
+        }
+        // A first read that *failed* never ends that window: `status` stays nil
+        // for as long as the repository stays open, so without this the bar
+        // would describe the previous repository indefinitely, under an error
+        // banner naming this one. Dropped, every face falls back to its empty
+        // form — which is what "we could not read it" looks like.
+        .onChange(of: hasFailedWithoutStatus) { _, failed in
+            if failed { heldStatus = .unknown }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .leogitRefreshRequested)) { _ in
             // ⌘R from the View menu — the keyboard-only successor of the
             // toolbar Refresh button: a full visible reload of status,
@@ -371,6 +460,7 @@ struct ContentView: View {
                     store: branchStore,
                     repoPath: repoPath,
                     status: store.status,
+                    shown: shownStatus,
                     isMerging: store.isMerging,
                     onWorkingTreeChanged: { await store.refresh() },
                     onFailure: { actionFailure = $0 }
@@ -412,6 +502,7 @@ struct ContentView: View {
                     store: syncStore,
                     repoPath: repoPath,
                     status: store.status,
+                    shown: shownStatus,
                     onWorkingTreeChanged: { await store.refresh() },
                     onFailure: { actionFailure = $0 }
                 )
@@ -452,7 +543,7 @@ struct ContentView: View {
         VStack(spacing: 0) {
             RepoTabBar(
                 selection: $tab,
-                changesCount: store.status?.files.count ?? 0
+                changesCount: shownStatus.changesCount
             )
 
             Divider()
@@ -462,6 +553,7 @@ struct ContentView: View {
                 ChangesSidebar(
                     repoPath: repoPath,
                     files: store.status?.files ?? [],
+                    statusLoaded: store.status != nil,
                     commitStore: commitStore,
                     selection: $changesSelection,
                     selectedPath: $selectedPath,
@@ -524,15 +616,38 @@ struct ContentView: View {
         }
     }
 
+    /// The toolbar's read of the open repository, `nil` for as long as its
+    /// first status has not landed.
+    private var liveStatus: ToolbarStatus? { store.status.map(ToolbarStatus.init) }
+
+    /// What the bar's faces draw: the live read when there is one, the last one
+    /// that landed while there is not.
+    private var shownStatus: ToolbarStatus { liveStatus ?? heldStatus }
+
+    /// Whether the open repository has no status *and* something has already
+    /// said why — the failed first read that `heldStatus` must not outlive.
+    /// `open()`'s own failure path leaves `errorMessage` set with `status`
+    /// still nil; a failing poll afterwards says the same thing in
+    /// `pollFailure`.
+    private var hasFailedWithoutStatus: Bool {
+        store.status == nil && (store.errorMessage != nil || store.pollFailure != nil)
+    }
+
     /// The ⌘P menu item's content: the ladder's proposal by title, enabled
     /// only when it's runnable and no operation holds the slot. The perform
     /// closure posts rather than acting — the sheet and alert the action may
     /// open belong to `SyncControls`.
+    ///
+    /// The title is the toolbar's face and is held with it, so the two surfaces
+    /// of one ladder never name different actions. What the item *runs* is the
+    /// live proposal, which stays `.loading` — and so not actionable — for as
+    /// long as the newly opened repository has no status: the held face must
+    /// never become a ⌘P against the new path (F18).
     private var syncMenuCommand: SyncCommand {
-        let proposal = store.status?.proposal ?? .loading
+        let live = store.status?.proposal ?? .loading
         return SyncCommand(
-            title: proposal.title,
-            isEnabled: proposal.isActionable && syncStore.activeOperation == nil
+            title: shownStatus.proposal.title,
+            isEnabled: live.isActionable && syncStore.activeOperation == nil
         ) {
             NotificationCenter.default.post(name: .leogitSyncActionRequested, object: nil)
         }
@@ -570,23 +685,23 @@ struct ContentView: View {
 
     /// `↑N ↓N` — pending pushes and pulls, empty when in sync (or detached,
     /// where neither direction exists).
+    ///
+    /// Read from the held status like the rest of the bar: text that
+    /// *disappears* is a width change too, and this item sits between the
+    /// update chip and the sync button.
     private var syncCountsText: String {
-        guard let status = store.status, !status.detached else { return "" }
+        guard !shownStatus.isDetached else { return "" }
         var parts: [String] = []
-        if status.ahead > 0 { parts.append("↑\(status.ahead)") }
-        if status.behind > 0 { parts.append("↓\(status.behind)") }
+        if shownStatus.ahead > 0 { parts.append("↑\(shownStatus.ahead)") }
+        if shownStatus.behind > 0 { parts.append("↓\(shownStatus.behind)") }
         return parts.joined(separator: " ")
     }
 
     private var syncCountsHelp: String {
-        guard let status = store.status else { return "" }
+        let (ahead, behind) = (shownStatus.ahead, shownStatus.behind)
         var parts: [String] = []
-        if status.ahead > 0 {
-            parts.append("\(status.ahead) commit\(status.ahead == 1 ? "" : "s") to push")
-        }
-        if status.behind > 0 {
-            parts.append("\(status.behind) commit\(status.behind == 1 ? "" : "s") to pull")
-        }
+        if ahead > 0 { parts.append("\(ahead) commit\(ahead == 1 ? "" : "s") to push") }
+        if behind > 0 { parts.append("\(behind) commit\(behind == 1 ? "" : "s") to pull") }
         return parts.joined(separator: ", ")
     }
 
@@ -668,7 +783,8 @@ struct ContentView: View {
         // `nil` = no fetch ran, which tells the breaker nothing (see
         // `silentFetch`). Status reloads only when one ran and reached the
         // remote — nothing can have moved otherwise.
-        guard let reached = await syncStore.silentFetch(repoPath: repoPath) else { return }
+        guard let reached = await syncStore.silentFetch(repoPath: repoPath, trigger: .catchUp)
+        else { return }
         directoryStore.breaker.record(success: reached)
         if reached { await store.refresh() }
     }
@@ -716,7 +832,9 @@ struct ContentView: View {
                 store.status?.hasRemote == true,
                 directoryStore.shouldAttemptBackground
             else { continue }
-            if let reached = await syncStore.silentFetch(repoPath: repoPath) {
+            // `.scheduled`: this is the cadence the user configured, so it is
+            // the one automatic fetch the cooldown never answers for.
+            if let reached = await syncStore.silentFetch(repoPath: repoPath, trigger: .scheduled) {
                 directoryStore.breaker.record(success: reached)
             }
             await store.refreshQuietly()
@@ -763,7 +881,7 @@ struct ContentView: View {
             store.status?.hasRemote == true,
             directoryStore.shouldAttemptBackground
         {
-            if let reached = await syncStore.silentFetch(repoPath: repoPath) {
+            if let reached = await syncStore.silentFetch(repoPath: repoPath, trigger: .catchUp) {
                 directoryStore.breaker.record(success: reached)
             }
         }
@@ -794,7 +912,7 @@ struct ContentView: View {
         directoryStore.breaker.reset()
         guard let repoPath = store.repoPath else { return }
         if schedulingPolicy.canAutoFetch, store.status?.hasRemote == true {
-            if let reached = await syncStore.silentFetch(repoPath: repoPath) {
+            if let reached = await syncStore.silentFetch(repoPath: repoPath, trigger: .catchUp) {
                 directoryStore.breaker.record(success: reached)
             }
             await store.refreshQuietly()

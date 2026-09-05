@@ -19,8 +19,13 @@ pub fn check_auth() -> bool {
     cmd.arg("auth").arg("status");
     super::process::prepare_child(&mut cmd);
     // A spawn failure (gh missing) or timeout both mean "can't confirm auth" → false.
-    super::process::run_timed(cmd, "gh auth status", GH_QUERY_TIMEOUT)
-        .is_ok_and(|out| out.status.success())
+    super::process::run_timed(
+        cmd,
+        "gh auth status",
+        GH_QUERY_TIMEOUT,
+        super::process::KillScope::Group,
+    )
+    .is_ok_and(|out| out.status.success())
 }
 
 /// Map a `run_timed` error to a Clone-dialog-friendly message: keep the
@@ -90,8 +95,13 @@ pub fn gh_repo_list(limit: u32) -> Result<Vec<GhRepo>, String> {
         "nameWithOwner,name,description,isPrivate,pushedAt",
     ]);
     super::process::prepare_child(&mut cmd);
-    let output = super::process::run_timed(cmd, "gh repo list", GH_QUERY_TIMEOUT)
-        .map_err(|e| gh_unavailable(&e))?;
+    let output = super::process::run_timed(
+        cmd,
+        "gh repo list",
+        GH_QUERY_TIMEOUT,
+        super::process::KillScope::Group,
+    )
+    .map_err(|e| gh_unavailable(&e))?;
     if !output.status.success() {
         return Err(stderr_or(
             &output,
@@ -160,8 +170,13 @@ pub async fn gh_publish_repo(
         let mut cmd = Command::new("gh");
         cmd.args(&args);
         super::process::prepare_child(&mut cmd);
-        let output = super::process::run_timed(cmd, "gh repo create", GH_TRANSFER_TIMEOUT)
-            .map_err(|e| gh_unavailable(&e))?;
+        let output = super::process::run_timed(
+            cmd,
+            "gh repo create",
+            GH_TRANSFER_TIMEOUT,
+            super::process::KillScope::Group,
+        )
+        .map_err(|e| gh_unavailable(&e))?;
         if !output.status.success() {
             return Err(stderr_or(
                 &output,
@@ -209,9 +224,14 @@ pub async fn gh_clone(
             "--progress",
         ]);
         super::process::prepare_child(&mut cmd);
-        let output =
-            super::process::run_timed_streaming(cmd, "gh repo clone", GH_TRANSFER_TIMEOUT, forward)
-                .map_err(|e| gh_unavailable(&e))?;
+        let output = super::process::run_timed_streaming(
+            cmd,
+            "gh repo clone",
+            GH_TRANSFER_TIMEOUT,
+            super::process::KillScope::Group,
+            forward,
+        )
+        .map_err(|e| gh_unavailable(&e))?;
         if !output.status.success() {
             return Err(stderr_or(&output, "gh repo clone failed."));
         }

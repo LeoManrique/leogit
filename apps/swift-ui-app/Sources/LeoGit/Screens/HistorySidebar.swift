@@ -84,6 +84,14 @@ struct HistorySidebar: View {
     }
 
     private var commitList: some View {
+        // Both sets are built once per body evaluation and captured by the row
+        // closure. Read as computed properties they would be rebuilt inside the
+        // closure — once per mounted row, on every repaint, including the 10 s
+        // relative-date tick — which is thousands of string hashes for two
+        // answers that do not vary across the rows they are asked about.
+        let unpushed = unpushedShas
+        let prefetchTriggers = prefetchTriggerShas
+
         // Restores the reader's place after a tab round trip, which takes this
         // whole subtree out of the hierarchy and rebuilds it scrolled to the
         // top. The anchor is the hoisted selection rather than a saved offset:
@@ -92,17 +100,17 @@ struct HistorySidebar: View {
         // have grown a page or lost the rewritten commit in between. The trade
         // is that it restores the *selection*, so a deep scroll made without
         // selecting anything still comes back at the top.
-        ScrollViewReader { proxy in
+        return ScrollViewReader { proxy in
             List(commits, selection: $selectedSha) { commit in
                 CommitRow(
                     commit: commit,
-                    isUnpushed: unpushedShas.contains(commit.sha),
+                    isUnpushed: unpushed.contains(commit.sha),
                     now: now
                 )
                 .onAppear {
                     // Rows materialise lazily, so one of the last few
                     // appearing means the end of what we have is in sight.
-                    if prefetchTriggerShas.contains(commit.sha) { onReachEnd() }
+                    if prefetchTriggers.contains(commit.sha) { onReachEnd() }
                 }
             }
             .listStyle(.inset)

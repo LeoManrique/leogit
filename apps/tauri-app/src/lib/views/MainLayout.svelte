@@ -14,8 +14,15 @@
   import { appState } from '$lib/stores/app'
   import { dismissTopOverlay, overlayDepth } from '$lib/actions/overlayStack'
   import { config, patchConfig, refreshConfig } from '$lib/stores/config'
-  import { hydrateReposState, patchReposState, recordRecentRepo } from '$lib/stores/reposState'
-  import { setRepoSync } from '$lib/stores/repoSync'
+  import { hydrateReposState, recordRecentRepo } from '$lib/stores/reposState'
+  import {
+    setRepoSync,
+    claimSyncSlot,
+    releaseSyncSlot,
+    fetchedRecently,
+    logCooldownSkip,
+    noteFetched,
+  } from '$lib/stores/repoSync'
   import { activeNetworkOp } from '$lib/stores/networkOps'
   import { repoSyncScheduler } from '$lib/services/repoSyncScheduler'
   import { rediscoverRepos } from '$lib/services/repoDiscovery'
@@ -664,11 +671,33 @@
     } catch {}
   }
 
+  /*
+    One `git log` per repository, however many callers ask for it.
+
+    Two of them do on every switch: the History effect below fires the moment
+    `resetRepoState` clears `log.loaded`, and `handleSwitchRepo`'s `Promise.all`
+    asks again a microtask later. Both are unconditional, and `loaded` only
+    flips when the read *resolves*, so without this the pair spent two reads and
+    bumped `log.resetSeq` twice — each bump scrolling the list back to row 0.
+
+    Keyed on the path rather than a bare boolean: a call for a *different*
+    repository is never a duplicate of the one in flight and must not be
+    dropped. The same key is what discards a reply that outlived its repository
+    — the read is slow enough to straddle a switch, and publishing the previous
+    repo's commits under the new one's path is exactly what `resetRepoState`
+    clears the log to prevent.
+  */
+  let initialLogPath: string | null = null
+  let initialLogClaim = 0
   async function loadInitialLog(): Promise<void> {
     const repoPath = $appState.repoPath
     if (!repoPath) return
+    if (initialLogPath === repoPath) return
+    initialLogPath = repoPath
+    const claim = ++initialLogClaim
     try {
       const commits = await gitApi.getLog(repoPath, PAGE_SIZE, 0)
+      if ($appState.repoPath !== repoPath) return
       repoState.update((s) => ({
         ...s,
         log: {
@@ -681,6 +710,16 @@
       }))
     } catch (error) {
       reportActionError(error)
+    } finally {
+      // Only the call that still owns the slot releases it: a switch that
+      // started its own read has already taken it, and clearing it here would
+      // let a third caller duplicate that one.
+      //
+      // The claim is a per-call number rather than the path, because A → B → A
+      // makes the path ambiguous: the second A read holds the slot under the
+      // same key the first one is about to release it by, and the first one
+      // would hand a fourth caller a duplicate of the read still out.
+      if (initialLogClaim === claim) initialLogPath = null
     }
   }
 
@@ -1079,12 +1118,27 @@
     }
   }
 
+  /**
+   * Why the active repo is being fetched right now.
+   *
+   * `'scheduled'` is the auto-fetch loop's own tick — a cadence the user chose
+   * in Settings (5 s to an hour, 30 s by default), so it is honoured exactly
+   * and never answered from the fetch cooldown, which is longer than most of
+   * that range and would quietly halve it.
+   *
+   * `'catch-up'` is every other automatic trigger — the cold open, the
+   * wake-up resync, the connectivity kick. Each of those fires on an event
+   * rather than a clock, and each can land seconds after a fetch that already
+   * answered the same question, which is exactly what the cooldown is for.
+   */
+  type FetchTrigger = 'scheduled' | 'catch-up'
+
   // Best-effort fetch of the active repo's remote. Swallows offline/auth/no-remote
   // errors so callers can always follow up with a status refresh regardless.
   // This is automatic (timer / refocus / cold-open), so it's gated on
   // connectivity: skipped while offline or backing off, and its outcome feeds
   // the breaker so a recovered link re-enables background syncing app-wide.
-  async function fetchActiveRemote(): Promise<void> {
+  async function fetchActiveRemote(trigger: FetchTrigger): Promise<void> {
     const repoPath = $appState.repoPath
     if (!repoPath) return
     if (!shouldAttemptBackground()) return
@@ -1101,28 +1155,49 @@
     // nobody has looked at — silently dropping a legitimate refocus fetch.
     const current = get(repoState)
     if (current.statusLoaded && !current.status.hasRemote) return
-    let remote: string | null
+    // Four triggers reach this — the launch warm-up, the fetch loop's tick, the
+    // wake-up resync and the connectivity kick — and nothing stopped two of
+    // them running `git fetch` in the same `.git` at once. The loser hits a ref
+    // lock, fails, and is charged to the breaker as if the network were down;
+    // two of those suppress background fetching app-wide (F15). `syncRepo` has
+    // held this guard all along, so claiming the same slot is all it takes.
+    if (!claimSyncSlot(repoPath)) return
     try {
-      remote = await gitApi.getRemote(repoPath)
-    } catch {
-      return // local remote lookup failed — not a connectivity signal
-    }
-    // Now a real answer rather than an invented "origin", so this is the
-    // authoritative version of the gate above rather than dead code under it.
-    if (!remote) return
-    try {
-      // Automatic, so it runs on the background budget: an unreachable remote
-      // gives up in 12 s instead of holding the single network slot for ten
-      // minutes with every other repo's refresh queued behind it.
-      await gitApi.fetch(repoPath, remote, true)
-      recordResult(true)
-    } catch {
-      recordResult(false)
+      // A fetch a moment old is not worth a round trip. The *caller* still
+      // refreshes status afterwards, which is the cheap local half and the part
+      // that surfaces anything that changed on disk meanwhile.
+      if (trigger === 'catch-up' && fetchedRecently(repoPath)) {
+        logCooldownSkip(repoPath, 'skipping the active repo fetch')
+        return
+      }
+      let remote: string | null
+      try {
+        remote = await gitApi.getRemote(repoPath)
+      } catch {
+        return // local remote lookup failed — not a connectivity signal
+      }
+      // Now a real answer rather than an invented "origin", so this is the
+      // authoritative version of the gate above rather than dead code under it.
+      if (!remote) return
+      try {
+        // Automatic, so it runs on the background budget: an unreachable remote
+        // gives up in 12 s instead of holding the single network slot for ten
+        // minutes with every other repo's refresh queued behind it.
+        await gitApi.fetch(repoPath, remote, true)
+        recordResult(true)
+        noteFetched(repoPath)
+      } catch {
+        recordResult(false)
+      }
+    } finally {
+      releaseSyncSlot(repoPath)
     }
   }
 
-  async function performAutoFetch(): Promise<void> {
-    await fetchActiveRemote()
+  async function performAutoFetch(trigger: FetchTrigger): Promise<void> {
+    await fetchActiveRemote(trigger)
+    // Runs even when the fetch above was answered from the cooldown: it is the
+    // local half, it is cheap, and it is what surfaces an edit made on disk.
     await refreshStatus({ silent: true, background: true })
   }
 
@@ -1187,7 +1262,7 @@
     run: async () => {
       if (get(appState).phase !== 'main') return
       if (!canAutoFetch() || isTextInputFocused()) return
-      await performAutoFetch()
+      await performAutoFetch('scheduled')
     },
   })
 
@@ -1218,7 +1293,7 @@
       await refreshConfig()
       // Coming back to the app: fetch the active repo so a remote that moved
       // while we were away surfaces on the Pull button, then refresh local state.
-      await fetchActiveRemote()
+      await fetchActiveRemote('catch-up')
       const status = await refreshStatus({ silent: true, background: true })
       if (status) void adoptHeadSha(status.head_sha)
       // Also refresh the top recents tier so their picker badges aren't stale;
@@ -1454,7 +1529,7 @@
         commitToAmend: null,
         restoreMessage: {
           summary: commit.summary,
-          description: commit.body_without_coauthors,
+          description: commit.body_without_coauthors ?? commit.body,
           coAuthors: commit.co_authors,
         },
         activeTab: 'changes',
@@ -1667,11 +1742,14 @@
     resetPollState()
     resetRepoState()
     appState.update((s) => ({ ...s, repoPath: repo }))
-    await patchReposState({ last_opened_repo: repo })
     // Promote to the front of the recents list (re-tiers the background sync)
-    // and fetch it now — "open a repo" should always pull its latest counts,
+    // and record the repo to restore on the next launch — one write, since the
+    // backend does both. Awaited, as the separate `last_opened_repo` patch
+    // that used to precede it was: the reads below can be slow, and a launch
+    // in between must find the file already naming this repo.
+    await recordRecentRepo(repo)
+    // Fetch it now — "open a repo" should always pull its latest counts,
     // including for the untiered long tail.
-    recordRecentRepo(repo)
     repoSyncScheduler.syncOnSwitch(repo)
     try {
       const [status] = await Promise.all([refreshStatus(), refreshBranches(), loadInitialLog()])
@@ -2103,10 +2181,31 @@
     // Seed the persisted sort-mode toggles and recents list before either
     // picker opens. Awaited so recordRecentRepo below prepends to the hydrated
     // list rather than racing the hydration that would otherwise clobber it.
+    // A no-op after App's own hydration on the paths that ran one; it is the
+    // real read on any path where this view mounts first.
     await hydrateReposState()
-    // The repo we launched into counts as the most-recent open.
+    // The one write per open, for every path that reaches a repo by mounting
+    // this view: the cold-start CLI target, the restored repo, the sole
+    // discovered repo, a pick from the picker, a finished clone, and a folder
+    // just `git init`ed from App's prompt. Each of those enters the `main`
+    // phase, which mounts this component, which runs this once — so App does
+    // not persist anything on any of them. The remaining path, an in-app
+    // switch, never remounts and is `handleSwitchRepo`'s single write instead.
+    //
+    // `record_recent_repo` writes the recency and `last_opened_repo` together,
+    // because opening a repo is what records both.
+    //
+    // Deliberately *not* awaited here, unlike the in-app switch: this is the
+    // mounting path, so the repository's first paint is behind everything above
+    // it, and this write is a cross-process-locked read-modify-write of a JSON
+    // file — under contention it spends up to 2 s in the `try_lock` loop before
+    // proceeding. Nothing below reads what it writes: the launch it beats is
+    // the *next* one, and the recents list it prepends to is already hydrated.
+    // The switch path awaits it because a launch racing an in-app switch has to
+    // find the file naming the repo the user moved to; a launch racing this one
+    // is the launch that is running it.
     const repoPath = $appState.repoPath
-    if (repoPath) recordRecentRepo(repoPath)
+    if (repoPath) void recordRecentRepo(repoPath)
     const [status] = await Promise.all([refreshStatus(), refreshBranches(), loadInitialLog()])
     if (status) lastHeadSha = status.head_sha
     statusLoop.start()
@@ -2116,15 +2215,30 @@
     // auto-fetch interval (and at all when auto-fetch is off). Non-blocking so
     // it never delays first paint. Mirrors the fetch-on-wake-up behaviour, and
     // it is why the loop's own start-up skew costs the user nothing.
-    void performAutoFetch()
+    void performAutoFetch('catch-up')
     // Background pull/push badges for the other recent repos in the picker.
     repoSyncScheduler.start()
   }
 
+  /*
+    Fill the History tab the first time it is the visible tab with an empty log.
+    A repo switch clears `log.loaded` while deliberately keeping `activeTab`, so
+    this is what reloads History for a user who changes repository while reading
+    it — `handleSwitchRepo`'s own read covers the case where they are not.
+
+    Derived key read by an `untrack`ed effect, the shape its three siblings
+    above use for the reason written at the last of them: reading `repoState`
+    inside the branch re-ran this on every 2 s status tick. A boolean settles,
+    so the effect now runs only when the answer to "does History need a log?"
+    actually changes — and the tick that changes neither tab nor `loaded` no
+    longer reaches `loadInitialLog` at all.
+  */
+  const historyNeedsLog = $derived($repoState.activeTab === 'history' && !$repoState.log.loaded)
   $effect(() => {
-    if ($repoState.activeTab === 'history' && !$repoState.log.loaded) {
-      loadInitialLog()
-    }
+    const needed = historyNeedsLog
+    untrack(() => {
+      if (needed) void loadInitialLog()
+    })
   })
 
   /**
@@ -2218,7 +2332,7 @@
     // the top picker tier immediately instead of waiting out the backoff window.
     teardownConnectivity = initConnectivity(() => {
       if ($appState.phase !== 'main') return
-      void performAutoFetch()
+      void performAutoFetch('catch-up')
       repoSyncScheduler.kickTopTier()
     })
 

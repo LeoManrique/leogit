@@ -41,6 +41,9 @@ just install     # pnpm install in apps/tauri-app
 just dev         # launch dev build with hot reload
 just build       # produce a debug bundle
 just check       # type-check (svelte-check + cargo check --workspace)
+just test        # cargo test --workspace
+just lint        # cargo clippy --workspace --all-targets (pedantic)
+just bench <repo> # time the core git operations against a real repo, with spawns per call
 just mac-run     # build and launch the native macOS app (needs Xcode + xcodegen)
                  # add --no-build to relaunch the last build without rebuilding
 just bundle      # build this platform's release bundle

@@ -110,8 +110,10 @@ export interface CommitInfo {
    * by the backend for re-application on amend / undo-commit restore. */
   co_authors: string[]
   /** `body` with its `Co-Authored-By:` lines removed — what the composer
-   * pre-fills, since co-authors are re-applied via `format_commit_message`. */
-  body_without_coauthors: string
+   * pre-fills, since co-authors are re-applied via `format_commit_message`.
+   * `null` when stripping changed nothing (most commits), so the field never
+   * ships a second copy of `body`: read it as `body_without_coauthors ?? body`. */
+  body_without_coauthors: string | null
   /** Names of tags pointing at this commit (from `%D`, `tag: ` prefix stripped). */
   tags: string[]
 }
@@ -365,7 +367,8 @@ export interface ReposState {
   /** Persisted sort mode for the Clone dialog's GitHub repo list ('recent' | 'name'). */
   clone_sort_mode?: string
   /** Repo paths, most-recently-opened first. Drives the picker's tiered sync.
-   * Owned by the backend's `record_recent_repo` (de-dupes, caps at 50). */
+   * Owned by the backend's `record_recent_repo` (de-dupes, caps at 50), which
+   * sets `last_opened_repo` in the same write. */
   recent_repos?: string[]
 }
 
@@ -407,8 +410,10 @@ export const configApi = {
   loadState: () => invoke<ReposState>('load_state'),
   /** Atomically merge the given fields into repos-state.json; returns the new state. */
   patchState: (patch: ReposStatePatch) => invoke<ReposState>('patch_state', { patch }),
-  /** Move a repo to the front of the persisted MRU list; returns the new state,
-   * whose `recent_repos` is the authoritative list to reseed the store from. */
+  /** Mark a repo as just-opened: front of the persisted MRU list *and* the
+   * repo to restore on the next launch, in one read-modify-write. Returns the
+   * new state, whose `recent_repos` is the authoritative list to reseed the
+   * store from. Patching `last_opened_repo` alongside this is redundant. */
   recordRecentRepo: (path: string) => invoke<ReposState>('record_recent_repo', { path }),
 }
 

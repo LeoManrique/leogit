@@ -204,14 +204,31 @@ pub async fn check_provider_status(
     }
 }
 
-/// Run `claude` with `args`, or `None` if it could not be spawned at all.
+/// How long a `claude` probe (`--version`, `auth status`) may run. These are
+/// meant to answer instantly; the bound exists because they are on the Settings
+/// path, where an unbounded await leaves the provider chip spinning forever.
+const CLAUDE_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Run `claude` with `args`, or `None` if it could not be spawned at all — or
+/// did not answer within [`CLAUDE_PROBE_TIMEOUT`].
+///
+/// Bounded and `kill_on_drop` for the same reason [`generate_claude`] is: an
+/// authenticating CLI can wait on the network with nothing to say, and a future
+/// dropped on the timeout would otherwise leave the child running detached.
+/// `None` is already the caller's "can't tell" answer, so a timeout needs no
+/// new shape — see [`check_claude`], which opens the gate on it.
 async fn run_claude(args: &[&str]) -> Option<std::process::Output> {
     let mut cmd = tokio::process::Command::new("claude");
-    cmd.args(args);
-    super::process::prepare_child_async(&mut cmd)
-        .output()
-        .await
-        .ok()
+    cmd.args(args).kill_on_drop(true);
+    let child = super::process::prepare_child_async(&mut cmd).output();
+    let Ok(finished) = tokio::time::timeout(CLAUDE_PROBE_TIMEOUT, child).await else {
+        eprintln!(
+            "[ai] claude {args:?} timed out after {}s",
+            CLAUDE_PROBE_TIMEOUT.as_secs()
+        );
+        return None;
+    };
+    finished.ok()
 }
 
 /// Installed *and* signed in — two separate questions, asked in that order so

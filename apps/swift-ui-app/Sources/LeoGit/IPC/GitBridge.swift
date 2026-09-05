@@ -27,6 +27,23 @@ enum GitBridge {
         fixPathEnv()
     }
 
+    /// Ask the login shell for the real `PATH` in the background, now that the
+    /// window exists.
+    ///
+    /// `bootstrapPathEnvironment()` almost always installs a *cached* `PATH`,
+    /// because probing the shell costs ~430 ms of launch the user would spend
+    /// looking at nothing. This confirms it for real and hands any correction
+    /// to the tools spawned from here on. It carries none of that function's
+    /// ordering contract — it never writes the process environment — so it is
+    /// safe to call after the first frame.
+    ///
+    /// The one wrapper here that is neither `async` nor `@concurrent`: it
+    /// starts a thread in Rust and returns immediately, so there is nothing for
+    /// the main actor to wait on and nothing to move off it.
+    static func reprobePathEnvironment() {
+        spawnPathReprobe()
+    }
+
     /// Resolve any path inside a repository to that repository's root.
     @concurrent
     static func repoRoot(of path: String) async throws -> String {
@@ -565,15 +582,13 @@ enum GitBridge {
         try loadState()
     }
 
-    /// Persist `repoPath` as the repo to restore on the next launch — of
-    /// either client; the state file is shared with the Tauri app.
-    @concurrent
-    static func setLastOpened(repoPath: String) async throws {
-        _ = try patchState(patch: ReposStatePatch(lastOpenedRepo: repoPath))
-    }
-
-    /// Move `repoPath` to the front of the most-recently-used list (core
-    /// de-dupes and caps it) and return the updated state.
+    /// Move `repoPath` to the front of the most-recently-used list and record
+    /// it as the repo to restore on the next launch — of either client, since
+    /// the state file is shared with the Tauri app. Core de-dupes and caps the
+    /// list, and returns the updated state.
+    ///
+    /// One call, because opening a repo is one fact. It used to be two, and
+    /// two full rewrites of the shared file on every switch is what that cost.
     @concurrent
     @discardableResult
     static func recordRecent(repoPath: String) async throws -> ReposState {

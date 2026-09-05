@@ -40,6 +40,10 @@ struct LeoGitApp: App {
                 .environment(appDelegate.launch)
                 .task {
                     await store.loadCoreVersion()
+                    // The window exists, so the ~430 ms shell probe that
+                    // `App.init` skipped in favour of the cached `PATH` can
+                    // now run where nobody is waiting for it.
+                    GitBridge.reprobePathEnvironment()
                     await appConfig.reload()
                 }
         }

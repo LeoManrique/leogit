@@ -47,7 +47,7 @@ Defaults fall back to `~/Dev`, `~/dev`, `~/code`, `~/Code`, `~/Projects`, `~/src
 Two-column layout: a resizable sidebar on the left and a content area on the right, with the embedded terminal docked at the bottom of the content column. The split is permanent — it never disappears for an empty list, and switching tabs swaps only what is inside each column. In the Tauri client all three split widths/heights persist in `localStorage` (`leogit:sidebarWidth`, `leogit:commitHeight`, `leogit:commitFilesWidth`); the native client persists the composer height (`UserDefaults`) and keeps the sidebar and commit-files widths for the session.
 
 **Sidebar** carries a tab bar (`Changes` / `History`) and changes shape per tab:
-- *Changes tab:* file list + commit composer. The composer stays visible on a clean tree (the list reads *No changes*, Commit and Generate are disabled) and is resized by dragging its top edge (180–600 px, default 220).
+- *Changes tab:* file list + commit composer. The composer stays visible on a clean tree (the list reads *No changes*, Commit and Generate are disabled) and is resized by dragging its top edge (180–600 px, default 220). While a just-opened repository's first status is still being read, the list stays blank rather than claim anything — it never shows the previous repository's files, and it never says *No changes* before it knows.
 - *History tab:* commit list (virtualized).
 
 **Main content** mirrors the tab:

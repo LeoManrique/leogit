@@ -29,6 +29,15 @@ final class RepoDirectoryStore {
     private static let sweepThrottle: TimeInterval = 30
     private static let refocusThrottle: TimeInterval = 30
 
+    /// How long a repository whose badge probe *failed* is left alone before
+    /// being asked again. Deliberately longer than both the 30 s sweep and the
+    /// 2 min top tier: what makes `repo_sync_status` fail is a property of the
+    /// folder — it stopped being a repository, its permissions changed, the MRU
+    /// still names a path that moved — not a hiccup that the next pass will find
+    /// resolved, and every re-ask spends a subprocess pair while the badges
+    /// behind it in the sequential loop wait.
+    private static let probeRetry: Duration = .seconds(5 * 60)
+
     /// Every known repository path, discovery order (sorted), MRU-only
     /// entries appended.
     private(set) var repos: [String] = []
@@ -91,6 +100,12 @@ final class RepoDirectoryStore {
     /// recovery kick on it.
     let networkObserver = NetworkPathObserver()
 
+    /// The one per-repository fetch stamp in the process, owned here beside the
+    /// breaker for the same reason — this is where background fetching lives —
+    /// and handed to `SyncStore` so the active repository's silent fetch and
+    /// the tier sweeps cannot keep two disagreeing answers.
+    let fetchCooldown = FetchCooldown()
+
     /// The Tauri client's `shouldAttemptBackground()` shape, exactly:
     /// online per the OS path monitor, and the breaker's backoff window
     /// closed. Every background fetch gates on this — while offline the
@@ -108,6 +123,26 @@ final class RepoDirectoryStore {
     private var inFlight: Set<String> = []
     private var lastFullSweep = Date.distantPast
     private var lastRefocusSweep = Date.distantPast
+
+    /// When each repository's badge probe last *failed*, for the ones whose
+    /// last one did.
+    ///
+    /// `syncByPath` on its own is two-valued — a summary, or nothing — and the
+    /// sweep reads "nothing" as "never looked up". A repository that cannot
+    /// answer therefore had no way to say so, and was re-asked on every pass,
+    /// forever, at the head of a sequential loop every other badge waits in.
+    /// Together the two dictionaries are three-valued, the way
+    /// `RepoIdentifierStore` is deliberately three-valued one file over: absent
+    /// from both means "never looked up", a summary means "answered", and a
+    /// stamp here means "asked, and it could not answer".
+    ///
+    /// A failure never blanks a badge — `sync` writes a summary only on success,
+    /// so whatever the row last showed stays — and never becomes permanent: this
+    /// is a retry cadence, not a deny list.
+    ///
+    /// `ContinuousClock` for `FetchCooldown`'s reason: it counts through system
+    /// sleep and cannot be walked backwards by a wall clock that steps.
+    private var lastProbeFailure: [String: ContinuousClock.Instant] = [:]
 
     /// A repository's folder name — the picker's row label wherever no
     /// remote names a better one, and what `RepoIdentifierStore` falls back
@@ -218,6 +253,11 @@ final class RepoDirectoryStore {
     /// immediately (so the switcher reorders without waiting on disk), then
     /// persisted to the shared state file — both the MRU and
     /// `last_opened_repo`, which is what either client restores on launch.
+    ///
+    /// Both in one write. They were two, and the shared file is read, parsed,
+    /// re-serialized and rewritten whole each time, so a repo switch paid for
+    /// that twice — with a window in between where the file named one repo as
+    /// most-recent and a different one as the one to reopen.
     func noteOpened(_ path: String) async {
         recentRepos.removeAll { $0 == path }
         recentRepos.insert(path, at: 0)
@@ -226,7 +266,6 @@ final class RepoDirectoryStore {
             adoptRecents(state.recentRepos ?? [])
             publishRepos()
         }
-        try? await GitBridge.setLastOpened(repoPath: path)
     }
 
     /// Fold the open repo's freshly polled status into its badge cache — the
@@ -238,6 +277,11 @@ final class RepoDirectoryStore {
     /// invalidating every switcher row on every tick — the same waste
     /// `RepoStore`'s equality skip exists to prevent, one store along.
     func noteActiveStatus(_ path: String, _ status: RepoStatus) {
+        // The open repository just answered a full status, so whatever made a
+        // background probe fail is over. Clearing the marker here is what stops
+        // the sweep avoiding a repository for another five minutes after the
+        // user has already fixed it and opened it.
+        lastProbeFailure.removeValue(forKey: path)
         let summary = RepoSync(
             ahead: status.ahead,
             behind: status.behind,
@@ -253,6 +297,10 @@ final class RepoDirectoryStore {
     /// no cached summary always fill, a full re-sweep at most once per 30 s.
     /// Local-only, so it works offline and costs no network. Obeys
     /// `canRunRepoSweeps` — the other-repos row of the policy table.
+    ///
+    /// "No cached summary" is not the same question as "not looked up yet", and
+    /// `sync` is where the two are told apart — a row whose probe failed is
+    /// still missing a summary and still selected here, and declined there.
     func sweepVisible(activePath: String?, policy: BackgroundSchedulingPolicy) async {
         let full = Date.now.timeIntervalSince(lastFullSweep) >= Self.sweepThrottle
         for path in repos where path != activePath {
@@ -335,23 +383,63 @@ final class RepoDirectoryStore {
         return Array(eligible[range.lowerBound..<min(range.upperBound, eligible.count)])
     }
 
-    /// One repo's badge refresh. Being offline or an open breaker downgrades
-    /// a fetching sync to a local one rather than skipping it (the Tauri
-    /// client's exact fallback — badges keep tracking local edits), and only
-    /// real fetch attempts against a real remote feed the breaker — a repo
-    /// with no remote says nothing about connectivity.
+    /// One repo's badge refresh. Being offline, an open breaker, or a remote
+    /// this repository reached moments ago all downgrade a fetching sync to a
+    /// local one rather than skipping it (the Tauri client's exact fallback —
+    /// badges keep tracking local edits), and only real fetch attempts against
+    /// a real remote feed the breaker — a repo with no remote says nothing
+    /// about connectivity, and a fetch never attempted says less still.
+    ///
+    /// `syncOnSwitch`'s native twin goes through here too, so opening a
+    /// repository a minute after leaving it recomputes rather than refetches.
+    ///
+    /// A repository that failed to answer recently is skipped outright. The
+    /// guard lives here rather than in the two callers so every sweep — visible
+    /// rows, refocus, each tier — obeys one cadence.
     private func sync(_ path: String, fetching: Bool) async {
         guard !inFlight.contains(path) else { return }
+        guard !isProbeSuppressed(path) else { return }
         inFlight.insert(path)
         defer { inFlight.remove(path) }
 
-        let fetch = fetching && shouldAttemptBackground
-        guard let summary = try? await GitBridge.syncSummary(of: path, fetching: fetch) else {
+        var fetch = fetching && shouldAttemptBackground
+        if fetch, fetchCooldown.isFresh(path) {
+            fetchCooldown.logSkip(path, "recomputing without a fetch")
+            fetch = false
+        }
+        let summary: RepoSync
+        do {
+            summary = try await GitBridge.syncSummary(of: path, fetching: fetch)
+        } catch {
+            // Stamped, not swallowed: this is the whole point of the marker, and
+            // logging it here rather than on every suppressed retry means one
+            // line per five minutes instead of one per sweep.
+            lastProbeFailure[path] = .now
+            print("[sweep] badge probe failed for \(path): \(error.displayMessage)")
             return
         }
+        lastProbeFailure.removeValue(forKey: path)
         syncByPath[path] = summary
         if fetch, summary.hasRemote {
             breaker.record(success: summary.fetched)
         }
+        // `fetched` alone is not "the remote replied": core documents it as
+        // `true` when no fetch was requested and when there was no remote to
+        // reach, because nothing failed. Reading it bare stamped every row of a
+        // fetch-less sweep — the one the picker runs the moment it opens — and
+        // the repository the user then opened had its own on-open fetch turned
+        // away for the next minute. The stamp needs all three: we asked, there
+        // was somewhere to ask, and the answer came back.
+        if fetch, summary.hasRemote, summary.fetched {
+            fetchCooldown.note(path)
+        }
+    }
+
+    /// Whether `path` failed recently enough that asking again would spend two
+    /// subprocesses — and the sequential loop's next slot — to be told the same
+    /// thing.
+    private func isProbeSuppressed(_ path: String) -> Bool {
+        guard let failed = lastProbeFailure[path] else { return false }
+        return failed.duration(to: .now) < Self.probeRetry
     }
 }

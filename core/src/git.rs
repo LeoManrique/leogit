@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, UNIX_EPOCH};
 
 use super::paths;
 
@@ -150,7 +151,12 @@ pub struct CommitInfo {
     pub co_authors: Vec<String>,
     /// `body` with its `Co-Authored-By:` lines removed — what the composer
     /// pre-fills, since co-authors travel separately (see `co_authors`).
-    pub body_without_coauthors: String,
+    /// `None` when stripping changed nothing, which is most commits: read it
+    /// as `body_without_coauthors.unwrap_or(body)`. Same treatment, for the
+    /// same reason, as [`super::diff::DiffLine::text`] — a field that is byte
+    /// for byte its neighbour costs a full second copy of every log page in
+    /// both clients' memory and across both wires.
+    pub body_without_coauthors: Option<String>,
     /// Names of tags pointing at this commit, parsed from git's `%D`
     /// decorations (e.g. "v0.1.0"). Branch/HEAD decorations are dropped —
     /// the UI only renders tag pills.
@@ -506,9 +512,19 @@ const NET_UI_TIMEOUT: Duration = Duration::from_secs(600);
 /// unreachable or stalled remote fails fast instead of hanging:
 ///   - SSH: `ConnectTimeout` bounds the TCP/handshake; `BatchMode=yes` refuses
 ///     any interactive prompt (so a missing key errors immediately).
+///   - SSH: `ServerAliveInterval`/`ServerAliveCountMax` bound the *established*
+///     session, which `ConnectTimeout` does not reach — once the handshake is
+///     done ssh has no keepalive of its own, so a remote that accepts and then
+///     goes silent (a VPN drop, a firewall dropping an established flow, a
+///     captive portal) leaves it waiting indefinitely. Three unanswered probes
+///     ten seconds apart end it: 30 s of total silence, deliberately longer
+///     than a background fetch's own 12 s cap so the bound that fires first is
+///     always the caller's budget, and long enough that a user-initiated push
+///     over a briefly stalled link is not aborted out from under them.
 ///   - HTTP(S): `http.lowSpeedLimit`/`http.lowSpeedTime` abort a transfer that
 ///     drops below ~1 KB/s for `stall_secs` (covers a dropped connection mid
 ///     transfer, which a plain connect timeout would miss).
+///
 /// `current_dir` is `None` for `clone` (no repo exists yet).
 fn git_net_cmd(
     current_dir: Option<&str>,
@@ -525,7 +541,10 @@ fn git_net_cmd(
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env(
             "GIT_SSH_COMMAND",
-            format!("ssh -o ConnectTimeout={connect_secs} -o BatchMode=yes"),
+            format!(
+                "ssh -o ConnectTimeout={connect_secs} -o BatchMode=yes \
+                 -o ServerAliveInterval=10 -o ServerAliveCountMax=3"
+            ),
         )
         // Same reason as [`git_cmd`], and set here too so the two builders
         // cannot disagree: `pull` runs a merge, and a merge that refuses names
@@ -567,7 +586,16 @@ fn run_git_net(
     timeout: Duration,
 ) -> Result<(bool, String), String> {
     let cmd = git_net_cmd(current_dir, args, connect_secs, stall_secs);
-    let out = super::process::run_timed(cmd, &format!("git {}", args.join(" ")), timeout)?;
+    // `Group`: git is only the front end here — the connection itself belongs
+    // to the `ssh` or `git-remote-https` it spawns, which inherits our pipes.
+    // Killing git alone would leave the transport running and this call's
+    // stderr reader waiting on it (F13).
+    let out = super::process::run_timed(
+        cmd,
+        &format!("git {}", args.join(" ")),
+        timeout,
+        super::process::KillScope::Group,
+    )?;
     Ok(combine_output(&out))
 }
 
@@ -586,6 +614,7 @@ fn run_git_net_streaming(
         cmd,
         &format!("git {}", args.join(" ")),
         timeout,
+        super::process::KillScope::Group,
         on_line,
     )?;
     Ok(combine_output(&out))
@@ -641,10 +670,92 @@ pub(crate) fn progress_forwarder(
 /// commit). A fresh repo with an unborn HEAD returns false rather than erroring,
 /// letting callers treat "no commits yet" as a valid empty state instead of
 /// hitting git's "does not have any commits yet" fatal.
+///
+/// Read from disk wherever the ref store is the ordinary one — see
+/// [`has_commits_from_fs`] for exactly which shapes those are. This question
+/// gates the anchor of every diff and of the history page, so it used to cost a
+/// `git rev-parse` on each: `get_selected_diff` asked it once per file, making
+/// the AI "generate message" path over 30 files 30 spawns for an answer two
+/// file reads give. `git rev-parse --verify --quiet HEAD` is kept as the
+/// fallback for the layouts the shortcut deliberately does not read, so an
+/// unusual repository is answered by git itself rather than guessed at.
 fn has_commits(repo_path: &str) -> bool {
+    if let Some(answer) = has_commits_from_fs(repo_path) {
+        return answer;
+    }
     git_cmd(repo_path, &["rev-parse", "--verify", "--quiet", "HEAD"])
         .output()
         .is_ok_and(|o| o.status.success())
+}
+
+/// A 40-hex (SHA-1) or 64-hex (SHA-256) object id — the form a detached `HEAD`
+/// and a loose ref file both hold.
+fn is_object_id(text: &str) -> bool {
+    matches!(text.len(), 40 | 64) && text.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// [`has_commits`] answered from `HEAD` and the ref store on disk, or `None`
+/// when this repository is a shape the shortcut does not read and the caller
+/// must ask git.
+///
+/// What it reads: `<gitdir>/HEAD`, then either the loose ref file it names
+/// under the common dir or, failing that, a `packed-refs` line. What makes it
+/// give up: a reftable ref store, a `HEAD` that is neither `ref: <name>` nor an
+/// object id, a `HEAD` naming anything but a branch, a ref that is itself
+/// symbolic (a chain this does not walk), and any read error that is not a
+/// plain "not found".
+///
+/// Split out from [`has_commits`] so the tests can assert *which* path produced
+/// an answer. Asserting only the answer would let a silent regression to the
+/// spawn keep passing, and the spawn is the whole thing being removed.
+fn has_commits_from_fs(repo_path: &str) -> Option<bool> {
+    let git_dir = git_dir(repo_path)?;
+    let common = common_dir(&git_dir);
+    // A reftable store keeps neither loose refs nor `packed-refs`, and leaves
+    // `refs/heads` as a stub *file* rather than a directory. Either sign means
+    // everything below would be reading a ref store this repo does not use.
+    if common.join("reftable").exists() || !common.join("refs").join("heads").is_dir() {
+        return None;
+    }
+
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    let Some(name) = head.strip_prefix("ref:").map(str::trim) else {
+        // Detached: HEAD carries the object id itself.
+        return is_object_id(head).then_some(true);
+    };
+    // Only `refs/heads/<branch>` is reliably reached through the common dir.
+    // git keeps whole namespaces *per worktree* — `refs/worktree/`,
+    // `refs/bisect/`, `refs/rewritten/` — beside that worktree's own `HEAD`,
+    // so resolving one of those here would look for a loose file and a
+    // `packed-refs` line that are both in the wrong directory, find neither,
+    // and report "no commits" for a repository that has them. That is a wrong
+    // answer rather than a silent one: it anchors every diff at the empty tree.
+    // Anything outside the branch namespace goes to git.
+    if name.strip_prefix("refs/heads/").is_none_or(str::is_empty) {
+        return None;
+    }
+
+    match std::fs::read_to_string(common.join(name)) {
+        // A loose ref holding an object id settles it. Anything else is a
+        // symbolic chain (`ref: …`) or a torn file — git's answer, not ours.
+        Ok(text) => return is_object_id(text.trim()).then_some(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return None,
+    }
+
+    // No loose file, so the branch may still be packed. `packed-refs` lines are
+    // `<oid> <refname>`, interleaved with `^<oid>` peel lines and `#` comments.
+    let suffix = format!(" {name}");
+    match std::fs::read_to_string(common.join("packed-refs")) {
+        Ok(text) => Some(
+            text.lines()
+                .any(|line| !line.starts_with(['#', '^']) && line.ends_with(&suffix)),
+        ),
+        // An unborn HEAD: the branch it names exists nowhere yet.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(false),
+        Err(_) => None,
+    }
 }
 
 /// Locate a repo's git directory — where `MERGE_HEAD`, `HEAD` and friends live.
@@ -684,15 +795,581 @@ fn git_dir(repo_path: &str) -> Option<PathBuf> {
     })
 }
 
+/// The directory holding a repository's *shared* state — `refs/`, `objects/`,
+/// `packed-refs`, `config` — given its git dir.
+///
+/// Usually that is the git dir itself. A linked worktree's git dir is
+/// `<main>/.git/worktrees/<name>` and holds only what is private to that
+/// worktree (its `HEAD`, its index); everything shared sits one hop away, named
+/// by the `commondir` file git writes beside them. Following that pointer is
+/// what keeps a filesystem shortcut *useful* in a worktree instead of merely
+/// silent — without it every such lookup misses and falls back to a subprocess,
+/// which is the whole cost being avoided.
+///
+/// Shared, and takes the git dir rather than the repo path, because callers
+/// need both and resolving [`git_dir`] twice can mean spawning twice.
+/// [`has_commits_from_fs`] reads refs through it; a `config` read belongs here
+/// too, for the same worktree reason.
+pub(crate) fn common_dir(git_dir: &Path) -> PathBuf {
+    let Ok(text) = std::fs::read_to_string(git_dir.join("commondir")) else {
+        return git_dir.to_path_buf();
+    };
+    let target = Path::new(text.trim_end_matches(['\r', '\n']));
+    if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        git_dir.join(target)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Remotes, read rather than spawned
+// ---------------------------------------------------------------------------
+//
+// `git remote` answers from a file of a few hundred bytes that changes twice
+// in a repository's life, and it used to be asked on every status poll, every
+// badge sweep and every auto-fetch — 38 of the 80 subprocesses a steady-state
+// minute spawns, ~319 ms/min of fork/exec per open window. Everything below
+// exists to answer it from `<common dir>/config` instead, and to recognise the
+// cases where that file is *not* the whole answer and git has to be asked
+// after all. The rule throughout is that the fallback is free and a wrong
+// answer is not: anything unexpected declines.
+
 /// First configured remote name (e.g. "origin"), or `None` when the repo has
 /// no remotes. Used both to gate Push-vs-Publish and to locate the
 /// remote-tracking ref for the no-upstream ahead/behind fallback.
 fn first_remote(repo_path: &str) -> Option<String> {
-    let out = run_git(repo_path, &["remote"]).unwrap_or_default();
-    out.lines()
+    first_remote_in(repo_path, git_dir(repo_path).as_deref())
+}
+
+/// [`first_remote`] for a caller that has already resolved the git dir.
+///
+/// Passed in rather than resolved again because [`git_dir`] can itself spawn
+/// (`rev-parse --git-dir`, for a layout the filesystem shortcut cannot see),
+/// so a second resolution risks being a second subprocess — and `read_status`
+/// has already made the first one to answer `merging`.
+fn first_remote_in(repo_path: &str, git_dir: Option<&Path>) -> Option<String> {
+    match config_remotes(git_dir) {
+        Some(names) => names.into_iter().next(),
+        None => first_remote_spawned(repo_path).unwrap_or_default(),
+    }
+}
+
+/// `git remote`'s own answer: the first name it prints, or `None` when it
+/// prints none. The fallback every shortcut here declines into.
+///
+/// # Errors
+/// When `git remote` itself can't run (not a repository, git missing).
+fn first_remote_spawned(repo_path: &str) -> Result<Option<String>, String> {
+    let out = run_git(repo_path, &["remote"])?;
+    Ok(out
+        .lines()
         .map(str::trim)
         .find(|l| !l.is_empty())
-        .map(str::to_string)
+        .map(str::to_string))
+}
+
+/// Every remote name `git remote` would print, in the order it prints them —
+/// or `None` when the repository's own config file is not the whole answer and
+/// the caller must spawn.
+///
+/// Two questions have to hold for the file to be enough, and they are asked in
+/// cost order: whether any remote is configured *outside* the repository
+/// (cached for the process), and then whether this file can be read on its own
+/// terms (see [`remotes_from_config`]).
+fn config_remotes(git_dir: Option<&Path>) -> Option<Vec<String>> {
+    let git_dir = git_dir?;
+    if outside_remotes(&global_config_paths())? {
+        return None;
+    }
+    remotes_from_config(git_dir)
+}
+
+/// The remote names the repository's own `config` file defines, sorted and
+/// de-duplicated the way `git remote` prints them — or `None` when this file,
+/// or this process's environment, is a shape the shortcut must not answer for.
+///
+/// Read through [`common_dir`], so a linked worktree reads the main
+/// repository's file: that is where a worktree's remotes actually live, and
+/// reading its own git dir would find no remotes at all rather than none.
+///
+/// It declines on: any `GIT_CONFIG*` variable in this process (git would then
+/// read configuration this cannot see), a file that is missing, unreadable or
+/// not UTF-8, an `include`/`includeIf` section, `extensions.worktreeConfig`,
+/// and any byte sequence git's own parser would reject. `$GIT_DIR/remotes/*`
+/// and `branches/*` are ignored rather than read, which is parity: `git
+/// remote` does not list those either.
+///
+/// Split out from [`first_remote`] so the tests can assert *which* path
+/// produced an answer. Asserting only the answer would let a silent regression
+/// to the spawn keep passing, and the spawn is the whole thing being removed.
+fn remotes_from_config(git_dir: &Path) -> Option<Vec<String>> {
+    if git_config_env_is_set(std::env::vars_os().map(|(name, _)| name)) {
+        return None;
+    }
+    let text = std::fs::read_to_string(common_dir(git_dir).join("config")).ok()?;
+    let mut names = remotes_in_config_text(&text)?;
+    // `git remote` collects the names, sorts them with `strcmp` — byte order,
+    // so `Origin` precedes `a-b` precedes `origin` — and prints each once.
+    names.sort();
+    names.dedup();
+    Some(names)
+}
+
+/// Whether any variable named `GIT_CONFIG…` appears among `names`.
+///
+/// `GIT_CONFIG_COUNT`/`_KEY_n`/`_VALUE_n` inject variables git will honour,
+/// `GIT_CONFIG_GLOBAL`/`_SYSTEM`/`_NOSYSTEM` move or silence whole scopes, and
+/// `GIT_CONFIG` redirects the file itself; every one of them changes the
+/// answer without changing the file this reads, so the presence of any is
+/// enough to decline.
+///
+/// Takes the names rather than reading the environment itself so it can be
+/// tested: `std::env::set_var` is `unsafe` in edition 2024 precisely because
+/// the process may be threaded, and a test suite is.
+fn git_config_env_is_set(names: impl IntoIterator<Item = OsString>) -> bool {
+    names
+        .into_iter()
+        .any(|name| name.to_string_lossy().starts_with("GIT_CONFIG"))
+}
+
+/// The files git reads for its global configuration. Both are read when both
+/// exist, so both key the probe below.
+fn global_config_paths() -> Vec<PathBuf> {
+    let home = paths::home_dir();
+    let xdg = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .or_else(|| home.as_ref().map(|dir| dir.join(".config")));
+    home.map(|dir| dir.join(".gitconfig"))
+        .into_iter()
+        .chain(xdg.map(|dir| dir.join("git").join("config")))
+        .collect()
+}
+
+/// Whether any remote is configured *outside* the repository — in the user's
+/// global files or the system one, both of which `git remote` lists alongside
+/// the local ones. `None` when the probe could not run, which every caller
+/// reads as "ask git".
+///
+/// Probed once per process, because a probe per call would spend exactly what
+/// this change saves, and re-probed when one of `paths` changes: those are
+/// stat'd on every call, which is two `stat`s against the ~8.4 ms spawn the
+/// answer avoids. A remote appearing in the *system* file mid-process is the
+/// one change this cannot see; it is not a file users edit while an app runs.
+///
+/// A failed probe is deliberately not cached. It means git could not be run at
+/// all, which is a state a repository recovers from, and caching it would
+/// strand every later call on the fallback for the life of the process.
+fn outside_remotes(paths: &[PathBuf]) -> Option<bool> {
+    /// The probe's answer beside the stamps it was measured against.
+    type Memo = Mutex<Option<(Vec<FileStamp>, bool)>>;
+    static CACHE: OnceLock<Memo> = OnceLock::new();
+
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    let key: Vec<FileStamp> = paths.iter().map(|path| file_stamp(path)).collect();
+    {
+        let cached = cache.lock().ok()?;
+        if let Some((stamps, answer)) = cached.as_ref()
+            && *stamps == key
+        {
+            return Some(*answer);
+        }
+    }
+
+    // Probed with the lock released, and re-taken only to store. Holding it
+    // across the probe would coalesce the cold-start callers into one spawn,
+    // which is the nicer of the two shapes right up to the moment the probe is
+    // slow: a `$HOME` on a disconnected mount would then park every status poll
+    // and badge sweep in the process behind a single stalled `git config`. Two
+    // callers racing cost one extra bounded subprocess, once.
+    let answer = probe_outside_remotes(None, None)?;
+    *cache.lock().ok()? = Some((key, answer));
+    Some(answer)
+}
+
+/// How long each of the two `git config` reads behind [`outside_remotes`] gets.
+/// Generous, because this is a backstop and not a latency budget: the probe
+/// reads two small local files and a healthy machine answers in milliseconds.
+/// What it bounds is the machine that never answers at all.
+const OUTSIDE_REMOTES_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A file's mtime in nanoseconds and its size, or `(None, None)` when it is
+/// not there — so a config file that appears keys differently from one that
+/// never existed.
+type FileStamp = (Option<u128>, Option<u64>);
+
+fn file_stamp(path: &Path) -> FileStamp {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return (None, None);
+    };
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|since| since.as_nanos());
+    (mtime, Some(meta.len()))
+}
+
+/// One `git config` read per scope outside the repository, behind
+/// [`outside_remotes`].
+///
+/// `global` and `system` override the file git reads for that scope. The tests
+/// pass temp files, since the alternative is asserting against whatever the
+/// developer's own `~/.gitconfig` happens to hold; production passes `None`
+/// and leaves git to its own search.
+///
+/// Two details are load-bearing. `--includes` is not optional: a scoped lookup
+/// defaults to *ignoring* `include.path` while `git remote` honours it, so
+/// without the flag a remote reached through an include would be invisible
+/// here and missing from our answer. And a conditional include counts as an
+/// outside remote whether or not it currently resolves to one — `includeIf` is
+/// evaluated against the repository being read, so its contribution differs
+/// per repository, which is exactly what a once-per-process answer cannot
+/// express.
+///
+/// Both reads go through [`process::run_timed`] rather than a plain `output()`.
+/// They read local files and normally answer in milliseconds, but "local" here
+/// means `$HOME` and `/etc`, and a `$HOME` on a disconnected network mount
+/// blocks in the kernel — an unbounded wait on the path every status poll and
+/// badge sweep takes. `Group`, because `git config` is bounded the same way
+/// every other timed git command is; unknown-and-cheap beats a correct answer
+/// nobody is still waiting for, and a timeout declines exactly as a failure
+/// does.
+fn probe_outside_remotes(global: Option<&Path>, system: Option<&Path>) -> Option<bool> {
+    for (scope, over, var) in [
+        ("--global", global, "GIT_CONFIG_GLOBAL"),
+        ("--system", system, "GIT_CONFIG_SYSTEM"),
+    ] {
+        let mut cmd = Command::new("git");
+        cmd.args([
+            "config",
+            scope,
+            "--includes",
+            "--name-only",
+            "--get-regexp",
+            "^(remote|includeif)\\.",
+        ])
+        .env("TERM", "dumb")
+        .env("GIT_TERMINAL_PROMPT", "0");
+        if let Some(path) = over {
+            cmd.env(var, path);
+        }
+        super::process::prepare_child(&mut cmd);
+        let out = super::process::run_timed(
+            cmd,
+            "git config (remotes outside this repository)",
+            OUTSIDE_REMOTES_TIMEOUT,
+            super::process::KillScope::Group,
+        )
+        .ok()?;
+        let listed = String::from_utf8_lossy(&out.stdout);
+        match out.status.code() {
+            Some(0) => {}
+            // git's "no variable matched". Nothing else about this scope is
+            // knowable from an exit code, so anything else leaves the question
+            // open rather than answering it "no".
+            Some(1) if listed.trim().is_empty() => continue,
+            _ => return None,
+        }
+        for key in listed.lines().map(str::trim) {
+            if key.starts_with("includeif.")
+                // `remote.pushDefault` is a setting, not a remote, and a name
+                // beginning with `/` is one git skips with a warning.
+                || remote_subsection(key).is_some_and(|name| !name.starts_with('/'))
+            {
+                return Some(true);
+            }
+        }
+    }
+    Some(false)
+}
+
+/// The remote a `remote.…` variable names, split the way git's
+/// `parse_config_key` splits it: everything between the *first* dot and the
+/// *last* one. Scanning from both ends is what makes `remote.a.b.url` the
+/// remote `a.b` — a subsection may hold dots and a key name may not.
+///
+/// `None` when the variable has no subsection at all, which is a `remote.*`
+/// setting rather than a remote.
+fn remote_subsection(name: &str) -> Option<&str> {
+    let rest = name.strip_prefix("remote.")?;
+    let last = rest.rfind('.')?;
+    Some(&rest[..last])
+}
+
+/// Which remotes a config file's text defines, or `None` on anything this
+/// must not answer for.
+///
+/// This is git's own `config.c` lexer, reduced to the one question asked of
+/// it. Reproducing it rather than pattern-matching `[remote "…"]` lines is the
+/// point: a value ending in `\` continues onto the next line, so a line that
+/// *looks* like a section header can be the tail of the value above it, and a
+/// regex over lines gets that backwards. The other shapes it has to get right
+/// are the legacy `[remote.Name]` form (lowercased, subsection and all), a
+/// case-sensitive quoted subsection where `\X` is a literal X, and a section
+/// with no variables under it, which defines no remote at all.
+fn remotes_in_config_text(text: &str) -> Option<Vec<String>> {
+    let mut reader = ConfigReader::new(text);
+    let mut names = Vec::new();
+    let mut section: Option<String> = None;
+    let mut comment = false;
+
+    loop {
+        let c = reader.next_char();
+        if c == '\n' {
+            if reader.eof {
+                return Some(names);
+            }
+            comment = false;
+            continue;
+        }
+        if comment || is_config_space(c) {
+            continue;
+        }
+        if c == '#' || c == ';' {
+            comment = true;
+            continue;
+        }
+        if c == '[' {
+            let base = reader.section_header()?;
+            // `include.path` and `includeIf.<cond>.path` splice in another
+            // file, whose remotes `git remote` lists and this does not read.
+            let head = base.split('.').next().unwrap_or_default();
+            if head == "include" || head == "includeif" {
+                return None;
+            }
+            section = Some(base);
+            continue;
+        }
+        if !c.is_ascii_alphabetic() {
+            return None;
+        }
+
+        // A variable ahead of any section header: git carries it under a bare
+        // name that belongs to no section, which is not a shape worth guessing
+        // at.
+        let base = section.as_deref()?;
+        let mut name = String::with_capacity(base.len() + 16);
+        name.push_str(base);
+        name.push('.');
+        name.push(c.to_ascii_lowercase());
+        // Which variables are set is the whole question here; what they are
+        // set to is not.
+        reader.variable(&mut name)?;
+
+        // A repository with per-worktree configuration keeps a second file,
+        // `config.worktree`, which this does not read and which can define
+        // remotes of its own.
+        if name == "extensions.worktreeconfig" {
+            return None;
+        }
+        if let Some(remote) = remote_subsection(&name) {
+            // git re-measures a zero-length subsection and ends up naming the
+            // remote after the rest of the variable — `[remote ""]` with a
+            // `url` gives a remote called `.url`. That is git's quirk to
+            // explain, so the question goes back to it.
+            if remote.is_empty() {
+                return None;
+            }
+            if !remote.starts_with('/') {
+                names.push(remote.to_string());
+            }
+        }
+    }
+}
+
+/// C's `isspace` under the "C" locale, which is what git's parser asks.
+fn is_config_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{b}' | '\u{c}')
+}
+
+/// git's `iskeychar`: what a section name (plus `.`) and a variable name may
+/// hold.
+fn is_key_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-'
+}
+
+/// git's config character reader: a `\r\n` pair reads as one `\n`, and the end
+/// of the file reads as `\n` as well with [`ConfigReader::eof`] raised. That
+/// second translation is what lets every loop below be written the way git
+/// writes it — terminating on a newline it is guaranteed to see, whether or
+/// not the file ends with one.
+struct ConfigReader<'a> {
+    chars: std::iter::Peekable<std::str::Chars<'a>>,
+    eof: bool,
+}
+
+impl<'a> ConfigReader<'a> {
+    fn new(text: &'a str) -> Self {
+        Self {
+            chars: text.chars().peekable(),
+            eof: false,
+        }
+    }
+
+    fn next_char(&mut self) -> char {
+        match self.chars.next() {
+            None => {
+                self.eof = true;
+                '\n'
+            }
+            Some('\r') if self.chars.peek() == Some(&'\n') => {
+                self.chars.next();
+                '\n'
+            }
+            Some(c) => c,
+        }
+    }
+
+    /// The header whose `[` was just read, flattened into git's own stem: the
+    /// section name lowercased, then — for `[section "subsection"]` — a dot
+    /// and the subsection verbatim. The legacy `[section.subsection]` form
+    /// needs no special case here; `.` is simply a section-name character, and
+    /// the whole thing is lowercased, which is exactly what git does with it.
+    fn section_header(&mut self) -> Option<String> {
+        let mut name = String::new();
+        loop {
+            let c = self.next_char();
+            if self.eof {
+                return None;
+            }
+            if c == ']' {
+                // git measures the stem it just read and rejects an empty one,
+                // failing the whole file — `[]` is `fatal: bad config line`,
+                // not a section named "". The quoted form cannot land here
+                // empty, since it always contributes at least the dot.
+                return (!name.is_empty()).then_some(name);
+            }
+            if is_config_space(c) {
+                return self.quoted_subsection(name, c);
+            }
+            if !(is_key_char(c) || c == '.') {
+                return None;
+            }
+            name.push(c.to_ascii_lowercase());
+        }
+    }
+
+    /// The `"subsection"` half of a `[section "subsection"]` header, appended
+    /// to `name`. Case is preserved — `[remote "Origin"]` and
+    /// `[remote "origin"]` are two different remotes — and inside the quotes a
+    /// backslash escapes the character after it, whatever it is, so a name may
+    /// hold `"` and `\` themselves.
+    fn quoted_subsection(&mut self, mut name: String, space: char) -> Option<String> {
+        let mut c = space;
+        while is_config_space(c) {
+            // A header cannot span a line break.
+            if c == '\n' {
+                return None;
+            }
+            c = self.next_char();
+        }
+        if c != '"' {
+            return None;
+        }
+        name.push('.');
+        loop {
+            let mut c = self.next_char();
+            if c == '\n' {
+                return None;
+            }
+            if c == '"' {
+                break;
+            }
+            if c == '\\' {
+                c = self.next_char();
+                if c == '\n' {
+                    return None;
+                }
+            }
+            name.push(c);
+        }
+        (self.next_char() == ']').then_some(name)
+    }
+
+    /// The variable whose first character is already in `name`: the rest of
+    /// its name is appended, lowercased, and its value read and dropped.
+    ///
+    /// Reading the value is not optional even though nothing here wants it —
+    /// that is what consumes any continuation lines, so the header-looking
+    /// line one of them can end on is never taken for a section. The valueless
+    /// form (git reads it as a boolean true) simply has none to read.
+    fn variable(&mut self, name: &mut String) -> Option<()> {
+        let mut c;
+        loop {
+            c = self.next_char();
+            if self.eof || !is_key_char(c) {
+                break;
+            }
+            name.push(c.to_ascii_lowercase());
+        }
+        while c == ' ' || c == '\t' {
+            c = self.next_char();
+        }
+        if c == '\n' {
+            return Some(());
+        }
+        if c != '=' {
+            return None;
+        }
+        self.value().map(|_| ())
+    }
+
+    /// A variable's value. `\` before a line break continues the value onto
+    /// the next line; a quote suspends comment and whitespace handling; runs
+    /// of whitespace are held back and only written out if something follows
+    /// them, which is how trailing space is dropped; and an escape git does
+    /// not define is an error rather than a guess.
+    fn value(&mut self) -> Option<String> {
+        let mut value = String::new();
+        let mut quoted = false;
+        let mut comment = false;
+        let mut pending_space = 0usize;
+        loop {
+            let mut c = self.next_char();
+            if c == '\n' {
+                // A quote left open at the end of a line is a file git
+                // rejects outright.
+                return (!quoted).then_some(value);
+            }
+            if comment {
+                continue;
+            }
+            if is_config_space(c) && !quoted {
+                if !value.is_empty() {
+                    pending_space += 1;
+                }
+                continue;
+            }
+            if !quoted && (c == ';' || c == '#') {
+                comment = true;
+                continue;
+            }
+            for _ in 0..pending_space {
+                value.push(' ');
+            }
+            pending_space = 0;
+            if c == '\\' {
+                c = self.next_char();
+                match c {
+                    '\n' => continue,
+                    't' => c = '\t',
+                    'b' => c = '\u{8}',
+                    'n' => c = '\n',
+                    '\\' | '"' => {}
+                    _ => return None,
+                }
+                value.push(c);
+                continue;
+            }
+            if c == '"' {
+                quoted = !quoted;
+                continue;
+            }
+            value.push(c);
+        }
+    }
 }
 
 /// Ahead/behind for a branch that has no explicit upstream, measured against
@@ -934,6 +1611,12 @@ fn read_status(repo_path: String) -> Result<RepoStatus, String> {
         ],
     )?;
 
+    // Resolved once and used twice: `merging` is a file probe inside it, and
+    // the remote lookup below reads the config file beside that. Both are
+    // filesystem answers, and [`git_dir`] is the one step of either that can
+    // fall back to a subprocess.
+    let git_dir = git_dir(&repo_path);
+
     let mut result = RepoStatus {
         branch: String::new(),
         upstream: String::new(),
@@ -945,7 +1628,7 @@ fn read_status(repo_path: String) -> Result<RepoStatus, String> {
         unpushed_shas: Vec::new(),
         detached: false,
         head_sha: String::new(),
-        merging: is_merging_in(git_dir(&repo_path).as_deref()),
+        merging: is_merging_in(git_dir.as_deref()),
         // Overwritten by `get_status` once every field it reads is filled.
         proposal: SyncProposal::Loading,
     };
@@ -953,7 +1636,7 @@ fn read_status(repo_path: String) -> Result<RepoStatus, String> {
     // Configured remote, queried once and reused below (the no-upstream
     // ahead/behind fallback needs the first remote's name). `has_remote` drives
     // the UI's Push-vs-Publish choice.
-    let first_remote = first_remote(&repo_path);
+    let first_remote = first_remote_in(&repo_path, git_dir.as_deref());
     result.has_remote = first_remote.is_some();
 
     if bytes.is_empty() {
@@ -1212,21 +1895,35 @@ fn diff_args_for_file<'a>(file: &'a FileEntry, head_ref: &'a str, ignore_ws: boo
     args
 }
 
-/// Run a diff command. For untracked files, `git diff --no-index` exits with status 1
-/// to signal "files differ", which is expected — we treat that as success.
-fn run_diff(repo_path: &str, file: &FileEntry, ignore_ws: bool) -> Result<String, String> {
-    // On a fresh repo (unborn HEAD) there is no `HEAD` to diff against, so fall
-    // back to the empty tree and the staged/working file shows as fully added.
-    let head_ref = if has_commits(repo_path) {
+/// What a working-tree diff is anchored at: `HEAD`, or the empty tree on a
+/// fresh repo (unborn HEAD) where there is no `HEAD` to diff against and the
+/// staged/working file should show as fully added.
+///
+/// Resolved by the caller and passed into [`run_diff`] rather than asked there,
+/// because the answer is a property of the repository, not of the file:
+/// [`get_selected_diff`] diffs N files under one anchor and used to re-derive
+/// it N times.
+fn diff_anchor(repo_path: &str) -> &'static str {
+    if has_commits(repo_path) {
         "HEAD"
     } else {
         EMPTY_TREE_SHA
-    };
+    }
+}
+
+/// Run a diff command against `head_ref` (see [`diff_anchor`]). For untracked
+/// files, `git diff --no-index` exits with status 1 to signal "files differ",
+/// which is expected — we treat that as success.
+fn run_diff(
+    repo_path: &str,
+    file: &FileEntry,
+    head_ref: &str,
+    ignore_ws: bool,
+) -> Result<String, String> {
     let args = diff_args_for_file(file, head_ref, ignore_ws);
-    let arg_refs: Vec<&str> = args.iter().copied().collect();
-    let output = git_cmd(repo_path, &arg_refs)
+    let output = git_cmd(repo_path, &args)
         .output()
-        .map_err(|e| format!("git diff: {}", e))?;
+        .map_err(|e| format!("git diff: {e}"))?;
     let untracked = matches!(file.status, FileStatus::New) && file.xy.starts_with('?');
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     if output.status.success() {
@@ -1248,11 +1945,11 @@ fn run_diff(repo_path: &str, file: &FileEntry, ignore_ws: bool) -> Result<String
 }
 
 pub fn get_diff(repo_path: String, file: FileEntry) -> Result<String, String> {
-    run_diff(&repo_path, &file, false)
+    run_diff(&repo_path, &file, diff_anchor(&repo_path), false)
 }
 
 pub fn get_diff_whitespace_ignored(repo_path: String, file: FileEntry) -> Result<String, String> {
-    run_diff(&repo_path, &file, true)
+    run_diff(&repo_path, &file, diff_anchor(&repo_path), true)
 }
 
 pub fn get_commit_diff(
@@ -1334,9 +2031,15 @@ pub fn get_selected_diff(repo_path: String, files: Vec<FileEntry>) -> Result<Str
     }
     // Diff each file individually so untracked files (which need --no-index) are
     // handled correctly. Concatenate the results.
+    //
+    // The anchor is resolved once for the whole loop, not once per file: it is
+    // the same answer for every file in a repository, and asking per file made
+    // this 2N spawns — the AI "generate message" path over 30 changed files
+    // spent half a second on nothing but process creation.
+    let head_ref = diff_anchor(&repo_path);
     let mut combined = String::new();
     for f in &files {
-        if let Ok(d) = run_diff(&repo_path, f, false)
+        if let Ok(d) = run_diff(&repo_path, f, head_ref, false)
             && !d.is_empty()
         {
             combined.push_str(&d);
@@ -1435,7 +2138,8 @@ pub fn get_log(repo_path: String, opts: LogOptions) -> Result<Vec<CommitInfo>, S
         };
 
         let co_authors = extract_co_authors(&trailers);
-        let body_without_coauthors = strip_co_author_lines(&body);
+        let stripped = strip_co_author_lines(&body);
+        let body_without_coauthors = (stripped != body).then_some(stripped);
 
         let tags = if fields.len() > 12 {
             tags_from_decorations(fields[12])
@@ -1740,16 +2444,16 @@ pub fn get_commit_detail(repo_path: String, sha: String) -> Result<CommitDetail,
 ///      the reader expects it rather than where git's byte-sorted output puts
 ///      it (uppercase names ahead of lowercase ones, and dot-prefixed dirs
 ///      before everything else).
+///
+/// Both keys are computed once per entry rather than once per comparison. The
+/// list is `-uall`, so a fresh `node_modules` that has yet to reach
+/// `.gitignore` puts 50k entries through ~780k comparisons on a 2 s poll, and
+/// lowercasing inside the comparator made that ~1.6M `String` allocations
+/// every tick. Ordering is unchanged: `sort_by_cached_key` is stable, and the
+/// key's first field is the same root-before-nested rank the comparison made
+/// its first test.
 fn sort_file_entries(files: &mut [FileEntry]) {
-    files.sort_by(|a, b| {
-        let a_root = !a.path.contains('/');
-        let b_root = !b.path.contains('/');
-        match (a_root, b_root) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.path.to_lowercase().cmp(&b.path.to_lowercase()),
-        }
-    });
+    files.sort_by_cached_key(|f| (u8::from(f.path.contains('/')), f.path.to_lowercase()));
 }
 
 // ---------------------------------------------------------------------------
@@ -2734,16 +3438,20 @@ pub fn get_ahead_behind(repo_path: String, upstream: String) -> Result<AheadBehi
 /// remote a *publish* is about to create — makes it explicitly, at that call
 /// site. Elsewhere, `RepoStatus::has_remote` is the question worth asking.
 ///
+/// Answered from the repository's config file wherever that file settles it
+/// (see [`config_remotes`]), because this command rides every auto-fetch tick
+/// in both clients — the third asker of the same question, alongside
+/// `get_status` and `repo_sync_status`.
+///
 /// # Errors
-/// When `git remote` itself can't run (not a repository, git missing).
+/// When `git remote` itself can't run (not a repository, git missing) — which
+/// only the fallback can report, the config read having no command to fail.
 pub fn get_remote(repo_path: String) -> Result<Option<String>, String> {
-    // Return the NAME of the first remote, not the URL.
-    let out = run_git(&repo_path, &["remote"])?;
-    Ok(out
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .map(str::to_string))
+    // The NAME of the first remote, not the URL.
+    if let Some(names) = config_remotes(git_dir(&repo_path).as_deref()) {
+        return Ok(names.into_iter().next());
+    }
+    first_remote_spawned(&repo_path)
 }
 
 /// The remote name a publish should create and push to when the repo has none.
@@ -3054,13 +3762,26 @@ fn scan_for_repos(
         if name_str.starts_with('.') {
             continue;
         }
-        let full = entry.path();
-        // fs::metadata follows symlinks (unlike symlink_metadata).
-        let meta = match std::fs::metadata(&full) {
-            Ok(m) => m,
-            Err(_) => continue,
+        // `file_type()` is answered from the `dirent` `read_dir` already
+        // returned on macOS and Linux, so an ordinary entry — a file, or a real
+        // directory — costs no syscall at all. `fs::metadata` cost one per
+        // entry, and a scan folder is mostly files: on this machine at the
+        // default depth that was 370 stats to find 160 candidate directories.
+        let Ok(kind) = entry.file_type() else {
+            continue;
         };
-        if !meta.is_dir() {
+        if !kind.is_dir() && !kind.is_symlink() {
+            continue;
+        }
+        let full = entry.path();
+        // A symlink is the one shape the `dirent` cannot answer, because it
+        // describes the link rather than its target — so this is the only entry
+        // that still pays for a `metadata` (which follows, unlike
+        // `symlink_metadata`). Following it is the behaviour to preserve: a
+        // project folder that lives elsewhere and is linked into a scan folder
+        // is a repository the user expects listed, and a link to a file is not
+        // a folder to descend into.
+        if kind.is_symlink() && !std::fs::metadata(&full).is_ok_and(|m| m.is_dir()) {
             continue;
         }
         scan_for_repos(&full, root, max_depth, seen, repos);
@@ -3089,34 +3810,142 @@ fn resolve_scan_paths(scan_paths: Vec<String>) -> Vec<String> {
 /// Expanded, unlike the configured form: the point of that list is to be
 /// checked against reality, and `~/Dev` tells the reader nothing about which
 /// folder was actually walked.
+///
+/// De-duplicated by the same identity [`discover_repos`] walks by, and for the
+/// same reason turned around: this list is a claim about what was searched, and
+/// listing `~/Dev` and `~/dev` as two folders on a case-insensitive volume tells
+/// the user we looked in two places when we looked in one. The **first**
+/// spelling survives, because that is the one the user's configuration reads.
+/// A folder that does not resolve has no identity to compare and is always
+/// listed: a missing folder is precisely what someone reading this is checking
+/// for.
 #[must_use]
 pub fn effective_scan_paths(scan_paths: Vec<String>) -> Vec<String> {
-    resolve_scan_paths(scan_paths)
-        .iter()
-        .map(|path| paths::expand_tilde(path).to_string_lossy().into_owned())
-        .collect()
+    let mut seen_roots: HashSet<RootId> = HashSet::new();
+    let mut listed: Vec<String> = Vec::new();
+    for path in resolve_scan_paths(scan_paths) {
+        let expanded = paths::expand_tilde(&path);
+        if let Some((abs, meta)) = resolved_root(&expanded)
+            && !seen_roots.insert(root_id(&abs, &meta))
+        {
+            continue;
+        }
+        listed.push(expanded.to_string_lossy().into_owned());
+    }
+    listed
 }
 
+/// A scan root's identity, for recognising two configured spellings of the
+/// same folder.
+///
+/// Canonicalising is not enough on its own. The stock list holds both `~/Dev`
+/// and `~/dev` (and `~/code` / `~/Code`), which name **one** directory on a
+/// case-insensitive volume — the macOS default — and `dunce::canonicalize`
+/// resolves both without folding case, so the two spellings survive as two
+/// different strings. The whole tree then gets walked twice and every repo is
+/// listed twice under two casings, which flows straight into the picker, the
+/// MRU and the badge sweep. Comparing the inode the kernel resolved to catches
+/// that, and catches a symlinked root aliasing a real one as well.
+#[cfg(unix)]
+#[derive(PartialEq, Eq, Hash)]
+enum RootId {
+    /// Device and inode — the kernel's own answer to "is this the same
+    /// directory?", and the only one that sees through case and symlinks.
+    Node(u64, u64),
+    /// Canonical text, for a filesystem that reports no inode. Weaker, and
+    /// used only where there is nothing stronger to be had.
+    Text(String),
+}
+
+/// On Windows `std::fs::canonicalize` goes through `GetFinalPathNameByHandleW`,
+/// which answers with the on-disk casing, so the canonical text is already a
+/// stable identity and there is no `st_ino` to consult.
+#[cfg(not(unix))]
+type RootId = String;
+
+#[cfg(unix)]
+fn root_id(path: &Path, meta: &std::fs::Metadata) -> RootId {
+    use std::os::unix::fs::MetadataExt;
+    let ino = meta.ino();
+    // Some SMB and FUSE mounts answer `st_ino == 0` for every entry they have.
+    // Taken at face value that makes every scan root the same root, so the
+    // second one and everything under it would vanish from the picker with
+    // nothing said. No inode means no identity: fall back to the canonical
+    // text, which is what Windows uses and is wrong only in the case this
+    // whole type exists for — two spellings of one folder — which is strictly
+    // better than dropping a real one.
+    if ino == 0 {
+        return RootId::Text(path.to_string_lossy().into_owned());
+    }
+    RootId::Node(meta.dev(), ino)
+}
+
+#[cfg(not(unix))]
+fn root_id(path: &Path, _meta: &std::fs::Metadata) -> RootId {
+    path.to_string_lossy().into_owned()
+}
+
+/// A scan root as the walker needs it: canonical path plus the metadata that
+/// carries its identity.
+///
+/// The metadata is answered, not just tested, because [`root_id`] compares it
+/// and re-reading it would be a second `stat` per configured folder for an
+/// answer already in hand. `None` for anything that does not resolve to a
+/// directory.
+fn resolved_root(path: &Path) -> Option<(PathBuf, std::fs::Metadata)> {
+    let abs = paths::canonicalize(path).ok()?;
+    let meta = std::fs::metadata(&abs).ok()?;
+    meta.is_dir().then_some((abs, meta))
+}
+
+/// # Errors
+/// Never, today. The `Result` is the shape both hosts' command layers expect
+/// of a discovery call, and a walk that cannot read a folder skips it rather
+/// than failing the whole scan.
 pub fn discover_repos(scan_paths: Vec<String>, max_depth: u32) -> Result<Vec<String>, String> {
+    Ok(discover_repos_counting(scan_paths, max_depth).0)
+}
+
+/// [`discover_repos`], plus how many roots it actually walked.
+///
+/// The count exists because the de-dupe it reports is otherwise unobservable:
+/// repos are de-duplicated a second time by canonical path, so walking the same
+/// tree twice produces the same list either way, and a test that asserts only
+/// on the list passes just as happily with the root de-dupe deleted. The number
+/// of trees actually walked is the only place the fix shows.
+///
+/// It is also what the log line counts, which the configured length got wrong:
+/// the stock list holds six spellings of four folders, so a default macOS
+/// install reported "across 6 folder(s)" having searched four.
+fn discover_repos_counting(scan_paths: Vec<String>, max_depth: u32) -> (Vec<String>, usize) {
     let scan_paths = resolve_scan_paths(scan_paths);
-    let searched = scan_paths.len();
 
     let mut repos: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
+    let mut seen_roots: HashSet<RootId> = HashSet::new();
     let mut skipped: Vec<String> = Vec::new();
+    // Counted here rather than taken from `seen_roots.len()` afterwards: the
+    // set's size is one per *distinct* root whether or not the de-dupe below
+    // acts on it, so it would report the fix as working even with the skip
+    // deleted. This counts walks.
+    let mut roots_walked = 0usize;
 
     for scan_path in scan_paths {
         let expanded = paths::expand_tilde(&scan_path);
-        let Some(abs) = paths::canonicalize(&expanded)
-            .ok()
-            .filter(|abs| std::fs::metadata(abs).is_ok_and(|meta| meta.is_dir()))
-        else {
+        let Some((abs, meta)) = resolved_root(&expanded) else {
             // Record what `~` became rather than what was configured: a `~`
             // still showing in this line means the home lookup came up empty,
             // which is a different problem from a folder that isn't there.
             skipped.push(expanded.to_string_lossy().into_owned());
             continue;
         };
+        // A folder already walked under another spelling. Skipped silently:
+        // the stock configuration contains such pairs by design, so this is
+        // the ordinary case rather than something to report.
+        if !seen_roots.insert(root_id(&abs, &meta)) {
+            continue;
+        }
+        roots_walked += 1;
         // If the scan path itself is a git repo, include it.
         if is_git_repo_path(&abs) {
             let abs_str = abs.to_string_lossy().to_string();
@@ -3131,15 +3960,17 @@ pub fn discover_repos(scan_paths: Vec<String>, max_depth: u32) -> Result<Vec<Str
     repos.sort();
     // Discovery failing quietly is what an empty picker looks like from the
     // outside, so say what was walked and what wasn't. A folder that can't be
-    // resolved was previously skipped in complete silence.
+    // resolved was previously skipped in complete silence. The count is of
+    // folders *walked*, not of folders configured — the stock list holds six
+    // spellings of four folders, and the old line claimed all six.
     println!(
-        "[discover] {} repo(s) across {searched} folder(s), depth {max_depth}",
+        "[discover] {} repo(s) across {roots_walked} folder(s), depth {max_depth}",
         repos.len()
     );
     if !skipped.is_empty() {
         println!("[discover] not searched (missing or not a folder): {skipped:?}");
     }
-    Ok(repos)
+    (repos, roots_walked)
 }
 
 pub fn is_git_repo_path(path: &Path) -> bool {
@@ -3420,6 +4251,125 @@ mod tests {
         assert!(!resolve_scan_paths(Vec::new()).is_empty());
     }
 
+    /// Build `<root>/one` and `<root>/two` as repos, and answer the root.
+    fn scan_root_with_two_repos(parent: &Path, name: &str) -> PathBuf {
+        let root = parent.join(name);
+        for repo in ["one", "two"] {
+            let dir = root.join(repo);
+            fs::create_dir_all(&dir).expect("create the repo folder");
+            init_test_repo(&dir);
+        }
+        root
+    }
+
+    /// Discovery over `roots`, with the number of roots it actually walked.
+    ///
+    /// The count is the assertion that matters: the repo list alone cannot
+    /// tell a de-duplicated root from a tree walked twice, because the repos
+    /// are de-duplicated again by canonical path on the way out.
+    fn discovered(roots: &[&Path]) -> (Vec<String>, usize) {
+        let configured = roots
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        discover_repos_counting(configured, 3)
+    }
+
+    fn has_no_duplicates(repos: &[String]) -> bool {
+        let unique: HashSet<&String> = repos.iter().collect();
+        unique.len() == repos.len()
+    }
+
+    /// The same folder configured twice is walked once and listed once.
+    #[test]
+    fn a_repeated_scan_root_lists_each_repo_once() {
+        let tmp = tempdir().expect("tempdir");
+        let root = scan_root_with_two_repos(tmp.path(), "Projects");
+
+        let (repos, roots_walked) = discovered(&[&root, &root]);
+
+        assert_eq!(roots_walked, 1, "one folder, however many times configured");
+        assert_eq!(repos.len(), 2, "each repo exactly once: {repos:?}");
+        assert!(has_no_duplicates(&repos));
+    }
+
+    /// The bug this closes, on the platform that has it: the stock scan list
+    /// ships both `~/Dev` and `~/dev`, which are one folder on a
+    /// case-insensitive volume. `canonicalize` resolves both and does not fold
+    /// case, so the two spellings used to walk the tree twice and list every
+    /// repo twice under two casings — into the picker, the MRU and the badge
+    /// sweep. macOS only: the volume has to be case-insensitive for the second
+    /// spelling to resolve at all.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scan_roots_differing_only_in_case_are_one_root() {
+        let tmp = tempdir().expect("tempdir");
+        let root = scan_root_with_two_repos(tmp.path(), "Root");
+        let lowercased = tmp.path().join("root");
+        if !lowercased.is_dir() {
+            // A case-sensitive volume (APFS can be formatted either way):
+            // the collision this guards cannot happen there.
+            return;
+        }
+
+        let (repos, roots_walked) = discovered(&[&root, &lowercased]);
+
+        assert_eq!(roots_walked, 1, "two spellings, one walk");
+        assert_eq!(
+            repos.len(),
+            2,
+            "one folder under two spellings is one folder: {repos:?}"
+        );
+        assert!(has_no_duplicates(&repos));
+    }
+
+    /// A symlinked scan folder beside the real one is the same alias by
+    /// another route — and the one no amount of case folding would catch.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_scan_root_and_its_target_are_one_root() {
+        let tmp = tempdir().expect("tempdir");
+        let root = scan_root_with_two_repos(tmp.path(), "real");
+        let link = tmp.path().join("alias");
+        std::os::unix::fs::symlink(&root, &link).expect("symlink the scan root");
+
+        let (repos, roots_walked) = discovered(&[&link, &root]);
+
+        assert_eq!(roots_walked, 1, "the link and its target are one folder");
+        assert_eq!(repos.len(), 2, "each repo exactly once: {repos:?}");
+        assert!(has_no_duplicates(&repos));
+    }
+
+    /// The walk decides directory-vs-file from the `dirent` and pays for a
+    /// `metadata` only on a symlink — so the two things a symlink can be are
+    /// what pins that decision down. A linked-in project folder is a repository
+    /// the user expects listed (the link is followed, and the row names the real
+    /// path, because the walk canonicalises what it finds); a link to a file is
+    /// not a folder, however folder-ish its name, and is never descended into.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_project_folder_is_found_and_a_symlinked_file_is_not() {
+        let tmp = tempdir().expect("tempdir");
+        let root = tmp.path().join("scan");
+        fs::create_dir_all(&root).expect("create the scan root");
+
+        // The repository itself lives outside the scan root, so only the link
+        // inside it can lead the walk there.
+        let project = tmp.path().join("elsewhere/project");
+        fs::create_dir_all(&project).expect("create the project folder");
+        init_test_repo(&project);
+        std::os::unix::fs::symlink(&project, root.join("linked-project"))
+            .expect("symlink the project folder");
+
+        let file = tmp.path().join("notes.txt");
+        fs::write(&file, "not a repository").expect("write the file");
+        std::os::unix::fs::symlink(&file, root.join("linked-file")).expect("symlink the file");
+
+        let (repos, _) = discovered(&[&root]);
+
+        assert_eq!(repos, vec![canonical(&project)], "the linked project, once");
+    }
+
     /// The picker's "searched these folders" list is meant to be checked
     /// against the disk, so it names the folders discovery actually walked. A
     /// `~` left in it says nothing about where we looked — and hid the fact
@@ -3435,6 +4385,32 @@ mod tests {
         );
         assert!(reported[0].ends_with("Dev"), "{}", reported[0]);
         assert_eq!(reported[1], "/tmp/code", "an ordinary path is untouched");
+    }
+
+    /// One folder is one entry here as well, or the empty state claims we
+    /// searched two places when we searched one — which is the stock macOS
+    /// configuration, where `~/Dev` and `~/dev` are the same directory. A
+    /// folder that does not exist stays listed: that is what the reader of this
+    /// list is checking for.
+    #[test]
+    fn effective_scan_paths_list_one_folder_once() {
+        let tmp = tempdir().expect("tempdir");
+        let root = tmp.path().join("Projects");
+        fs::create_dir_all(&root).expect("create the scan folder");
+        let configured = root.to_string_lossy().into_owned();
+        let missing = tmp.path().join("gone").to_string_lossy().into_owned();
+
+        let reported = effective_scan_paths(vec![
+            configured.clone(),
+            configured.clone(),
+            missing.clone(),
+        ]);
+
+        assert_eq!(
+            reported,
+            [configured, missing],
+            "the first spelling survives, and an unresolvable folder is kept"
+        );
     }
 
     /// A fresh repo lands on `main`, not git's legacy `master` default.
@@ -3626,6 +4602,231 @@ mod tests {
         let log = get_log(repo_path, default_log_opts()).expect("get_log");
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].summary, "First");
+    }
+
+    // ── `has_commits` reads the ref store from disk (F28) ──────────────────
+    //
+    // Two assertions per layout, and both matter. `has_commits_from_fs` says
+    // *which* path answered — the point of the change is that the filesystem
+    // one does, so a regression that quietly went back to spawning would still
+    // return the right answer and must still fail. `has_commits` vs git's own
+    // `rev-parse` says the answer is right whichever path produced it, which is
+    // what makes the fallback shapes worth testing at all.
+
+    /// `git rev-parse --verify --quiet HEAD` — the oracle the shortcut has to
+    /// match, and the exact command `has_commits` falls back to.
+    fn head_resolves(repo_path: &str) -> bool {
+        git_cmd(repo_path, &["rev-parse", "--verify", "--quiet", "HEAD"])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+
+    fn assert_agrees_with_git(repo_path: &str) {
+        assert_eq!(
+            has_commits(repo_path),
+            head_resolves(repo_path),
+            "has_commits disagreed with `git rev-parse --verify --quiet HEAD`"
+        );
+    }
+
+    /// A repo with one commit, plus the name of the branch it landed on —
+    /// which is `init.defaultBranch`, so it is read back rather than assumed.
+    fn repo_with_one_commit(repo: &Path) -> (String, String) {
+        init_test_repo(repo);
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+        fs::write(repo.join("a.txt"), "x\n").expect("write file");
+        commit(
+            repo_path.clone(),
+            "First".to_string(),
+            vec![new_file("a.txt")],
+            None,
+        )
+        .expect("commit");
+        let branch = run_git(&repo_path, &["symbolic-ref", "--short", "HEAD"])
+            .expect("current branch")
+            .trim()
+            .to_string();
+        (repo_path, branch)
+    }
+
+    /// An unborn HEAD: the branch it names exists in neither ref store, which
+    /// the shortcut reports as "no commits" rather than declining.
+    #[test]
+    fn has_commits_reads_an_unborn_head_from_disk() {
+        let tmp = tempdir().expect("tempdir");
+        init_test_repo(tmp.path());
+        let repo_path = tmp.path().to_str().expect("utf-8 path").to_string();
+
+        assert_eq!(has_commits_from_fs(&repo_path), Some(false));
+        assert_agrees_with_git(&repo_path);
+    }
+
+    /// The ordinary case: HEAD names a branch with a loose ref file.
+    #[test]
+    fn has_commits_reads_a_loose_branch_ref_from_disk() {
+        let tmp = tempdir().expect("tempdir");
+        let (repo_path, branch) = repo_with_one_commit(tmp.path());
+
+        assert!(
+            tmp.path().join(".git/refs/heads").join(&branch).is_file(),
+            "expected a loose ref to read"
+        );
+        assert_eq!(has_commits_from_fs(&repo_path), Some(true));
+        assert_agrees_with_git(&repo_path);
+    }
+
+    /// After `git pack-refs` the loose file is gone and the only record of the
+    /// branch is a `packed-refs` line, which the shortcut has to read too —
+    /// otherwise every packed repository falls back to the spawn.
+    #[test]
+    fn has_commits_reads_a_packed_ref_from_disk() {
+        let tmp = tempdir().expect("tempdir");
+        let (repo_path, branch) = repo_with_one_commit(tmp.path());
+        run_git(&repo_path, &["pack-refs", "--all"]).expect("pack refs");
+
+        assert!(
+            !tmp.path().join(".git/refs/heads").join(&branch).exists(),
+            "pack-refs should have removed the loose ref"
+        );
+        assert_eq!(has_commits_from_fs(&repo_path), Some(true));
+        assert_agrees_with_git(&repo_path);
+    }
+
+    /// Detached HEAD holds the object id itself — no ref to look up.
+    #[test]
+    fn has_commits_reads_a_detached_head_from_disk() {
+        let tmp = tempdir().expect("tempdir");
+        let (repo_path, _) = repo_with_one_commit(tmp.path());
+        run_git(&repo_path, &["checkout", "--detach", "HEAD"]).expect("detach HEAD");
+
+        assert_eq!(has_commits_from_fs(&repo_path), Some(true));
+        assert_agrees_with_git(&repo_path);
+    }
+
+    /// A linked worktree's git dir holds its own HEAD but no refs; those live
+    /// one `commondir` hop away. Without that hop the shortcut would miss on
+    /// every worktree, which is silent rather than wrong — and so worth a test.
+    #[test]
+    fn has_commits_reads_a_linked_worktree_through_commondir() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        fs::create_dir(&repo).expect("create repo dir");
+        let (repo_path, _) = repo_with_one_commit(&repo);
+
+        let worktree = tmp.path().join("wt");
+        let worktree_path = worktree.to_str().expect("utf-8 path").to_string();
+        run_git(
+            &repo_path,
+            &["worktree", "add", &worktree_path, "-b", "side"],
+        )
+        .expect("worktree add");
+
+        assert_eq!(has_commits_from_fs(&worktree_path), Some(true));
+        assert_agrees_with_git(&worktree_path);
+    }
+
+    /// HEAD → an alias ref → the real branch. The shortcut does not walk
+    /// chains, so it declines and git resolves it.
+    #[test]
+    fn has_commits_falls_back_on_a_symbolic_ref_chain() {
+        let tmp = tempdir().expect("tempdir");
+        let (repo_path, branch) = repo_with_one_commit(tmp.path());
+        let target = format!("refs/heads/{branch}");
+        run_git(&repo_path, &["symbolic-ref", "refs/heads/alias", &target])
+            .expect("alias -> branch");
+        run_git(&repo_path, &["symbolic-ref", "HEAD", "refs/heads/alias"]).expect("HEAD -> alias");
+
+        assert_eq!(
+            has_commits_from_fs(&repo_path),
+            None,
+            "a symbolic chain is git's to resolve"
+        );
+        assert_agrees_with_git(&repo_path);
+    }
+
+    /// A `HEAD` pointing into a *per-worktree* ref namespace. `refs/worktree/*`
+    /// is stored beside that worktree's own `HEAD`, not under the common dir,
+    /// so following it through `commondir` finds neither the loose file nor a
+    /// `packed-refs` line and reads the absence as "no commits" — a wrong
+    /// answer, and the one that anchors every diff at the empty tree. Only a
+    /// linked worktree can show it: in the main one the two directories are the
+    /// same, so the lookup lands on the ref by accident.
+    #[test]
+    fn has_commits_declines_on_a_per_worktree_ref_namespace() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        fs::create_dir(&repo).expect("create repo dir");
+        let (repo_path, _) = repo_with_one_commit(&repo);
+
+        let worktree = tmp.path().join("wt");
+        let worktree_path = worktree.to_str().expect("utf-8 path").to_string();
+        run_git(
+            &repo_path,
+            &["worktree", "add", &worktree_path, "-b", "side"],
+        )
+        .expect("worktree add");
+
+        run_git(&worktree_path, &["update-ref", "refs/worktree/x", "HEAD"])
+            .expect("write the per-worktree ref");
+        run_git(&worktree_path, &["symbolic-ref", "HEAD", "refs/worktree/x"])
+            .expect("HEAD -> refs/worktree/x");
+
+        assert!(
+            !repo.join(".git/refs/worktree").exists(),
+            "the ref must live in the worktree's own git dir, not the common one"
+        );
+        assert_eq!(
+            has_commits_from_fs(&worktree_path),
+            None,
+            "a namespace the common dir does not hold is git's to resolve"
+        );
+        assert_agrees_with_git(&worktree_path);
+    }
+
+    /// A reftable repository stores refs in `reftable/` and leaves
+    /// `refs/heads` as a stub file, so there is nothing on the paths the
+    /// shortcut reads — it must decline rather than answer "no commits" from a
+    /// ref store this repo does not use. Skipped where the installed git
+    /// predates `--ref-format` (added in 2.45).
+    #[test]
+    fn has_commits_falls_back_on_a_reftable_repo() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path();
+        let initialised = Command::new("git")
+            .current_dir(repo)
+            .args(["init", "-q", "--ref-format=reftable"])
+            .status()
+            .is_ok_and(|s| s.success());
+        if !initialised {
+            return;
+        }
+        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+        run_git(&repo_path, &["config", "user.email", "test@example.com"]).expect("set email");
+        run_git(&repo_path, &["config", "user.name", "Test User"]).expect("set name");
+        run_git(&repo_path, &["config", "commit.gpgsign", "false"]).expect("disable signing");
+
+        assert_eq!(
+            has_commits_from_fs(&repo_path),
+            None,
+            "unborn reftable repo"
+        );
+        assert_agrees_with_git(&repo_path);
+
+        fs::write(repo.join("a.txt"), "x\n").expect("write file");
+        commit(
+            repo_path.clone(),
+            "First".to_string(),
+            vec![new_file("a.txt")],
+            None,
+        )
+        .expect("commit");
+
+        assert_eq!(
+            has_commits_from_fs(&repo_path),
+            None,
+            "committed reftable repo"
+        );
+        assert_agrees_with_git(&repo_path);
     }
 
     /// Regression: the repository's first commit must diff like any other,
@@ -4794,6 +5995,439 @@ mod tests {
         assert!(
             get_status(repo_path).expect("status").has_remote,
             "and the status flag agrees"
+        );
+    }
+
+    // ── remote names read from `config` rather than spawned (F1) ───────────
+    //
+    // Two assertions per case, for the reason the `has_commits` block gives:
+    // `remotes_from_config` says *which* path answered — the point of the
+    // change is that the file does — while the comparison against a spawned
+    // `git remote` says the answer is right whichever path produced it, which
+    // is what makes the declining cases worth testing at all.
+
+    /// `git remote`'s own answer, the oracle every case below is measured
+    /// against.
+    fn git_remote_names(repo_path: &str) -> Vec<String> {
+        run_git(repo_path, &["remote"])
+            .expect("git remote")
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Both public askers must return `git remote`'s first line, whether they
+    /// read it or spawned for it.
+    fn assert_agrees_with_git_remote(repo_path: &str) {
+        let expected = git_remote_names(repo_path).first().cloned();
+        assert_eq!(
+            first_remote(repo_path),
+            expected,
+            "first_remote disagreed with `git remote`"
+        );
+        assert_eq!(
+            get_remote(repo_path.to_string()).expect("get_remote"),
+            expected,
+            "get_remote disagreed with `git remote`"
+        );
+    }
+
+    /// What the config file alone says, and whether it is willing to say it.
+    fn remotes_of(repo_path: &str) -> Option<Vec<String>> {
+        remotes_from_config(&git_dir(repo_path).expect("git dir"))
+    }
+
+    /// Append raw text to a repository's config, for the shapes `git config`
+    /// will not write itself: a section with no variables, the legacy form, a
+    /// value continued over a line break.
+    fn append_to_config(repo: &Path, text: &str) {
+        let path = repo.join(".git").join("config");
+        let mut current = fs::read_to_string(&path).expect("read config");
+        current.push_str(text);
+        fs::write(&path, current).expect("write config");
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    #[test]
+    fn remotes_from_config_reports_a_repo_with_no_remotes() {
+        let tmp = tempdir().expect("tempdir");
+        init_test_repo(tmp.path());
+        let repo_path = tmp.path().to_str().expect("utf-8 path").to_string();
+
+        assert_eq!(
+            remotes_of(&repo_path),
+            Some(Vec::new()),
+            "no remotes is an answer, not a reason to spawn"
+        );
+        assert_eq!(first_remote(&repo_path), None);
+        assert_agrees_with_git_remote(&repo_path);
+    }
+
+    /// `git remote` sorts with `strcmp`, so the order is byte order:
+    /// every uppercase name ahead of every lowercase one. The first line is
+    /// what `first_remote` returns, so the sort is not cosmetic here.
+    #[test]
+    fn remotes_from_config_sorts_names_in_byte_order() {
+        let tmp = tempdir().expect("tempdir");
+        init_test_repo(tmp.path());
+        let repo_path = tmp.path().to_str().expect("utf-8 path").to_string();
+        for name in ["origin", "Origin", "a-b"] {
+            run_git(
+                &repo_path,
+                &["remote", "add", name, "https://example.invalid/x.git"],
+            )
+            .expect("add remote");
+        }
+
+        assert_eq!(
+            remotes_of(&repo_path),
+            Some(names(&["Origin", "a-b", "origin"]))
+        );
+        assert_eq!(first_remote(&repo_path).as_deref(), Some("Origin"));
+        assert_agrees_with_git_remote(&repo_path);
+    }
+
+    /// A remote exists as soon as *any* variable is set under its name, url or
+    /// no url — matching a `[remote "…"]` header to a `url` line would miss it.
+    #[test]
+    fn remotes_from_config_lists_a_url_less_remote() {
+        let tmp = tempdir().expect("tempdir");
+        init_test_repo(tmp.path());
+        let repo_path = tmp.path().to_str().expect("utf-8 path").to_string();
+        run_git(
+            &repo_path,
+            &[
+                "config",
+                "remote.stub.fetch",
+                "+refs/heads/*:refs/remotes/stub/*",
+            ],
+        )
+        .expect("configure a url-less remote");
+
+        assert_eq!(remotes_of(&repo_path), Some(names(&["stub"])));
+        assert_agrees_with_git_remote(&repo_path);
+    }
+
+    /// The mirror image: a header with nothing under it defines no remote, so
+    /// the section alone must not be counted.
+    #[test]
+    fn remotes_from_config_ignores_a_section_with_no_variables() {
+        let tmp = tempdir().expect("tempdir");
+        init_test_repo(tmp.path());
+        let repo_path = tmp.path().to_str().expect("utf-8 path").to_string();
+        append_to_config(tmp.path(), "[remote \"ghost\"]\n");
+
+        assert_eq!(remotes_of(&repo_path), Some(Vec::new()));
+        assert_agrees_with_git_remote(&repo_path);
+    }
+
+    /// git still accepts the pre-subsection `[remote.Name]` spelling, and
+    /// lowercases the whole header when it does — so this remote is `legacy`,
+    /// not `Legacy`, and a reader that preserved the case would name a remote
+    /// that does not exist.
+    #[test]
+    fn remotes_from_config_lowercases_a_legacy_section() {
+        let tmp = tempdir().expect("tempdir");
+        init_test_repo(tmp.path());
+        let repo_path = tmp.path().to_str().expect("utf-8 path").to_string();
+        append_to_config(
+            tmp.path(),
+            "[remote.Legacy]\n\turl = https://example.invalid/legacy\n",
+        );
+
+        assert_eq!(remotes_of(&repo_path), Some(names(&["legacy"])));
+        assert_agrees_with_git_remote(&repo_path);
+    }
+
+    /// A value ending in `\` continues onto the next line, so the line that
+    /// looks like a second header is the tail of the first one's url. Only
+    /// `real` exists; anything scanning for `[remote "…"]` lines invents
+    /// `fake`.
+    #[test]
+    fn remotes_from_config_reads_a_continued_value_as_value_text() {
+        let tmp = tempdir().expect("tempdir");
+        init_test_repo(tmp.path());
+        let repo_path = tmp.path().to_str().expect("utf-8 path").to_string();
+        append_to_config(
+            tmp.path(),
+            "[remote \"real\"]\n\turl = https://example.invalid/x \\\n[remote \"fake\"]\n",
+        );
+
+        assert_eq!(remotes_of(&repo_path), Some(names(&["real"])));
+        assert_agrees_with_git_remote(&repo_path);
+    }
+
+    /// An `include` splices in a file this does not read, and the remote it
+    /// contributes here sorts *first* — so the fallback is not a formality:
+    /// the config file's own answer would have been the wrong name.
+    #[test]
+    fn remotes_from_config_declines_on_an_include_section() {
+        let tmp = tempdir().expect("tempdir");
+        init_test_repo(tmp.path());
+        let repo_path = tmp.path().to_str().expect("utf-8 path").to_string();
+        run_git(
+            &repo_path,
+            &["remote", "add", "origin", "https://example.invalid/o.git"],
+        )
+        .expect("add remote");
+
+        let extra = tmp.path().join("extra.cfg");
+        fs::write(
+            &extra,
+            "[remote \"included\"]\n\turl = https://example.invalid/i.git\n",
+        )
+        .expect("write the included file");
+        // Forward slashes even on Windows: a backslash starts an escape in a
+        // config value, and git accepts `/` in a path everywhere.
+        append_to_config(
+            tmp.path(),
+            &format!(
+                "[include]\n\tpath = {}\n",
+                extra.display().to_string().replace('\\', "/")
+            ),
+        );
+
+        assert_eq!(remotes_of(&repo_path), None);
+        assert_eq!(
+            first_remote(&repo_path).as_deref(),
+            Some("included"),
+            "the included remote sorts first, which only git's own answer knows"
+        );
+        assert_agrees_with_git_remote(&repo_path);
+    }
+
+    /// `extensions.worktreeConfig` gives the repository a second config file
+    /// this does not read — and one that can define a remote of its own, as it
+    /// does here, where the extra remote again sorts first.
+    #[test]
+    fn remotes_from_config_declines_on_per_worktree_config() {
+        let tmp = tempdir().expect("tempdir");
+        init_test_repo(tmp.path());
+        let repo_path = tmp.path().to_str().expect("utf-8 path").to_string();
+        run_git(
+            &repo_path,
+            &["remote", "add", "origin", "https://example.invalid/o.git"],
+        )
+        .expect("add remote");
+        run_git(&repo_path, &["config", "extensions.worktreeConfig", "true"])
+            .expect("enable per-worktree config");
+        run_git(
+            &repo_path,
+            &[
+                "config",
+                "--worktree",
+                "remote.aaa.url",
+                "https://example.invalid/a.git",
+            ],
+        )
+        .expect("configure a per-worktree remote");
+
+        assert_eq!(remotes_of(&repo_path), None);
+        assert_eq!(first_remote(&repo_path).as_deref(), Some("aaa"));
+        assert_agrees_with_git_remote(&repo_path);
+    }
+
+    /// Three shapes a hand-written reader gets wrong before it gets anything
+    /// else wrong, in one file: CRLF line endings, a `#` inside a quoted value
+    /// (text, not the start of a comment), a commented-out header, and a last
+    /// line with no newline after it at all.
+    #[test]
+    fn remotes_from_config_reads_awkward_but_legal_files() {
+        let tmp = tempdir().expect("tempdir");
+        init_test_repo(tmp.path());
+        let repo_path = tmp.path().to_str().expect("utf-8 path").to_string();
+        append_to_config(
+            tmp.path(),
+            "# [remote \"commented\"]\r\n\
+             [remote \"crlf\"]\r\n\turl = \"https://example.invalid/x#y\"\r\n\
+             [remote \"tail\"]\r\n\turl = https://example.invalid/t",
+        );
+
+        assert_eq!(remotes_of(&repo_path), Some(names(&["crlf", "tail"])));
+        assert_agrees_with_git_remote(&repo_path);
+    }
+
+    /// An empty section header is not a section named "": git measures the
+    /// header it just read, rejects a zero-length one, and fails the *file*
+    /// with `fatal: bad config line`. Accepting it meant naming a remote out of
+    /// a file git will not read — `origin` here, where git's own answer is an
+    /// error — so the shortcut has to decline and let the fallback deal with a
+    /// repository whose config is broken.
+    #[test]
+    fn remotes_from_config_declines_on_an_empty_section_header() {
+        let tmp = tempdir().expect("tempdir");
+        init_test_repo(tmp.path());
+        let repo_path = tmp.path().to_str().expect("utf-8 path").to_string();
+        run_git(
+            &repo_path,
+            &["remote", "add", "origin", "https://example.invalid/o.git"],
+        )
+        .expect("add remote");
+        // Last, since every `git` invocation on this repo fails afterwards.
+        append_to_config(tmp.path(), "[]\n");
+
+        assert_eq!(remotes_of(&repo_path), None);
+        // The oracle every other case here is measured against cannot be run:
+        // `git remote` exits 128 on this file. So the assertion is that neither
+        // public asker invents a remote git never printed — one degrades to
+        // "none", the other reports git's failure, and neither says `origin`.
+        assert_eq!(first_remote(&repo_path), None);
+        assert!(
+            get_remote(repo_path).is_err(),
+            "a config file git rejects is an error, not an answer"
+        );
+    }
+
+    /// A linked worktree's own git dir holds no remotes; they live one
+    /// `commondir` hop away in the main repository's config. Without that hop
+    /// every worktree would fall back to the spawn — silent rather than wrong,
+    /// and so worth asserting on the path that answered.
+    #[test]
+    fn remotes_from_config_reads_a_linked_worktree_through_commondir() {
+        let tmp = tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        fs::create_dir(&repo).expect("create repo dir");
+        let (repo_path, _) = repo_with_one_commit(&repo);
+        run_git(
+            &repo_path,
+            &["remote", "add", "origin", "https://example.invalid/o.git"],
+        )
+        .expect("add remote");
+
+        let worktree = tmp.path().join("wt");
+        let worktree_path = worktree.to_str().expect("utf-8 path").to_string();
+        run_git(
+            &repo_path,
+            &["worktree", "add", &worktree_path, "-b", "side"],
+        )
+        .expect("worktree add");
+
+        assert_eq!(remotes_of(&worktree_path), Some(names(&["origin"])));
+        assert_eq!(first_remote(&worktree_path).as_deref(), Some("origin"));
+        assert_agrees_with_git_remote(&worktree_path);
+    }
+
+    /// Any `GIT_CONFIG*` variable means git is reading configuration from
+    /// somewhere this cannot see, so the file stops being the whole answer.
+    /// Checked over a list rather than the real environment: `set_var` is
+    /// `unsafe` in edition 2024 because the process may be threaded, and this
+    /// suite is.
+    #[test]
+    fn git_config_env_is_set_spots_every_git_config_variable() {
+        let vars = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
+
+        assert!(git_config_env_is_set(vars(&["PATH", "GIT_CONFIG_COUNT"])));
+        assert!(git_config_env_is_set(vars(&["GIT_CONFIG"])));
+        assert!(git_config_env_is_set(vars(&["GIT_CONFIG_GLOBAL"])));
+        assert!(git_config_env_is_set(vars(&["GIT_CONFIG_NOSYSTEM"])));
+        assert!(!git_config_env_is_set(vars(&[
+            "PATH",
+            "GIT_DIR",
+            "GITCONFIG"
+        ])));
+        assert!(!git_config_env_is_set(vars(&[])));
+    }
+
+    /// The probe that decides whether the repository's own file is the whole
+    /// answer. Pointed at temp files, since the alternative is asserting
+    /// against whatever the developer's `~/.gitconfig` holds.
+    #[test]
+    fn outside_remote_probe_separates_a_global_remote_from_a_global_setting() {
+        let tmp = tempdir().expect("tempdir");
+        let global = tmp.path().join("gitconfig");
+        // Never created: git reports an absent scope as "no match", which is
+        // the same answer as an empty one.
+        let system = tmp.path().join("no-such-system-config");
+
+        fs::write(&global, "[user]\n\tname = Probe\n").expect("write global");
+        assert_eq!(
+            probe_outside_remotes(Some(&global), Some(&system)),
+            Some(false),
+            "a global config with no remotes leaves the local file in charge"
+        );
+
+        fs::write(&global, "[remote]\n\tpushDefault = origin\n").expect("write global");
+        assert_eq!(
+            probe_outside_remotes(Some(&global), Some(&system)),
+            Some(false),
+            "`remote.pushDefault` matches the search but names no remote"
+        );
+
+        fs::write(
+            &global,
+            "[user]\n\tname = Probe\n[remote \"g\"]\n\turl = https://example.invalid/g.git\n",
+        )
+        .expect("write global");
+        assert_eq!(
+            probe_outside_remotes(Some(&global), Some(&system)),
+            Some(true),
+            "a remote outside the repository is listed in every repository"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // sort_file_entries (F5)
+    // -----------------------------------------------------------------------
+
+    /// The order is two keys — root-level files first, then case-insensitive
+    /// path — and computing them once per entry rather than once per
+    /// comparison must not move a single row. Both halves are asserted: the
+    /// exact expected order, and equality with the comparison spelled out
+    /// pair-wise, which is the shape a cached key is easy to get subtly wrong
+    /// against.
+    #[test]
+    fn sort_file_entries_orders_root_files_first_then_case_insensitively() {
+        let entry = |path: &str, status: FileStatus| FileEntry {
+            status,
+            ..new_file(path)
+        };
+        let unsorted = || {
+            vec![
+                entry("src/zeta.rs", FileStatus::Modified),
+                entry("README.md", FileStatus::New),
+                entry("Src/beta.rs", FileStatus::Deleted),
+                entry(".gitignore", FileStatus::Modified),
+                entry("src/Alpha.rs", FileStatus::Renamed),
+                entry("a.txt", FileStatus::Conflicted),
+            ]
+        };
+
+        let mut files = unsorted();
+        sort_file_entries(&mut files);
+        let order: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                ".gitignore",
+                "a.txt",
+                "README.md",
+                "src/Alpha.rs",
+                "Src/beta.rs",
+                "src/zeta.rs",
+            ],
+            "status takes no part in the order; case does not either, except \
+             that root-level files come first"
+        );
+
+        let mut pairwise = unsorted();
+        pairwise.sort_by(|a, b| {
+            let a_root = !a.path.contains('/');
+            let b_root = !b.path.contains('/');
+            match (a_root, b_root) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.path.to_lowercase().cmp(&b.path.to_lowercase()),
+            }
+        });
+        assert_eq!(
+            pairwise.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+            order,
+            "the cached key must reproduce the comparison exactly"
         );
     }
 

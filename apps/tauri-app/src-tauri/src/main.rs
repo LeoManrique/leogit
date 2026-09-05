@@ -37,6 +37,16 @@ fn main() {
         // without a recent one. This writes from the native side, so a `vim`
         // yank lands whenever it happens rather than only just after a keypress.
         .plugin(tauri_plugin_clipboard_manager::init())
+        // The `PATH` above almost always came from a cache, because asking the
+        // login shell costs ~430 ms and the window would wait for it. Now that
+        // the window exists, ask for real on a worker thread: the answer
+        // rewrites the cache and, if it disagrees with what we installed,
+        // reaches every child spawned from here on. Never the environment —
+        // that is `fix_path_env`'s alone, and only before threads exist.
+        .setup(|_app| {
+            leogit_core::process::spawn_path_reprobe();
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             config::load_config,
             config::patch_config,

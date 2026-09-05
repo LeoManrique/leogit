@@ -26,12 +26,29 @@ trash = "5"
 # `paths`. A no-op re-export of `std::fs` on macOS and Linux.
 dunce = "1.0.5"
 
+# Signalling a whole process group: `process::run_timed`'s timeout has to reach
+# the grandchildren `git fetch` starts (`ssh`, `git-remote-https`), and std can
+# only kill the one process it spawned. `killpg` is the missing piece. Already
+# in the lock file via tokio and portable-pty, so this compiles nothing new.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Windows shell discovery and build-number lookup: Git for Windows records its
 # install root under HKLM\SOFTWARE\GitForWindows, and the OS build number
 # (needed to enable xterm.js reflow) lives in CurrentVersion. Both are registry
 # reads, so this is Windows-only.
+#
+# `windows-sys` is the same timeout story as `libc` above: Windows has no
+# process groups we can signal, so a timed child is put in a job object and the
+# job is what gets terminated. Also already in the lock file.
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55.0"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile = "3"

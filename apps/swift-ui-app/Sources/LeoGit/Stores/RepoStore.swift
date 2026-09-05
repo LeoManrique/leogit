@@ -118,6 +118,13 @@ final class RepoStore {
     /// and because it is claimed on entry rather than when a read resolves,
     /// the repository that wins is the one the user asked for last, not the
     /// one whose `git log` happened to finish first.
+    ///
+    /// **The rule every read here follows: claim it before the first `await`,
+    /// re-check it after every one.** This class is `@MainActor`, which orders
+    /// its statements but does not suspend the actor across an `await` — a
+    /// switch runs *in* that gap, by design. So a claim taken after a
+    /// suspension is already the new repository's number and guards nothing,
+    /// and a check that happens once cannot cover a second read done later.
     private var openGeneration = 0
 
     /// Suspend until no explicit load is in flight.
@@ -207,9 +214,22 @@ final class RepoStore {
             commits = []
             hasMoreHistory = true
             historyLoaded = false
+            // The same argument, for the same reason: the status describes the
+            // repository it was read from, so it has to be dropped with the
+            // path too. Everything on screen that says what this repository
+            // *is* reads from here — the Changes list and its count badge, the
+            // branch name in the chip and the Branch menu, the ahead/behind
+            // counts — and would otherwise describe the previous repository
+            // for the 100–500 ms the first read takes. The proposal is the
+            // sharp one: it is live, so ⌘P in that window would run the old
+            // repository's proposed action against the new repository's path.
+            // Cleared, every reader falls back to the state it already has for
+            // a repository whose first read hasn't landed (`SyncControls`
+            // reads `.loading`, which is disabled).
+            status = nil
             // A fresh repository starts at page one, whatever depth the
             // previous one had been scrolled to.
-            await loadRepoData(root, historyLimit: Self.historyPageSize)
+            await loadRepoData(root, historyLimit: Self.historyPageSize, generation: generation)
             return generation == openGeneration ? .opened : .superseded
         } catch {
             guard generation == openGeneration else { return .superseded }
@@ -223,9 +243,13 @@ final class RepoStore {
     /// Re-read status and history for the already-open repository.
     func refresh() async {
         guard let repoPath else { return }
+        // Claimed before the first await, like every other read here: a switch
+        // that starts while this reload is out must be able to tell that the
+        // answer coming back describes the repository it left.
+        let generation = openGeneration
         beginLoad()
         defer { finishLoad() }
-        await loadRepoData(repoPath, historyLimit: currentHistoryLimit)
+        await loadRepoData(repoPath, historyLimit: currentHistoryLimit, generation: generation)
     }
 
     /// Re-read *only* the status, after an action that changed the working tree
@@ -254,27 +278,43 @@ final class RepoStore {
     ///
     /// Returns whether `HEAD` had moved, because the *branch* list is the third
     /// thing that edge feeds and it lives in another store — the caller reloads
-    /// it, exactly as the poll does.
+    /// it, exactly as the poll does. A repository switch that lands mid-read
+    /// answers `false`: the branch reload the `true` asks for would be for the
+    /// repository the user has just left.
     @discardableResult
     func refreshWorkingTree() async -> Bool {
         guard let repoPath else { return false }
+        // Claimed before the first await. Without it this was the one read that
+        // could still publish across a switch — and the *most* likely to,
+        // because a repository whose status has just been cleared has no
+        // `headSha` to compare against, so the guard below fell through to the
+        // full reload every single time.
+        let generation = openGeneration
         beginLoad(showsProgress: false)
         defer { finishLoad() }
         do {
             let newStatus = try await GitBridge.status(of: repoPath)
+            guard generation == openGeneration else { return false }
             guard newStatus.headSha == status?.headSha else {
-                await loadRepoData(repoPath, historyLimit: currentHistoryLimit)
+                await loadRepoData(
+                    repoPath,
+                    historyLimit: currentHistoryLimit,
+                    generation: generation
+                )
                 return true
             }
             if newStatus != status { status = newStatus }
             errorMessage = nil
         } catch {
+            guard generation == openGeneration else { return false }
             errorMessage = error.displayMessage
         }
         // This read has just asked the repository directly, so the poll's
         // streak and its banner both describe a question already answered —
         // either it succeeded, or `errorMessage` above now carries the same
         // news in the same place and two lines would say one thing twice.
+        // Past the guards above, so a superseded read leaves the *new*
+        // repository's streak and banner to speak for themselves.
         quietFailureStreak = 0
         pollFailure = nil
         return false
@@ -295,16 +335,24 @@ final class RepoStore {
     /// open diff on its own.
     func refreshQuietly() async {
         guard let repoPath else { return }
+        // Gated like `loadRepoData`, because a tick is in flight roughly as
+        // often as not and `open()` cannot wait for one: a switch that starts
+        // while this tick's `git status` is out lands the previous
+        // repository's status under the new repository's path — putting back
+        // exactly what `open()` clears, and for as long as the new read takes.
+        let generation = openGeneration
         let newStatus: RepoStatus
         do {
             newStatus = try await GitBridge.status(of: repoPath)
         } catch {
+            guard generation == openGeneration else { return }
             quietFailureStreak += 1
             if quietFailureStreak >= Self.quietFailureThreshold {
                 pollFailure = error.displayMessage
             }
             return
         }
+        guard generation == openGeneration else { return }
         quietFailureStreak = 0
         // The repo is readable again; retire the poll's own banner.
         pollFailure = nil
@@ -316,6 +364,11 @@ final class RepoStore {
         if headMoved {
             let limit = currentHistoryLimit
             if let newCommits = try? await GitBridge.log(of: repoPath, limit: limit) {
+                // The second await needs the same guard as the first: a
+                // `git log` at up to 500 commits is the slower of the two, so
+                // a switch is *more* likely to land under it than under the
+                // status read that got this far.
+                guard generation == openGeneration else { return }
                 commits = newCommits
                 hasMoreHistory = newCommits.count == Int(limit)
             }
@@ -327,6 +380,7 @@ final class RepoStore {
     /// can fire it freely.
     func loadMoreHistory() async {
         guard let repoPath, hasMoreHistory, !isLoadingMoreHistory else { return }
+        let generation = openGeneration
         isLoadingMoreHistory = true
         defer { isLoadingMoreHistory = false }
 
@@ -337,6 +391,11 @@ final class RepoStore {
                 skip: Int32(commits.count)
             )
         else { return }
+        // A switch can land under this page as easily as under any other read,
+        // and appending is the worst of the three ways to get it wrong: the new
+        // repository's list would grow the old one's commits on the end rather
+        // than be replaced by them, so nothing later would ever correct it.
+        guard generation == openGeneration else { return }
         // The 2 s poll can slide the window under a page in flight; keying
         // out already-known shas keeps every row's identity unique.
         let known = Set(commits.map(\.sha))
@@ -357,8 +416,15 @@ final class RepoStore {
 
     /// Status and history are independent reads, so run them concurrently and
     /// let each report its own failure.
-    private func loadRepoData(_ path: String, historyLimit: Int32) async {
-        let generation = openGeneration
+    ///
+    /// `generation` is the caller's, claimed **before its first await** — never
+    /// re-read here. Reading it on entry looks equivalent and is not: a caller
+    /// that has already awaited something has already given a switch the chance
+    /// to happen, and this would then adopt the *new* repository's generation
+    /// and publish the old repository's status and history under it, which is
+    /// exactly the guard's job to prevent. Making it a parameter is what forces
+    /// every caller to claim it at the only moment that is sound.
+    private func loadRepoData(_ path: String, historyLimit: Int32, generation: Int) async {
         async let statusResult = GitBridge.status(of: path)
         async let logResult = GitBridge.log(of: path, limit: historyLimit)
 

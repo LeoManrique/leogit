@@ -2422,6 +2422,7 @@ version = "0.1.0"
 dependencies = [
  "directories",
  "dunce",
+ "libc",
  "portable-pty",
  "reqwest",
  "serde",
@@ -2432,6 +2433,7 @@ dependencies = [
  "toml 1.1.4+spec-1.1.0",
  "trash",
  "two-face",
+ "windows-sys 0.61.2",
  "winreg 0.55.0",
 ]
 

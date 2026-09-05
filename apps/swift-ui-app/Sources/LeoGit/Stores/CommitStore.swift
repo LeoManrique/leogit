@@ -320,7 +320,7 @@ final class CommitStore {
         guard amendTarget?.sha != commit.sha else { return }
         amendTarget = commit
         summary = commit.summary
-        details = commit.bodyWithoutCoauthors
+        details = commit.bodyWithoutCoauthors ?? commit.body
         coAuthors = commit.coAuthors
         errorMessage = nil
     }
@@ -341,7 +341,7 @@ final class CommitStore {
     func restoreDraft(from commit: CommitInfo) {
         amendTarget = nil
         summary = commit.summary
-        details = commit.bodyWithoutCoauthors
+        details = commit.bodyWithoutCoauthors ?? commit.body
         coAuthors = commit.coAuthors
         errorMessage = nil
     }

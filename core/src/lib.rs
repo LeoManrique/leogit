@@ -23,6 +23,11 @@ pub mod git;
 pub mod highlight;
 pub mod launch;
 pub mod os;
+// Crate-internal, and only where there is a login shell to cache the answer of:
+// on Windows a GUI launch already inherits the user's full environment, so
+// `process` never probes and there is nothing to key.
+#[cfg(not(target_os = "windows"))]
+mod path_cache;
 pub mod paths;
 pub mod process;
 pub mod progress;

@@ -4,12 +4,12 @@
 //!
 //! All three hand their argument off to another program (Finder / Explorer /
 //! `xdg-open` / the registered handler), so they're `async` (worker thread, no
-//! UI block) and bounded by [`process::run_timed`] — a wedged file manager or
-//! handler can't hang the app. The launchers are treated as fire-and-forget:
-//! once the process exits we report success regardless of its exit code,
-//! because some launchers (notably `explorer /select,`) return non-zero even on
-//! success. Only a spawn failure (e.g. `xdg-open` not installed) or a timeout
-//! surfaces as an error.
+//! UI block) and bounded by [`process::run_timed_uncaptured`] — a wedged file
+//! manager or handler can't hang the app. The launchers are treated as
+//! fire-and-forget: once the process exits we report success regardless of its
+//! exit code, because some launchers (notably `explorer /select,`) return
+//! non-zero even on success. Only a spawn failure (e.g. `xdg-open` not
+//! installed) or a timeout surfaces as an error.
 
 use super::process;
 use std::path::PathBuf;
@@ -19,10 +19,25 @@ use std::time::Duration;
 /// Launchers return quickly after handing off; this only catches a hang.
 const OS_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Spawn a hand-off launcher, bounded by [`process::run_timed`]. A completed
-/// run is success regardless of exit code (see module docs).
+/// Spawn a hand-off launcher, bounded by [`process::run_timed_uncaptured`]. A
+/// completed run is success regardless of exit code (see module docs).
+///
+/// The one runner in the codebase that asks for [`process::KillScope::Child`],
+/// and the reason that scope is a parameter at all: `xdg-open` execs the
+/// registered handler *in its own process group*, and `cmd /c start` can end up
+/// the parent of whatever the association launches. Killing the group on a
+/// timeout would therefore close the browser window the user just asked us to
+/// open. Only the launcher itself is ours to end.
+///
+/// It is also the one runner that reads nothing back — the result here is
+/// `Result<(), _>`, so every byte a launcher writes is discarded. Capturing
+/// them anyway had a cost that showed: the handler `xdg-open` execs daemonises
+/// still holding the pipes, so no EOF arrived, both readers had to be detached,
+/// and Reveal / Open in browser resolved a full reader grace after the work was
+/// done. Nulling the streams is what makes a hand-off cost what it looks like.
 fn launch(cmd: Command, label: &str) -> Result<(), String> {
-    process::run_timed(cmd, label, OS_OPEN_TIMEOUT).map(|_| ())
+    process::run_timed_uncaptured(cmd, label, OS_OPEN_TIMEOUT, process::KillScope::Child)
+        .map(|_| ())
 }
 
 /// Reveal `rel_path` (relative to `repo_path`) in the OS file manager,
