@@ -220,26 +220,46 @@ def artifact_name(version: str, *, target_os: str | None = None, arch: str | Non
 
 
 # ── Subprocesses ──
+def _resolved(command: list[str]) -> list[str] | None:
+    """`command` with its executable replaced by its full path, or None if absent.
+
+    Every subprocess goes through here so a tool is looked up exactly the way
+    `require_tools` looked it up. Handing the bare name to `subprocess.run`
+    is not the same lookup on Windows: it becomes a CreateProcess call, which
+    tries only `<name>` and `<name>.exe`, while npm installs its tools — pnpm
+    among them — as `<name>.cmd` shims that only a PATHEXT-aware search finds.
+    """
+    executable = shutil.which(command[0])
+    if executable is None:
+        return None
+    return [executable, *command[1:]]
+
+
 def run(command: list[str], *, cwd: Path | None = None, what: str, env: dict[str, str] | None = None) -> None:
-    """Run a subcommand, aborting the script if it exits non-zero."""
+    """Run a subcommand, aborting the script if it is missing or exits non-zero."""
+    resolved = _resolved(command)
+    if resolved is None:
+        error(f"{what} failed: {command[0]} is not installed")
     merged = {**os.environ, **env} if env else None
-    result = subprocess.run(command, cwd=cwd, env=merged, check=False)
+    result = subprocess.run(resolved, cwd=cwd, env=merged, check=False)
     if result.returncode != 0:
         error(f"{what} failed (exit {result.returncode})")
 
 
 def capture(command: list[str], *, cwd: Path | None = None) -> tuple[int, str]:
-    """Run a subcommand quietly. Returns (exit code, stdout stripped)."""
-    try:
-        result = subprocess.run(command, cwd=cwd, capture_output=True, text=True, check=False)
-    except FileNotFoundError:
+    """Run a subcommand quietly. Returns (exit code, stdout stripped); 127 if missing."""
+    resolved = _resolved(command)
+    if resolved is None:
         return 127, ""
+    result = subprocess.run(resolved, cwd=cwd, capture_output=True, text=True, check=False)
     return result.returncode, result.stdout.strip()
 
 
 def quietly(command: list[str]) -> None:
-    """Run a subcommand whose failure is not worth stopping for."""
-    subprocess.run(command, capture_output=True, check=False)
+    """Run a subcommand whose failure — or absence — is not worth stopping for."""
+    resolved = _resolved(command)
+    if resolved is not None:
+        subprocess.run(resolved, capture_output=True, check=False)
 
 
 def require_tools(*names: str) -> None:

@@ -1833,6 +1833,8 @@ It is deliberately **not** inside an asset catalog: Xcode 26 consumes an `.icon`
 
 The maintainer scripts are Python and share three modules — [_common.py](scripts/_common.py) (console, subprocesses, paths, platform and artifact naming), [_version.py](scripts/_version.py) (the version and the files that state it) and [_build.py](scripts/_build.py) (build, sign, package, install):
 
+Every subprocess those modules spawn goes through `_common.py`'s `run`, `capture` and `quietly`, which resolve the executable with `shutil.which` before spawning — the same lookup `require_tools` used to approve it. That is a Windows requirement rather than tidiness: a bare name handed to `subprocess.run` becomes a `CreateProcess` call that tries only `<name>` and `<name>.exe`, while npm installs its tools — pnpm included — as `<name>.cmd` shims that only a PATHEXT-aware search finds. An unresolved `pnpm` therefore passes the prerequisite check and then fails to spawn at the build; resolving once, in one place, keeps the check and the spawn from ever disagreeing.
+
 | Script | What it does |
 |---|---|
 | `build.py` | Builds this platform's release bundle. `--client tauri` forces the Tauri build, which on macOS is a supported client that no release publishes — the flag is how that path stays exercised. |
