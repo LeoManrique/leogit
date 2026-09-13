@@ -343,28 +343,48 @@ enum GitBridge {
 
     // MARK: - Sync
 
-    /// The repository's first remote name, or `nil` when it has none.
-    /// Resolved immediately before each network operation, never cached —
-    /// matching the Tauri handlers. Deliberately does not invent "origin": a
-    /// caller that skips on `nil` is skipping a fetch that could only fail,
-    /// and whose failure the connectivity breaker would have read as the
-    /// network being down.
+    /// The remote the current branch fetches and pulls from —
+    /// `branch.<name>.remote`, else `origin`, else the first remote — or `nil`
+    /// when the repository has none. Resolved immediately before each network
+    /// operation, never cached — a branch switch changes the answer, and the
+    /// Tauri handlers resolve it the same way. Never an invented "origin": a
+    /// caller that skips on `nil` is skipping a fetch that could only fail, and
+    /// whose failure the connectivity breaker would have read as the network
+    /// being down.
     @concurrent
-    static func remoteName(in repoPath: String) async throws -> String? {
-        try getRemote(repoPath: repoPath)
+    static func trackingRemoteName(in repoPath: String) async throws -> String? {
+        try getTrackingRemote(repoPath: repoPath)
     }
 
-    /// `git fetch --prune`: refresh remote-tracking refs — and the
-    /// ahead/behind counts derived from them — without touching the working
-    /// tree. Fetch streams no progress; core's fetch path has no sink.
+    /// The remote a push of `branch` goes to — git's own push order:
+    /// `branch.<name>.pushRemote`, `remote.pushDefault`, then the tracking
+    /// remote — or `nil` when the repository has none. Resolved immediately
+    /// before each push.
+    @concurrent
+    static func pushRemoteName(in repoPath: String, branch: String) async throws -> String? {
+        try getPushRemote(repoPath: repoPath, branch: branch)
+    }
+
+    /// `git fetch --prune <remote>`: refresh one remote's tracking refs — and
+    /// the ahead/behind counts derived from them — without touching the
+    /// working tree. The automatic fetches' call, naming the branch's own
+    /// remote. Fetch streams no progress; core's fetch path has no sink.
     ///
-    /// `background` picks the budget: an automatic fetch nobody is waiting on
-    /// fails fast (8/8/12 s) so an unreachable remote can't hold the single
-    /// network slot for ten minutes, while a fetch the user asked for keeps
-    /// the generous one a large transfer needs.
+    /// `background` picks the budget: `true` fails fast (8/8/12 s) so an
+    /// unreachable remote can't hold the single network slot for ten minutes,
+    /// `false` keeps the generous one a large transfer needs — which the
+    /// user's Fetch gets through `fetchAllRemotes`.
     @concurrent
     static func fetchRemote(in repoPath: String, remote: String, background: Bool) async throws {
         try await fetch(repoPath: repoPath, remote: remote, background: background)
+    }
+
+    /// `git fetch --all --prune`: every remote at once — the Fetch the user
+    /// asks for, always on the user budget. Core refuses a repository with no
+    /// remote, and fails naming any remote it couldn't reach.
+    @concurrent
+    static func fetchAllRemotes(in repoPath: String) async throws {
+        try await fetchAll(repoPath: repoPath)
     }
 
     /// `git pull --ff --progress`. Fast-forward only: a diverged branch fails

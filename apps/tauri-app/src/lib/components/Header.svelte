@@ -232,7 +232,7 @@
     PublishBranch: 'Publish this branch to the remote and start tracking it (Ctrl+P)',
     Pull: 'Pull from the remote (Ctrl+P)',
     Push: 'Push to the remote (Ctrl+P)',
-    Fetch: 'Fetch from the remote — updates the counts without touching your files (Ctrl+P)',
+    Fetch: 'Fetch from every remote — updates the counts without touching your files (Ctrl+P)',
   }
 
   const actionLabel = $derived(
@@ -262,14 +262,13 @@
     if (!repoPath) return
     beginNetworkOp('fetch')
     try {
-      const remote = await gitApi.getRemote(repoPath)
-      if (!remote) throw new Error('This repository has no remote to fetch from.')
-      // The user asked for this one and is waiting on it, so it keeps the
-      // generous budget a real transfer needs; the fail-fast background budget
-      // belongs to the fetches nobody is watching. It never consults the fetch
-      // cooldown either — asking is the user saying the answer might be stale —
-      // but it does start one, because the answer it brings back is fresh.
-      await gitApi.fetch(repoPath, remote, false)
+      // Every remote, on the generous budget a real transfer needs — the
+      // fail-fast background budget belongs to the fetches nobody is watching,
+      // which reach only the branch's own remote. Core refuses a repo with no
+      // remote. It never consults the fetch cooldown either — asking is the
+      // user saying the answer might be stale — but it does start one, because
+      // the answer it brings back is fresh.
+      await gitApi.fetchAll(repoPath)
       noteFetched(repoPath)
       await onTransferFinished?.()
     } catch (error) {
@@ -285,7 +284,9 @@
     if (!repoPath) return
     beginNetworkOp('pull')
     try {
-      const remote = await gitApi.getRemote(repoPath)
+      // `git pull <remote>` without a branch refuses any remote but the
+      // branch's own.
+      const remote = await gitApi.getTrackingRemote(repoPath)
       if (!remote) throw new Error('This repository has no remote to pull from.')
       await gitApi.pull(repoPath, remote)
       // A pull is a fetch and a merge, so its fetch half starts a cooldown just
@@ -307,7 +308,8 @@
     if (!repoPath || !branch) return
     beginNetworkOp('push')
     try {
-      const remote = await gitApi.getRemote(repoPath)
+      // git's push order, not the remote the branch pulls from.
+      const remote = await gitApi.getPushRemote(repoPath, branch)
       // Unreachable through the UI — a repo with no remote is offered Publish,
       // not Push — but saying so beats git failing on a name we invented.
       if (!remote) throw new Error('This repository has no remote to push to.')
@@ -332,7 +334,7 @@
     forcePushError = undefined
     beginNetworkOp('push')
     try {
-      const remote = await gitApi.getRemote(repoPath)
+      const remote = await gitApi.getPushRemote(repoPath, branch)
       if (!remote) throw new Error('This repository has no remote to push to.')
       const setUpstream = !$repoState.status.hasUpstream
       // 5th arg = forceWithLease. We never use bare --force.

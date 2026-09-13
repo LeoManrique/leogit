@@ -104,18 +104,16 @@ final class SyncStore {
         generation += 1
     }
 
-    /// `git fetch` the repository's remote, updating ahead/behind counts
-    /// without touching the working tree.
+    /// `git fetch --all`: every remote's branches, updating ahead/behind counts
+    /// without touching the working tree. Core refuses a repository with no
+    /// remote, in the words the alert shows.
     ///
     /// The user asked, so the fetch cooldown is never consulted — but a fetch
-    /// that reached the remote opens one, because the background work that does
-    /// consult it now holds a fresh answer.
+    /// that reached the remotes opens one: the branch's own remote, the one
+    /// the background fetches consult the cooldown for, was among them.
     func fetch(repoPath: String) async -> OpOutcome {
         let outcome = await run(.fetch) {
-            guard let remote = try await GitBridge.remoteName(in: repoPath) else {
-                throw GitError.Failed(message: "This repository has no remote to fetch from.")
-            }
-            try await GitBridge.fetchRemote(in: repoPath, remote: remote, background: false)
+            try await GitBridge.fetchAllRemotes(in: repoPath)
         }
         if case .succeeded = outcome {
             fetchCooldown.note(repoPath)
@@ -123,23 +121,21 @@ final class SyncStore {
         return outcome
     }
 
-    /// One fetch attempt that claims no slot and surfaces no errors — the
-    /// open-a-repo warm-up the Tauri client also runs at startup, so the
-    /// behind badge reflects the remote within moments.
+    /// One fetch of the current branch's remote that claims no slot and
+    /// surfaces no errors — the open-a-repo warm-up the Tauri client also runs
+    /// at startup, so the behind badge reflects the remote within moments.
     ///
     /// `nil` means **no attempt was made**: the transfer slot was taken,
     /// another silent fetch of this same repository already holds its slot, a
     /// `.catchUp` trigger found the last answer still fresh, or resolving the
-    /// remote name failed
-    /// locally. None
-    /// of those says anything about the network, so callers must not report
-    /// them to the connectivity breaker — a local `git remote` failure counted
-    /// as an unreachable remote is the same class of poisoning D-2 was about.
-    /// `true`/`false` mean a fetch actually ran and did or didn't reach the
-    /// remote; only then does the caller refresh status, and only then does the
-    /// breaker hear about it. (The Tauri client's `fetchActiveRemote` draws the
-    /// same line, returning early without `recordResult` when `get_remote`
-    /// fails.)
+    /// remote name failed locally. None of those says anything about the
+    /// network, so callers must not report them to the connectivity breaker — a
+    /// local `git config` failure counted as an unreachable remote is the same
+    /// class of poisoning D-2 was about. `true`/`false` mean a fetch actually
+    /// ran and did or didn't reach the remote; only then does the caller
+    /// refresh status, and only then does the breaker hear about it. (The Tauri
+    /// client's `fetchActiveRemote` draws the same line, returning early
+    /// without `recordResult` when `get_tracking_remote` fails.)
     func silentFetch(repoPath: String, trigger: FetchTrigger) async -> Bool? {
         guard activeOperation == nil, !silentFetches.contains(repoPath) else { return nil }
         if trigger == .catchUp, fetchCooldown.isFresh(repoPath) {
@@ -151,7 +147,9 @@ final class SyncStore {
         // `try?` flattens the throw and the "no remote" answer into one `nil`,
         // which is right here: both mean no fetch was attempted, and neither
         // says anything about the network.
-        guard let remote = try? await GitBridge.remoteName(in: repoPath) else { return nil }
+        guard let remote = try? await GitBridge.trackingRemoteName(in: repoPath) else {
+            return nil
+        }
         // Nobody is waiting on this one, so it runs on the background budget:
         // an unreachable remote gives up in 12 s instead of holding the single
         // network slot — and every other repo's refresh behind it — for ten
@@ -165,13 +163,15 @@ final class SyncStore {
         return reached
     }
 
-    /// `git pull --ff` from the repository's remote, streaming progress.
+    /// `git pull --ff` from the remote the current branch tracks, streaming
+    /// progress. That remote and no other: `git pull <remote>` without a branch
+    /// refuses any remote but the branch's own.
     ///
     /// Its fetch half opens a cooldown window exactly as a bare fetch does; a
     /// push opens none, having learned nothing new about the remote.
     func pull(repoPath: String) async -> OpOutcome {
         let outcome = await run(.pull) {
-            guard let remote = try await GitBridge.remoteName(in: repoPath) else {
+            guard let remote = try await GitBridge.trackingRemoteName(in: repoPath) else {
                 throw GitError.Failed(message: "This repository has no remote to pull from.")
             }
             try await GitBridge.pullRemote(
@@ -186,9 +186,11 @@ final class SyncStore {
         return outcome
     }
 
-    /// `git push` the given branch, streaming progress. `setUpstream` is
-    /// derived from `RepoStatus.hasUpstream` by the caller; `forceWithLease`
-    /// only ever arrives from the confirmed force-push dialog.
+    /// `git push` the given branch to its push remote — git's own order:
+    /// `pushRemote`, `pushDefault`, then the branch's tracking remote —
+    /// streaming progress. `setUpstream` is derived from
+    /// `RepoStatus.hasUpstream` by the caller; `forceWithLease` only ever
+    /// arrives from the confirmed force-push dialog.
     func push(
         repoPath: String,
         branch: String,
@@ -199,7 +201,9 @@ final class SyncStore {
             // Unreachable through the UI — the ladder offers Publish, not
             // Push, for a repo with no remote — but saying so beats inventing
             // a remote name and letting git fail with something less clear.
-            guard let remote = try await GitBridge.remoteName(in: repoPath) else {
+            guard
+                let remote = try await GitBridge.pushRemoteName(in: repoPath, branch: branch)
+            else {
                 throw GitError.Failed(message: "This repository has no remote to push to.")
             }
             try await GitBridge.pushRemote(

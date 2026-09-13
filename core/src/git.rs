@@ -451,13 +451,19 @@ fn run_git_raw(repo_path: &str, args: &[&str]) -> Result<Vec<u8>, String> {
         .output()
         .map_err(|e| format!("git: {}", e))?;
     if !output.status.success() {
-        return Err(format!(
-            "git {}: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+        return Err(command_failed(args, &output.stderr));
     }
     Ok(output.stdout)
+}
+
+/// The error a failed git command reports: its command line and git's own
+/// complaint, trimmed.
+fn command_failed(args: &[&str], stderr: &[u8]) -> String {
+    format!(
+        "git {}: {}",
+        args.join(" "),
+        String::from_utf8_lossy(stderr).trim()
+    )
 }
 
 /// Run a git command and return stdout as a UTF-8 string with trailing whitespace trimmed.
@@ -465,6 +471,27 @@ fn run_git_raw(repo_path: &str, args: &[&str]) -> Result<Vec<u8>, String> {
 fn run_git(repo_path: &str, args: &[&str]) -> Result<String, String> {
     let bytes = run_git_raw(repo_path, args)?;
     Ok(String::from_utf8_lossy(&bytes).trim_end().to_string())
+}
+
+/// [`run_git`] for a command that answers "absent" with exit status 1 and no
+/// complaint — `config --get` on an unset key, `symbolic-ref --quiet` on a
+/// detached `HEAD` — so that answer arrives as `None` rather than as an error.
+/// Every other failure is still an error.
+fn run_git_optional(repo_path: &str, args: &[&str]) -> Result<Option<String>, String> {
+    let output = git_cmd(repo_path, args)
+        .output()
+        .map_err(|e| format!("git: {e}"))?;
+    if output.status.code() == Some(1) {
+        return Ok(None);
+    }
+    if !output.status.success() {
+        return Err(command_failed(args, &output.stderr));
+    }
+    Ok(Some(
+        String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_string(),
+    ))
 }
 
 /// Run a git command and return combined stdout+stderr, regardless of exit status.
@@ -835,38 +862,52 @@ pub(crate) fn common_dir(git_dir: &Path) -> PathBuf {
 // after all. The rule throughout is that the fallback is free and a wrong
 // answer is not: anything unexpected declines.
 
-/// First configured remote name (e.g. "origin"), or `None` when the repo has
-/// no remotes. Used both to gate Push-vs-Publish and to locate the
-/// remote-tracking ref for the no-upstream ahead/behind fallback.
-fn first_remote(repo_path: &str) -> Option<String> {
-    first_remote_in(repo_path, git_dir(repo_path).as_deref())
-}
-
-/// [`first_remote`] for a caller that has already resolved the git dir.
+/// Every configured remote name, in the order `git remote` prints them, for a
+/// caller that has already resolved the git dir — what gates Push-vs-Publish
+/// (`has_remote`) and what the no-upstream ahead/behind fallback picks a remote
+/// out of, through [`fallback_remote`].
 ///
-/// Passed in rather than resolved again because [`git_dir`] can itself spawn
-/// (`rev-parse --git-dir`, for a layout the filesystem shortcut cannot see),
-/// so a second resolution risks being a second subprocess — and `read_status`
-/// has already made the first one to answer `merging`.
-fn first_remote_in(repo_path: &str, git_dir: Option<&Path>) -> Option<String> {
+/// A repository git itself cannot read answers "no remotes": both callers want
+/// an answer to draw, and a status poll that failed over a config file would
+/// blank a window rather than one badge.
+///
+/// The git dir is passed in rather than resolved again because [`git_dir`] can
+/// itself spawn (`rev-parse --git-dir`, for a layout the filesystem shortcut
+/// cannot see), so a second resolution risks being a second subprocess — and
+/// `read_status` has already made the first one to answer `merging`.
+fn remote_names_in(repo_path: &str, git_dir: Option<&Path>) -> Vec<String> {
     match config_remotes(git_dir) {
-        Some(names) => names.into_iter().next(),
-        None => first_remote_spawned(repo_path).unwrap_or_default(),
+        Some(names) => names,
+        None => remote_names_spawned(repo_path).unwrap_or_default(),
     }
 }
 
-/// `git remote`'s own answer: the first name it prints, or `None` when it
-/// prints none. The fallback every shortcut here declines into.
+/// Every name `git remote` prints, in the order it prints them.
 ///
 /// # Errors
 /// When `git remote` itself can't run (not a repository, git missing).
-fn first_remote_spawned(repo_path: &str) -> Result<Option<String>, String> {
+fn remote_names_spawned(repo_path: &str) -> Result<Vec<String>, String> {
     let out = run_git(repo_path, &["remote"])?;
     Ok(out
         .lines()
         .map(str::trim)
-        .find(|l| !l.is_empty())
-        .map(str::to_string))
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// [`remote_names_in`] for a caller that has no git dir in hand and needs a
+/// failure reported rather than swallowed — the remote resolvers, which would
+/// otherwise answer "no remote" about a repository that has one.
+///
+/// # Errors
+/// When `git remote` itself can't run — which only the fallback can report,
+/// the config read having no command to fail.
+fn remote_names(repo_path: &str) -> Result<Vec<String>, String> {
+    match config_remotes(git_dir(repo_path).as_deref()) {
+        Some(names) => Ok(names),
+        None => remote_names_spawned(repo_path),
+    }
 }
 
 /// Every remote name `git remote` would print, in the order it prints them —
@@ -900,7 +941,7 @@ fn config_remotes(git_dir: Option<&Path>) -> Option<Vec<String>> {
 /// and `branches/*` are ignored rather than read, which is parity: `git
 /// remote` does not list those either.
 ///
-/// Split out from [`first_remote`] so the tests can assert *which* path
+/// Split out from [`remote_names_in`] so the tests can assert *which* path
 /// produced an answer. Asserting only the answer would let a silent regression
 /// to the spawn keep passing, and the spawn is the whole thing being removed.
 fn remotes_from_config(git_dir: &Path) -> Option<Vec<String>> {
@@ -1633,11 +1674,15 @@ fn read_status(repo_path: String) -> Result<RepoStatus, String> {
         proposal: SyncProposal::Loading,
     };
 
-    // Configured remote, queried once and reused below (the no-upstream
-    // ahead/behind fallback needs the first remote's name). `has_remote` drives
-    // the UI's Push-vs-Publish choice.
-    let first_remote = first_remote_in(&repo_path, git_dir.as_deref());
-    result.has_remote = first_remote.is_some();
+    // Configured remotes, read once and reused below. `has_remote` drives the
+    // UI's Push-vs-Publish choice; `fallback` is the remote the no-upstream
+    // ahead/behind fallback measures against — the *tail* of the ladder Fetch,
+    // Pull and Push follow (`origin`, else the first), which is their whole
+    // answer for a branch that tracks nothing, and this poll reads no
+    // `branch.*` key of its own: that would be a subprocess per tick.
+    let remotes = remote_names_in(&repo_path, git_dir.as_deref());
+    result.has_remote = !remotes.is_empty();
+    let fallback = fallback_remote(&remotes);
 
     if bytes.is_empty() {
         return Ok(result);
@@ -1697,7 +1742,7 @@ fn read_status(repo_path: String) -> Result<RepoStatus, String> {
 
     // Effective upstream ref — what `rev-list HEAD ^<this>` should compare
     // against. For tracked branches it's the `branch.upstream` value; for
-    // untracked branches it falls back to `refs/remotes/<first-remote>/<branch>`
+    // untracked branches it falls back to `refs/remotes/<fallback remote>/<branch>`
     // if such a ref exists. Stays `None` for detached HEAD, empty repos, or
     // branches with no matching remote ref.
     let mut effective_upstream: Option<String> = if result.has_upstream {
@@ -1710,7 +1755,7 @@ fn read_status(repo_path: String) -> Result<RepoStatus, String> {
     // git status only emits `# branch.ab` when `branch.<name>.{merge,remote}` are
     // set, so a freshly created local branch (or a clone that never ran
     // `push -u`) will report ahead=behind=0 even when a matching remote ref
-    // exists. Where a `refs/remotes/<first-remote>/<branch>` ref exists,
+    // exists. Where a `refs/remotes/<fallback remote>/<branch>` ref exists,
     // compute ahead/behind against it manually so the Push badge updates.
     //
     // Don't synthesise `has_upstream = true` — that flag still drives whether
@@ -1718,7 +1763,7 @@ fn read_status(repo_path: String) -> Result<RepoStatus, String> {
     // first-push behaviour.
     if !result.has_upstream
         && !result.branch.is_empty()
-        && let Some(remote) = first_remote.as_deref()
+        && let Some(remote) = fallback.as_deref()
         && let Some((ahead, behind, remote_ref)) =
             remote_tracking_ahead_behind(&repo_path, remote, &result.branch)
     {
@@ -3168,37 +3213,50 @@ fn is_change_record(record: &[u8]) -> bool {
 }
 
 /// Background sync for the repo picker's pull/push badges and dirty dot.
-/// Optionally fetches the repo's first remote (best-effort — network errors
-/// are swallowed so a stale-but-known ahead/behind still comes back), then
+/// Optionally fetches the current branch's remote ([`get_tracking_remote`],
+/// the remote its ahead/behind is measured against; best-effort — network
+/// errors are swallowed so a stale-but-known count still comes back), then
 /// computes the current branch's ahead/behind and whether the working tree is
 /// dirty. Deliberately lighter than `get_status`: `-unormal` reports an
 /// untracked directory as one `dir/` record instead of enumerating its files
 /// (same emptiness answer as `get_status`'s `-uall`, cheaper walk), and no
 /// file list is built — the picker only needs counts and a yes/no per repo.
 pub fn repo_sync_status(repo_path: String, do_fetch: bool) -> Result<RepoSync, String> {
-    let remote = first_remote(&repo_path);
+    // One read of the remote list answers both of this function's questions:
+    // which remote to fetch, and which remote-tracking ref the no-upstream
+    // fallback measures against.
+    let remotes = remote_names(&repo_path).unwrap_or_default();
 
-    // Best-effort, time-boxed fetch. A failure (offline, auth, timeout) must not
-    // blank the badge — we fall through and report ahead/behind from whatever
-    // refs we already have. `--prune` keeps deleted remote branches from
-    // lingering. `fetched` records whether we actually reached the remote so the
-    // frontend's circuit breaker can back off after a run of failures.
+    // Best-effort, time-boxed fetch of the current branch's own remote. A
+    // failure (offline, auth, timeout) must not blank the badge — we fall
+    // through and report ahead/behind from whatever refs we already have.
+    // `fetched` records whether we actually reached the remote so the
+    // frontend's circuit breaker can back off after a run of failures; failing
+    // to resolve that remote locally is not a fetch attempt at all and leaves
+    // `fetched` true, because the breaker must only ever hear about attempts
+    // that touched the network.
     let mut fetched = true;
-    if do_fetch && let Some(remote) = remote.as_deref() {
-        fetched = run_git_net(
-            Some(&repo_path),
-            &["fetch", "--prune", "--recurse-submodules=on-demand", remote],
-            NET_BG_CONNECT_SECS,
-            NET_BG_STALL_SECS,
-            NET_BG_TIMEOUT,
-        )
-        .is_ok_and(|(ok, _)| ok);
+    let mut fetched_remote = None;
+    if do_fetch && let Ok(branch) = current_branch(&repo_path) {
+        fetched_remote = tracking_remote_of(&repo_path, branch.as_deref(), &remotes)
+            .ok()
+            .flatten();
+        if let Some(target) = &fetched_remote {
+            fetched = fetch_blocking(&repo_path, target, true).is_ok();
+        }
     }
+
+    // What the no-upstream fallback below measures against: the remote just
+    // fetched, so the ref it reads is the one that was refreshed — refreshing
+    // one remote's refs while measuring another's leaves a badge that never
+    // moves, however well the fetch went — and the same ladder's tail
+    // (`origin`, else the first) when no fetch ran.
+    let remote = fetched_remote.or_else(|| fallback_remote(&remotes));
 
     let mut sync = RepoSync {
         ahead: 0,
         behind: 0,
-        has_remote: remote.is_some(),
+        has_remote: !remotes.is_empty(),
         fetched,
         dirty: false,
     };
@@ -3268,15 +3326,18 @@ pub fn repo_sync_status(repo_path: String, do_fetch: bool) -> Result<RepoSync, S
     Ok(sync)
 }
 
-/// Fetch `remote` (`--prune`, on-demand submodules).
+/// Fetch `remote` (`--prune`, on-demand submodules) — what the automatic
+/// fetches run, naming the current branch's remote ([`get_tracking_remote`]).
 ///
 /// `background` picks the budget. An automatic fetch — the timer, the
 /// on-activation resync — is `true`: nobody is waiting on it, so it fails fast
 /// under the same 8/8/12 s budget the badge sweep uses, and an unreachable
 /// remote can't hold the single network slot for ten minutes while every other
-/// repo's polling waits behind it. A fetch the user asked for is `false` and
-/// keeps the generous 15/30/600 s budget, because a legitimate large transfer
-/// takes a while and abandoning it would be the wrong answer.
+/// repo's polling waits behind it. `false` keeps the generous 15/30/600 s
+/// budget, because a legitimate large transfer takes a while and abandoning it
+/// would be the wrong answer — the budget [`fetch_all`] gives the Fetch the
+/// user asked for. Every automatic fetch in both clients passes `true`, so
+/// `false` arrives here only from a caller naming one remote deliberately.
 ///
 /// Like every command below that can legitimately run for minutes, this is an
 /// `async fn` delegating to [`process::run_blocking`] so the transfer sits on
@@ -3285,30 +3346,60 @@ pub fn repo_sync_status(repo_path: String, do_fetch: bool) -> Result<RepoSync, S
 /// # Errors
 /// When the process can't start or `git fetch` exits non-zero.
 pub async fn fetch(repo_path: String, remote: String, background: bool) -> Result<(), String> {
+    super::process::run_blocking(move || fetch_blocking(&repo_path, &remote, background)).await?
+}
+
+/// Fetch every remote (`--all`) — the Fetch the user asks for, from the sync
+/// button, its chevron, or ⌘/Ctrl+P. Always on the user budget: someone is
+/// waiting, and several remotes take longer than one.
+///
+/// Every remote rather than the branch's own because this is the manual "ask
+/// the remote a question", and asking one remote leaves every other remote's
+/// branches where they were. The automatic fetches keep to the branch's remote,
+/// which is all a badge is measured against.
+///
+/// A repository with no remote is refused here rather than handed to git,
+/// which exits 0 having fetched nothing — a success nobody got. One remote
+/// that fails fails the call even though the others were fetched: git exits 1
+/// naming it (`error: could not fetch fork`), which is the text the user needs.
+/// Remotes marked `remote.<name>.skipFetchAll` are skipped, by git.
+///
+/// # Errors
+/// When there is no remote, git can't run, or any remote's fetch fails.
+pub async fn fetch_all(repo_path: String) -> Result<(), String> {
     super::process::run_blocking(move || {
-        let (connect, stall, timeout) = if background {
-            (NET_BG_CONNECT_SECS, NET_BG_STALL_SECS, NET_BG_TIMEOUT)
-        } else {
-            (NET_UI_CONNECT_SECS, NET_UI_STALL_SECS, NET_UI_TIMEOUT)
-        };
-        let (ok, combined) = run_git_net(
-            Some(&repo_path),
-            &[
-                "fetch",
-                "--prune",
-                "--recurse-submodules=on-demand",
-                &remote,
-            ],
-            connect,
-            stall,
-            timeout,
-        )?;
-        if !ok {
-            return Err(format!("git fetch failed: {}", combined.trim()));
+        if remote_names(&repo_path)?.is_empty() {
+            return Err("This repository has no remote to fetch from.".to_string());
         }
-        Ok(())
+        fetch_blocking(&repo_path, "--all", false)
     })
     .await?
+}
+
+/// The one `git fetch` every fetch here runs: `--prune` so a branch deleted
+/// on the remote doesn't linger, on-demand submodules, and `target` — a
+/// remote's name, or `--all`. `background` picks the budget ([`fetch`] says
+/// which is which).
+///
+/// # Errors
+/// When the process can't start or `git fetch` exits non-zero.
+fn fetch_blocking(repo_path: &str, target: &str, background: bool) -> Result<(), String> {
+    let (connect, stall, timeout) = if background {
+        (NET_BG_CONNECT_SECS, NET_BG_STALL_SECS, NET_BG_TIMEOUT)
+    } else {
+        (NET_UI_CONNECT_SECS, NET_UI_STALL_SECS, NET_UI_TIMEOUT)
+    };
+    let (ok, combined) = run_git_net(
+        Some(repo_path),
+        &["fetch", "--prune", "--recurse-submodules=on-demand", target],
+        connect,
+        stall,
+        timeout,
+    )?;
+    if !ok {
+        return Err(format!("git fetch failed: {}", combined.trim()));
+    }
+    Ok(())
 }
 
 /// Pull the current branch from `remote` (`--ff` only), streaming git's live
@@ -3427,31 +3518,127 @@ pub fn get_ahead_behind(repo_path: String, upstream: String) -> Result<AheadBehi
     }
 }
 
-/// Name of the repo's first configured remote (e.g. `"origin"`), or `None`
-/// when it has none.
+/// The remote the current branch fetches and pulls from, or `None` when the
+/// repository has no remote — what the automatic fetches, the badge sweep's
+/// fetch and Pull all name.
 ///
-/// Deliberately does **not** invent `"origin"` for a remote-less repo. It used
-/// to, and every caller inherited a name that resolves to nothing: a guard
-/// written as "skip when there's no remote" could never fire, so fetches ran
-/// against a remote that does not exist and their failures were read as the
-/// network being down. The one place the assumption is legitimate — naming the
-/// remote a *publish* is about to create — makes it explicitly, at that call
-/// site. Elsewhere, `RepoStatus::has_remote` is the question worth asking.
+/// `branch.<name>.remote` while the repository still has that remote, then
+/// [`fallback_remote`]: the order a bare `git fetch` follows. Deliberately not
+/// the first name `git remote` prints:
+/// in a repository with `fork` and `origin` that is `fork` whatever the branch
+/// tracks, so the branch's own upstream never moves and Pull fails with git's
+/// "you asked to pull from the remote 'fork'".
 ///
-/// Answered from the repository's config file wherever that file settles it
-/// (see [`config_remotes`]), because this command rides every auto-fetch tick
-/// in both clients — the third asker of the same question, alongside
-/// `get_status` and `repo_sync_status`.
+/// Never an invented `"origin"` either — a repository with no remote says so,
+/// or every "skip when there's no remote" guard becomes unfireable and a doomed
+/// fetch's failures read as the network being down. The one place the name is
+/// legitimately assumed — the remote a *publish* is about to create — makes it
+/// explicitly, at that call site ([`DEFAULT_PUBLISH_REMOTE`]).
+///
+/// Spawns `git config` for the branch key rather than reading the file the way
+/// [`remote_names_in`] does: a `branch.*` key may live in any configuration
+/// scope, and the file shortcut sees only the repository's own. Two local
+/// subprocesses then (`symbolic-ref`, `config --get`) in front of a network
+/// round trip — three where the remote list has to be spawned too — and none
+/// on the status poll, which resolves no remote of its own.
 ///
 /// # Errors
-/// When `git remote` itself can't run (not a repository, git missing) — which
-/// only the fallback can report, the config read having no command to fail.
-pub fn get_remote(repo_path: String) -> Result<Option<String>, String> {
-    // The NAME of the first remote, not the URL.
-    if let Some(names) = config_remotes(git_dir(&repo_path).as_deref()) {
-        return Ok(names.into_iter().next());
+/// When git can't run, or the repository's configuration can't be read.
+pub fn get_tracking_remote(repo_path: &str) -> Result<Option<String>, String> {
+    let branch = current_branch(repo_path)?;
+    let names = remote_names(repo_path)?;
+    tracking_remote_of(repo_path, branch.as_deref(), &names)
+}
+
+/// The remote a push of `branch` goes to, or `None` when the repository has no
+/// remote — what Push, Publish Branch and force push name.
+///
+/// Git's own order for a bare `git push`: `branch.<name>.pushRemote`, then
+/// `remote.pushDefault`, then the branch's tracking remote as
+/// [`tracking_remote_of`] finds it. The first two are how a fork workflow pulls
+/// from `origin` and pushes to `fork`, and `remote.pushDefault` in particular
+/// is commonly set globally — a second reason this asks `git config`. Each of
+/// the three is taken only while [`known_remote`] still recognises it, so the
+/// three operations agree about a remote that is gone.
+///
+/// # Errors
+/// When git can't run, or the repository's configuration can't be read.
+pub fn get_push_remote(repo_path: &str, branch: &str) -> Result<Option<String>, String> {
+    let names = remote_names(repo_path)?;
+    if let Some(remote) = known_remote(branch_config(repo_path, branch, "pushRemote")?, &names) {
+        return Ok(Some(remote));
     }
-    first_remote_spawned(&repo_path)
+    let push_default = run_git_optional(repo_path, &["config", "--get", "remote.pushDefault"])?;
+    if let Some(remote) = known_remote(push_default, &names) {
+        return Ok(Some(remote));
+    }
+    tracking_remote_of(repo_path, Some(branch), &names)
+}
+
+/// The remote `branch` tracks — `branch.<name>.remote`, while [`known_remote`]
+/// still recognises it — or [`fallback_remote`] for a branch that tracks none,
+/// tracks one that is gone, or is no branch at all (a detached `HEAD`).
+fn tracking_remote_of(
+    repo_path: &str,
+    branch: Option<&str>,
+    names: &[String],
+) -> Result<Option<String>, String> {
+    if let Some(branch) = branch
+        && let Some(remote) = known_remote(branch_config(repo_path, branch, "remote")?, names)
+    {
+        return Ok(Some(remote));
+    }
+    Ok(fallback_remote(names))
+}
+
+/// A configured remote value, but only while it still names something to talk
+/// to: a remote the repository has, or `.` — the local repository itself, which
+/// is what a branch tracking another local branch names.
+///
+/// Anything else is a leftover, the remote having been renamed or removed while
+/// the branch kept pointing at it, and the caller falls back rather than hand
+/// git a name it will reject. Handing it over is the worse failure in both
+/// directions: an automatic fetch would fail on every tick, and enough of those
+/// read as the network being down and open the connectivity breaker against
+/// every *other* repository; a push would fail where falling back to `origin`
+/// lets Publish Branch repair the branch with its `--set-upstream`. A URL
+/// written straight into the key falls back too — git would accept it, but it
+/// is rare enough that telling it from a stale name is not worth a parser.
+fn known_remote(configured: Option<String>, names: &[String]) -> Option<String> {
+    configured.filter(|name| name == "." || names.contains(name))
+}
+
+/// git's choice for a branch that names no remote: `origin` when the
+/// repository has one — the name `clone` gives — and otherwise the first name
+/// `git remote` prints, which for a repository with a single remote is that
+/// remote. `None` only when there is no remote at all.
+///
+/// One case goes further than git, on purpose: with several remotes and none
+/// of them `origin`, a bare `git fetch` names an `origin` that doesn't exist
+/// and quietly fetches nothing, and a bare `git push` refuses. Naming a real
+/// remote is what someone pressing a button expects.
+fn fallback_remote(names: &[String]) -> Option<String> {
+    if names.iter().any(|name| name == "origin") {
+        return Some("origin".to_string());
+    }
+    names.first().cloned()
+}
+
+/// One `branch.<branch>.<key>` value from every configuration scope, or `None`
+/// when it is unset. The branch subsection is case-sensitive, as git's is.
+fn branch_config(repo_path: &str, branch: &str, key: &str) -> Result<Option<String>, String> {
+    run_git_optional(
+        repo_path,
+        &["config", "--get", &format!("branch.{branch}.{key}")],
+    )
+}
+
+/// The branch `HEAD` is on, or `None` when it is detached — or on anything
+/// outside `refs/heads/`, which no `branch.*` key describes.
+fn current_branch(repo_path: &str) -> Result<Option<String>, String> {
+    // `--quiet` makes a detached HEAD exit 1, which arrives as None.
+    let head = run_git_optional(repo_path, &["symbolic-ref", "--quiet", "HEAD"])?;
+    Ok(head.and_then(|h| h.strip_prefix("refs/heads/").map(str::to_string)))
 }
 
 /// The remote name a publish should create and push to when the repo has none.
@@ -5958,43 +6145,228 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // get_remote (H-2)
+    // Which remote an operation talks to
     // -----------------------------------------------------------------------
+    //
+    // Configuration only: the remotes point at URLs nothing contacts, and each
+    // case asks which *name* git's own rules pick. Every case but the first has
+    // several remotes on purpose — with one, every rule gives the same answer.
+
+    /// `names` added as remotes of `repo_path`, at URLs nothing contacts.
+    fn add_remotes(repo_path: &str, names: &[&str]) {
+        for name in names {
+            let url = format!("https://example.invalid/{name}.git");
+            run_git(repo_path, &["remote", "add", name, &url]).expect("add remote");
+        }
+    }
+
+    /// Set one value in the repository's own configuration file.
+    fn set_config(repo_path: &str, key: &str, value: &str) {
+        run_git(repo_path, &["config", key, value]).expect("git config");
+    }
+
+    /// A key the case below needs unset in *every* scope. The resolvers read
+    /// all of them, so a value in the developer's own global configuration
+    /// would decide the answer and the failure would read as a bug in the
+    /// resolver rather than as a polluted environment.
+    fn assert_unset(repo_path: &str, key: &str) {
+        assert_eq!(
+            run_git_optional(repo_path, &["config", "--get", key]).expect("git config"),
+            None,
+            "this test needs {key} unset in every scope"
+        );
+    }
 
     /// A repo with no remote must say so. Inventing `"origin"` is what made
     /// every "skip when there's no remote" guard unfireable, so fetches ran
     /// against a name that resolves to nothing and their failures were read as
     /// the network being down.
     #[test]
-    fn get_remote_is_none_without_a_remote_and_names_the_real_one_with() {
+    fn tracking_remote_is_none_without_a_remote() {
         let tmp = tempdir().expect("tempdir");
-        let repo = tmp.path();
-        init_test_repo(repo);
-        let repo_path = repo.to_str().expect("utf-8 path").to_string();
+        let (repo_path, branch) = repo_with_one_commit(tmp.path());
+        assert_unset(&repo_path, &format!("branch.{branch}.remote"));
 
         assert_eq!(
-            get_remote(repo_path.clone()).expect("remote lookup"),
+            get_tracking_remote(&repo_path).expect("tracking remote"),
             None,
-            "a remote-less repo reports no remote"
-        );
-        assert!(
-            !get_status(repo_path.clone()).expect("status").has_remote,
-            "and the status flag agrees"
+            "a repository with no remote names none"
         );
 
-        run_git(
-            &repo_path,
-            &["remote", "add", "upstream", "https://example.invalid/x.git"],
-        )
-        .expect("add remote");
-        assert_eq!(
-            get_remote(repo_path.clone()).expect("remote lookup"),
-            Some("upstream".to_string()),
-            "the real remote's name is returned, not a guess"
-        );
         assert!(
-            get_status(repo_path).expect("status").has_remote,
+            !get_status(repo_path).expect("status").has_remote,
             "and the status flag agrees"
+        );
+    }
+
+    /// The bug these rules replaced: `fork` sorts first, and the branch tracks
+    /// something else.
+    #[test]
+    fn tracking_remote_is_the_branch_remote_not_the_first_alphabetically() {
+        let tmp = tempdir().expect("tempdir");
+        let (repo_path, branch) = repo_with_one_commit(tmp.path());
+        add_remotes(&repo_path, &["fork", "origin", "zzz"]);
+
+        set_config(&repo_path, &format!("branch.{branch}.remote"), "zzz");
+
+        assert_eq!(
+            get_tracking_remote(&repo_path).expect("tracking remote"),
+            Some("zzz".to_string()),
+            "the branch's own remote, not the first one alphabetically"
+        );
+    }
+
+    #[test]
+    fn tracking_remote_prefers_origin_when_the_branch_tracks_nothing() {
+        let tmp = tempdir().expect("tempdir");
+        let (repo_path, branch) = repo_with_one_commit(tmp.path());
+        add_remotes(&repo_path, &["fork", "origin"]);
+        assert_unset(&repo_path, &format!("branch.{branch}.remote"));
+
+        assert_eq!(
+            get_tracking_remote(&repo_path).expect("tracking remote"),
+            Some("origin".to_string()),
+            "the name `clone` gives, whatever `git remote` prints first"
+        );
+    }
+
+    #[test]
+    fn tracking_remote_falls_back_to_the_first_remote_without_origin() {
+        let tmp = tempdir().expect("tempdir");
+        let (repo_path, branch) = repo_with_one_commit(tmp.path());
+        add_remotes(&repo_path, &["zzz", "fork"]);
+        assert_unset(&repo_path, &format!("branch.{branch}.remote"));
+
+        assert_eq!(
+            get_tracking_remote(&repo_path).expect("tracking remote"),
+            Some("fork".to_string()),
+            "the name `git remote` prints first"
+        );
+    }
+
+    /// A branch left pointing at a remote that was renamed or removed. Handing
+    /// the dead name to git would fail every automatic fetch, and enough of
+    /// those open the connectivity breaker against every other repository.
+    #[test]
+    fn tracking_remote_falls_back_when_the_branch_remote_is_gone() {
+        let tmp = tempdir().expect("tempdir");
+        let (repo_path, branch) = repo_with_one_commit(tmp.path());
+        add_remotes(&repo_path, &["fork", "origin"]);
+        set_config(&repo_path, &format!("branch.{branch}.remote"), "ghost");
+
+        assert_eq!(
+            get_tracking_remote(&repo_path).expect("tracking remote"),
+            Some("origin".to_string()),
+            "a name the repository no longer has falls back"
+        );
+    }
+
+    /// `.` is the local repository, which is what a branch tracking another
+    /// local branch names — a value git accepts, so it is not a leftover.
+    #[test]
+    fn tracking_remote_keeps_a_branch_that_tracks_the_local_repository() {
+        let tmp = tempdir().expect("tempdir");
+        let (repo_path, branch) = repo_with_one_commit(tmp.path());
+        add_remotes(&repo_path, &["origin"]);
+        set_config(&repo_path, &format!("branch.{branch}.remote"), ".");
+
+        assert_eq!(
+            get_tracking_remote(&repo_path).expect("tracking remote"),
+            Some(".".to_string()),
+            "`.` is a value git accepts, so it passes through"
+        );
+    }
+
+    /// A detached HEAD is on no branch, so no `branch.*` key applies — not
+    /// even the one for the branch it was detached from.
+    #[test]
+    fn tracking_remote_of_a_detached_head_ignores_branch_config() {
+        let tmp = tempdir().expect("tempdir");
+        let (repo_path, branch) = repo_with_one_commit(tmp.path());
+        add_remotes(&repo_path, &["origin", "zzz"]);
+        set_config(&repo_path, &format!("branch.{branch}.remote"), "zzz");
+
+        run_git(&repo_path, &["checkout", "--detach"]).expect("detach");
+
+        assert_eq!(
+            get_tracking_remote(&repo_path).expect("tracking remote"),
+            Some("origin".to_string()),
+            "on no branch, so no branch.* key applies"
+        );
+    }
+
+    /// `pushRemote` outranks both `pushDefault` and the branch's own remote.
+    #[test]
+    fn push_remote_prefers_the_branch_push_remote() {
+        let tmp = tempdir().expect("tempdir");
+        let (repo_path, branch) = repo_with_one_commit(tmp.path());
+        add_remotes(&repo_path, &["fork", "origin", "zzz"]);
+        set_config(&repo_path, &format!("branch.{branch}.remote"), "origin");
+        set_config(&repo_path, "remote.pushDefault", "fork");
+
+        set_config(&repo_path, &format!("branch.{branch}.pushRemote"), "zzz");
+
+        assert_eq!(
+            get_push_remote(&repo_path, &branch).expect("push remote"),
+            Some("zzz".to_string()),
+            "pushRemote outranks both"
+        );
+    }
+
+    /// The triangular setup: pull from `origin`, push everything to `fork`.
+    #[test]
+    fn push_remote_uses_push_default_before_the_branch_remote() {
+        let tmp = tempdir().expect("tempdir");
+        let (repo_path, branch) = repo_with_one_commit(tmp.path());
+        add_remotes(&repo_path, &["fork", "origin"]);
+        set_config(&repo_path, &format!("branch.{branch}.remote"), "origin");
+        assert_unset(&repo_path, &format!("branch.{branch}.pushRemote"));
+
+        set_config(&repo_path, "remote.pushDefault", "fork");
+
+        assert_eq!(
+            get_push_remote(&repo_path, &branch).expect("push remote"),
+            Some("fork".to_string()),
+            "pushDefault outranks the branch's own remote"
+        );
+    }
+
+    /// A dead `remote.pushDefault` — commonly set globally, so it outlives any
+    /// one repository — steps aside for the branch's own remote.
+    #[test]
+    fn push_remote_falls_back_when_push_default_is_gone() {
+        let tmp = tempdir().expect("tempdir");
+        let (repo_path, branch) = repo_with_one_commit(tmp.path());
+        add_remotes(&repo_path, &["fork", "origin"]);
+        set_config(&repo_path, &format!("branch.{branch}.remote"), "fork");
+        assert_unset(&repo_path, &format!("branch.{branch}.pushRemote"));
+
+        set_config(&repo_path, "remote.pushDefault", "ghost");
+
+        assert_eq!(
+            get_push_remote(&repo_path, &branch).expect("push remote"),
+            Some("fork".to_string()),
+            "a dead pushDefault steps aside for the branch's remote"
+        );
+    }
+
+    /// With neither push setting, a push goes where the branch pulls from.
+    #[test]
+    fn push_remote_falls_back_to_the_branch_tracking_remote() {
+        let tmp = tempdir().expect("tempdir");
+        let (repo_path, branch) = repo_with_one_commit(tmp.path());
+        add_remotes(&repo_path, &["fork", "origin", "zzz"]);
+
+        // Both push settings outrank the branch's remote, from any scope.
+        assert_unset(&repo_path, &format!("branch.{branch}.pushRemote"));
+        assert_unset(&repo_path, "remote.pushDefault");
+
+        set_config(&repo_path, &format!("branch.{branch}.remote"), "zzz");
+
+        assert_eq!(
+            get_push_remote(&repo_path, &branch).expect("push remote"),
+            Some("zzz".to_string()),
+            "a push goes where the branch pulls from"
         );
     }
 
@@ -6018,19 +6390,30 @@ mod tests {
             .collect()
     }
 
-    /// Both public askers must return `git remote`'s first line, whether they
-    /// read it or spawned for it.
+    /// The head of the production answer, for the cases that assert which name
+    /// comes first. `read_status` reads the whole list and picks out of it with
+    /// `fallback_remote`; what has to hold here is that the first name agrees
+    /// with `git remote`'s first line.
+    fn first_remote_of(repo_path: &str) -> Option<String> {
+        remote_names_in(repo_path, git_dir(repo_path).as_deref())
+            .into_iter()
+            .next()
+    }
+
+    /// Both askers must agree with `git remote`, whether they read it or
+    /// spawned for it: [`remote_names_in`] with its first line, `remote_names`
+    /// with every line.
     fn assert_agrees_with_git_remote(repo_path: &str) {
-        let expected = git_remote_names(repo_path).first().cloned();
+        let expected = git_remote_names(repo_path);
         assert_eq!(
-            first_remote(repo_path),
-            expected,
-            "first_remote disagreed with `git remote`"
+            first_remote_of(repo_path),
+            expected.first().cloned(),
+            "remote_names_in disagreed with `git remote`"
         );
         assert_eq!(
-            get_remote(repo_path.to_string()).expect("get_remote"),
+            remote_names(repo_path).expect("remote_names"),
             expected,
-            "get_remote disagreed with `git remote`"
+            "remote_names disagreed with `git remote`"
         );
     }
 
@@ -6064,13 +6447,14 @@ mod tests {
             Some(Vec::new()),
             "no remotes is an answer, not a reason to spawn"
         );
-        assert_eq!(first_remote(&repo_path), None);
+        assert_eq!(first_remote_of(&repo_path), None);
         assert_agrees_with_git_remote(&repo_path);
     }
 
     /// `git remote` sorts with `strcmp`, so the order is byte order:
     /// every uppercase name ahead of every lowercase one. The first line is
-    /// what `first_remote` returns, so the sort is not cosmetic here.
+    /// what a repository without an `origin` falls back to, so the sort is not
+    /// cosmetic here.
     #[test]
     fn remotes_from_config_sorts_names_in_byte_order() {
         let tmp = tempdir().expect("tempdir");
@@ -6088,7 +6472,7 @@ mod tests {
             remotes_of(&repo_path),
             Some(names(&["Origin", "a-b", "origin"]))
         );
-        assert_eq!(first_remote(&repo_path).as_deref(), Some("Origin"));
+        assert_eq!(first_remote_of(&repo_path).as_deref(), Some("Origin"));
         assert_agrees_with_git_remote(&repo_path);
     }
 
@@ -6194,7 +6578,7 @@ mod tests {
 
         assert_eq!(remotes_of(&repo_path), None);
         assert_eq!(
-            first_remote(&repo_path).as_deref(),
+            first_remote_of(&repo_path).as_deref(),
             Some("included"),
             "the included remote sorts first, which only git's own answer knows"
         );
@@ -6228,7 +6612,7 @@ mod tests {
         .expect("configure a per-worktree remote");
 
         assert_eq!(remotes_of(&repo_path), None);
-        assert_eq!(first_remote(&repo_path).as_deref(), Some("aaa"));
+        assert_eq!(first_remote_of(&repo_path).as_deref(), Some("aaa"));
         assert_agrees_with_git_remote(&repo_path);
     }
 
@@ -6274,11 +6658,11 @@ mod tests {
         assert_eq!(remotes_of(&repo_path), None);
         // The oracle every other case here is measured against cannot be run:
         // `git remote` exits 128 on this file. So the assertion is that neither
-        // public asker invents a remote git never printed — one degrades to
-        // "none", the other reports git's failure, and neither says `origin`.
-        assert_eq!(first_remote(&repo_path), None);
+        // asker invents a remote git never printed — one degrades to "none",
+        // the other reports git's failure, and neither says `origin`.
+        assert_eq!(first_remote_of(&repo_path), None);
         assert!(
-            get_remote(repo_path).is_err(),
+            remote_names(&repo_path).is_err(),
             "a config file git rejects is an error, not an answer"
         );
     }
@@ -6308,7 +6692,7 @@ mod tests {
         .expect("worktree add");
 
         assert_eq!(remotes_of(&worktree_path), Some(names(&["origin"])));
-        assert_eq!(first_remote(&worktree_path).as_deref(), Some("origin"));
+        assert_eq!(first_remote_of(&worktree_path).as_deref(), Some("origin"));
         assert_agrees_with_git_remote(&worktree_path);
     }
 

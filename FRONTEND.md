@@ -35,9 +35,9 @@ static-linking or a local daemon (that decision is open; see the plan).
   Frontends never re-derive git state the core already returns (e.g. file status
   categories, ahead/behind, merge conflicts).
 - Today's surface: **4 events, ~45 DTOs**, and a command catalogue (§3) each host exposes
-  **to the extent it consumes it**. The Tauri host registers **68** `#[tauri::command]`s,
+  **to the extent it consumes it**. The Tauri host registers **70** `#[tauri::command]`s,
   each with a wrapper in `apps/tauri-app/src/lib/api/commands.ts`; the UniFFI bridge
-  exports **67** functions. The two sets are deliberately not identical, and a command
+  exports **70** functions. The two sets are deliberately not identical, and a command
   reaching one host does not oblige the other — what is required is that the difference be
   recorded, here or in §8, never left silent.
   - No native export: `check_auth`, `generate_patch`, `generate_inverse_patch`,
@@ -86,12 +86,12 @@ static-linking or a local daemon (that decision is open; see the plan).
 - **State ownership** — durable state (config, repos MRU, terminal PTY sessions)
   lives in the core. Frontends hold only re-derivable view state.
 
-## 3. Command surface (68)
+## 3. Command surface (70)
 
 Grouped by namespace. `args` are the logical inputs (camelCase on the wire);
 `→` is the return DTO (§5). "async/net" marks network operations that may stream
 progress (§4.1) and can be slow. This is the catalogue of operations core offers a
-frontend — the Tauri host registers all 68; the native bridge exposes the subset it
+frontend — the Tauri host registers all 70; the native bridge exposes the subset it
 consumes, plus seven of its own (§1).
 
 ### 3.1 Config & state — 6
@@ -176,14 +176,16 @@ also carries a count of consecutive misses, because elapsed time alone is not
 enough in the other direction: at the 30 s rung a single read is charged the
 whole window, and that read is exactly the one that can land mid-rewrite.
 
-### 3.6 Git — sync / remote — 6
+### 3.6 Git — sync / remote — 8
 | Command | Args | Returns |
 |---|---|---|
 | `repo_sync_status` (net) | `repoPath, doFetch` | `RepoSync` |
 | `fetch` (net) | `repoPath, remote, background` | `void` |
+| `fetch_all` (net) | `repoPath` | `void` |
 | `pull` (net) | `repoPath, remote` | `void` |
 | `push` (net) | `repoPath, remote, branch, setUpstream, forceWithLease` | `void` |
-| `get_remote` | `repoPath` | `string \| null` |
+| `get_tracking_remote` | `repoPath` | `string \| null` |
+| `get_push_remote` | `repoPath, branch` | `string \| null` |
 | `get_repo_identifier` | `repoPath` | `RepoIdentifier \| null` |
 
 ### 3.7 Git — merge — 5
@@ -409,13 +411,15 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    open, for an answer that could not have changed. A key that moved because the *path*
    changed is not this rule's business: the user changed the selection, and that
    selection's own load is already in flight.
-   Automatic fetches are additionally
-   gated on `RepoStatus.has_remote`: `get_remote` answers `"origin"` for a repo with no
-   remote (§ *Notable invariants*), so an ungated tick spawns a doomed `git fetch` whose
-   failures then open the connectivity breaker against every *other* repo. The gate skips
+   An automatic fetch reaches the current branch's own remote (`get_tracking_remote`,
+   TECHNICAL.md § *Notable invariants*); only the user's Fetch reaches every remote.
+   Automatic fetches are additionally gated on
+   `RepoStatus.has_remote`: a repo with no remote has nothing to fetch, and an
+   ungated tick spawns a doomed `git fetch` whose failures then open the connectivity
+   breaker against every *other* repo. The gate skips
    only when the answer is **known** — a status not yet loaded is not a repo without a
    remote — and only a fetch that actually ran reports to the breaker: a slot conflict or a
-   failed local `git remote` says nothing about the network.
+   failed local remote lookup says nothing about the network.
    A failed **background** refresh is swallowed — a repository mid-write is momentarily
    unreadable — but **three consecutive failures raise a non-blocking banner** owned by
    those refreshes: the last good snapshot stays on screen behind it, any successful read
@@ -440,7 +444,9 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    same chord to it (⌘/Ctrl+P), so the button and the menu item can never disagree.
    **Fetch is always reachable** — as the proposal when in sync, and from the
    chevron in every state that has one — because it is the only way to ask the
-   remote a question without a pull moving the working tree. A chevron appears only
+   remotes a question without a pull moving the working tree, and it asks all of
+   them (`fetch_all`) where the automatic fetches ask only the branch's own. A
+   chevron appears only
    where it offers something the face does not; force-push-with-lease joins it only
    on a genuinely diverged branch, behind a confirmation naming `status.upstream`
    (composing `remote/branch` is wrong whenever the upstream branch is named

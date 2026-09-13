@@ -491,11 +491,16 @@ export const gitApi = {
     invoke<string>('format_commit_message', { summary, description, coAuthors }),
   repoSyncStatus: (repoPath: string, doFetch: boolean) =>
     invoke<RepoSync>('repo_sync_status', { repoPath, doFetch }),
-  /** `background` picks the budget: an automatic fetch nobody waits on fails
-   *  fast (12 s) so an unreachable remote can't hold the single network slot;
-   *  a user-initiated one keeps the generous budget a real transfer needs. */
+  /** One remote — the automatic fetches' call, naming `getTrackingRemote`'s
+   *  answer. `background` picks the budget: `true` fails fast (12 s) so an
+   *  unreachable remote can't hold the single network slot, `false` keeps the
+   *  generous budget a real transfer needs (the user's Fetch gets it via
+   *  `fetchAll`). */
   fetch: (repoPath: string, remote: string, background: boolean) =>
     invoke<void>('fetch', { repoPath, remote, background }),
+  /** Every remote at once (`git fetch --all`) — the Fetch the user clicks, on
+   *  the user budget. Core refuses a repo with no remote. */
+  fetchAll: (repoPath: string) => invoke<void>('fetch_all', { repoPath }),
   pull: (repoPath: string, remote: string) => invoke<void>('pull', { repoPath, remote }),
   push: (
     repoPath: string,
@@ -504,9 +509,16 @@ export const gitApi = {
     setUpstream: boolean,
     forceWithLease: boolean
   ) => invoke<void>('push', { repoPath, remote, branch, setUpstream, forceWithLease }),
-  /** The first remote's name, or `null` when the repo has none — never an
-   *  invented "origin", which made every no-remote guard unfireable. */
-  getRemote: (repoPath: string) => invoke<string | null>('get_remote', { repoPath }),
+  /** The remote the current branch fetches and pulls from — its
+   *  `branch.<name>.remote`, else `origin`, else the first remote — or `null`
+   *  when the repo has none, never an invented "origin". Resolve it right
+   *  before each use: a branch switch changes it. */
+  getTrackingRemote: (repoPath: string) =>
+    invoke<string | null>('get_tracking_remote', { repoPath }),
+  /** The remote a push of `branch` goes to — `pushRemote`, then `pushDefault`,
+   *  then the tracking remote — or `null` when the repo has none. */
+  getPushRemote: (repoPath: string, branch: string) =>
+    invoke<string | null>('get_push_remote', { repoPath, branch }),
   getRepoIdentifier: (repoPath: string) =>
     invoke<RepoIdentifier | null>('get_repo_identifier', { repoPath }),
   mergeBranch: (repoPath: string, branch: string) =>

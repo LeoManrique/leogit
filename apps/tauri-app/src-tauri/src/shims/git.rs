@@ -138,6 +138,11 @@ pub async fn fetch(repo_path: String, remote: String, background: bool) -> Resul
 }
 
 #[tauri::command]
+pub async fn fetch_all(repo_path: String) -> Result<(), String> {
+    git::fetch_all(repo_path).await
+}
+
+#[tauri::command]
 pub async fn pull(app: AppHandle, repo_path: String, remote: String) -> Result<(), String> {
     git::pull(ProgressSink::arc(app), repo_path, remote).await
 }
@@ -163,8 +168,13 @@ pub async fn push(
 }
 
 #[tauri::command(async)]
-pub fn get_remote(repo_path: String) -> Result<Option<String>, String> {
-    git::get_remote(repo_path)
+pub fn get_tracking_remote(repo_path: &str) -> Result<Option<String>, String> {
+    git::get_tracking_remote(repo_path)
+}
+
+#[tauri::command(async)]
+pub fn get_push_remote(repo_path: &str, branch: &str) -> Result<Option<String>, String> {
+    git::get_push_remote(repo_path, branch)
 }
 
 #[tauri::command(async)]

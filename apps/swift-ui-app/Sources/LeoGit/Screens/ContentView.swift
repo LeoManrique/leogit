@@ -764,11 +764,10 @@ struct ContentView: View {
     /// Gated exactly like every other automatic fetch, which it was not
     /// before: skipped while offline or inside the breaker's backoff window,
     /// and skipped for a repository with no remote, whose fetch could only
-    /// ever fail — `get_remote` answers `"origin"` for a remote-less repo, so
-    /// the attempt is not merely useless but actively poisons the breaker for
-    /// every other repo. Its outcome feeds the breaker, which is the contract
-    /// for a real network attempt (the Tauri client's on-switch sync already
-    /// reported its result; this one used to throw it away).
+    /// ever fail — so the attempt would not merely be useless but would poison
+    /// the breaker for every other repo. Its outcome feeds the breaker, which
+    /// is the contract for a real network attempt — the same contract the
+    /// Tauri client's on-switch sync keeps.
     ///
     /// Waits for the open to settle first: `.task(id: repoPath)` is started by
     /// `repoPath` being published, which happens before status exists, and a

@@ -29,9 +29,10 @@
 //! Progress callbacks arrive on core's stderr-reader thread, never the main
 //! one; Swift listeners must hop to the main actor themselves.
 
-// Exported signatures are dictated by UniFFI, not by Rust ergonomics: arguments
-// arrive as owned values across the FFI boundary, so taking `String` by value is
-// required rather than avoidable.
+// Exported signatures follow UniFFI rather than Rust ergonomics: every argument
+// is lifted into an owned value on its way across the FFI boundary — a `&str`
+// parameter only borrows from a `String` UniFFI already allocated — so the crate
+// takes `String` by value, one convention for every export.
 #![allow(clippy::needless_pass_by_value)]
 
 use std::sync::Arc;
@@ -1053,21 +1054,35 @@ impl EventSink for ProgressSink {
     }
 }
 
-/// The name of the repository's first remote, falling back to the literal
-/// `"origin"` when none is configured. Both clients resolve this immediately
-/// before each network operation rather than caching it.
+/// The remote the current branch fetches and pulls from —
+/// `branch.<name>.remote`, else `origin`, else the first remote — or `None`
+/// when the repository has none. Resolved immediately before each automatic
+/// fetch and each pull rather than cached: a branch switch changes it.
 ///
 /// # Errors
 ///
-/// Returns [`GitError`] when `git remote` itself fails.
+/// Returns [`GitError`] when git can't run or the configuration can't be read.
 #[uniffi::export]
-pub fn get_remote(repo_path: String) -> Result<Option<String>, GitError> {
-    git::get_remote(repo_path).map_err(GitError::from)
+pub fn get_tracking_remote(repo_path: String) -> Result<Option<String>, GitError> {
+    git::get_tracking_remote(&repo_path).map_err(GitError::from)
+}
+
+/// The remote a push of `branch` goes to — git's own push order,
+/// `pushRemote`, then `pushDefault`, then the tracking remote — or `None` when
+/// the repository has none. Resolved immediately before each push.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when git can't run or the configuration can't be read.
+#[uniffi::export]
+pub fn get_push_remote(repo_path: String, branch: String) -> Result<Option<String>, GitError> {
+    git::get_push_remote(&repo_path, &branch).map_err(GitError::from)
 }
 
 /// `git fetch --prune <remote>`: refresh remote-tracking refs — and the
 /// ahead/behind counts derived from them — without touching the working
-/// tree. Fetch does not stream progress; core's fetch path has no sink.
+/// tree. The automatic fetches' call, naming the branch's own remote. Fetch
+/// does not stream progress; core's fetch path has no sink.
 ///
 /// # Errors
 ///
@@ -1077,6 +1092,18 @@ pub async fn fetch(repo_path: String, remote: String, background: bool) -> Resul
     git::fetch(repo_path, remote, background)
         .await
         .map_err(GitError::from)
+}
+
+/// `git fetch --all --prune`: every remote at once — the Fetch the user asks
+/// for, always on the user budget.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when the repository has no remote, or any remote's
+/// fetch fails — git's text names the one that did.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn fetch_all(repo_path: String) -> Result<(), GitError> {
+    git::fetch_all(repo_path).await.map_err(GitError::from)
 }
 
 /// `git pull --ff --progress <remote>`. Fast-forward only: a diverged branch
@@ -2497,18 +2524,35 @@ mod tests {
 
     /// Create a bare "origin" next to the temp repos and wire `dir` to it.
     fn bare_origin(tag: &str, dir: &Path) -> std::path::PathBuf {
+        bare_remote(tag, "origin", dir)
+    }
+
+    /// Create a bare repository next to the temp repos and wire `dir` to it
+    /// as the remote `name`.
+    fn bare_remote(tag: &str, name: &str, dir: &Path) -> std::path::PathBuf {
         let bare = std::env::temp_dir().join(format!(
-            "leogit-ffi-{tag}-origin-{}.git",
+            "leogit-ffi-{tag}-{name}-{}.git",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&bare);
         std::fs::create_dir_all(&bare).expect("bare dir");
         run_git(&bare, &["init", "--bare"]);
-        run_git(
-            dir,
-            &["remote", "add", "origin", bare.to_str().expect("utf-8")],
-        );
+        run_git(dir, &["remote", "add", name, bare.to_str().expect("utf-8")]);
         bare
+    }
+
+    /// Land one commit on `bare`'s `branch` from a throwaway clone and return
+    /// its SHA — a remote moving on without the repository under test.
+    fn advance_remote(tag: &str, bare: &Path, branch: &str) -> String {
+        let clone = cloned_workmate(tag, bare);
+        run_git(&clone, &["checkout", branch]);
+        std::fs::write(clone.join(format!("{tag}.txt")), "x\n").expect("write");
+        run_git(&clone, &["add", "."]);
+        run_git(&clone, &["commit", "-m", tag]);
+        run_git(&clone, &["push", "origin", branch]);
+        let head = run_git_stdout(&clone, &["rev-parse", "HEAD"]);
+        let _ = std::fs::remove_dir_all(&clone);
+        head
     }
 
     /// Clone `bare` to a sibling working copy with commit identity configured.
@@ -2536,7 +2580,7 @@ mod tests {
     async fn sync_flow_publishes_fetches_and_pulls() {
         let (dir, repo, default) = seeded_repo("sync");
         assert_eq!(
-            get_remote(repo.clone()).expect("remote"),
+            get_tracking_remote(repo.clone()).expect("remote"),
             None,
             "a repo with no remote says so rather than inventing one"
         );
@@ -2604,6 +2648,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&bare);
         let _ = std::fs::remove_dir_all(&clone_b);
+    }
+
+    /// The Fetch button's call: one `fetch_all` brings back what *both* of a
+    /// repository's remotes gained. Fetching a single remote — `fork`, the
+    /// first alphabetically — is how a checkout of `master` tracking `origin`
+    /// never saw `origin`'s new commits.
+    #[tokio::test]
+    async fn fetch_all_updates_every_remote() {
+        let (dir, repo, default) = seeded_repo("fetch-all");
+        let origin = bare_origin("fetch-all", &dir);
+        let fork = bare_remote("fetch-all", "fork", &dir);
+        run_git(&dir, &["push", "origin", &default]);
+        run_git(&dir, &["push", "fork", &default]);
+        let origin_head = advance_remote("fetch-all-o", &origin, &default);
+        let fork_head = advance_remote("fetch-all-f", &fork, &default);
+
+        fetch_all(repo).await.expect("fetch all");
+
+        assert_eq!(
+            run_git_stdout(&dir, &["rev-parse", &format!("origin/{default}")]),
+            origin_head,
+            "origin's new commit arrived"
+        );
+        assert_eq!(
+            run_git_stdout(&dir, &["rev-parse", &format!("fork/{default}")]),
+            fork_head,
+            "and so did fork's — one Fetch, every remote"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&origin);
+        let _ = std::fs::remove_dir_all(&fork);
+    }
+
+    /// With no remote, git's own `fetch --all` succeeds having fetched
+    /// nothing; core refuses instead, in the words the client shows.
+    #[tokio::test]
+    async fn fetch_all_refuses_a_repository_without_remotes() {
+        let (dir, repo, _) = seeded_repo("fetch-all-none");
+
+        let err = fetch_all(repo).await.unwrap_err();
+
+        assert!(
+            matches!(err, GitError::Failed { ref message } if message.contains("no remote")),
+            "refused in the words the client shows, got {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Force-push semantics end to end: a diverged branch is rejected by a

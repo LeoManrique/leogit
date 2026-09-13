@@ -1133,7 +1133,7 @@
    */
   type FetchTrigger = 'scheduled' | 'catch-up'
 
-  // Best-effort fetch of the active repo's remote. Swallows offline/auth/no-remote
+  // Best-effort fetch of the current branch's remote. Swallows offline/auth/no-remote
   // errors so callers can always follow up with a status refresh regardless.
   // This is automatic (timer / refocus / cold-open), so it's gated on
   // connectivity: skipped while offline or backing off, and its outcome feeds
@@ -1172,11 +1172,11 @@
       }
       let remote: string | null
       try {
-        remote = await gitApi.getRemote(repoPath)
+        remote = await gitApi.getTrackingRemote(repoPath)
       } catch {
         return // local remote lookup failed — not a connectivity signal
       }
-      // Now a real answer rather than an invented "origin", so this is the
+      // `null` only for a repo with no remote at all, so this is the
       // authoritative version of the gate above rather than dead code under it.
       if (!remote) return
       try {

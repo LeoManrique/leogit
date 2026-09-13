@@ -11,9 +11,10 @@ import SwiftUI
 /// meanwhile. Force push with lease is menu-only, offered only while
 /// diverged, and behind a destructive confirmation. Fetch is the
 /// primary action once nothing needs pulling or pushing — the manual "check
-/// the remote" — and a menu item in every split state, which is what let the
-/// separate toolbar Refresh button go (⌘R in the View menu still forces the
-/// local reload). Underneath, nothing changed: single-slot operations,
+/// the remotes", which fetches every one of them — and a menu item in every
+/// split state, which is what let the separate toolbar Refresh button go (⌘R
+/// in the View menu still forces the local reload). Underneath, nothing
+/// changed: single-slot operations,
 /// `--ff`-only pull, gh-based publish, and the progress banner.
 struct SyncControls: View {
     let store: SyncStore
@@ -205,7 +206,7 @@ struct SyncControls: View {
         case .push:
             "Push \(shown.ahead) commit\(shown.ahead == 1 ? "" : "s") to the remote"
         case .fetch:
-            "Fetch from the remote — updates the ahead/behind counts without touching your files"
+            "Fetch from every remote — updates the ahead/behind counts without touching your files"
         }
     }
 
