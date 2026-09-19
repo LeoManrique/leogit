@@ -41,7 +41,7 @@ struct ChangesSidebar: View {
     @Binding var selection: Set<String>
 
     /// The file whose diff the detail pane shows. Derived from `selection`
-    /// through `FileListSelection`, which is the one place that rule lives.
+    /// through `ListSelection`, which is the one place that rule lives.
     @Binding var selectedPath: String?
 
     /// Called after a commit: HEAD moved, so status *and* history are stale.
@@ -159,14 +159,10 @@ struct ChangesSidebar: View {
         // mid-gesture — never reaches `onCommit`, and the height would be lost
         // at the next launch. Leaving is the other moment it is settled.
         .onDisappear(perform: persistComposerHeight)
-        .onChange(of: files.map(\.path), initial: true) { reseat() }
-        .onChange(of: selection) {
-            selectedPath = FileListSelection.activePath(
-                in: selection,
-                of: files,
-                keeping: selectedPath
-            )
-        }
+        // Rows that have left the working tree — committed, discarded,
+        // `git rm`'d in a terminal — leave the highlight, and the first file
+        // opens itself when none of them is left (STYLE.md).
+        .maintainsSelection($selection, showing: $selectedPath, of: files)
         .task(id: commitStore.aiProvider) {
             // Re-asked whenever the picker moves, so the gate always describes
             // the provider Generate would actually run. Keyed on the provider
@@ -180,32 +176,6 @@ struct ChangesSidebar: View {
         } message: {
             Text(embeddedWarning)
         }
-    }
-
-    // MARK: Selection
-
-    /// Keep the highlight and the open diff describing files that still exist.
-    ///
-    /// Two things, in order. Rows that have left the working tree are pruned —
-    /// committed, discarded, `git rm`'d in a terminal — because a highlight
-    /// pointing at nothing would still be counted by every action that reads it.
-    /// Then, and only if nothing is left, the list re-seats on the first row.
-    /// Those are the two conditions and no others (STYLE.md): a file the user
-    /// chose is never overridden, and a tick that changes only a row's content
-    /// or status is not a re-seat — the trigger is the *set of paths* changing.
-    private func reseat() {
-        let live = Set(files.map(\.path))
-        let survivors = selection.intersection(live)
-        if survivors.isEmpty {
-            selection = files.first.map { [$0.path] } ?? []
-        } else if survivors != selection {
-            selection = survivors
-        }
-        selectedPath = FileListSelection.activePath(
-            in: selection,
-            of: files,
-            keeping: selectedPath
-        )
     }
 
     // MARK: Composer height

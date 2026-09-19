@@ -104,7 +104,11 @@ private struct CommitDetailView: View {
                 // room, and this diff should dominate its split too.
                 ChangedFileList(files: store.files, selection: $store.selection)
                     .frame(minWidth: 200, idealWidth: 240, maxWidth: 360)
-                    .onChange(of: store.selection) { store.selectionChanged() }
+                    .maintainsSelection(
+                        $store.selection,
+                        showing: $store.selectedPath,
+                        of: store.files
+                    )
                 fileDiff
                     .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
             }

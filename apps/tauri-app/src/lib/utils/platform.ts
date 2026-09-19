@@ -17,3 +17,12 @@ export function isMac(): boolean {
 export function isWindows(): boolean {
   return navigator.userAgent.includes('Win')
 }
+
+/**
+ * Whether an event carries the platform's primary modifier — ⌘ on macOS, Ctrl
+ * elsewhere. The one that toggles a row in a list and follows a link in the
+ * terminal; Ctrl on macOS is not it, since Ctrl-click is a right-click there.
+ */
+export function platformModifierHeld(e: MouseEvent | KeyboardEvent): boolean {
+  return isMac() ? e.metaKey : e.ctrlKey
+}

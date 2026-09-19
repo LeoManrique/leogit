@@ -6,7 +6,7 @@
   import { Channel } from '@tauri-apps/api/core'
   import { writeText } from '@tauri-apps/plugin-clipboard-manager'
   import { osApi, terminalApi, type TerminalEvent } from '$lib/api/commands'
-  import { isMac } from '$lib/utils/platform'
+  import { isMac, platformModifierHeld } from '$lib/utils/platform'
   import '@xterm/xterm/css/xterm.css'
 
   let {
@@ -209,14 +209,13 @@
     if (container?.contains(document.activeElement)) term?.focus()
   }
 
-  /** Whether this click carries the modifier that means "follow the link". */
-  function linkModifierHeld(e: MouseEvent): boolean {
-    return isMac() ? e.metaKey : e.ctrlKey
-  }
-
-  /** Hand a clicked URL to the OS browser, as the update chip's link does. */
+  /**
+   * Hand a clicked URL to the OS browser, as the update chip's link does. Only
+   * a platform-modifier click follows the link — a plain one belongs to the
+   * selection.
+   */
   function openLink(e: MouseEvent, uri: string): void {
-    if (!linkModifierHeld(e)) return
+    if (!platformModifierHeld(e)) return
     osApi.openUrl(uri).catch((error) => {
       console.error('[terminal] could not open link:', error)
     })

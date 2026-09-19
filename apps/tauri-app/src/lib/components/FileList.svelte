@@ -1,8 +1,24 @@
 <script lang="ts">
-  import { tick } from 'svelte'
+  import { untrack } from 'svelte'
   import type { FileEntry } from '$lib/api/commands'
   import { fileStatusStyles } from '$lib/stores/config'
   import { revealLabel, fileExtension, type FileContextActions } from '$lib/services/fileActions'
+  import {
+    EMPTY_SELECTION,
+    activeKey,
+    applyGesture,
+    clickGesture,
+    contextTargets,
+    isSelectAllChord,
+    keyGesture,
+    rangeBetween,
+    reseated,
+    rowIndexForKey,
+    selectAll,
+    type ListSelection,
+    type SelectionGesture,
+  } from '$lib/utils/listSelection'
+  import { focusVirtualRow } from '$lib/utils/virtualList'
   import PathText from './PathText.svelte'
   import ContextMenu, { type ContextMenuItem } from './ContextMenu.svelte'
 
@@ -53,14 +69,16 @@
   // Visual multi-row selection. Independent of commit inclusion — this is the
   // user's mouse-/keyboard-driven highlight, not the staged set. Lives local
   // to FileList so it survives tab switches (component stays mounted) but
-  // resets when FileList unmounts (e.g. on repo switch).
-  let rowSelection = $state<Set<string>>(new Set())
-  // Anchor for shift+click on the row BODY. Set by plain clicks; shift+clicks
-  // re-extend from this anchor without moving it, matching Finder semantics.
-  let rowAnchor = $state<string | null>(null)
-  // Anchor for shift+click on a CHECKBOX. Tracked independently so the two
-  // gestures don't bleed into each other.
+  // resets when FileList unmounts (e.g. on repo switch). The rules it follows
+  // are `listSelection.ts`'s, shared with the commit list; `raw` because a
+  // selection is a value that is replaced, never mutated.
+  let rowSelection = $state.raw<ListSelection>(EMPTY_SELECTION)
+  // Anchor for shift+click on a CHECKBOX. Tracked apart from the row
+  // selection's own anchor so the two gestures don't bleed into each other.
   let checkboxAnchor = $state<string | null>(null)
+
+  /** The list as it is drawn, by key — what every selection rule reads. */
+  const paths = $derived(files.map((f) => f.path))
 
   // ---- Virtualization --------------------------------------------------
   // Render only the rows currently in view (plus a small buffer) instead of
@@ -133,69 +151,68 @@
   const visibleFiles = $derived(files.slice(startIdx, endIdx))
   const totalHeight = $derived(files.length * ROW_HEIGHT)
 
-  /** Files between `anchorPath` and `clickedPath` inclusive, ordered as displayed. */
-  function rangeBetween(anchorPath: string | null, clickedPath: string): FileEntry[] {
-    const fallback = files.find((f) => f.path === clickedPath)
-    if (!anchorPath) return fallback ? [fallback] : []
-    const a = files.findIndex((f) => f.path === anchorPath)
-    const b = files.findIndex((f) => f.path === clickedPath)
-    if (a < 0 || b < 0) return fallback ? [fallback] : []
-    const [from, to] = a <= b ? [a, b] : [b, a]
-    return files.slice(from, to + 1)
-  }
-
-  function handleRowClick(e: MouseEvent, file: FileEntry) {
-    if (e.shiftKey && rowAnchor) {
-      const range = rangeBetween(rowAnchor, file.path)
-      rowSelection = new Set(range.map((f) => f.path))
-      // Anchor stays put — user can keep re-extending from the same spot.
-      onActivate(file)
-      return
-    }
-    rowAnchor = file.path
-    rowSelection = new Set([file.path])
-    onActivate(file)
+  /**
+   * Land a gesture on a row, and keep the diff pane on the row it landed on.
+   *
+   * The pane follows the *clicked* row — this client's rule, where the native
+   * pane holds still for a multi-row selection (FRONTEND §8). The one gesture
+   * with no row to follow is a toggle that took its row *out*: the pane then
+   * keeps the file it had while that is still selected, and otherwise moves to
+   * the first selected row.
+   */
+  function selectRow(file: FileEntry, gesture: SelectionGesture) {
+    rowSelection = applyGesture(rowSelection, paths, file.path, gesture)
+    const shown = rowSelection.keys.has(file.path)
+      ? file.path
+      : activeKey(rowSelection, paths, activeFile?.path ?? null)
+    const target = shown === file.path ? file : files.find((f) => f.path === shown)
+    if (target) onActivate(target)
   }
 
   /**
-   * Move keyboard focus + activation to another row by index: focus the new
-   * row (so the next arrow press continues navigating) and nudge it into view.
-   *
-   * With virtualization the target row may not be in the DOM yet, so we
-   * first compute and apply the scrollTop that would bring it into view,
-   * await Svelte's re-render via `tick()`, then focus the now-rendered row.
+   * Move keyboard focus and the selection to another row by index: select it
+   * (Shift extends), then bring it into view and focus it so the next arrow
+   * press continues from there.
    */
-  async function focusRowAt(index: number) {
-    const clamped = Math.max(0, Math.min(files.length - 1, index))
-    const next = files[clamped]
+  async function focusRowAt(index: number, gesture: SelectionGesture) {
+    const next = files[index]
     if (!next) return
-    rowAnchor = next.path
-    rowSelection = new Set([next.path])
-    onActivate(next)
+    selectRow(next, gesture)
+    await focusVirtualRow({
+      container: viewportEl,
+      index,
+      rowHeight: ROW_HEIGHT,
+      rowSelector: `[data-file-row-index="${index}"]`,
+      onScroll: (top) => (scrollTop = top),
+    })
+  }
 
-    if (viewportEl) {
-      const top = clamped * ROW_HEIGHT
-      const bottom = top + ROW_HEIGHT
-      const vh = viewportEl.clientHeight
-      let newScroll = viewportEl.scrollTop
-      if (top < newScroll) newScroll = top
-      else if (bottom > newScroll + vh) newScroll = bottom - vh
-      if (newScroll !== viewportEl.scrollTop) {
-        viewportEl.scrollTop = newScroll
-        // Sync state synchronously so derived ranges update before tick().
-        // Otherwise scroll events arrive asynchronously and we'd focus before
-        // the new row is rendered.
-        scrollTop = newScroll
+  function handleRowKeyDown(e: KeyboardEvent, file: FileEntry, fileIndex: number) {
+    const target = rowIndexForKey(e, fileIndex, files.length)
+    if (target !== null) {
+      // The container would scroll otherwise; move the selection instead.
+      e.preventDefault()
+      void focusRowAt(target, keyGesture(e))
+    } else if (isSelectAllChord(e)) {
+      e.preventDefault()
+      rowSelection = selectAll(rowSelection, paths)
+    } else if (e.key === 'Enter') {
+      e.preventDefault()
+      onActivate(file)
+    } else if (e.key === ' ' && showCheckbox) {
+      e.preventDefault()
+      // Bulk-toggle the visual multi-selection when one exists and the
+      // focused row is part of it; otherwise fall back to single toggle.
+      // Match the master-checkbox rule: any-excluded → include all, else
+      // exclude all.
+      if (rowSelection.keys.size > 1 && rowSelection.keys.has(file.path) && onBulkToggle) {
+        const selected = [...rowSelection.keys]
+        const anyExcluded = selected.some((p) => !selectedFiles.has(p))
+        onBulkToggle(selected, anyExcluded)
+      } else {
+        onToggle(file)
       }
     }
-
-    await tick()
-
-    const el = viewportEl?.querySelector<HTMLDivElement>(
-      `[data-file-row-index="${clamped}"]`,
-    )
-    if (!el) return
-    el.focus({ preventScroll: true })
   }
 
   function handleCheckboxClick(e: MouseEvent, file: FileEntry) {
@@ -211,8 +228,7 @@
       // including this one, via the bulk callback.
       e.preventDefault()
       const willInclude = !selectedFiles.has(file.path)
-      const range = rangeBetween(checkboxAnchor, file.path)
-      onBulkToggle?.(range.map((f) => f.path), willInclude)
+      onBulkToggle?.(rangeBetween(paths, checkboxAnchor, file.path), willInclude)
       checkboxAnchor = file.path
       return
     }
@@ -221,17 +237,23 @@
     onToggle(file)
   }
 
-  // Drop stale paths after a commit / discard / external `git rm` removes
-  // files from the working tree. Anchors that point at a file no longer in
-  // the list go null so the next plain click reseats them cleanly.
+  // Keep the highlight describing files that still exist, after a commit /
+  // discard / external `git rm` takes some out of the working tree — and when
+  // nothing the user highlighted is left, re-seat it on the file the owner has
+  // open. That second half is also what gives the file the owner opened by
+  // itself (the first one, on arrival) a selection to extend *from*, so a
+  // shift-click straight after arriving has an anchor.
+  //
+  // Keyed on the path list and the open file, not on the selection — gestures
+  // keep it valid themselves, and reading it here would re-run this on every
+  // click.
   $effect(() => {
-    const present = new Set(files.map((f) => f.path))
-    if (rowSelection.size > 0) {
-      const next = new Set([...rowSelection].filter((p) => present.has(p)))
-      if (next.size !== rowSelection.size) rowSelection = next
-    }
-    if (rowAnchor && !present.has(rowAnchor)) rowAnchor = null
-    if (checkboxAnchor && !present.has(checkboxAnchor)) checkboxAnchor = null
+    const order = paths
+    const open = activeFile?.path ?? null
+    untrack(() => {
+      rowSelection = reseated(rowSelection, order, open)
+      if (checkboxAnchor && !order.includes(checkboxAnchor)) checkboxAnchor = null
+    })
   })
 
   let masterCheckbox = $state<HTMLInputElement | null>(null)
@@ -309,15 +331,9 @@
     // Right-clicking inside a multi-row selection acts on the whole selection;
     // right-clicking elsewhere re-selects just that row first (Finder / GH
     // Desktop semantics).
-    let targets: FileEntry[]
-    if (rowSelection.has(file.path) && rowSelection.size > 1) {
-      targets = files.filter((f) => rowSelection.has(f.path))
-    } else {
-      rowAnchor = file.path
-      rowSelection = new Set([file.path])
-      onActivate(file)
-      targets = [file]
-    }
+    const targetPaths = new Set(contextTargets(rowSelection, paths, file.path))
+    if (targetPaths.size === 1) selectRow(file, 'replace')
+    const targets = files.filter((f) => targetPaths.has(f.path))
     contextMenu = { x: e.clientX, y: e.clientY, files: targets }
   }
 
@@ -433,7 +449,7 @@
           {@const fileIndex = startIdx + i}
           {@const isSelected = selectedFiles.has(file.path)}
           {@const isActive = activeFile?.path === file.path}
-          {@const isRowSelected = rowSelection.has(file.path)}
+          {@const isRowSelected = rowSelection.keys.has(file.path)}
           <div
             class="file-row virtual-row"
             class:active={isActive}
@@ -443,46 +459,11 @@
             class:submodule-dirty={file.submodule_dirty}
             data-file-row-index={fileIndex}
             style="top: {fileIndex * ROW_HEIGHT}px;"
-            onclick={(e) => handleRowClick(e, file)}
+            onclick={(e) => selectRow(file, clickGesture(e))}
             oncontextmenu={(e) => openContextMenu(e, file)}
+            onkeydown={(e) => handleRowKeyDown(e, file, fileIndex)}
             role="button"
             tabindex="0"
-            onkeydown={(e) => {
-              // Home/End first — on macOS those are Cmd+ArrowUp / Cmd+ArrowDown,
-              // so they must beat the plain Arrow branches below.
-              if (e.key === 'Home' || (e.key === 'ArrowUp' && e.metaKey)) {
-                e.preventDefault()
-                focusRowAt(0)
-              } else if (e.key === 'End' || (e.key === 'ArrowDown' && e.metaKey)) {
-                e.preventDefault()
-                focusRowAt(files.length - 1)
-              } else if (e.key === 'ArrowDown') {
-                // Navigate to next file. Default browser behavior is to scroll
-                // the container — block it so the selection moves instead, matching
-                // the desktop list pattern.
-                e.preventDefault()
-                focusRowAt(fileIndex + 1)
-              } else if (e.key === 'ArrowUp') {
-                e.preventDefault()
-                focusRowAt(fileIndex - 1)
-              } else if (e.key === 'Enter') {
-                e.preventDefault()
-                onActivate(file)
-              } else if (e.key === ' ' && showCheckbox) {
-                e.preventDefault()
-                // Bulk-toggle the visual multi-selection when one exists and the
-                // focused row is part of it; otherwise fall back to single toggle.
-                // Match the master-checkbox rule: any-excluded → include all, else
-                // exclude all.
-                if (rowSelection.size > 1 && rowSelection.has(file.path) && onBulkToggle) {
-                  const paths = [...rowSelection]
-                  const anyExcluded = paths.some((p) => !selectedFiles.has(p))
-                  onBulkToggle(paths, anyExcluded)
-                } else {
-                  onToggle(file)
-                }
-              }
-            }}
           >
             {#if showCheckbox}
               <input
@@ -688,7 +669,8 @@
   }
 
   /*
-    Visual multi-row highlight (shift+click range, mouse selection).
+    Visual multi-row highlight — every row in the selection, however it got
+    there (a shift range, a ⌘/Ctrl-click, ⌘A).
     Independent of commit inclusion (.included) and the diff-displayed
     row (.active). Subtle so a sole selection still reads as "marked"
     without competing with the active row's heavier backplate.

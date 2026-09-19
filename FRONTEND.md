@@ -535,6 +535,26 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    Extending a selection is choosing a group to act on, and the diff being read while a
    discard selection is built around it is the one thing that must not move. Which row an
    extension leaves open is where the two clients differ (§8).
+   **The History list follows the same selection contract as the file lists, from one set
+   of rules per client** (`utils/listSelection.ts`; `Services/ListSelection.swift` plus
+   AppKit's own gestures). A client MUST NOT write a second copy of these for a new list:
+   - the selection is a set keyed by a stable id (a path, a sha), never an index. Click
+     replaces it, shift-click and shift-arrow extend it from an anchor that stays put,
+     the platform modifier (⌘, or Ctrl off macOS) flips one row, ⌘A takes every loaded
+     row, and it may be non-contiguous;
+   - **a list with rows keeps at least one row selected** — the last row cannot be
+     toggled off, and nothing else clears it;
+   - **a reload prunes, then re-seats**: ids that left the list leave the selection, and
+     only when none survive does it re-seat — on the first file, on the newest commit. A
+     row the user chose is never overridden, and the trigger is the *set of ids*
+     changing, never a row's content;
+   - the detail pane shows one selected row. With no gesture to name it — a row toggled
+     off, ⌘A, a reload — that is the row already showing while it is still selected,
+     otherwise the first selected row **in list order**;
+   - what a context menu acts on is the selection **in list order**, never set order: a
+     menu that names a count, or a range of history, has to describe the rows as drawn.
+     Every History menu item acts on one commit, so a multi-row selection there raises
+     no menu.
 5. **Connectivity circuit-breaker** — after consecutive failures, back off
    (30s→5min) and gate background git ops on connectivity; recover on reconnect.
 6. **Tiered background refresh** — repos refresh in tiers (2/5/10 min) with staggered
@@ -953,7 +973,7 @@ every deliberate difference here.
 | Error surface (§6.13) | three shapes off `repoState`: a centred `ErrorModal` with git's text in a scrollable `<pre>` and an optional **Retry**, a one-line tinted strip under the header for a hand-off that didn't take (with ✕) and for the poll's streak (without), and an `error` prop rendered inside whichever dialog raised it | the same three: an `ActionFailureSheet` at a fixed width with the text mono, selectable and capped — an `.alert` cannot keep git's multi-line text legible — an `ErrorBanner` row above the split for the same two banner conditions and the same ✕ rule, and a local `errorMessage` inside the sheet that raised it. The classification is shared; only the widget is per-platform |
 | Loading presentation (§6.3, §6.2) | the diff pane dims to 0.45 over 120 ms and lays a CSS ring 48 px from the top past the 150 ms threshold; a transfer fills the sync button itself, with git's line in the status bar; no global progress indicator for an explicit reload | the same dim, the same 120 ms, the same 48 pt inset past the same threshold, drawn as a `ProgressView`; a transfer is a top-edge material banner over the content, and an explicit load (open, ⌘R) puts a linear bar in that same slot — macOS has no in-control fill to wipe across a toolbar button, and the banner is the one place both can live |
 | Background-cadence enforcement (§6.1) | the ladder is a self-scheduling `setTimeout` chain, so a WebView free to throttle a backgrounded document can only make the hidden rung *slower* than 30 s; the wake-up resync is what guarantees a current screen | an App Nap assertion is held while a repo is open, so the same ladder's timers are not coalesced away, and the hidden rung is exactly 30 s (`AppNapSuppressor`) |
-| File-list selection & keyboard (§6.4) | two anchors and hand-rolled key handling: shift-click on the row body extends from a sticky row anchor, shift-click on a checkbox range-toggles from a second one that *does* move, and Home/End jump to first/last. Plain click and ⌘-click both collapse to one row. An extension **activates the shift-clicked row**, so the diff follows the far end | one `List(selection: Set<String>)`, so the range and multi-row gestures are AppKit's own and behave like every other macOS list, and the checkbox column has no separate anchor. The gesture that produced a selection is not recoverable from a `Set`, so an extension leaves the diff on the row it was already showing rather than guessing which row was clicked |
+| List selection & keyboard, file lists and History (§6.4) | hand-rolled gestures from one module, `utils/listSelection.ts`: click, shift-click and shift-arrow from a sticky anchor, the platform modifier to flip one row, ⌘A, Home/End. The file list's checkbox column keeps a second anchor of its own, which *does* move, for range-toggling inclusion. A gesture **activates the row it landed on**, so the detail pane follows the far end of an extension and a row ⌘-clicked in | one `List(selection: Set<String>)` per list, so the range and multi-row gestures are AppKit's own and behave like every other macOS list, and the checkbox column has no separate anchor. The gesture that produced a selection is not recoverable from a `Set`, so an extension leaves the detail pane on the row it was already showing rather than guessing which row was clicked. AppKit allows an empty selection, so "a list with rows keeps a selection" is a write-back here (`maintainsSelection`) rather than a gesture that never happens |
 | Relative-date tick gating (§6.12) | one `setInterval` that skips its own body while `document.hidden` or the pane has no height — the pane stays mounted behind the other tab, so the tick has to test for it | a `.task` keyed on `BackgroundSchedulingPolicy.canTickRelativeDates`, torn down and rebuilt with the predicate; the History pane is *removed* from the hierarchy on a tab change, so "is the pane showing?" needs no test at all. Rebuilding also re-reads the clock at once, so a window returning from an hour hidden is current immediately |
 | Pending-count placement (§6.2) | `↓N` / `↑N` capsules on the sync button's trailing edge, each with its own arrow | plain `↑N ↓N` text in its own toolbar item left of the button: macOS renders a toolbar control's label as text and icon only, so no custom view can ride the face, and no system API badges a toolbar item |
 | Transfer progress surface | inside the control that started it — a fill wiping across the sync button, sweeping where git reports no percentage | a full-width strip under the toolbar with a real indeterminate state, plus git's line verbatim |

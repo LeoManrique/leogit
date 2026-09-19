@@ -40,7 +40,7 @@ struct ChangedFileList<Leading: View, Menu: View>: View {
     /// SwiftUI decides which, and re-selects in the second case — so a menu
     /// raised over an unselected row can never act on a file the user is not
     /// looking at. Over a multi-row selection it acts on all of them, which the
-    /// diff pane deliberately does not follow (`FileListSelection`).
+    /// diff pane deliberately does not follow (`ListSelection`).
     let menu: ([FileEntry]) -> Menu
 
     /// Whether `menu` builds anything. Attaching the modifier unconditionally
@@ -89,7 +89,7 @@ struct ChangedFileList<Leading: View, Menu: View>: View {
             list.contextMenu(forSelectionType: String.self) { paths in
                 // In list order, not set order: a menu that names a count has
                 // to act on a stable set, and every caller reports paths.
-                let targets = files.filter { paths.contains($0.path) }
+                let targets = ListSelection.targets(paths, in: files)
                 if !targets.isEmpty {
                     menu(targets)
                 }

@@ -1,12 +1,33 @@
 <script lang="ts">
-  import { tick } from 'svelte'
   import type { CommitInfo } from '$lib/api/commands'
+  import {
+    activeKey,
+    applyGesture,
+    clickGesture,
+    contextTargets,
+    isSelectAllChord,
+    keyGesture,
+    rowIndexForKey,
+    selectAll,
+    type ListSelection,
+    type SelectionGesture,
+  } from '$lib/utils/listSelection'
+  import { focusVirtualRow } from '$lib/utils/virtualList'
   import ContextMenu, { type ContextMenuItem } from './ContextMenu.svelte'
   import Icon from './Icon.svelte'
 
   interface Props {
     commits: CommitInfo[]
-    selectedSha: string | null
+    /**
+     * The highlighted rows, by sha — a **set**, because the history actions act
+     * on several commits at once. Owned by the parent, which is what re-seats it
+     * when a re-read drops the commits it named; this list only proposes the
+     * next one, through `onSelect`. The rules are `listSelection.ts`'s, shared
+     * with the changed-file list.
+     */
+    selection: ListSelection
+    /** The one commit whose detail the pane shows; always one of `selection`. */
+    activeSha: string | null
     unpushedShas?: Set<string>
     /**
      * Whether the backend was able to resolve an upstream ref (explicit or
@@ -39,7 +60,13 @@
      * `get_log` resolves on a repo that does have commits.
      */
     loaded?: boolean
-    onSelect: (commit: CommitInfo) => void
+    /**
+     * A gesture changed the selection. `active` is the commit the detail pane
+     * should now show: the row the gesture landed on, which is this client's
+     * rule where the native pane holds still for a multi-row selection
+     * (FRONTEND §8).
+     */
+    onSelect: (selection: ListSelection, active: CommitInfo) => void
     onLoadMore: () => void
     onAmendCommit?: (commit: CommitInfo) => void
     onUndoCommit?: (commit: CommitInfo) => void
@@ -48,7 +75,8 @@
 
   let {
     commits = [],
-    selectedSha = null,
+    selection,
+    activeSha = null,
     unpushedShas = new Set<string>(),
     hasResolvedUpstream = false,
     headSha = '',
@@ -61,19 +89,47 @@
     onCheckoutCommit,
   }: Props = $props()
 
+  /** The list as it is drawn, by key — what every selection rule reads. */
+  const shas = $derived(commits.map((c) => c.sha))
+
+  /**
+   * Land a gesture on a row and tell the parent, along with the commit the
+   * detail pane should follow to. That is the row itself — except for a toggle
+   * that took the row *out* of the selection, where the pane keeps the commit it
+   * had while that is still selected and otherwise moves to the first selected
+   * row.
+   */
+  function selectRow(commit: CommitInfo, gesture: SelectionGesture) {
+    const next = applyGesture(selection, shas, commit.sha, gesture)
+    const shown = next.keys.has(commit.sha) ? commit.sha : activeKey(next, shas, activeSha)
+    // Nothing moved — a click on the one row already selected and showing.
+    if (next === selection && shown === activeSha) return
+    const active = shown === commit.sha ? commit : commits.find((c) => c.sha === shown)
+    if (active) onSelect(next, active)
+  }
+
   let contextMenu = $state<{ x: number; y: number; commit: CommitInfo } | null>(null)
 
   /**
-   * Right-click selects the row it opens on, so the menu and the detail pane
-   * below can never describe two different commits. Native gets this from
-   * `contextMenu(forSelectionType:)` and this client's own file list already
-   * did it by hand; only here did the menu act on a commit the pane wasn't
-   * showing.
+   * Right-click acts on the whole selection when it lands inside a multi-row
+   * one, and otherwise selects the row it opens on first — so the menu and the
+   * detail pane can never describe different commits. Native gets this from
+   * `contextMenu(forSelectionType:)`; the rule here is `contextTargets`, the
+   * file list's.
+   *
+   * The targets come back in list order, newest first: a set has no order, and
+   * every history action names a *range*.
    */
   function openContextMenu(e: MouseEvent, commit: CommitInfo) {
+    // Always ours: a right-click that raises nothing must not fall through to
+    // the WebView's own menu.
     e.preventDefault()
     e.stopPropagation()
-    if (commit.sha !== selectedSha) onSelect(commit)
+    const targets = contextTargets(selection, shas, commit.sha)
+    // Every item below acts on one commit, so a multi-row selection has no
+    // menu to raise — and keeps its rows, which is the point of the rule above.
+    if (targets.length > 1) return
+    selectRow(commit, 'replace')
     contextMenu = { x: e.clientX, y: e.clientY, commit }
   }
 
@@ -196,37 +252,21 @@
   }
 
   /**
-   * Move keyboard focus and the selection to another row, scrolling it into
-   * view first so a virtualized row that isn't mounted yet exists by the time
-   * we reach for it. The file list's `focusRowAt`, which is where the pattern
-   * and its `tick()` ordering are explained — this was the one list in the app
-   * an arrow key did nothing in, so a keyboard user had to tab through every
-   * commit to reach the next one.
+   * Move keyboard focus and the selection to another row (Shift extends), then
+   * bring it into view and focus it so the next arrow press continues from
+   * there — the file list's `focusRowAt`.
    */
-  async function focusRowAt(index: number) {
-    const clamped = Math.max(0, Math.min(commits.length - 1, index))
-    const next = commits[clamped]
+  async function focusRowAt(index: number, gesture: SelectionGesture) {
+    const next = commits[index]
     if (!next) return
-    onSelect(next)
-
-    if (scrollContainer) {
-      const top = clamped * ROW_HEIGHT
-      const bottom = top + ROW_HEIGHT
-      const vh = scrollContainer.clientHeight
-      let newScroll = scrollContainer.scrollTop
-      if (top < newScroll) newScroll = top
-      else if (bottom > newScroll + vh) newScroll = bottom - vh
-      if (newScroll !== scrollContainer.scrollTop) {
-        scrollContainer.scrollTop = newScroll
-        // Synchronously, so the derived visible range updates before tick().
-        scrollTop = newScroll
-      }
-    }
-
-    await tick()
-    scrollContainer
-      ?.querySelector<HTMLDivElement>(`[data-commit-row-index="${clamped}"]`)
-      ?.focus({ preventScroll: true })
+    selectRow(next, gesture)
+    await focusVirtualRow({
+      container: scrollContainer,
+      index,
+      rowHeight: ROW_HEIGHT,
+      rowSelector: `[data-commit-row-index="${index}"]`,
+      onScroll: (top) => (scrollTop = top),
+    })
   }
 
   function getVisibleRange() {
@@ -288,24 +328,25 @@
   }
 
   function handleRowKeyDown(e: KeyboardEvent, commit: CommitInfo, index: number) {
-    // Home/End first — on macOS those arrive as Cmd+ArrowUp / Cmd+ArrowDown,
-    // so they have to beat the plain Arrow branches below.
-    if (e.key === 'Home' || (e.key === 'ArrowUp' && e.metaKey)) {
-      e.preventDefault()
-      focusRowAt(0)
-    } else if (e.key === 'End' || (e.key === 'ArrowDown' && e.metaKey)) {
-      e.preventDefault()
-      focusRowAt(commits.length - 1)
-    } else if (e.key === 'ArrowDown') {
+    const target = rowIndexForKey(e, index, commits.length)
+    if (target !== null) {
       // The container would scroll otherwise; move the selection instead.
       e.preventDefault()
-      focusRowAt(index + 1)
-    } else if (e.key === 'ArrowUp') {
+      void focusRowAt(target, keyGesture(e))
+    } else if (isSelectAllChord(e)) {
+      // Every *loaded* commit — the rows that exist to be selected. The pane
+      // holds still: the commit it shows is among them.
       e.preventDefault()
-      focusRowAt(index - 1)
+      const all = selectAll(selection, shas)
+      const active = commits.find((c) => c.sha === activeKey(all, shas, activeSha))
+      if (active) onSelect(all, active)
     } else if (e.key === 'Enter' || e.key === ' ') {
+      // Activation, for a row reached by Tab and so focused without being
+      // selected. On a row that already is, it does nothing: Space is the file
+      // list's bulk toggle, and a hand that presses it here out of habit must
+      // not collapse the selection it just built.
       e.preventDefault()
-      onSelect(commit)
+      if (!selection.keys.has(commit.sha)) selectRow(commit, 'replace')
     }
   }
 
@@ -393,11 +434,12 @@
         {@const isUnpushed = unpushedShas.has(commit.sha)}
         <div
           class="commit-row"
-          class:selected={commit.sha === selectedSha}
+          class:selected={commit.sha === activeSha}
+          class:row-selected={selection.keys.has(commit.sha)}
           class:striped={rowIndex % 2 === 1}
           data-commit-row-index={rowIndex}
           title={formatDateAbsolute(commit.author_date)}
-          onclick={() => onSelect(commit)}
+          onclick={(e) => selectRow(commit, clickGesture(e))}
           oncontextmenu={(e) => openContextMenu(e, commit)}
           onkeydown={(e) => handleRowKeyDown(e, commit, rowIndex)}
           role="button"
@@ -535,6 +577,16 @@
   }
 
   .commit-row:hover {
+    background: var(--surface-hover);
+  }
+
+  /*
+    Selection is a set (STYLE.md, *Changes list*): every highlighted row takes
+    the lighter tint, and the one row whose detail is showing keeps the heavier
+    plate — `FileList.svelte`'s `.row-selected` and `.active`, in that order for
+    the same source-order reason as the stripe above.
+  */
+  .commit-row.row-selected {
     background: var(--surface-hover);
   }
 

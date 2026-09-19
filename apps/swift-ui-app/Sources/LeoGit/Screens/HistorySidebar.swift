@@ -17,10 +17,17 @@ struct HistorySidebar: View {
     /// over a read that is still in flight.
     let historyLoaded: Bool
 
-    /// The commit whose detail the main content shows, keyed by sha so it
-    /// survives a log refresh that replaces every row value (same idea as
-    /// the Changes tab's path selection). Owned by the repository screen:
-    /// the detail lives on the far side of the split.
+    /// The highlighted commits, keyed by sha so they survive a log refresh that
+    /// replaces every row value (same idea as the Changes tab's path
+    /// selection). A **set**, because the history actions act on several commits
+    /// at once; shift-click, ⌘-click, shift-arrow and ⌘A are AppKit's. Owned by
+    /// the repository screen: a tab switch rebuilds this view, and the detail
+    /// lives on the far side of the split.
+    @Binding var selection: Set<String>
+
+    /// The commit whose detail the main content shows. Derived from `selection`
+    /// through `ListSelection`, which is the one place that rule lives: it
+    /// follows a single-row selection and holds still for a multi-row one.
     @Binding var selectedSha: String?
 
     /// Ask the owner for another page when the list nears its last row.
@@ -71,13 +78,9 @@ struct HistorySidebar: View {
                 EmptyListPlaceholder(text: "Loading history…")
             }
         }
-        .onChange(of: commits.map(\.sha), initial: true) {
-            // Keep something selected: newest commit on arrival, and again
-            // when a refresh drops the selected sha (an amend).
-            if selectedSha == nil || !commits.contains(where: { $0.sha == selectedSha }) {
-                selectedSha = commits.first?.sha
-            }
-        }
+        // Keep something selected: the newest commit on arrival, and again when
+        // a refresh drops every selected sha — which is what an amend does.
+        .maintainsSelection($selection, showing: $selectedSha, of: commits)
         .sheet(item: $commitToCheckout) { commit in
             CheckoutCommitSheet(commit: commit) { await onCheckout(commit) }
         }
@@ -101,7 +104,7 @@ struct HistorySidebar: View {
         // is that it restores the *selection*, so a deep scroll made without
         // selecting anything still comes back at the top.
         return ScrollViewReader { proxy in
-            List(commits, selection: $selectedSha) { commit in
+            List(commits, selection: $selection) { commit in
                 CommitRow(
                     commit: commit,
                     isUnpushed: unpushed.contains(commit.sha),
@@ -116,7 +119,11 @@ struct HistorySidebar: View {
             .listStyle(.inset)
             .alternatingRowBackgrounds()
             .contextMenu(forSelectionType: String.self) { shas in
-                if let sha = shas.first, let commit = commits.first(where: { $0.sha == sha }) {
+                // In list order, newest first — a set has no order, and every
+                // history action names a *range*. Every item in `rowMenu` acts
+                // on one commit, so a multi-row selection raises no menu.
+                let targets = ListSelection.targets(shas, in: commits)
+                if targets.count == 1, let commit = targets.first {
                     rowMenu(for: commit)
                 }
             }

@@ -64,6 +64,7 @@
     type ActivityState,
   } from '$lib/services/backgroundPolicy'
   import { pacedLoop } from '$lib/services/pacedLoop'
+  import { activeKey, reseated, type ListSelection } from '$lib/utils/listSelection'
 
   import Header from '$lib/components/Header.svelte'
   import Icon from '$lib/components/Icon.svelte'
@@ -995,6 +996,22 @@
     if (active) loadCommitFileDiff(active, { force: true, showAnyway: true })
   }
 
+  /**
+   * Set History's selection and the commit its detail pane shows — the one
+   * writer of the pair, so the highlighted rows and the open commit cannot
+   * drift. `active` is always one of `selection`, or `null` with an empty one.
+   */
+  function selectCommits(selection: ListSelection, active: CommitInfo | null): void {
+    // Checked out here rather than inside `update`: a store publishes any object
+    // it is handed, the same one included, so returning `s` would still wake
+    // every subscriber. The selection rules return the same object when
+    // nothing changed, which is what makes this identity test enough.
+    if (get(repoState).historySelection !== selection) {
+      repoState.update((s) => ({ ...s, historySelection: selection }))
+    }
+    void loadCommitFiles(active)
+  }
+
   async function loadCommitFiles(commit: CommitInfo | null): Promise<void> {
     // Re-selecting the commit already open blanked the pane and refetched
     // everything it was showing, for a row the user clicked because it was
@@ -1399,10 +1416,15 @@
   /*
     The History tab's half of the same rule, and native's exact two conditions:
     keep the newest commit selected on arrival, and re-seat when a refresh drops
-    the selected sha — which is what an amend or an undo does to it. Landing on
+    every selected sha — which is what an amend or an undo does to it. Landing on
     "Select a commit" beside a list of commits is the same wasted click the
     changes pane used to ask for, and rendering the detail of a commit that has
     been rewritten away is worse than empty: it is wrong.
+
+    The selection is a set, so a re-read first prunes it (`reseated`) and only
+    falls back to the newest commit when nothing the user chose is left; the
+    pane then shows what `activeKey` says — the commit it had while that is still
+    selected, otherwise the first selected row.
 
     Keyed on the *sha list*, and only while History is the visible tab — the
     pane stays mounted behind Changes, and selecting into it there would spend a
@@ -1420,9 +1442,11 @@
     untrack(() => {
       if (!key) return
       const current = get(repoState)
-      const selected = current.activeCommit?.sha
-      if (selected && current.log.commits.some((c) => c.sha === selected)) return
-      void loadCommitFiles(current.log.commits[0] ?? null)
+      const commits = current.log.commits
+      const order = commits.map((c) => c.sha)
+      const selection = reseated(current.historySelection, order, order[0] ?? null)
+      const shown = activeKey(selection, order, current.activeCommit?.sha ?? null)
+      selectCommits(selection, commits.find((c) => c.sha === shown) ?? null)
     })
   })
 
@@ -2426,13 +2450,14 @@
         <div class="commit-list-container">
           <CommitList
             commits={$repoState.log.commits}
-            selectedSha={$repoState.activeCommit?.sha || null}
+            selection={$repoState.historySelection}
+            activeSha={$repoState.activeCommit?.sha ?? null}
             unpushedShas={$repoState.status.unpushedShas}
             hasResolvedUpstream={$repoState.status.upstream !== ''}
             headSha={$repoState.status.headSha}
             resetSeq={$repoState.log.resetSeq}
             loaded={$repoState.log.loaded}
-            onSelect={loadCommitFiles}
+            onSelect={selectCommits}
             onLoadMore={loadMoreCommits}
             onAmendCommit={handleStartAmending}
             onUndoCommit={handleUndoCommit}

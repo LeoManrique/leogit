@@ -810,7 +810,8 @@ stable `VStack` whose *content* switches on the tab, so the split — and its di
 — is never rebuilt by a tab change or an empty list. The previous shape, a per-tab
 `HSplitView` swapped out wholesale and replaced by a full-width empty state on a clean tree,
 is what made the composer vanish and the terminal span the window. Each tab's selection
-(`changesSelection` + the `selectedPath` derived from it, and `selectedSha`) is `@State` in
+(`changesSelection` + the `selectedPath` derived from it, and `historySelection` + the
+`selectedSha` derived from it) is `@State` in
 `ContentView` because the list and its detail now sit on opposite sides of the split — and
 because a tab switch rebuilds the pane, which would otherwise drop the highlight every time
 someone looked at History. The sidebars re-seed it on list change and the detail panes only
@@ -881,14 +882,28 @@ actions work for free: it hands the builder the **whole selection** when the rig
 inside one and just the clicked row otherwise, which is the Tauri rule without the Tauri
 bookkeeping.
 
-**Selection is a `Set`, and the shown file is derived from it.** `List(selection: Set<String>)`
-brings shift-click, shift-arrow and the rest from AppKit, so no anchors are tracked by hand;
-what a `Set` cannot carry is *which* row a gesture landed on, so `Services/FileListSelection.swift`
-answers the one question the diff pane has — a single-row selection is the choice and the pane
-follows it, a multi-row one leaves the pane on the file it was showing, and a fallback picks the
+**Selection is a `Set`, and the shown row is derived from it** — in the file lists and the
+commit list alike. `List(selection: Set<String>)`
+brings shift-click, ⌘-click, shift-arrow and ⌘A from AppKit, so no anchors are tracked by hand;
+what a `Set` cannot carry is *which* row a gesture landed on, so `Services/ListSelection.swift`
+— generic over any `Identifiable` row — answers the questions a set leaves open. `activeID` is
+the one the detail pane has: a single-row selection is the choice and the pane
+follows it, a multi-row one leaves the pane on the row it was showing, and a fallback picks the
 first selected row in **list** order rather than `Set.first`, which is a hash order and would
-land differently from one launch to the next. Both file lists route through it: the Changes tab
-via `ChangesSidebar`, the commit detail via `CommitDetailStore.selectionChanged()`. Space is an
+land differently from one launch to the next. `reseated` prunes ids that left the list and
+re-seats on the first row only when none survive, and `targets` puts a context menu's ids back
+into list order. All three lists — the two sidebars and the commit detail's file list — apply
+them through one modifier,
+`maintainsSelection(_:showing:of:)` (`Design/ListSelectionMaintenance.swift`), at the two moments
+the rules can stop holding: the list's *ids* changing, and the selection changing. The second is
+also where **a list with rows keeps a selection** — AppKit lets ⌘-click take the last row out
+and a click below the rows clear them all, and the modifier writes the previous selection back.
+It is a write-back from `onChange` rather than a binding whose setter refuses the empty set,
+deliberately: the table has already drawn the deselection by then, and only a state change makes
+it draw the selection again. The write-back cannot tell a user's click from an owner clearing the
+set, so a clear only sticks when the rows empty with it — which is what a repository switch does.
+`CommitDetailStore.load` additionally seeds its selection and shown file in the step that
+publishes the files, so the commit detail never draws a frame with a list and nothing open. Space is an
 `.onKeyPress` on the list rather than on a row, since the selection — not a focus ring — is what
 it acts on; a focused row checkbox still gets its own Space first, because AppKit gives a focused
 control the key before the view behind it.
@@ -1313,6 +1328,17 @@ The file checkbox state is **opt-out**: every change reported by `git status` is
 **The window has two terms, and each covers what the other cannot.** It is **wall-clock**, not a count of ticks, because the poll's cadence is 2 s or 30 s depending on where the window is and "fifteen ticks" would mean anything from half a minute to seven; the caller passes the time actually elapsed, so a tick skipped for a transfer neither shortens nor extends anything. But elapsed time alone fails at the other end of that same ladder: at the 30 s rung a single read is charged the whole window, and a transfer can hand over minutes in one lump, so a purely time-based rule would drop the opt-out on the **first** look — which is exactly the look that can land in the half-second a formatter has the file renamed away. Hence `EXCLUSION_GRACE_READS`: two consecutive misses cannot be one unlucky read, at any cadence. Both counters advance on **every** tick, outside the equality gate, because a path is dropped for having been *absent* long enough — which an unchanged file list keeps being true of — and a single reappearance **resets** both, so a file edited repeatedly through a formatter never accumulates its way out of the set.
 
 Both clients keep the clocks beside their exclusion set rather than inside it — every reader of that set asks "is this path excluded?", and a map of clocks would make each of them carry the answer to a different question — and rebuild both wholesale from core's answer, so they cannot drift apart. The crossing is skipped entirely while nothing is excluded, which is the usual state of the app, so the poll pays for this only once the user has actually unchecked something. `resetPollState()` clears the clocks with the rest of the per-repository poll memory on a switch; natively `CommitStore.reset()` does.
+
+### Row selection (Tauri)
+
+The changed-file list and the commit list share one set of selection rules, [utils/listSelection.ts](apps/tauri-app/src/lib/utils/listSelection.ts), and keep their own rows, paging and menus — the *rules* are what would otherwise be written twice. A selection is a `ListSelection`: a set of row keys (a path, a sha — never an index, so a reload that replaces every row value keeps the highlight) plus the anchor a shift gesture extends from. Everything in the module is a pure function of the selection and of `order`, the list's keys as drawn, and **returns the same object when nothing changed**, so an identity test is all a caller needs to skip a no-op: `selectCommits` makes it *before* touching `repoState`, because a Svelte store publishes any object it is handed, the same one included. It is also why `FileList` holds its selection in `$state.raw` — a selection is replaced, never mutated, and a deep proxy would break the identity check.
+
+- **Gestures** — `clickGesture` and `keyGesture` turn an event into `replace`, `extend` or `toggle` (the toggle modifier is `platformModifierHeld`, ⌘ on macOS and Ctrl elsewhere, read before Shift), and `applyGesture` lands it: an extend *replaces* the selection with the range from the anchor and leaves the anchor put (Finder's rule), a toggle cannot take the last row out, and toggling the anchor off hands it to the first row still selected. `rowIndexForKey` is the arrow / Home / End arithmetic and `isSelectAllChord` the ⌘A test.
+- **`reseated`** prunes keys that left the list and, only when none survive, re-seats on a fallback the owner names — the file the pane has open, the newest commit.
+- **`contextTargets`** is the right-click rule: the whole selection in **list order** when the click lands inside a multi-row one, otherwise that row alone, which the list then selects.
+- **`activeKey`** is which single row a detail pane shows when no gesture names one — a row toggled off, ⌘A, a reload: the row already showing while it is still selected, otherwise the first selected row in list order. It is the native `ListSelection.activeID`, rule for rule.
+
+`FileList` keeps its selection locally (plus the checkbox column's own anchor, which only it uses). History's lives in `repoState.historySelection` beside `activeCommit`, with `selectCommits` in `MainLayout` as the one writer of the pair — hoisted because an operation that rewrites history has to be able to *set* the selection to the commits it produced. Moving focus to a row that may not be mounted yet is [utils/virtualList.ts](apps/tauri-app/src/lib/utils/virtualList.ts)'s `focusVirtualRow`, shared by both lists: apply the `scrollTop`, hand it to the list synchronously so the visible range re-derives, `tick()`, then focus.
 
 ### Icons
 

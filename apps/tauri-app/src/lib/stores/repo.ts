@@ -8,6 +8,7 @@ import type {
   ParsedDiff,
   SyncProposal,
 } from '$lib/api/commands'
+import { EMPTY_SELECTION, type ListSelection } from '$lib/utils/listSelection'
 
 export type ActiveTab = 'changes' | 'history'
 
@@ -94,6 +95,14 @@ export interface RepoState {
    */
   isDiffLoadingSlow: boolean
   activeTab: ActiveTab
+  /**
+   * The commits highlighted in History, by sha. A **set**, because the history
+   * actions act on several commits at once; `activeCommit` is the one of them
+   * whose detail the pane shows. Held here rather than in `CommitList` because
+   * the operations that rewrite history have to be able to *set* it — to the
+   * commits they produced.
+   */
+  historySelection: ListSelection
   activeCommit: CommitInfo | null
   activeCommitFiles: FileEntry[]
   /** Aggregate +adds/-dels for the active commit; null until fetched. */
@@ -178,6 +187,7 @@ const defaultState: RepoState = {
   isDiffLoading: false,
   isDiffLoadingSlow: false,
   activeTab: 'changes',
+  historySelection: EMPTY_SELECTION,
   activeCommit: null,
   activeCommitFiles: [],
   activeCommitStats: null,

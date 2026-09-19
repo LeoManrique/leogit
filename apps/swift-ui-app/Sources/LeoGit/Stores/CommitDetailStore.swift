@@ -21,19 +21,12 @@ final class CommitDetailStore {
     /// down the list.
     var selection: Set<String> = []
 
-    /// The file whose diff the detail pane shows, derived from `selection`
-    /// through `FileListSelection` — the one place that rule lives. Auto-set to
-    /// the first file when a commit loads, like the Changes tab's list.
-    private(set) var selectedPath: String?
-
-    /// Re-derive the shown file after the highlight moved.
-    func selectionChanged() {
-        selectedPath = FileListSelection.activePath(
-            in: selection,
-            of: files,
-            keeping: selectedPath
-        )
-    }
+    /// The file whose diff the detail pane shows. Derived from `selection` by
+    /// the list's `maintainsSelection`, like the two sidebars' — which is why
+    /// the view can write it. `load` seeds both with the first file in the
+    /// same step that publishes the files, so the pane never draws a frame with
+    /// a list and nothing open.
+    var selectedPath: String?
 
     /// Guards against a superseded load writing over a newer one — the
     /// blocking FFI calls cannot be interrupted, so a stale task may resume

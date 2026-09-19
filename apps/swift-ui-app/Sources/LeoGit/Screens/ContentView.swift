@@ -156,11 +156,13 @@ struct ContentView: View {
     /// detail sit on opposite sides of the split — and so a round trip
     /// through the other tab comes back to the same file or commit.
     ///
-    /// The Changes list highlights a *set* of rows, since a discard can act on
-    /// several at once; `selectedPath` is the one whose diff shows, derived
-    /// from that set by `FileListSelection`.
+    /// Both lists highlight a *set* of rows — a discard acts on several files
+    /// at once, the history actions on several commits — and each tab's pane
+    /// shows one of them: `selectedPath` and `selectedSha`, derived from the
+    /// sets by `ListSelection`.
     @State private var changesSelection: Set<String> = []
     @State private var selectedPath: String?
+    @State private var historySelection: Set<String> = []
     @State private var selectedSha: String?
 
     /// One attempt per launch at picking the repository to open by itself.
@@ -352,6 +354,7 @@ struct ContentView: View {
                 // The sidebars re-seed these from the new repository's lists.
                 changesSelection = []
                 selectedPath = nil
+                historySelection = []
                 selectedSha = nil
                 // Sessions never survive a repo switch — a shell from the prior
                 // repo would be a leak wearing the new repo's dock.
@@ -581,6 +584,7 @@ struct ContentView: View {
                     commits: store.commits,
                     status: store.status,
                     historyLoaded: store.historyLoaded,
+                    selection: $historySelection,
                     selectedSha: $selectedSha,
                     onReachEnd: { Task { await store.loadMoreHistory() } },
                     policy: schedulingPolicy,
