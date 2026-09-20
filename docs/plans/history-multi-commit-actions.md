@@ -1,14 +1,17 @@
 # Plan — History multi-commit actions (cherry-pick, squash, reorder)
 
-> Status: **WS-A (a selection that is a set, `5ff2a4c`) and WS-B (operations in
-> progress, `d0b68df`) are built, confirmed and committed. WS-C (cherry-pick,
-> the preflight, and the window-wide write gate) is built in both clients,
-> 2026-09-20, and awaits the owner's visual check; WS-D (force push
-> recommended) is next — do not start it before that check.** The owner's decisions
+> Status: **WS-A (a selection that is a set, `5ff2a4c`), WS-B (operations in
+> progress, `d0b68df`) and WS-C (cherry-pick, the preflight and the window-wide
+> write gate, `ff0e195`) are built, confirmed and committed. WS-D (force push
+> recommended) is built in both clients, 2026-09-20, and awaits the owner's
+> visual check; WS-E (the rewrite driver and squash) is next — do not start it
+> before that check.** The owner's decisions
 > are marked **Decided**; the ones this plan made on its own are marked
-> **Proposed** and are open to change until their workstream starts. No question
-> is open; §9 records the standing decision on where rewriting runs. §3 describes
-> the code as it stands *after* WS-C, and §4.2 – §4.4, §5.1 – §5.3 record what
+> **Proposed** and are open to change until their workstream starts. One question
+> is open and is the owner's — whether network transfers and repository writes
+> exclude each other (§5.2) — and nothing in WS-E … WS-G waits on it; §9 records
+> the standing decision on where rewriting runs. §3 describes
+> the code as it stands *after* WS-D, and §4.2 – §4.6, §5.1 – §5.3 record what
 > the next workstreams inherit.
 > Produced from a three-way read of the native client, the Tauri client, and
 > the GitHub Desktop source at
@@ -215,11 +218,20 @@ in History also switches back to the branch it came from
 clients re-read first and report second**, because a continue that stops again
 has still moved the repository.
 
-**Sync** — `SyncProposal` (`core/src/git.rs`) has no force-push rung: a
-diverged branch proposes *Pull* and force-push-with-lease sits under the
-chevron (`SyncControls.swift`, `Header.svelte`). `ROADMAP.md`'s
-*Force-push-recommended detection* item already files the promoted state as "a
-new `SyncProposal` variant plus each client's word for it".
+**Sync** (WS-D) — `core/src/sync_ladder.rs` holds `SyncProposal`, the ladder
+`propose(status, rewritten_away)` and the reflog probe
+`upstream_was_rewritten_away`; `get_status` (`git.rs`) wires them. A branch
+diverged by its own rewrite proposes **`ForcePush`**, anything else diverged
+proposes *Pull*, and each keeps the other under its chevron. **A squash or a
+reorder of pushed commits needs nothing more from the sync button**: the
+rebase leaves the old tip in the branch's reflog, and the next status read
+proposes Force Push by itself
+(`sync_proposes_force_push_after_a_rebase_of_pushed_commits`). Each client
+states a rung's presentation once, over the whole enum — `SYNC_FACES` in
+`Header.svelte`, `Services/SyncFace.swift` — so a new rung is a compile error
+at every site; `utils/assertNever.ts` is there for any other `switch` over a
+core union. `git.rs` also lends `run_git_with_stdin` (feed git a list on
+stdin, judge the exit status yourself).
 
 **Surfaces** — one sheet slot per window on the native side, driven by
 `RootSheet` (the enum at the foot of `ContentView.swift`, which now has a
@@ -235,7 +247,8 @@ banner (`reportNotice` in `stores/repo.ts` and its native counterpart).
 
 The core lives beside `git.rs`, which is already 4 000+ lines, in modules
 split by responsibility: `core/src/operation.rs` (built — detect, continue,
-abort), `core/src/git_version.rs` (built — the floor), and
+abort), `core/src/git_version.rs` (built — the floor),
+`core/src/sync_ladder.rs` (built — the sync proposal and the reflog test), and
 `core/src/history_rewrite.rs` for everything that *starts* an operation — the
 preflight and cherry-pick are built; the rewrite driver, squash, reorder and
 undo go there too. It reuses the `pub(crate)` helpers §3 lists.
@@ -479,33 +492,72 @@ the todo the same line would amend the last replayed commit instead. The message
 inside or adjacent to a contiguous selection) with `success: true` and an
 unchanged tip rather than an error.
 
-### 4.6 Force push recommended (FP)
+### 4.6 Force push recommended (FP) — built (WS-D)
 
-**FP-1 — `SyncProposal::ForcePush`**, stateless. When the branch has diverged
-(ahead > 0 *and* behind > 0), the core asks whether the upstream tip is
-reachable from any entry of the local branch's reflog:
+**FP-1 — `SyncProposal::ForcePush`**, stateless, and **FP-2** — the force push
+is a lease core pins and grants itself
+(`--force-with-lease=refs/heads/<b>:<sha>`, `sync_ladder::force_push_lease`).
+The contract is `FRONTEND.md` §6.2 and the mechanics are `TECHNICAL.md` (*Sync
+proposal*). What the later workstreams inherit, and where this differs from the
+plan's first draft:
 
-```
-git rev-list -1 --stdin      # stdin: <upstream>, then ^<sha> per reflog entry
-```
-
-Empty output means *the upstream is a commit this branch used to contain* —
-the divergence is our own rewrite, and the ladder proposes **Force Push**
-(with lease, as today). Anything else stays **Pull**. This is the same test
-`git push --force-if-includes` applies, it needs no remembered state, it
-survives a restart, and it is right for an amend and for a rebase done in the
-terminal (§2 flaw 3; verified in both directions, §4.8-7). It costs one or two
-subprocesses **only while diverged**, cached on `(head_sha, upstream_sha)`.
-The reflog goes in on stdin, never argv, so its length is not a limit.
-**Every doubt reads as Pull**: no reflog at all, a non-zero exit from a pruned
-object, or the pre-rewrite tip having aged out of the reflog
-(`gc.reflogExpireUnreachable`, 30 days by default) all leave the ladder where
-it is today, with force push still under the chevron (verified, §4.8-7).
-This closes `ROADMAP.md`'s *Force-push-recommended detection* item.
-
-**FP-2** — the force push itself gains `--force-if-includes` beside
-`--force-with-lease`, so a fetch that landed between the proposal and the
-click cannot make the lease pass over a foreign commit.
+- **Not git's `--force-if-includes`, which the draft named.** It is the same
+  reflog test with a defect (git 2.54, `remote.c`, `is_reachable_in_reflog`):
+  the walk over the local reflog is bounded by the newest entry of the
+  **remote-tracking** ref's reflog, and that timestamp is read uninitialised
+  when the ref has none — every `refs/remotes/origin/*` of a fresh clone until
+  a fetch *moves* it. Measured: `init` + `push -u` + amend → accepted; `clone` +
+  amend → refused `(remote ref updated since checkout)`; `clone` + no-op
+  `fetch` + amend → refused; `clone` + commit + `push` + amend → accepted. The
+  first build shipped the flag and passed every test, because the fixture was
+  `init` + `push -u`; a verification agent found it. Core now runs the test
+  itself (`reflog_holds`, shared with the probe) on the tip of
+  `refs/remotes/<remote>/<b>` and pins the lease to that sha, so the check and
+  the push are about the same commit however the automatic fetches move the
+  ref in between. **A proposed Force Push is therefore one `push` accepts** —
+  keep it so: anything that changes where a push lands
+  (`ROADMAP.md`, *A push names the local branch…*) has to change
+  `measured_push_target`, `tracking_ref` and the lease together.
+- **Not cached.** The draft cached on `(head_sha, upstream_sha)`; the
+  upstream's sha is not in `status --porcelain=2`, so the key costs a
+  subprocess itself, and a reflog can change under unchanged tips
+  (`reflog expire`), leaving a stale *Force Push* — the unsafe direction. The
+  probe is three local subprocesses, paid only while `ahead > 0 && behind > 0`.
+- **Proposed only when the push lands on the measured ref.** One
+  `for-each-ref --format=%(upstream)%00%(upstream:remoteref)%00%(push:remotename)`
+  must show the upstream to be `refs/remotes/<push remote>/<this branch's
+  name>`. `%(push:remotename)` follows `pushRemote` → `remote.pushDefault` →
+  the tracking remote whatever `push.default` says, which is
+  `get_push_remote`'s order. **`%(push)` is the wrong field**: empty for a fork
+  workflow under `push.default=simple`, and *equal to the upstream* under
+  `push.default=upstream` with a fork — where core still pushes to the fork.
+  Everything else stays Pull.
+- **`behind > 0` alone is never asked.** After a `pull --rebase` the old
+  upstream tip is in the reflog too, and the probe would call a branch that
+  simply fast-forwards rewritten.
+- **The Pull-state force push is a guarded item, not a free one.** On a branch
+  diverged by somebody else's push the chevron's *Force Push (with Lease)…* is
+  refused — by core, before git is spawned, once their commit has been fetched
+  ("…holds commits this branch never contained…"); by the remote, `(stale
+  info)`, before that. It is refused as well wherever the reflog cannot answer
+  (`core.logAllRefUpdates=false`, a rewrite aged out of it). LeoGit therefore
+  has no way to overwrite a commit the branch never contained; that is
+  deliberate, and the terminal is the way.
+- **"Never contained" is not "somebody else's".** A colleague's commit that was
+  pulled and then dropped by a rebase is in the reflog, so the probe says
+  *rewritten* and the force push removes it. That is what the user did, and git
+  agrees; the confirmation says commits go "whoever wrote them". SQ-2 / RO-2's
+  pushed-commit warning is the earlier place to say whose commits a rewrite
+  touches, if that is ever wanted.
+- **Core's Pull is `pull --ff`, which *merges* a diverged branch** — it does
+  not refuse. On a rewritten branch that puts the old commits back beside their
+  replacements, which is what made *Pull* the wrong face there and is worth
+  remembering wherever a rewrite's next step is described (SQ-2, RO-2).
+- **UN (undo) and the ladder.** Undoing a rewrite of pushed commits puts the
+  tip back on the upstream: the next status read proposes Fetch again by
+  itself. Undoing *after* the force push leaves the branch diverged with the
+  force-pushed tip in its reflog, so the ladder proposes Force Push once more —
+  correct, and UN-2's banner need say nothing about it.
 
 ### 4.7 The git floor
 
@@ -518,7 +570,6 @@ something worth using.
 | --- | --- | --- |
 | `cherry-pick --empty=keep` | **2.45** | CP |
 | `rebase --no-update-refs` | 2.38 | SQ, RO |
-| `push --force-if-includes` | 2.30 | FP-2 |
 | `rebase --empty=keep` (merge backend, which `-i` always uses) | 2.26 | SQ, RO |
 | `cherry-pick -m 1` on non-merge commits | 2.21 | CP |
 
@@ -527,9 +578,9 @@ So **the floor is git 2.45** (April 2024). The development machines run 2.54
 `core/src/git_version.rs` reads `git --version` once per process and
 `require_floor()` answers with one sentence naming both versions — a single
 check, no degraded mode, no flag fallbacks. `README.md` Requirements states
-the floor. **Nothing calls `require_floor()` yet**: nothing WS-B runs needs
-more than git 2.25, so the preflight (OP-2, WS-C) is its first caller and it
-is on neither bridge.
+the floor. `rewrite_preflight` is its one caller, and it is on neither bridge.
+The force push does not ask: `--force-with-lease=<ref>:<expect>` is older than
+anything the app otherwise tolerates, and a push is not a History action.
 
 **Platforms:** this plan targets **macOS and Linux**. Windows is not verified
 and not a gate for any workstream; the one Windows-specific unknown — whether
@@ -554,8 +605,7 @@ system config disabled:
 6. After a conflicted multi-pick is committed by hand, `CHERRY_PICK_HEAD` is
    gone and `sequencer/todo` remains; `--continue` finishes the sequence. ✅
 7. The reflog probe says *rewritten* after a local squash of pushed commits
-   and *foreign* once someone else pushes; `--force-if-includes` refuses the
-   foreign case. ✅
+   and *foreign* once someone else pushes. ✅
 8. `merge-base --is-ancestor` separates pushed from unpushed commits. ✅
 9. `rev-list -1 --merges` finds a merge in a range; a dirty tree is refused
    with git's own two-line message. ✅
@@ -640,6 +690,69 @@ core tests; 30 – 32 were run by WS-C's research and verification agents, and
     worktree. ✅
 33. `status --porcelain=v1 -z` gives a rename as `R  new\0old\0`, paths raw. ✅
     (`a_dirty_tree_refusal_names_a_renamed_file_by_its_new_name`)
+
+Added in WS-D (2026-09-20, same conditions). Items 38, 40 and 42 are behind
+core tests, and so are the amend, rebase, fresh-clone, foreign-push,
+expired-reflog and rename cases of 34; the rest of 34 and items 36, 37, 39 and
+41 were run by WS-D's research agent; 35, 40 and 42 were run by hand:
+
+34. The reflog probe against a bare origin and two clones: *rewritten* after
+    an amend, a `rebase -i` squash, a feature branch rebased onto a newer
+    main, a `reset --hard` past a pulled commit, a DWIM `git switch topic`, a
+    fresh clone, a branch renamed after the rewrite, and inside a linked
+    worktree; *foreign* after somebody else's push, and once the reflog has
+    expired. ✅ (`push --force-if-includes` does **not** agree in the fresh
+    clone — item 42.)
+35. **`pull --ff` on a diverged branch merges** (`Merge made by the 'ort'
+    strategy`): naming `--ff` counts as choosing how to reconcile, so git's
+    "Need to specify how to reconcile divergent branches" never fires. After
+    an amend of a pushed commit that puts the old commit back. ✅
+36. `rev-list -g <ref>` is the only reflog reader whose stdout survives
+    `log.showSignature` ("No signature" lands on **stdout** of `log -g` and
+    `reflog show`) and `i18n.logOutputEncoding`. All three print nothing, exit
+    0, for a missing reflog, and skip an entry whose object is gone. A 5 000
+    entry reflog costs about 10 ms for both commands together. ✅
+37. `rev-list -1 <upstream> --not --reflog` is wrong — `--reflog` walks the
+    remote-tracking ref's own reflog, so it answers *rewritten* for a plain
+    foreign push — and `merge-base --fork-point` reads the upstream's reflog,
+    not the branch's. `--ignore-missing` on the `--stdin` form forgives a
+    missing *positive* too, turning an error into an empty answer. ✅
+38. A bare `--force-with-lease` after a fetch pushes over a foreign commit
+    (the lease compares the fetched tip with itself); with
+    `--force-if-includes` it is
+    `! [rejected] main -> main (remote ref updated since checkout)`, exit 1,
+    with a four-line `hint:` block. A stale lease — bare or pinned — is
+    `(stale info)`, no hint. ✅
+    (`force_push_refuses_a_commit_pushed_since_the_last_fetch`)
+39. `--force-if-includes` is a no-op without `--force-with-lease`, a no-op
+    beside `--force-with-lease=<ref>:<expect>`, live beside the bare and the
+    `=<ref>` forms, overridden by `--force`, and never blocks a first publish
+    with `--set-upstream`. **It reads the reflog of the local branch named
+    after the *destination*:** `push … new:old` is refused however safe, until
+    a local `old` whose reflog holds the tip exists. ✅
+40. `for-each-ref`'s `%(push)` is empty when `push.default=simple` cannot name
+    one destination (`pushRemote` / `remote.pushDefault` set), **equals the
+    upstream under `push.default=upstream` with the same fork settings**, and
+    `%(push:remoteref)` is empty under the default config even when `%(push)`
+    is not. `%(push:remotename)` names the fork in all of them, and a stale
+    `pushRemote` verbatim. `%00` separates fields safely. ✅
+    (`sync_proposes_pull_when_the_push_goes_somewhere_else`)
+41. `git push <remote> <local>` with `branch.<local>.merge` naming another
+    branch creates `<local>` on the remote instead of pushing to the upstream,
+    and `remote.<name>.push` remaps the bare name silently. Server-side
+    refusals read `! [remote rejected] … (non-fast-forward)` under
+    `receive.denyNonFastForwards` and `(hook declined)` from an `update`
+    hook; no client flag beats either. ✅
+42. **`push --force-with-lease --force-if-includes` refuses clone → amend →
+    push** `(remote ref updated since checkout)`, and still does after a
+    no-op fetch: `is_reachable_in_reflog` (`remote.c`, v2.54.0) declares
+    `timestamp_t date;`, sets it only from the remote-tracking ref's reflog,
+    and stops the local walk at the first entry older than it — before the
+    `clone: from …` entry that *is* the remote tip. Accepted once the
+    remote-tracking ref has a reflog entry (a push, or a fetch that moved it).
+    `--force-with-lease=refs/heads/<b>:<sha>` is accepted in the same clone and
+    refused `(stale info)` once the remote moves. ✅
+    (`force_push_publishes_a_rewrite_made_in_a_fresh_clone`)
 
 **Not verified:** any git between the 2.45 floor and 2.54; and anything on
 Windows, in particular that Git for Windows' `sh` resolves `cp` for the
@@ -740,8 +853,14 @@ sequence editor (§4.7, *Platforms*).
     undo-commit and discard; **network transfers still have their own slot**,
     so a pull can start under a rewrite and the sync button stays live during
     a merge, cherry-pick or revert (`ROADMAP.md`, *Network transfers and
-    repository writes do not exclude each other*). WS-D touches the sync button
-    and is the natural place to settle that.
+    repository writes do not exclude each other*). WS-D did not settle it: the
+    rule changes what the composer does during a slow push, which is the
+    owner's call, and the roadmap item now carries three candidates — the
+    recommended one being that **Pull alone claims the write slot too**, as the
+    only transfer that writes the working tree. A squash or reorder started
+    under a pull is the case that matters to WS-E and WS-F; until the rule
+    exists, git's own `index.lock` refusal is what the user would see, and it
+    arrives as the action's `Err`.
   - **The status poll does not pause for a write**, so both clients now drop a
     status read that lands after a later-asked one (`FRONTEND.md` §6.1).
     Anything a new action keys on the status — as `cherryPickReturn` is —
@@ -777,7 +896,10 @@ sequence editor (§4.7, *Platforms*).
   summary and body, co-authors as the de-duplicated union.
 - **SQ-2 — The pushed-commits warning is a caption inside the sheet**, not a
   modal in front of it: "These commits are already on `origin/main`. After
-  squashing, the next push is a force push."
+  squashing, the next push is a force push." It is fed by
+  `RewritePreflight.rewrites_pushed`, which core already computes and no
+  client reads yet. The promise is kept by WS-D without further work: after
+  the squash the sync button's face *is* Force Push.
 - **RO-1 — Insertion mode. Decided: like the reference, plus a sober hint.**
   The menu item arms the list: selection frozen, context menu suppressed, a
   2 px accent insertion line between rows, ↑/↓ move it, ⏎ confirms, Esc or a
@@ -824,13 +946,15 @@ is tested by hand before the next starts.
    committed (`5ff2a4c`).** MS-1 … MS-4, no core change.
 2. **WS-B — Operations in progress. Built 2026-09-20, confirmed and committed
    (`d0b68df`).** OP-1, OP-3, OP-4, OP-6, OP-7 and the git floor module.
-3. **WS-C — Cherry-pick. Built 2026-09-20**; the owner's visual check is
-   pending. OP-2, OP-5, CP, MS-5's cherry-pick items, MS-6's shared gate, OP-8,
-   the window-wide write gate, and status reads published in order.
-4. **WS-D — Force push recommended. Next.** FP-1, FP-2. Before squash on purpose: an
-   amended pushed commit already produces this state, so it is testable today,
-   and squash then lands into a sync button that already knows what to say.
-5. **WS-E — Squash.** The rewrite driver, the todo builder, SQ.
+3. **WS-C — Cherry-pick. Built 2026-09-20, confirmed and committed
+   (`ff0e195`).** OP-2, OP-5, CP, MS-5's cherry-pick items, MS-6's shared gate,
+   OP-8, the window-wide write gate, and status reads published in order.
+4. **WS-D — Force push recommended. Built 2026-09-20**; the owner's visual
+   check is pending. FP-1, FP-2, the ladder's own module, and one presentation
+   table per client. Before squash on purpose: an amended pushed commit already
+   produces this state, and squash lands into a sync button that knows what to
+   say.
+5. **WS-E — Squash. Next.** The rewrite driver, the todo builder, SQ.
 6. **WS-F — Reorder.** RO, starting with the RO-3 spike.
 7. **WS-G — Undo.** UN, for all three actions at once.
 
@@ -869,13 +993,36 @@ Facts about running them on the owner's machine:
   test path (`history_rewrite`), not a list.
 - **A background build's exit status is the last command's**: a trailing
   `grep -c` that counts zero warnings exits 1. Read the log, not the status.
+- **Run `pnpm tauri build` in the foreground.** Detached, its `bundle_dmg.sh`
+  step fails (it scripts Finder) after the app itself has compiled and
+  bundled, and leaves a scratch image mounted at `/Volumes/dmg.*` —
+  `hdiutil detach` it before the retry. Nothing to do with the code.
+- **`pnpm lint` does check `commands.ts`**, and prettier here takes no trailing
+  comma after the last parameter of a multi-line arrow function.
+- **A test that needs a remote** starts from `test_support::published_repo()`
+  (bare `origin.git` plus `mine`, whose `main` is pushed and tracking) and
+  `clone_of()` for a second contributor. **`mine` is `init` + `push -u`, not a
+  clone, and the two differ** — its remote-tracking ref has a reflog, a
+  clone's has none, which is what hid §4.8 item 42. Anything that reads a
+  reflog or pushes gets a `clone_of()` test as well. The tests read the
+  developer's global git config (`git_cmd` does): the probe no longer depends
+  on `push.default`, but a global `remote.pushDefault` would still bend the
+  force-push tests.
+- **A verification agent's finding is reproduced by hand before it is fixed,
+  and a research agent's git claim before it is built on.** WS-D had one of
+  each wrong way round: two research agents misdescribed `pull --ff`, and the
+  plan's own `--force-if-includes` was only caught by a verifier. `#[tokio::test]` is available in core
+  for the async commands; an `EventSink` that drops everything is three lines
+  (`NoProgress` in `git.rs`'s tests).
 
 Core tests live with their module and build repositories with
 `core/src/test_support.rs` (§3 lists it). Bridge tests copy
 `cherry_pick_flow_preflights_copies_and_stops_on_a_conflict` (`ffi/src/lib.rs`).
-WS-B's sixteen tests are in `operation.rs`, four more in `git_version.rs`, and
-WS-C's fourteen in `history_rewrite.rs`. Still to write, at minimum, named as
-sentences:
+WS-B's sixteen tests are in `operation.rs`, four more in `git_version.rs`,
+WS-C's fourteen in `history_rewrite.rs`, and WS-D's in `sync_ladder.rs` (the
+ladder and seven runs of the probe) and `git.rs` (seven `force_push_*`, each
+asserting what the remote holds afterwards). Still
+to write, at minimum, named as sentences:
 `squash_gathers_a_non_contiguous_selection_at_the_target`,
 `squash_keeps_the_message_across_a_conflict`,
 `squash_reaching_the_first_commit_uses_root`,
@@ -883,8 +1030,6 @@ sentences:
 `reorder_moves_commits_to_the_tip_and_into_the_middle`,
 `reorder_keeps_a_commit_that_became_empty`,
 `todo_path_with_spaces_and_quotes_is_safe`,
-`sync_proposes_force_push_after_a_rewrite_and_pull_after_a_foreign_push`,
-`sync_proposes_pull_when_the_reflog_cannot_answer`,
 `undo_refuses_once_the_branch_tip_has_moved`,
 `undo_of_a_cherry_pick_works_from_the_source_branch`.
 Two probe claims in `operation.rs` rest on a scratch run rather than a test and
@@ -902,20 +1047,24 @@ rather than adding a rule each**) and two §8 rows; `DESIGN.md` flows 5 and 6;
 `STYLE.md` (context menus, dialogs, branch picker); `TECHNICAL.md` (*History's
 multi-commit actions*, both write gates, status ordering); `README.md`; and
 `ROADMAP.md`'s entry, with *Cherry-pick / revert* reworded to *Revert, and
-cherry-pick into the current branch* and left open. What is still owed:
+cherry-pick into the current branch* and left open. WS-D's: `FRONTEND.md` §5.1
+(the `ForcePush` variant) and §6.2 (the rung, its doubts, the pinned-lease force
+push); `DESIGN.md` flow 7 and the amend flow's last sentence; `STYLE.md` (the
+glyph, and why the face is not red); `TECHNICAL.md` (*Sync proposal*, the
+layout tree, test fixtures); `README.md`; and `ROADMAP.md`'s entry, which
+closed *Force-push-recommended detection* and opened *A push names the local
+branch…*. No command was added, so §1's count stands at 73. What is still owed:
 
 - **`FRONTEND.md`** — §1 command counts again; §3.7 rows for `squash_commits`,
-  `reorder_commits` and `undo_operation`; §5 `SyncProposal::ForcePush`; §6.21
+  `reorder_commits` and `undo_operation`; §6.21
   rules for the squash target, insertion mode and the undo banner's lifetime.
 - **`DESIGN.md`** — one bullet per action that states the failure path as
   carefully as the happy one (cherry-pick's is the model).
 - **`STYLE.md`** — the insertion line, the hint caption and the banner action
   get their metrics.
-- **`TECHNICAL.md`** — the driver, the todo builder, the message file, the
-  reflog test.
-- **`ROADMAP.md`** — dated entries for *Force-push-recommended detection* and
-  *Rebase (interactive UI)* (squash and reorder; edit, drop and drag stay
-  open).
+- **`TECHNICAL.md`** — the driver, the todo builder, the message file.
+- **`ROADMAP.md`** — a dated entry for *Rebase (interactive UI)* (squash and
+  reorder; edit, drop and drag stay open).
 - **`README.md`** — *Browse history* gains squash and reorder.
 
 ## 9. Standing decision — where history rewriting runs

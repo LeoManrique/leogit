@@ -17,7 +17,7 @@
     { key: 'Ctrl/Cmd + G', description: 'Generate commit message with AI' },
     // Named after what the button says rather than after one of its states:
     // the chord runs whatever the sync ladder proposes.
-    { key: 'Ctrl/Cmd + P', description: 'Run the sync action (fetch / pull / push / publish)' },
+    { key: 'Ctrl/Cmd + P', description: 'Run the sync action (fetch / pull / push / force push / publish)' },
     { key: 'Ctrl/Cmd + R', description: 'Reload status, history and branches' },
     { key: 'Ctrl/Cmd + 1', description: 'Show Changes' },
     { key: 'Ctrl/Cmd + 2', description: 'Show History' },

@@ -13,7 +13,7 @@
     type SelectionGesture,
   } from '$lib/utils/listSelection'
   import { focusVirtualRow } from '$lib/utils/virtualList'
-  import ContextMenu, { type ContextMenuItem } from './ContextMenu.svelte'
+  import ContextMenu, { MENU_SEPARATOR, type ContextMenuItem } from './ContextMenu.svelte'
   import Icon from './Icon.svelte'
 
   interface Props {
@@ -230,7 +230,7 @@
             },
           },
           cherryPickItem,
-          { separator: true, label: '', action: () => {} },
+          MENU_SEPARATOR,
           {
             label: 'Copy SHA',
             action: () => {

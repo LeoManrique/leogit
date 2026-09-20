@@ -51,9 +51,9 @@
         This will overwrite <code>{upstream}</code> with your local branch.
       </p>
       <p class="muted">
-        <code>--force-with-lease</code> refuses the push if someone else has pushed since
-        your last fetch, so it's safer than <code>--force</code>. It cannot be undone if it
-        succeeds.
+        Commits on the remote branch that your branch no longer contains are removed
+        from it, whoever wrote them. The push is refused if the remote branch holds a
+        commit your branch never contained. It cannot be undone once it succeeds.
       </p>
       {#if error}
         <p class="error">{error}</p>

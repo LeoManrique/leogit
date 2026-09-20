@@ -20,7 +20,7 @@
   } from '$lib/utils/listSelection'
   import { focusVirtualRow } from '$lib/utils/virtualList'
   import PathText from './PathText.svelte'
-  import ContextMenu, { type ContextMenuItem } from './ContextMenu.svelte'
+  import ContextMenu, { MENU_SEPARATOR, type ContextMenuItem } from './ContextMenu.svelte'
 
   interface Props {
     files: FileEntry[]
@@ -337,10 +337,6 @@
     contextMenu = { x: e.clientX, y: e.clientY, files: targets }
   }
 
-  function separator(): ContextMenuItem {
-    return { separator: true, label: '', action: () => {} }
-  }
-
   // Build the menu for the current target set. Multi-selection collapses to the
   // bulk discard (the only action that's meaningful for many files at once);
   // a single file gets the full menu.
@@ -367,7 +363,7 @@
 
     const items: ContextMenuItem[] = [
       { label: 'Discard Changes…', destructive: true, action: () => actions.discard([file]) },
-      separator(),
+      MENU_SEPARATOR,
       { label: 'Ignore File (Add to .gitignore)', action: () => actions.ignoreFile(file) },
     ]
     if (ext) {
@@ -377,10 +373,10 @@
       })
     }
     items.push(
-      separator(),
+      MENU_SEPARATOR,
       { label: 'Copy File Path', action: () => actions.copyPath(file) },
       { label: 'Copy Relative File Path', action: () => actions.copyRelativePath(file) },
-      separator(),
+      MENU_SEPARATOR,
       { label: revealLabel(), enabled: onDisk, action: () => actions.reveal(file) },
       {
         label: 'Open with Default Program',

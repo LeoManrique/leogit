@@ -34,15 +34,25 @@ export interface FileEntry {
 /**
  * What the sync control should offer to do next — one state at a time, chosen
  * by core's precedence ladder over the status: detached → publish repository →
- * publish branch → pull → push → fetch. Pull outranks push, so a diverged
- * branch is never offered the push git would reject.
+ * publish branch → force push → pull → push → fetch. Pull outranks push, so a
+ * diverged branch is never offered the push git would reject — except where it
+ * diverged from its own past (an amend, a rebase, a squash of pushed commits),
+ * which core reads from the branch's reflog: there a pull would merge the old
+ * commits back in, and the proposal is the force push.
  *
  * Decided in core rather than here so this client and the native one can't
  * drift; it arrives on `RepoStatus` because both render it on every refresh,
- * and asking separately would be a crossing per tick to run six comparisons.
+ * and asking separately would be a crossing per tick.
  */
 export type SyncProposal =
-  'Loading' | 'Detached' | 'PublishRepository' | 'PublishBranch' | 'Pull' | 'Push' | 'Fetch'
+  | 'Loading'
+  | 'Detached'
+  | 'PublishRepository'
+  | 'PublishBranch'
+  | 'ForcePush'
+  | 'Pull'
+  | 'Push'
+  | 'Fetch'
 
 /**
  * A multi-step git operation the repository is stopped in the middle of —
@@ -555,13 +565,18 @@ export const gitApi = {
    *  the user budget. Core refuses a repo with no remote. */
   fetchAll: (repoPath: string) => invoke<void>('fetch_all', { repoPath }),
   pull: (repoPath: string, remote: string) => invoke<void>('pull', { repoPath, remote }),
+  /** `forceWithLease` is the only force there is, never a bare `--force`: core
+   *  pins the lease to the commit the remote branch was last seen at, and
+   *  refuses before sending anything unless the local branch's reflog shows it
+   *  once contained that commit. Named options rather than positions, because
+   *  two booleans side by side are one swap away from a force push nobody
+   *  asked for. */
   push: (
     repoPath: string,
     remote: string,
     branch: string,
-    setUpstream: boolean,
-    forceWithLease: boolean
-  ) => invoke<void>('push', { repoPath, remote, branch, setUpstream, forceWithLease }),
+    options: { setUpstream: boolean; forceWithLease: boolean }
+  ) => invoke<void>('push', { repoPath, remote, branch, ...options }),
   /** The remote the current branch fetches and pulls from — its
    *  `branch.<name>.remote`, else `origin`, else the first remote — or `null`
    *  when the repo has none, never an invented "origin". Resolve it right

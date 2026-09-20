@@ -3,12 +3,13 @@ use std::collections::HashSet;
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, UNIX_EPOCH};
 
 use super::operation::{self, OperationInProgress};
 use super::paths;
+use super::sync_ladder::{self, SyncProposal};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FileStatus {
@@ -256,81 +257,10 @@ pub struct RepoStatus {
     ///
     /// Carried on the status for the same reason [`RepoStatus::operation`] is:
     /// every client renders it on every refresh, so asking for it separately
-    /// would be a crossing per tick for six comparisons — and a second route to
-    /// the same answer is how the two clients' ladders drifted apart in the
-    /// first place. Computed by [`sync_proposal`].
+    /// would be a crossing per tick for a handful of comparisons — and a second
+    /// route to the same answer is how the two clients' ladders drifted apart
+    /// in the first place. Computed by [`sync_ladder::propose`].
     pub proposal: SyncProposal,
-}
-
-/// What the sync control should offer to do next.
-///
-/// One state at a time, picked by a strict precedence ladder over
-/// [`RepoStatus`]. Pull outranks push, so a diverged branch proposes the step
-/// that has to happen first; the pending counts stay visible beside the
-/// control meanwhile.
-///
-/// It lives in core because four surfaces read it: each client's sync control
-/// and each client's keyboard/menu route to the same action. Written twice it
-/// would be four chances to disagree about what the repository needs next —
-/// and the clients *had* drifted, one deriving the ladder as three loose
-/// booleans that could all be true at once.
-///
-/// Titles, icons, and which states get a chevron stay per-platform: the two
-/// controls are shaped differently and that is presentation, not policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SyncProposal {
-    /// Nothing is known about the repository yet. A neutral, disabled Fetch —
-    /// so the control never flashes "Publish" at a repository whose first
-    /// status read simply hasn't landed.
-    Loading,
-    /// HEAD points at a commit rather than a branch: there is no branch to
-    /// push or pull, and the way out is the branch picker.
-    Detached,
-    /// No remote at all — create the GitHub repository and push in one shot.
-    PublishRepository,
-    /// A remote exists but this branch tracks nothing, so its first push has
-    /// to carry `--set-upstream`.
-    PublishBranch,
-    /// Behind the upstream. Pulling comes first, whatever else is pending.
-    Pull,
-    /// Ahead only.
-    Push,
-    /// In sync: the manual "check the remote", which touches no files.
-    Fetch,
-}
-
-/// Run the sync ladder over a repository status.
-///
-/// Total: every status maps to exactly one proposal, which is what makes the
-/// impossible combinations unrepresentable rather than merely unhandled —
-/// "publishable and behind" cannot both be live the way three independent
-/// booleans could.
-///
-/// A host that has no status *at all* yet answers [`SyncProposal::Loading`]
-/// itself; that is a fact about the host's own load, not about the repository.
-#[must_use]
-pub fn sync_proposal(status: &RepoStatus) -> SyncProposal {
-    // A detached HEAD reports an empty branch name too, so it has to be told
-    // apart from a status nobody has filled in before the emptiness test.
-    if status.branch.is_empty() && !status.detached {
-        return SyncProposal::Loading;
-    }
-    if status.detached {
-        // Deliberately ahead of the remote checks: on a detached HEAD,
-        // publishing would offer to push a branch that does not exist, and
-        // the honest state wins.
-        SyncProposal::Detached
-    } else if !status.has_remote {
-        SyncProposal::PublishRepository
-    } else if !status.has_upstream {
-        SyncProposal::PublishBranch
-    } else if status.behind > 0 {
-        SyncProposal::Pull
-    } else if status.ahead > 0 {
-        SyncProposal::Push
-    } else {
-        SyncProposal::Fetch
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -521,6 +451,50 @@ pub(crate) fn run_git_combined_with_env(
     let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
     combined.push_str(&String::from_utf8_lossy(&output.stderr));
     Ok((output.status.success(), combined))
+}
+
+/// Run a git command that reads its work list from stdin — NUL-separated
+/// paths, or one revision per line — and hand back everything it said.
+///
+/// Stdin rather than arguments because both kinds of list are unbounded (every
+/// file of a large merge, every entry of an old reflog) and an argument list is
+/// not. The exit status is the caller's to judge: a command that refuses is an
+/// error to one caller and an answer to another.
+///
+/// # Errors
+/// When the process can't start or can't be waited on, or the list could not
+/// be written to a git that then claimed success.
+pub(crate) fn run_git_with_stdin(
+    repo_path: &str,
+    args: &[&str],
+    input: &[u8],
+) -> Result<Output, String> {
+    let mut child = git_cmd(repo_path, args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("git: {e}"))?;
+    // Taken, so that it is dropped — and the pipe closed — before the wait:
+    // git reads to end-of-file.
+    let written = child
+        .stdin
+        .take()
+        .ok_or_else(|| "git: failed to open stdin".to_string())
+        .and_then(|mut stdin| {
+            stdin
+                .write_all(input)
+                .map_err(|e| format!("git: write stdin: {e}"))
+        });
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("git: wait: {e}"))?;
+    // A list cut short is git's failure to explain when git failed — its
+    // stderr says which line it died on — and ours only when git did not.
+    match written {
+        Err(cut_short) if output.status.success() => Err(cut_short),
+        _ => Ok(output),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1632,21 +1606,27 @@ fn parse_unmerged_entry(seg: &str) -> Option<FileEntry> {
 /// Working-tree status, plus what the sync control should offer to do next.
 ///
 /// Deliberately one call rather than a status read followed by a separate ask
-/// for the ladder: the proposal is a pure function of the fields below it, so a
-/// second crossing to run six comparisons would be a real cost on the host that
-/// pays for crossings — and `operation` already established that a value every
-/// refresh path needs belongs on the status it is derived from, where no path
-/// can forget to fetch it.
+/// for the ladder: the proposal is derived from the fields below it, so a
+/// second crossing for it would be a real cost on the host that pays for
+/// crossings — and `operation` already established that a value every refresh
+/// path needs belongs on the status it is derived from, where no path can
+/// forget to fetch it.
+///
+/// The ladder's one question that costs subprocesses — whether a divergence is
+/// this branch's own rewrite — is asked only on the rung that needs it, so a
+/// branch that has not diverged pays nothing for it.
 ///
 /// # Errors
 /// When `git status` fails — `repo_path` is no longer a repository, or git is
 /// missing from `PATH`.
 pub fn get_status(repo_path: String) -> Result<RepoStatus, String> {
-    let mut status = read_status(repo_path)?;
+    let mut status = read_status(repo_path.clone())?;
     // Filled here, once, rather than at each of `read_status`'s three exits:
     // an early return that forgot is exactly the bug class this field exists
     // to remove.
-    status.proposal = sync_proposal(&status);
+    status.proposal = sync_ladder::propose(&status, || {
+        sync_ladder::upstream_was_rewritten_away(&repo_path, &status.branch)
+    });
     Ok(status)
 }
 
@@ -2726,31 +2706,7 @@ fn update_index(repo_path: &str, paths: &[String], force_remove: bool) -> Result
     }
     args.extend(["--replace", "-z", "--stdin"]);
 
-    let mut child = git_cmd(repo_path, &args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("git update-index: {}", e))?;
-
-    {
-        let stdin = child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| "failed to open stdin".to_string())?;
-        let mut buf = Vec::new();
-        for p in paths {
-            buf.extend_from_slice(p.as_bytes());
-            buf.push(0);
-        }
-        stdin
-            .write_all(&buf)
-            .map_err(|e| format!("write stdin: {}", e))?;
-    }
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("git update-index wait: {}", e))?;
+    let output = run_git_with_stdin(repo_path, &args, &nul_separated(paths))?;
     if !output.status.success() {
         return Err(format!(
             "git update-index failed: {}",
@@ -2810,7 +2766,7 @@ pub(crate) fn git_add(repo_path: &str, paths: &[String]) -> Result<(), String> {
     if paths.is_empty() {
         return Ok(());
     }
-    let mut child = git_cmd(
+    let output = run_git_with_stdin(
         repo_path,
         &[
             "--literal-pathspecs",
@@ -2820,31 +2776,8 @@ pub(crate) fn git_add(repo_path: &str, paths: &[String]) -> Result<(), String> {
             "--pathspec-from-file=-",
             "--pathspec-file-nul",
         ],
-    )
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .spawn()
-    .map_err(|e| format!("git add: {e}"))?;
-
-    {
-        let stdin = child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| "failed to open stdin".to_string())?;
-        let mut buf = Vec::new();
-        for p in paths {
-            buf.extend_from_slice(p.as_bytes());
-            buf.push(0);
-        }
-        stdin
-            .write_all(&buf)
-            .map_err(|e| format!("write stdin: {e}"))?;
-    }
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("git add wait: {e}"))?;
+        &nul_separated(paths),
+    )?;
     if !output.status.success() {
         return Err(format!(
             "git add failed: {}",
@@ -2852,6 +2785,17 @@ pub(crate) fn git_add(repo_path: &str, paths: &[String]) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Paths as git's `-z` inputs read them: each one followed by a NUL, so no
+/// character a file name may hold can end it early.
+fn nul_separated(paths: &[String]) -> Vec<u8> {
+    let mut list = Vec::new();
+    for path in paths {
+        list.extend_from_slice(path.as_bytes());
+        list.push(0);
+    }
+    list
 }
 
 pub fn commit(
@@ -3470,9 +3414,16 @@ pub async fn pull(
 /// Push `branch` to `remote`, streaming git's live `--progress` output to the
 /// window as `git-progress` events.
 ///
+/// `force_with_lease` is the one force there is: a lease pinned to the commit
+/// the remote branch was last seen at, granted only when this branch's reflog
+/// shows it once held that commit. The sync ladder proposes a force push by
+/// the same test, so a proposed one is one this accepts.
+///
 /// # Errors
-/// When the process can't start or `git push` exits non-zero (rejected,
-/// stale lease, no permission, unreachable remote).
+/// When the process can't start, when a force push would replace a commit
+/// this branch never held (decided here, before anything is sent), or when
+/// `git push` exits non-zero (rejected, stale lease, no permission,
+/// unreachable remote).
 pub async fn push(
     sink: Arc<dyn crate::events::EventSink>,
     repo_path: String,
@@ -3486,9 +3437,10 @@ pub async fn push(
         if set_upstream {
             args.push("--set-upstream");
         }
-        if force_with_lease {
-            args.push("--force-with-lease");
-        }
+        let lease = force_with_lease
+            .then(|| sync_ladder::force_push_lease(&repo_path, &remote, &branch))
+            .transpose()?;
+        args.extend(lease.as_deref());
         args.push(&remote);
         args.push(&branch);
 
@@ -4267,7 +4219,9 @@ pub fn get_repo_name(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::init_test_repo;
+    use crate::test_support::{
+        clone_of, commit_file, git as test_git, git_stdout, init_test_repo, published_repo,
+    };
     use std::fs;
     use tempfile::tempdir;
 
@@ -6926,113 +6880,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Sync ladder (H-3)
+    // Sync ladder (H-3) — the ladder's own tests live in `sync_ladder.rs`
     // -----------------------------------------------------------------------
-
-    /// A status with everything settled: on a branch, tracking a reachable
-    /// upstream, nothing pending. Each test perturbs the one field it is about.
-    fn synced_status() -> RepoStatus {
-        RepoStatus {
-            branch: "main".to_string(),
-            upstream: "origin/main".to_string(),
-            has_upstream: true,
-            ahead: 0,
-            behind: 0,
-            files: Vec::new(),
-            has_remote: true,
-            unpushed_shas: Vec::new(),
-            detached: false,
-            head_sha: "a".repeat(40),
-            operation: None,
-            proposal: SyncProposal::Fetch,
-        }
-    }
-
-    /// The ladder's precedence, top to bottom, each rung asserted against a
-    /// status that also satisfies every rung below it — which is the property
-    /// three independent booleans could not express.
-    #[test]
-    fn sync_ladder_follows_its_precedence() {
-        assert_eq!(sync_proposal(&synced_status()), SyncProposal::Fetch);
-
-        let ahead = RepoStatus {
-            ahead: 2,
-            ..synced_status()
-        };
-        assert_eq!(sync_proposal(&ahead), SyncProposal::Push);
-
-        // Diverged: pull outranks push, so the step that has to happen first
-        // is the one proposed.
-        let diverged = RepoStatus {
-            ahead: 2,
-            behind: 3,
-            ..synced_status()
-        };
-        assert_eq!(sync_proposal(&diverged), SyncProposal::Pull);
-
-        // An untracked branch outranks its own inferred counts: the first push
-        // must set the upstream before anything can be pulled into it.
-        let untracked = RepoStatus {
-            has_upstream: false,
-            upstream: String::new(),
-            ahead: 2,
-            behind: 3,
-            ..synced_status()
-        };
-        assert_eq!(sync_proposal(&untracked), SyncProposal::PublishBranch);
-
-        // No remote at all outranks the untracked branch, since there is
-        // nothing to set an upstream to.
-        let no_remote = RepoStatus {
-            has_remote: false,
-            has_upstream: false,
-            upstream: String::new(),
-            ..synced_status()
-        };
-        assert_eq!(sync_proposal(&no_remote), SyncProposal::PublishRepository);
-
-        // And a detached HEAD outranks every remote question, because there is
-        // no branch for any of them to be about.
-        let detached = RepoStatus {
-            detached: true,
-            branch: String::new(),
-            has_remote: false,
-            has_upstream: false,
-            upstream: String::new(),
-            ..synced_status()
-        };
-        assert_eq!(sync_proposal(&detached), SyncProposal::Detached);
-    }
-
-    /// The empty status a client holds before its first read must not look
-    /// like a repository with no remote, or the control flashes "Publish" at
-    /// every repo on the way in.
-    #[test]
-    fn sync_ladder_waits_for_a_real_status() {
-        let unloaded = RepoStatus {
-            branch: String::new(),
-            upstream: String::new(),
-            has_upstream: false,
-            has_remote: false,
-            head_sha: String::new(),
-            ..synced_status()
-        };
-        assert_eq!(sync_proposal(&unloaded), SyncProposal::Loading);
-    }
-
-    /// A freshly initialised repository — a real branch, no commits, no
-    /// remote — is a publish candidate, not an unloaded status.
-    #[test]
-    fn sync_ladder_offers_publish_for_an_unborn_repository() {
-        let unborn = RepoStatus {
-            has_remote: false,
-            has_upstream: false,
-            upstream: String::new(),
-            head_sha: String::new(),
-            ..synced_status()
-        };
-        assert_eq!(sync_proposal(&unborn), SyncProposal::PublishRepository);
-    }
 
     /// The status carries the proposal, so no client has to re-derive it — and
     /// no early return inside the status read may leave it at its placeholder.
@@ -7052,6 +6901,158 @@ mod tests {
         run_git(&repo_path, &["commit", "-m", "first"]).expect("commit");
         let committed = get_status(repo_path).expect("status");
         assert_eq!(committed.proposal, SyncProposal::PublishRepository);
+    }
+
+    // -----------------------------------------------------------------------
+    // Force push
+    // -----------------------------------------------------------------------
+
+    /// A host that shows no progress.
+    struct NoProgress;
+
+    impl crate::events::EventSink for NoProgress {
+        fn emit(&self, _event: crate::events::CoreEvent) {}
+    }
+
+    /// Force-push `branch` from `repo` to `origin`.
+    async fn force_push(repo: &Path, branch: &str) -> Result<(), String> {
+        push(
+            Arc::new(NoProgress),
+            repo.to_string_lossy().into_owned(),
+            "origin".to_string(),
+            branch.to_string(),
+            false,
+            true,
+        )
+        .await
+    }
+
+    /// Reword the newest commit — the smallest rewrite of a pushed commit.
+    fn amend(repo: &Path) {
+        test_git(repo, &["commit", "-q", "--amend", "-m", "second, reworded"]);
+    }
+
+    /// The subject `branch` points at on the remote of a [`published_repo`].
+    fn subject_on_origin(root: &Path, branch: &str) -> String {
+        git_stdout(
+            &root.join("origin.git"),
+            &["log", "-1", "--format=%s", branch],
+        )
+    }
+
+    fn proposal_of(repo: &Path) -> SyncProposal {
+        get_status(repo.to_string_lossy().into_owned())
+            .expect("status")
+            .proposal
+    }
+
+    #[tokio::test]
+    async fn force_push_publishes_a_rewrite_of_pushed_commits() {
+        let (tmp, mine) = published_repo();
+        amend(&mine);
+
+        assert_eq!(proposal_of(&mine), SyncProposal::ForcePush);
+        force_push(&mine, "main").await.expect("force push");
+        assert_eq!(subject_on_origin(tmp.path(), "main"), "second, reworded");
+        assert_eq!(proposal_of(&mine), SyncProposal::Fetch);
+    }
+
+    /// A fresh clone's `refs/remotes/origin/*` have no reflog, and its branch's
+    /// only older entry is `clone: from …`. git's own `--force-if-includes`
+    /// refuses this one; the proposal and the push here must both accept it.
+    #[tokio::test]
+    async fn force_push_publishes_a_rewrite_made_in_a_fresh_clone() {
+        let (tmp, _mine) = published_repo();
+        let cloned = clone_of(tmp.path(), "cloned");
+        amend(&cloned);
+
+        assert_eq!(proposal_of(&cloned), SyncProposal::ForcePush);
+        force_push(&cloned, "main").await.expect("force push");
+        assert_eq!(subject_on_origin(tmp.path(), "main"), "second, reworded");
+    }
+
+    /// A branch name with a slash goes through the ref names and the lease
+    /// unharmed.
+    #[tokio::test]
+    async fn force_push_publishes_a_rewrite_of_a_branch_with_a_slash_in_its_name() {
+        let (tmp, mine) = published_repo();
+        test_git(&mine, &["checkout", "-q", "-b", "feature/x"]);
+        commit_file(&mine, "third.txt", "third\n", "third");
+        test_git(
+            &mine,
+            &["push", "-q", "--set-upstream", "origin", "feature/x"],
+        );
+        amend(&mine);
+
+        assert_eq!(proposal_of(&mine), SyncProposal::ForcePush);
+        force_push(&mine, "feature/x").await.expect("force push");
+        assert_eq!(
+            subject_on_origin(tmp.path(), "feature/x"),
+            "second, reworded"
+        );
+    }
+
+    /// The hazard a bare lease has in an app that fetches by itself: once the
+    /// fetch has moved `origin/main` onto somebody else's commit, the lease
+    /// compares that commit with itself and passes. The reflog test is what
+    /// still refuses — before anything is sent — and their commit is still on
+    /// the remote afterwards.
+    #[tokio::test]
+    async fn force_push_refuses_a_fetched_commit_this_branch_never_held() {
+        let (tmp, mine) = published_repo();
+        amend(&mine);
+
+        let theirs = clone_of(tmp.path(), "theirs");
+        commit_file(&theirs, "theirs.txt", "theirs\n", "their commit");
+        test_git(&theirs, &["push", "-q", "origin", "main"]);
+        test_git(&mine, &["fetch", "-q", "origin"]);
+
+        let refused = force_push(&mine, "main").await.expect_err("refused");
+        assert!(refused.contains("never contained"), "said: {refused}");
+        assert_eq!(subject_on_origin(tmp.path(), "main"), "their commit");
+    }
+
+    /// Their commit has not been fetched, so the reflog test passes on the old
+    /// tip — and the lease, pinned to that tip, is what the remote refuses.
+    #[tokio::test]
+    async fn force_push_refuses_a_commit_pushed_since_the_last_fetch() {
+        let (tmp, mine) = published_repo();
+        amend(&mine);
+
+        let theirs = clone_of(tmp.path(), "theirs");
+        commit_file(&theirs, "theirs.txt", "theirs\n", "their commit");
+        test_git(&theirs, &["push", "-q", "origin", "main"]);
+
+        let refused = force_push(&mine, "main").await.expect_err("refused");
+        assert!(refused.contains("stale info"), "git said: {refused}");
+        assert_eq!(subject_on_origin(tmp.path(), "main"), "their commit");
+    }
+
+    /// A repository that keeps no reflog cannot show what its branch held, and
+    /// the doubt goes the same way in both places: Pull is proposed, and the
+    /// force push is refused.
+    #[tokio::test]
+    async fn force_push_refuses_when_the_reflog_cannot_show_the_remote_tip() {
+        let (tmp, mine) = published_repo();
+        test_git(&mine, &["config", "core.logAllRefUpdates", "false"]);
+        test_git(&mine, &["reflog", "expire", "--expire=now", "--all"]);
+        amend(&mine);
+
+        assert_eq!(proposal_of(&mine), SyncProposal::Pull);
+        let refused = force_push(&mine, "main").await.expect_err("refused");
+        assert!(refused.contains("never contained"), "said: {refused}");
+        assert_eq!(subject_on_origin(tmp.path(), "main"), "second");
+    }
+
+    #[tokio::test]
+    async fn force_push_refuses_a_branch_that_was_never_fetched() {
+        let (tmp, mine) = published_repo();
+        test_git(&mine, &["checkout", "-q", "-b", "local-only"]);
+
+        let refused = force_push(&mine, "local-only").await.expect_err("refused");
+        assert!(refused.contains("never been fetched"), "said: {refused}");
+        let origin = tmp.path().join("origin.git");
+        assert_eq!(git_stdout(&origin, &["branch", "--list", "local-only"]), "");
     }
 
     /// The escape table git writes when it quotes a path. `\nnn` is octal, not

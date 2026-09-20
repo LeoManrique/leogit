@@ -386,8 +386,11 @@ codegen decision is open (plan §10.7).
 - `DiffLine.line_type` — PascalCase: `'Context' | 'Add' | 'Delete' | 'Hunk' | 'NoNewline'`.
 - `BlobSource` — tagged union: `{kind:'workingTree', repoPath}` | `{kind:'commit', repoPath, sha}`.
 - `RepoStatus.proposal` — `SyncProposal`, PascalCase: `'Loading' | 'Detached' |
-  'PublishRepository' | 'PublishBranch' | 'Pull' | 'Push' | 'Fetch'`. Core's sync
-  ladder (§6.2); each client maps it to its own title, icon and chevron rule.
+  'PublishRepository' | 'PublishBranch' | 'ForcePush' | 'Pull' | 'Push' | 'Fetch'`.
+  Core's sync ladder (§6.2); each client maps it to its own title, icon and
+  chevron contents, in one table over the whole union (`SYNC_FACES`,
+  `SyncFace.swift`) so that a rung core adds fails the build instead of falling
+  through to another rung's face.
 
 ### 5.2 Structures by domain
 | Domain | Types (key fields) |
@@ -497,23 +500,48 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    no slot: nobody is waiting on them, and taking it would disable the whole action
    cluster on a timer.
    **The sync surface is one adaptive control, and the ladder that drives it is
-   core's** (`sync_proposal`, carried on `RepoStatus.proposal`): detached → publish
-   repository → publish branch → pull → push → fetch, with a neutral disabled Fetch
-   until the first status read lands. It is a *total function of the status*, which
-   is the point — three independent booleans could all be true at once, and that is
-   how one client came to offer a push git would reject on a diverged branch. Pull
-   outranks push, so the state that needs doing first is the one proposed, and the
-   push is simply not reachable. Both clients render the same answer and bind the
-   same chord to it (⌘/Ctrl+P), so the button and the menu item can never disagree.
+   core's** (`sync_ladder::propose`, carried on `RepoStatus.proposal`): detached →
+   publish repository → publish branch → force push → pull → push → fetch, with a
+   neutral disabled Fetch until the first status read lands. Every status maps to
+   exactly one proposal, which is the point — three independent booleans could all
+   be true at once, and that is how one client came to offer a push git would
+   reject on a diverged branch. Pull outranks push, so the state that needs doing
+   first is the one proposed, and the push is simply not reachable. Both clients
+   render the same answer and bind the same chord to it (⌘/Ctrl+P), so the button
+   and the menu item can never disagree.
+   **A diverged branch proposes Force Push when it diverged from its own past** —
+   an amend, a rebase or a squash of commits already pushed, here or in a terminal,
+   before a restart or after. Core reads it from the branch's reflog: the
+   upstream's tip is reachable from something this branch used to be. Nothing is
+   remembered between calls. A Pull there would merge the rewritten commits back in
+   beside their replacements, which is why it stops being the face. The rung is
+   proposed only for a push that lands on the ref the divergence was measured
+   against — the upstream is `refs/remotes/<push remote>/<this branch's name>`,
+   the push remote being git's own (`pushRemote`, `remote.pushDefault`, then the
+   tracking remote) — and **every doubt reads as Pull**: no reflog, a rewrite aged
+   out of it, a fork workflow that pushes elsewhere. A diverged branch keeps both ways out within
+   reach whichever is on the face: *Pull* under Force Push, *Force Push (with
+   Lease)…* under Pull. The face and the menu item open the same confirmation, and
+   ⌘/Ctrl+P reaches it like any other rung.
+   **The force push is a lease core pins and grants itself**
+   (`--force-with-lease=<branch>:<commit>`): the commit is the remote-tracking tip,
+   and core pins it only after the same reflog test shows this branch once
+   contained it — so a proposed Force Push is one the push accepts, and a remote
+   commit this branch never contained is never removed. A bare lease would not do:
+   the automatic fetches keep moving the remote-tracking ref, so it passes over a
+   commit somebody else pushed. On a branch that diverged because somebody else
+   pushed, the menu's force push is therefore refused — by core before anything is
+   sent once their commit has been fetched, by the remote (`stale info`) before
+   that — inside the dialog (§6.13), until their commit has been taken in. What a
+   force push *does* remove is every commit the branch moved away from, whoever
+   wrote it, and the confirmation says so.
    **Fetch is always reachable** — as the proposal when in sync, and from the
    chevron in every state that has one — because it is the only way to ask the
    remotes a question without a pull moving the working tree, and it asks all of
    them (`fetch_all`) where the automatic fetches ask only the branch's own. A
-   chevron appears only
-   where it offers something the face does not; force-push-with-lease joins it only
-   on a genuinely diverged branch, behind a confirmation naming `status.upstream`
-   (composing `remote/branch` is wrong whenever the upstream branch is named
-   something else). **Neither client has a Refresh button**: the poll keeps the view
+   chevron appears only where it offers something the face does not. The force
+   push confirmation names `status.upstream` (composing `remote/branch` is wrong
+   whenever the upstream branch is named something else). **Neither client has a Refresh button**: the poll keeps the view
    current, and ⌘/Ctrl+R forces a full local reload — status, history *and*
    branches — held back while a transfer runs, since a `git status` racing a pull
    contends for the lock files it is writing. Titles, icons, which states get a

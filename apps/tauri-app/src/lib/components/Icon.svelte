@@ -92,6 +92,7 @@
     | 'arrow-up'
     | 'arrow-down'
     | 'arrow-up-circle'
+    | 'arrow-up-to-line'
     | 'arrow-clockwise'
     | 'arrow-2-circlepath'
     | 'icloud-arrow-up'
@@ -232,6 +233,13 @@
     'arrow-up-circle': [
       { path: ring(8, 8, 5.8) },
       { path: 'M8 11.15V5.2M5.85 7.35 8 5.2l2.15 2.15' },
+    ],
+    // The push that stops at nothing short of the top: native's
+    // `arrow.up.to.line`, the force push face. The same head as `arrow-up`,
+    // on a shorter shaft, under a bar the width of the head.
+    'arrow-up-to-line': [
+      { path: 'M4.35 2.95h7.3' },
+      { path: 'M8 13.2V5.75M4.35 9.4 8 5.75l3.65 3.65' },
     ],
     // One loop with one head: a plain refresh, matching the native Clone
     // sheet's `arrow.clockwise`.

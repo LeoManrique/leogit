@@ -59,7 +59,7 @@ pub use leogit_core::exclusions::Exclusion;
 pub use leogit_core::gh::GhRepo;
 pub use leogit_core::git::{
     BranchInfo, CommitDetail, CommitInfo, CommitStats, DiscardPlan, FileEntry, FileStatus,
-    FileStatusStyle, LogOptions, MergeResult, RepoIdentifier, RepoStatus, RepoSync, SyncProposal,
+    FileStatusStyle, LogOptions, MergeResult, RepoIdentifier, RepoStatus, RepoSync,
 };
 pub use leogit_core::highlight::{BlobSource, Token, TokenClass};
 pub use leogit_core::history_rewrite::{RewritePreflight, RewriteResult, UndoPoint};
@@ -67,6 +67,7 @@ pub use leogit_core::launch::LaunchTarget;
 pub use leogit_core::operation::{OperationInProgress, OperationOutcome};
 pub use leogit_core::repos::{CloneTarget, RepoRow};
 pub use leogit_core::shell::ShellOption;
+pub use leogit_core::sync_ladder::SyncProposal;
 pub use leogit_core::terminal::StartedTerminal;
 pub use leogit_core::update::UpdateInfo;
 
@@ -146,13 +147,14 @@ pub struct Exclusion {
     pub absent_reads: u32,
 }
 
-/// Mirrors [`leogit_core::git::SyncProposal`].
+/// Mirrors [`leogit_core::sync_ladder::SyncProposal`].
 #[uniffi::remote(Enum)]
 pub enum SyncProposal {
     Loading,
     Detached,
     PublishRepository,
     PublishBranch,
+    ForcePush,
     Pull,
     Push,
     Fetch,
@@ -1228,19 +1230,22 @@ pub async fn pull(
         .map_err(GitError::from)
 }
 
-/// `git push --progress [--set-upstream] [--force-with-lease] <remote>
-/// <branch>`.
+/// `git push --progress [--set-upstream]
+/// [--force-with-lease=<branch>:<commit>] <remote> <branch>`.
 ///
 /// `set_upstream` must be derived from `RepoStatus.has_upstream` (pass
 /// `!has_upstream`), never synthesised: that flag is only true when real
 /// tracking configuration exists, and dropping `--set-upstream` on a first
 /// push leaves the branch permanently untracked. `force_with_lease` is the
-/// only force mode core offers — there is no bare `--force` path.
+/// only force mode core offers — there is no bare `--force` path — and core
+/// grants it only over a commit the local branch's reflog shows it once
+/// contained, refusing before anything is sent otherwise.
 ///
 /// # Errors
 ///
 /// Returns [`GitError`] when the push is rejected (non-fast-forward, stale
-/// lease) or the remote is unreachable.
+/// lease, a remote commit this branch never held) or the remote is
+/// unreachable.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn push(
     repo_path: String,
@@ -2900,12 +2905,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Force-push semantics end to end: a diverged branch is rejected by a
-    /// plain push, rejected again by `--force-with-lease` while the
-    /// remote-tracking ref is stale, and accepted after a fetch — the exact
-    /// flow behind the UI's "Force Push (with Lease)…" confirmation.
+    /// Force-push semantics end to end, on a branch that diverged because
+    /// somebody else pushed: rejected by a plain push, rejected by the lease
+    /// while the remote-tracking ref is stale, and *still* rejected once a
+    /// fetch has moved that ref onto their commit — by core, because their
+    /// commit was never part of this branch. Then the branch takes their
+    /// commit in and rewrites its own, and the same call goes through: the
+    /// flow behind the UI's force push confirmation.
     #[tokio::test]
-    async fn force_with_lease_rejects_stale_then_succeeds_after_fetch() {
+    async fn force_push_spares_a_commit_this_branch_never_held() {
         let (dir, repo, default) = seeded_repo("lease");
         let bare = bare_origin("lease", &dir);
         run_git(&dir, &["push", "--set-upstream", "origin", &default]);
@@ -2948,10 +2956,35 @@ mod tests {
         .unwrap_err();
         assert!(matches!(stale, GitError::Failed { .. }));
 
-        // After a fetch the lease matches, and the forced push wins.
+        // After a fetch a bare lease would match, and push over B's commit.
+        // It is refused all the same: this branch never held that commit, so
+        // it is not this branch's to remove.
         fetch(repo.clone(), "origin".to_string(), false)
             .await
             .expect("fetch");
+        let theirs = run_git_stdout(&bare, &["rev-parse", &default]);
+        let foreign = push(
+            repo.clone(),
+            "origin".to_string(),
+            default.clone(),
+            false,
+            true,
+            CollectingListener::arc(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(foreign, GitError::Failed { .. }));
+        assert_eq!(
+            run_git_stdout(&bare, &["rev-parse", &default]),
+            theirs,
+            "their commit is still the remote's tip"
+        );
+
+        // Take their commit in, then rewrite: now everything the remote holds
+        // is something this branch held, and the forced push wins.
+        run_git(&dir, &["rebase", &format!("origin/{default}")]);
+        run_git(&dir, &["push", "origin", &default]);
+        run_git(&dir, &["commit", "--amend", "-m", "ours, reworded"]);
         push(
             repo.clone(),
             "origin".to_string(),
@@ -2961,7 +2994,7 @@ mod tests {
             CollectingListener::arc(),
         )
         .await
-        .expect("force with lease");
+        .expect("force push of a rewrite");
 
         let local_head = run_git_stdout(&dir, &["rev-parse", "HEAD"]);
         let remote_head = run_git_stdout(&bare, &["rev-parse", &default]);

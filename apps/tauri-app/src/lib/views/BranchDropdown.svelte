@@ -4,7 +4,10 @@
   import { operationWords } from '$lib/utils/operationWords'
   import { dismissOnEscape } from '$lib/actions/overlayStack'
   import { nextActiveIndex, scrollIntoViewWhenActive } from '$lib/actions/listNavigation'
-  import ContextMenu, { type ContextMenuItem } from '$lib/components/ContextMenu.svelte'
+  import ContextMenu, {
+    MENU_SEPARATOR,
+    type ContextMenuItem,
+  } from '$lib/components/ContextMenu.svelte'
   import Icon from '$lib/components/Icon.svelte'
 
   interface Props {
@@ -266,7 +269,7 @@
         enabled: !branch.is_remote && !isCurrent,
         destructive: true,
       },
-      { separator: true, label: '', action: () => {} },
+      MENU_SEPARATOR,
       {
         label: 'Switch to Branch',
         action: () => onSwitch(branch.name),

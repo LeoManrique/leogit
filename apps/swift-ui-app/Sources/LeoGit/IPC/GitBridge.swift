@@ -435,11 +435,14 @@ enum GitBridge {
         try await pull(repoPath: repoPath, remote: remote, listener: ProgressRelay(onProgress))
     }
 
-    /// `git push --progress [--set-upstream] [--force-with-lease]`.
+    /// `git push --progress [--set-upstream]
+    /// [--force-with-lease=<branch>:<commit>]`.
     /// `setUpstream` must be `!status.hasUpstream` — that flag is only true
     /// when real tracking configuration exists, and a first push without
     /// `--set-upstream` leaves the branch permanently untracked. With-lease
-    /// is the only force mode core offers; there is no bare `--force`.
+    /// is the only force mode core offers — there is no bare `--force` — and
+    /// core grants it only over a commit the local branch's reflog shows it
+    /// once contained, refusing before anything is sent otherwise.
     @concurrent
     static func pushRemote(
         in repoPath: String,

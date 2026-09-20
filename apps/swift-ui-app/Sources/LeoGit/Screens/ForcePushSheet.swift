@@ -8,10 +8,11 @@ import SwiftUI
 /// anywhere else. A push is the slowest thing this app does, and a dialog that
 /// dismisses on the click leaves the user watching a toolbar button for an
 /// answer to a question they were just asked in the middle of the window. And
-/// a lease is *made* to be refused: someone pushed since your last fetch is
-/// the expected failure, not the exceptional one, and FRONTEND §6.13's
-/// refinement keeps it inside the dialog that raised it — fetch, then press
-/// the same button again, one dismissal away instead of two.
+/// a lease is *made* to be refused: a remote branch holding a commit this
+/// branch never contained is the expected failure, not the exceptional one,
+/// and FRONTEND §6.13's refinement keeps it inside the dialog that raised it —
+/// fetch, look, then press the same button again, one dismissal away instead
+/// of two.
 struct ForcePushSheet: View {
     /// Where the push would land, named from git's own tracking configuration
     /// (`RepoStatus.upstream`) rather than composed from the remote and the
@@ -45,8 +46,9 @@ struct ForcePushSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             Text(
-                "With-lease refuses the push if someone else has pushed since your last "
-                    + "fetch — safer than a plain force, but it cannot be undone once it "
+                "Commits on the remote branch that your branch no longer contains are removed "
+                    + "from it, whoever wrote them. The push is refused if the remote branch "
+                    + "holds a commit your branch never contained. It cannot be undone once it "
                     + "succeeds."
             )
             .font(.callout)
@@ -54,8 +56,9 @@ struct ForcePushSheet: View {
             .fixedSize(horizontal: false, vertical: true)
 
             if let errorMessage {
-                // Git's own rejection, kept as git wrote it: monospaced so its
-                // ref names line up, selectable so the ref that moved can be
+                // The refusal as it was written — git's, or core's when it
+                // refused before asking git: monospaced so git's ref names
+                // line up, selectable so the ref that moved can be
                 // copied into a fetch, and scrollable so a long hint block
                 // cannot push the buttons off the sheet (STYLE.md).
                 ScrollView {

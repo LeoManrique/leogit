@@ -3,19 +3,22 @@ import SwiftUI
 /// The toolbar's sync control — one adaptive split button running on
 /// LeoGit's own workflow machinery.
 ///
-/// A strict precedence ladder picks the single action that makes sense right
-/// now: detached HEAD → publish repository (no remote) → publish branch (no
-/// upstream) → pull (behind) → push (ahead) → fetch (in sync). Pull outranks
-/// push, so a diverged branch proposes the step that must happen first — the
-/// ahead count stays visible in the toolbar counts beside this control
-/// meanwhile. Force push with lease is menu-only, offered only while
-/// diverged, and behind a destructive confirmation. Fetch is the
-/// primary action once nothing needs pulling or pushing — the manual "check
-/// the remotes", which fetches every one of them — and a menu item in every
-/// split state, which is what let the separate toolbar Refresh button go (⌘R
-/// in the View menu still forces the local reload). Underneath, nothing
-/// changed: single-slot operations,
-/// `--ff`-only pull, gh-based publish, and the progress banner.
+/// Core's precedence ladder (`sync_ladder.rs`) picks the single action that
+/// makes sense right now: detached HEAD → publish repository (no remote) →
+/// publish branch (no upstream) → force push (diverged from its own past) →
+/// pull (behind) → push (ahead) → fetch (in sync). Pull outranks push, so a
+/// diverged branch proposes the step that must happen first — the ahead count
+/// stays visible in the toolbar counts beside this control meanwhile — unless
+/// the branch's reflog shows the divergence is its own rewrite, where a pull
+/// would merge the old commits back in and the force push is the step. Either
+/// way the other one is under the chevron, and a force push always stands
+/// behind its destructive confirmation. Fetch is the primary action once
+/// nothing needs pulling or pushing — the manual "check the remotes", which
+/// fetches every one of them — and a menu item in every split state, which is
+/// what let the separate toolbar Refresh button go (⌘R in the View menu still
+/// forces the local reload). Underneath: single-slot operations, a `--ff`
+/// pull, gh-based publish, and the progress banner. How each rung looks is
+/// `SyncFace.swift`.
 struct SyncControls: View {
     let store: SyncStore
     let repoPath: String
@@ -45,21 +48,12 @@ struct SyncControls: View {
     @State private var isConfirmingForcePush = false
     @State private var isPublishSheetPresented = false
 
-    /// The live reads the *actions* are built from: what gets pushed, whether
-    /// that push sets an upstream, and whether the divergence that unlocks
-    /// force push is real. All four fall to their empty values while the open
-    /// repository has no status, which is what makes those actions unavailable
-    /// rather than wrong.
+    /// The live reads the *actions* are built from: what gets pushed, and
+    /// whether that push sets an upstream. Both fall to their empty values
+    /// while the open repository has no status, which is what makes those
+    /// actions unavailable rather than wrong.
     private var branch: String { status?.branch ?? "" }
     private var hasUpstream: Bool { status?.hasUpstream ?? false }
-    private var ahead: Int32 { status?.ahead ?? 0 }
-    private var behind: Int32 { status?.behind ?? 0 }
-
-    /// Force push is offered only for a truly diverged branch: real upstream
-    /// tracking plus commits on both sides. By the precedence ladder this can
-    /// only be true in the `.pull` state, which is where the menu item
-    /// appears.
-    private var hasDiverged: Bool { hasUpstream && ahead > 0 && behind > 0 }
 
     private var isBusy: Bool { store.activeOperation != nil }
 
@@ -84,14 +78,10 @@ struct SyncControls: View {
 
     var body: some View {
         Group {
-            switch face {
-            case .loading, .detached:
+            if menuActions.isEmpty {
                 plainButton(action: perform)
-                    .disabled(true)
-            case .publishRepository, .fetch:
-                plainButton(action: perform)
-                    .disabled(!isEnabled)
-            case .publishBranch, .push, .pull:
+                    .disabled(!face.isActionable || !isEnabled)
+            } else {
                 splitButton(primaryAction: perform)
             }
         }
@@ -102,7 +92,10 @@ struct SyncControls: View {
         // symbol); the repo and branch chips at the leading edge render
         // regular. One chip family, one weight.
         .fontWeight(.regular)
-        .help(helpText)
+        // The tooltip explains the face, so its counts come from the same held
+        // read — a "Pull 0 commits" while the live status is still nil would
+        // be the one place the bar contradicted itself.
+        .help(face.help(ahead: shown.ahead, behind: shown.behind))
         // Repository ▸ <action> (⌘P) lands here. The menu item can't call
         // `perform()` directly — its focused value is published by the
         // window content, which doesn't own this view's sheet and alert
@@ -131,13 +124,21 @@ struct SyncControls: View {
     /// The states with no meaningful secondary action, so no dropdown.
     private func plainButton(action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Label(title, systemImage: icon)
+            Label(title, systemImage: face.symbol)
         }
     }
 
+    /// The chevron's contents, from the face's own list. Only a diverged
+    /// branch has something a force push would publish, and by the ladder that
+    /// is the pull rung with commits still to push — so a branch that is only
+    /// behind loses the item. Read from the held status like the face it hangs
+    /// under; every item is disabled anyway until the live one lands.
+    private var menuActions: [SyncMenuAction] {
+        face.menu.filter { $0 != .forcePush || shown.ahead > 0 }
+    }
+
     /// The split states: the proposed action on the button face, plus a
-    /// chevron menu that always offers Fetch and — only while diverged —
-    /// force push with lease.
+    /// chevron menu of what the face does not offer.
     ///
     /// Deliberately the stock `Menu(primaryAction:)` split button, nothing
     /// hand-built. macOS bridges a toolbar control's label to a system
@@ -148,18 +149,28 @@ struct SyncControls: View {
     /// item left of this one, and this button's tooltip.
     private func splitButton(primaryAction: @escaping () -> Void) -> some View {
         Menu {
-            Button("Fetch", action: fetch)
-                .disabled(!isEnabled)
-
-            if hasDiverged {
-                Divider()
-                Button("Force Push (with Lease)…", role: .destructive) {
-                    isConfirmingForcePush = true
+            ForEach(menuActions, id: \.self) { action in
+                switch action {
+                case .fetch:
+                    Button("Fetch", action: fetch)
+                case .pull:
+                    Button("Pull", action: pull)
+                case .forcePush:
+                    // Set apart from its neighbours — unless it has none
+                    // above it, where a rule would open the menu.
+                    if action != menuActions.first {
+                        Divider()
+                    }
+                    Button("Force Push (with Lease)…", role: .destructive) {
+                        isConfirmingForcePush = true
+                    }
                 }
-                .disabled(!isEnabled)
             }
+            // On the items as well as the menu: the slot can change hands
+            // while the menu is already open.
+            .disabled(!isEnabled)
         } label: {
-            Label(title, systemImage: icon)
+            Label(title, systemImage: face.symbol)
         } primaryAction: {
             primaryAction()
         }
@@ -178,38 +189,6 @@ struct SyncControls: View {
         return face.title
     }
 
-    private var icon: String {
-        switch face {
-        case .loading, .fetch: "arrow.triangle.2.circlepath"
-        case .detached, .push: "arrow.up"
-        case .publishRepository: "icloud.and.arrow.up"
-        case .publishBranch: "arrow.up.circle"
-        case .pull: "arrow.down"
-        }
-    }
-
-    /// The tooltip explains the face, so its counts come from the same held
-    /// read — a "Pull 0 commits" while the live status is still nil would be
-    /// the one place the bar contradicted itself.
-    private var helpText: String {
-        switch face {
-        case .loading:
-            "Loading repository status"
-        case .detached:
-            "Detached HEAD — check out a branch to push"
-        case .publishRepository:
-            "Publish this repository to GitHub — creates the remote repo and pushes this branch"
-        case .publishBranch:
-            "Publish this branch to the remote and start tracking it"
-        case .pull:
-            "Pull \(shown.behind) commit\(shown.behind == 1 ? "" : "s") from the remote"
-        case .push:
-            "Push \(shown.ahead) commit\(shown.ahead == 1 ? "" : "s") to the remote"
-        case .fetch:
-            "Fetch from every remote — updates the ahead/behind counts without touching your files"
-        }
-    }
-
     /// Runs whatever the ladder proposes. The single entry point for the
     /// button face, the split button's primary action, and the menu command,
     /// so a state can never be reachable by one and not the others.
@@ -223,6 +202,9 @@ struct SyncControls: View {
         case .loading, .detached: break
         case .publishRepository: isPublishSheetPresented = true
         case .publishBranch, .push: push()
+        // The face asks first, exactly as the menu item does: proposing the
+        // force push says it is the step that fits, not that it is harmless.
+        case .forcePush: isConfirmingForcePush = true
         case .pull: pull()
         case .fetch: fetch()
         }
@@ -281,39 +263,6 @@ struct SyncControls: View {
     private func refresh(after outcome: OpOutcome) async {
         if case .refusedBusy = outcome { return }
         await onWorkingTreeChanged()
-    }
-}
-
-/// The presentation half of core's `SyncProposal`, which is where the ladder
-/// itself lives — one implementation for both clients, carried on
-/// `RepoStatus.proposal` so the toolbar button, the ⌘P menu item and the Tauri
-/// header can never disagree about what the repository needs next.
-///
-/// Only the words stay here: the two controls are shaped differently, and which
-/// state earns a chevron is a macOS question rather than a policy one.
-extension SyncProposal {
-    /// The state word: the button face's title when idle, and the menu
-    /// item's title always (a disabled "Pull" mid-pull reads better in a
-    /// menu than "Pulling…").
-    var title: String {
-        switch self {
-        case .loading, .fetch: "Fetch"
-        case .detached: "Push"
-        case .publishRepository: "Publish"
-        case .publishBranch: "Publish Branch"
-        case .pull: "Pull"
-        case .push: "Push"
-        }
-    }
-
-    /// Whether the proposal can be run at all — the two informational states
-    /// have nothing to do, and both the button and the menu item say so by
-    /// staying disabled.
-    var isActionable: Bool {
-        switch self {
-        case .loading, .detached: false
-        case .publishRepository, .publishBranch, .pull, .push, .fetch: true
-        }
     }
 }
 

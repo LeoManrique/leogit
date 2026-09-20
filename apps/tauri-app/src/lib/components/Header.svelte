@@ -23,9 +23,10 @@
   import { basename } from '$lib/utils/path'
   import { isFromTerminal } from '$lib/utils/keyboard'
   import { operationWords } from '$lib/utils/operationWords'
-  import ContextMenu, { type ContextMenuItem } from './ContextMenu.svelte'
+  import { assertNever } from '$lib/utils/assertNever'
+  import ContextMenu, { MENU_SEPARATOR, type ContextMenuItem } from './ContextMenu.svelte'
   import ForcePushConfirm from './ForcePushConfirm.svelte'
-  import Icon from './Icon.svelte'
+  import Icon, { type IconName } from './Icon.svelte'
   import PublishRepository from './PublishRepository.svelte'
   import RepoTooltip from './RepoTooltip.svelte'
 
@@ -158,7 +159,6 @@
 
   const ahead = $derived($repoState.status.ahead)
   const behind = $derived($repoState.status.behind)
-  const hasUpstream = $derived($repoState.status.hasUpstream)
   // Detached HEAD (after "Check Out Commit…"): the chip shows the short SHA instead
   // of a branch name. The user returns to a branch via the branch picker.
   const detached = $derived($repoState.status.detached)
@@ -193,34 +193,99 @@
    */
   const proposal = $derived($repoState.status.proposal)
 
-  /** The two informational states: the button names them and stays off. */
-  const isActionable = $derived(proposal !== 'Loading' && proposal !== 'Detached')
+  /** How one rung of the ladder looks on the button. */
+  interface SyncFace {
+    label: string
+    icon: IconName
+    /** The tooltip, given the pending counts a rung may want to name. */
+    help: (ahead: number, behind: number) => string
+    /** False for the informational rungs: the button names them and stays off. */
+    actionable: boolean
+    /**
+     * What the chevron offers, as in the native client: only what the face
+     * does not. Empty means no chevron — publishing a repository has no
+     * secondary action, and in the Fetch state the one item would *be* the
+     * face.
+     */
+    menu: readonly SyncMenuAction[]
+  }
+
+  /** Everything a chevron can offer. `forcePush` is dropped from a menu whose
+   *  branch has nothing to push: a branch that is only behind fast-forwards. */
+  type SyncMenuAction = 'fetch' | 'pull' | 'forcePush'
+
+  const commits = (count: number) => `${count} commit${count === 1 ? '' : 's'}`
 
   /**
-   * Which states earn a chevron, as in the native client: only where the menu
-   * offers something the face doesn't. Publishing a repository has no
-   * secondary action, and in the Fetch state the menu's one item *is* the
-   * face.
+   * One row per rung, and the only place a rung's presentation is written:
+   * a `Record` over the union, so a rung core adds is a `pnpm check` error
+   * here rather than a button that falls through to somebody else's icon.
    */
-  const hasMenu = $derived(
-    proposal === 'PublishBranch' || proposal === 'Pull' || proposal === 'Push',
-  )
-
-  // Force-push is only meaningful once the branch has diverged from its upstream
-  // (commits on both sides). A plain ahead-only branch fast-forwards, so offering
-  // it there is noise — and by the ladder this can only be true in the Pull
-  // state, so that is the only menu carrying the item.
-  const hasDiverged = $derived(hasUpstream && ahead > 0 && behind > 0)
-
-  const PROPOSAL_LABEL: Record<SyncProposal, string> = {
-    Loading: 'Fetch',
-    Detached: 'Push',
-    PublishRepository: 'Publish',
-    PublishBranch: 'Publish Branch',
-    Pull: 'Pull',
-    Push: 'Push',
-    Fetch: 'Fetch',
+  const SYNC_FACES: Record<SyncProposal, SyncFace> = {
+    Loading: {
+      label: 'Fetch',
+      icon: 'arrow-2-circlepath',
+      help: () => 'Loading repository status',
+      actionable: false,
+      menu: [],
+    },
+    Detached: {
+      label: 'Push',
+      icon: 'arrow-up',
+      help: () => 'Detached HEAD — check out a branch to push',
+      actionable: false,
+      menu: [],
+    },
+    PublishRepository: {
+      label: 'Publish',
+      icon: 'icloud-arrow-up',
+      help: () =>
+        'Publish this repository to GitHub — creates the remote repo and pushes this branch (Ctrl+P)',
+      actionable: true,
+      menu: [],
+    },
+    PublishBranch: {
+      label: 'Publish Branch',
+      icon: 'arrow-up-circle',
+      help: () => 'Publish this branch to the remote and start tracking it (Ctrl+P)',
+      actionable: true,
+      menu: ['fetch'],
+    },
+    ForcePush: {
+      label: 'Force Push',
+      icon: 'arrow-up-to-line',
+      help: (ahead, behind) =>
+        `This branch was rewritten: replace ${commits(behind)} on the remote with ${commits(ahead)} from here (Ctrl+P)`,
+      actionable: true,
+      // Pull stays reachable: git's test says the remote holds nothing this
+      // branch never had, not that the user wants what it holds gone.
+      menu: ['pull', 'fetch'],
+    },
+    Pull: {
+      label: 'Pull',
+      icon: 'arrow-down',
+      help: (_ahead, behind) => `Pull ${commits(behind)} from the remote (Ctrl+P)`,
+      actionable: true,
+      menu: ['fetch', 'forcePush'],
+    },
+    Push: {
+      label: 'Push',
+      icon: 'arrow-up',
+      help: (ahead) => `Push ${commits(ahead)} to the remote (Ctrl+P)`,
+      actionable: true,
+      menu: ['fetch'],
+    },
+    Fetch: {
+      label: 'Fetch',
+      icon: 'arrow-2-circlepath',
+      help: () =>
+        'Fetch from every remote — updates the ahead/behind counts without touching your files (Ctrl+P)',
+      actionable: true,
+      menu: [],
+    },
   }
+
+  const face = $derived(SYNC_FACES[proposal])
 
   const OP_LABEL: Record<NetworkOpKind, string> = {
     fetch: 'Fetching…',
@@ -229,31 +294,8 @@
     publish: 'Publishing…',
   }
 
-  const PROPOSAL_HELP: Record<SyncProposal, string> = {
-    Loading: 'Loading repository status',
-    Detached: 'Detached HEAD — check out a branch to push',
-    PublishRepository:
-      'Publish this repository to GitHub — creates the remote repo and pushes this branch (Ctrl+P)',
-    PublishBranch: 'Publish this branch to the remote and start tracking it (Ctrl+P)',
-    Pull: 'Pull from the remote (Ctrl+P)',
-    Push: 'Push to the remote (Ctrl+P)',
-    Fetch: 'Fetch from every remote — updates the counts without touching your files (Ctrl+P)',
-  }
-
-  const actionLabel = $derived(
-    $activeNetworkOp ? OP_LABEL[$activeNetworkOp] : PROPOSAL_LABEL[proposal],
-  )
-
-  const actionHelp = $derived.by(() => {
-    switch (proposal) {
-      case 'Pull':
-        return `Pull ${behind} commit${behind === 1 ? '' : 's'} from the remote (Ctrl+P)`
-      case 'Push':
-        return `Push ${ahead} commit${ahead === 1 ? '' : 's'} to the remote (Ctrl+P)`
-      default:
-        return PROPOSAL_HELP[proposal]
-    }
-  })
+  const actionLabel = $derived($activeNetworkOp ? OP_LABEL[$activeNetworkOp] : face.label)
+  const actionHelp = $derived(face.help(ahead, behind))
 
   /** Where a force push would land. Named from git's own tracking configuration
    *  rather than composed from `{remote}/{branch}`, which is wrong whenever the
@@ -306,11 +348,26 @@
     }
   }
 
-  async function handlePush() {
-    if ($activeNetworkOp) return
+  /**
+   * The one push: Push, Publish Branch and the force push differ in a flag and
+   * in where a refusal is said, and in nothing else.
+   *
+   * @returns whether it went through. Anything else has already been handed
+   *   to `onRefused` — a busy slot included, in the native sheet's own words:
+   *   a dialog whose button did nothing would leave the user guessing about
+   *   the one push they most need to be sure of.
+   */
+  async function runPush(
+    forceWithLease: boolean,
+    onRefused: (error: unknown) => void,
+  ): Promise<boolean> {
+    if ($activeNetworkOp) {
+      onRefused('Another network operation is in progress. Try again in a moment.')
+      return false
+    }
     const repoPath = $appState.repoPath
     const branch = $repoState.status.branch
-    if (!repoPath || !branch) return
+    if (!repoPath || !branch) return false
     beginNetworkOp('push')
     try {
       // git's push order, not the remote the branch pulls from.
@@ -322,37 +379,32 @@
       // synthesised: this is what makes a first push `--set-upstream`, and it
       // is why Publish Branch and Push are one handler.
       const setUpstream = !$repoState.status.hasUpstream
-      await gitApi.push(repoPath, remote, branch, setUpstream, false)
+      await gitApi.push(repoPath, remote, branch, { setUpstream, forceWithLease })
       await onTransferFinished?.()
+      return true
     } catch (error) {
-      reportActionError(error, handlePush)
+      onRefused(error)
+      return false
     } finally {
       endNetworkOp()
     }
   }
 
-  async function handleForcePush() {
-    if ($activeNetworkOp) return
-    const repoPath = $appState.repoPath
-    const branch = $repoState.status.branch
-    if (!repoPath || !branch) return
+  function handlePush(): Promise<boolean> {
+    return runPush(false, (error) => reportActionError(error, handlePush))
+  }
+
+  function askToForcePush(): void {
     forcePushError = undefined
-    beginNetworkOp('push')
-    try {
-      const remote = await gitApi.getPushRemote(repoPath, branch)
-      if (!remote) throw new Error('This repository has no remote to push to.')
-      const setUpstream = !$repoState.status.hasUpstream
-      // 5th arg = forceWithLease. We never use bare --force.
-      await gitApi.push(repoPath, remote, branch, setUpstream, true)
-      await onTransferFinished?.()
-      showForcePushConfirm = false
-    } catch (error) {
-      // Stays open with the reason inline: a refused lease is answered by
-      // fetching and pressing the same button again.
-      forcePushError = String(error)
-    } finally {
-      endNetworkOp()
-    }
+    showForcePushConfirm = true
+  }
+
+  async function handleForcePush() {
+    forcePushError = undefined
+    // A refusal stays in the dialog with the reason inline: a stale lease is
+    // answered by fetching and pressing the same button again.
+    const pushed = await runPush(true, (error) => (forcePushError = String(error)))
+    if (pushed) showForcePushConfirm = false
   }
 
   /**
@@ -374,11 +426,19 @@
       case 'Push':
         void handlePush()
         return
+      case 'ForcePush':
+        // The face asks first, exactly as the menu item does: proposing the
+        // force push says it is the step that fits, not that it is harmless.
+        askToForcePush()
+        return
       case 'Pull':
         void handlePull()
         return
       case 'Fetch':
         void handleFetch()
+        return
+      default:
+        assertNever(proposal)
     }
   }
 
@@ -505,30 +565,41 @@
   })
 
   /**
-   * The chevron's contents, in the three states that have one. Fetch is always
-   * here — it is how the user reaches the remote without a working-tree-mutating
-   * pull, which this client had no route to at all — and force push joins it
-   * only once the branch has actually diverged.
+   * The chevron's contents, from the face's own list. Fetch is on every one of
+   * them — it is how the user reaches the remote without a pull that touches
+   * the working tree — and a diverged branch keeps *both* ways out within
+   * reach, whichever of them core put on the face: Pull under Force Push, and
+   * the force push under Pull.
    *
-   * The menu no longer repeats the face: a chevron whose only item was the
-   * button's own action was a control that revealed nothing.
+   * A menu never repeats its face: a chevron whose only item was the button's
+   * own action was a control that revealed nothing.
    */
-  const actionMenuItems = $derived<ContextMenuItem[]>([
-    { label: 'Fetch', action: handleFetch, enabled: !isTransferring },
-    ...(hasDiverged
-      ? [
-          {
-            label: 'Force Push (with Lease)…',
-            action: () => {
-              forcePushError = undefined
-              showForcePushConfirm = true
-            },
-            enabled: !isTransferring,
-            destructive: true,
-          },
-        ]
-      : []),
-  ])
+  const actionMenuItems = $derived.by<ContextMenuItem[]>(() => {
+    const enabled = !isTransferring
+    const items: Record<SyncMenuAction, ContextMenuItem> = {
+      fetch: { label: 'Fetch', action: handleFetch, enabled },
+      pull: { label: 'Pull', action: handlePull, enabled },
+      forcePush: {
+        label: 'Force Push (with Lease)…',
+        action: askToForcePush,
+        enabled,
+        destructive: true,
+      },
+    }
+    return (
+      face.menu
+        // Only a diverged branch has something a force push would publish. By
+        // the ladder that is the Pull rung with commits still to push.
+        .filter((action) => action !== 'forcePush' || ahead > 0)
+        // The destructive item is set apart from its neighbours, as the native
+        // menu's `Divider()` sets it — unless it has none above it.
+        .flatMap((action, index) =>
+          action === 'forcePush' && index > 0 ? [MENU_SEPARATOR, items[action]] : [items[action]],
+        )
+    )
+  })
+
+  const hasMenu = $derived(actionMenuItems.length > 0)
 </script>
 
 <header class="header">
@@ -626,7 +697,7 @@
         class:in-progress={isTransferring}
         class:solo={!hasMenu}
         onclick={performProposal}
-        disabled={!isActionable || isTransferring}
+        disabled={!face.actionable || isTransferring}
         title={actionHelp}
       >
         {#if isTransferring}
@@ -637,21 +708,13 @@
                  until git's first tick — a bar frozen at zero reads as stuck. -->
             <div class="btn-progress indeterminate"></div>
           {/if}
-          <!-- The face the native sync control wears for both `.loading` and
-               `.fetch` (`SyncControls.swift:154`): a two-arrow sync loop, which
-               is a different statement from the one-arrow refresh the Clone
-               sheet uses. -->
+          <!-- A transfer spins the glyph of the `.loading` and `.fetch` rungs
+               (`SyncProposal.symbol` in the native `SyncFace.swift`): a
+               two-arrow sync loop, which is a different statement from the
+               one-arrow refresh the Clone sheet uses. -->
           <Icon name="arrow-2-circlepath" size={TOOLBAR_GLYPH} class="icon" spin />
-        {:else if proposal === 'PublishRepository'}
-          <Icon name="icloud-arrow-up" size={TOOLBAR_GLYPH} class="icon" />
-        {:else if proposal === 'PublishBranch'}
-          <Icon name="arrow-up-circle" size={TOOLBAR_GLYPH} class="icon" />
-        {:else if proposal === 'Pull'}
-          <Icon name="arrow-down" size={TOOLBAR_GLYPH} class="icon" />
-        {:else if proposal === 'Push' || proposal === 'Detached'}
-          <Icon name="arrow-up" size={TOOLBAR_GLYPH} class="icon" />
         {:else}
-          <Icon name="arrow-2-circlepath" size={TOOLBAR_GLYPH} class="icon" />
+          <Icon name={face.icon} size={TOOLBAR_GLYPH} class="icon" />
         {/if}
         <span>{actionLabel}</span>
         <!-- Both pending counts ride the one button, GitHub-Desktop style: with

@@ -8,6 +8,10 @@
     destructive?: boolean
     separator?: boolean
   }
+
+  /** The rule between two groups of items — the one spelling of it, since a
+   *  separator is an item that carries nothing but its flag. */
+  export const MENU_SEPARATOR: ContextMenuItem = { separator: true, label: '', action: () => {} }
 </script>
 
 <script lang="ts">

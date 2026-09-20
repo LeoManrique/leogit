@@ -1,6 +1,6 @@
 //! Throwaway repositories for the git-driving modules' tests.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::{TempDir, tempdir};
 
@@ -44,6 +44,12 @@ pub(crate) fn git_stopping(dir: &Path, args: &[&str]) {
 /// global git setup.
 pub(crate) fn init_test_repo(dir: &Path) {
     git(dir, &["init", "-q"]);
+    set_identity(dir);
+}
+
+/// The committer identity every test repository commits under, with signing
+/// off, written to the repository's own config.
+fn set_identity(dir: &Path) {
     git(dir, &["config", "user.email", "test@example.com"]);
     git(dir, &["config", "user.name", "Test User"]);
     git(dir, &["config", "commit.gpgsign", "false"]);
@@ -81,4 +87,34 @@ pub(crate) fn conflicting_repo() -> (TempDir, String) {
     commit_file(dir, "shared.txt", "main\n", "main edits shared");
     let repo_path = dir.to_str().expect("utf-8 path").to_string();
     (tmp, repo_path)
+}
+
+/// A bare `origin.git` and a clone of it, `mine`, side by side in one
+/// directory: `main` holds two commits ("first", "second"), both pushed, and
+/// tracks `origin/main`. Returns the directory and the path of `mine`;
+/// [`clone_of`] adds somebody else's clone beside it.
+pub(crate) fn published_repo() -> (TempDir, PathBuf) {
+    let tmp = tempdir().expect("tempdir");
+    let root = tmp.path();
+    git(root, &["init", "-q", "--bare", "-b", "main", "origin.git"]);
+    // Initialised and then pointed at the remote, rather than cloned from it:
+    // cloning an empty repository warns on every test's stderr.
+    let mine = root.join("mine");
+    std::fs::create_dir(&mine).expect("mkdir");
+    init_test_repo(&mine);
+    git(&mine, &["checkout", "-q", "-b", "main"]);
+    git(&mine, &["remote", "add", "origin", "../origin.git"]);
+    commit_file(&mine, "first.txt", "first\n", "first");
+    commit_file(&mine, "second.txt", "second\n", "second");
+    git(&mine, &["push", "-q", "--set-upstream", "origin", "main"]);
+    (tmp, mine)
+}
+
+/// Another clone of [`published_repo`]'s `origin.git`, named `name`, with the
+/// same committer identity every test repository gets.
+pub(crate) fn clone_of(root: &Path, name: &str) -> PathBuf {
+    git(root, &["clone", "-q", "origin.git", name]);
+    let clone = root.join(name);
+    set_identity(&clone);
+    clone
 }

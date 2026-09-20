@@ -47,6 +47,7 @@ leogit/
 │       ├── git.rs                   # git operations (status, log, branch, discard, ignore, …)
 │       ├── operation.rs             # the merge/rebase/pick/revert in progress: probe, continue, abort
 │       ├── history_rewrite.rs       # History's multi-commit actions: preflight, cherry-pick
+│       ├── sync_ladder.rs           # SyncProposal: the sync control's ladder + the reflog test for a rewrite
 │       ├── git_version.rs           # the installed git's version and the 2.45 floor
 │       ├── exclusions.rs            # the commit composer's opt-out grace window
 │       ├── launch.rs                # `leogit <dir>` resolution + pending-target state
@@ -549,17 +550,22 @@ non-Sendable tokens.
 
 The sync toolbar consuming all of this is one adaptive control (`SyncControls`), GitHub
 Desktop's model: the precedence ladder — loading → detached → publish repository → publish
-branch → pull → push → fetch — arrives as `RepoStatus.proposal` from core's
-`sync_proposal`, and this view renders a plain button for the no-menu states and a split
-button for the rest, whose chevron always offers Fetch and,
-only while diverged, force push with lease (the ladder makes divergence reachable only in
-the pull state, so the item lands exactly where GitHub Desktop puts it). Only the words
-and the shapes are Swift's: an `extension SyncProposal` supplies `title` and
-`isActionable`, and the local enum that used to re-derive the ladder from a `RepoStatus?`
-is gone — `status?.proposal ?? .loading` is the whole derivation, with the `nil` case the
+branch → force push → pull → push → fetch — arrives as `RepoStatus.proposal` from core's
+`sync_ladder::propose`, and this view renders a plain button for the rungs whose menu is
+empty and a split button for the rest. Only the words and the shapes are Swift's, and
+they are in one file: `Services/SyncFace.swift` extends `SyncProposal` with `title`,
+`symbol`, `isActionable`, `help(ahead:behind:)` and `menu` — a list of `SyncMenuAction`
+(fetch, pull, force push) holding only what the face does not offer — each an exhaustive
+`switch`, so a rung core adds stops the build there. It mirrors the Tauri client's
+`SYNC_FACES` record in `Header.svelte`, where the same guarantee comes from
+`Record<SyncProposal, SyncFace>` plus `assertNever` (`utils/assertNever.ts`) closing the
+`switch` that runs the proposal. A diverged branch keeps both ways out in reach: Pull
+under the force-push face, *Force Push (with Lease)…* under the pull face, dropped again
+by the view for a branch with nothing to push. The view derives nothing else —
+`status?.proposal ?? .loading` is the whole derivation, with the `nil` case the
 one thing the view still decides, because "no status yet" is a fact about its own load
-rather than about the repository. The old toolbar
-Refresh button is gone; its jobs are split between View ▸ Refresh (⌘R), which posts
+rather than about the repository. The toolbar has no
+Refresh button; that job is split between View ▸ Refresh (⌘R), which posts
 `leogitRefreshRequested` for `ContentView` to perform the visible reload — a
 scene-to-window notification, because commands live on the scene while the stores live
 in the window — and the automatics: `refreshQuietly` now counts consecutive status failures and surfaces
@@ -648,8 +654,8 @@ the toolbar title became duplication, so `.toolbar(removing: .title)` hides it
 `BranchMenu.menuLabel` ("Detached at <sha7>", "<branch> · merging", "Detached at <sha7> · rebasing"): repo name, branch,
 and counts each appear exactly once in the toolbar.
 
-The ladder also reaches the menu bar. Its states live in `SyncProposal`, a pure type over
-`RepoStatus` (ladder, title, actionability) that two views read: `SyncControls` renders it
+The ladder also reaches the menu bar. Its states live in `SyncProposal`, core's answer
+with its presentation in `SyncFace.swift`, which two views read: `SyncControls` renders it
 and runs every state through one `perform()` — the button face and the split button's
 primary action both call it, so no state is reachable by one and not the others — and the
 repository screen republishes it as a `SyncCommand` (title, enabled, closure) through
@@ -1672,8 +1678,10 @@ failed switch is reported as that and not as a failed abort.
 **Test fixtures shared across core's modules live in
 [core/src/test_support.rs](core/src/test_support.rs)** — `init_test_repo`,
 `commit_file`, `subjects`, `git_stopping` (run a git command that is expected to
-stop) and `conflicting_repo()` — so `operation.rs` and `history_rewrite.rs` build
-their stopped repositories the same way.
+stop), `conflicting_repo()`, and for anything that needs a remote `published_repo()`
+(a bare `origin.git` beside a clone whose `main` is pushed and tracking) with
+`clone_of()` for somebody else's clone — so `operation.rs`, `history_rewrite.rs`,
+`sync_ladder.rs` and `git.rs` build their repositories the same way.
 
 **In the clients the operation is one table of words and one swapped button.**
 [utils/operationWords.ts](apps/tauri-app/src/lib/utils/operationWords.ts) and
@@ -1700,24 +1708,87 @@ explaining why Merge is unavailable, for the same reason.
 
 HEAD identity: `# branch.head` reading `(detached)` sets `RepoStatus.detached` (and leaves `branch` empty) so the UI can distinguish a detached HEAD from a still-loading status; `# branch.oid` yields `head_sha` for free (no extra `rev-parse`), or stays empty for an unborn branch (`(initial)`). The branch chip shows `Detached at <short-sha>` — the native chip's own label (`BranchMenu.placeLabel`), which reports the state in the control rather than in a separate badge beside it — and the sync button disables itself while detached; the History "Check Out Commit…" item is disabled on the current HEAD. Covered by `get_status_reports_branch_and_head_sha`.
 
-Sync proposal: `RepoStatus.proposal` is `sync_proposal(&status)` — the precedence
-ladder (detached → publish repository → publish branch → pull → push → fetch) as a
-**total function** of the status, so the combinations three independent booleans
-could hold at once are unrepresentable rather than merely unhandled. That is what
-retires the "push offered on a diverged branch" class: pull outranks push, so the
-rejected state has no way to be proposed. `get_status` is a thin wrapper around
+Sync proposal: `RepoStatus.proposal` is `sync_ladder::propose(&status, …)`
+(`core/src/sync_ladder.rs`) — the precedence ladder (detached → publish repository →
+publish branch → force push → pull → push → fetch), **total** over the status, so the
+combinations three independent booleans could hold at once are unrepresentable rather
+than merely unhandled. That is what retires the "push offered on a diverged branch"
+class: pull outranks push, so the rejected state has no way to be proposed.
+
+The ladder's one question a status cannot answer is *why* a branch diverged, and it
+arrives as a closure so that it is asked on the diverged rung only (`has_upstream`,
+`behind > 0` **and** `ahead > 0` — a branch that is only behind is never asked, because
+after a `pull --rebase` its reflog would say "rewritten" about a branch that simply
+fast-forwards). `upstream_was_rewritten_away` answers it statelessly, in three local
+subprocesses:
+
+1. `measured_push_target`:
+   `for-each-ref --format=%(upstream)%00%(upstream:remoteref)%00%(push:remotename) refs/heads/<b>` —
+   the push has to land on the ref the divergence was measured against. A push here
+   names the branch once, which git reads as `<b>:<b>`, so the upstream's branch is
+   `refs/heads/<b>` and the upstream itself is `refs/remotes/<push remote>/<b>`.
+   `%(push:remotename)` is git's push remote whatever `push.default` says
+   (`pushRemote`, `remote.pushDefault`, the tracking remote) — the order
+   `get_push_remote` follows — where `%(push)` is empty under `push.default=simple`
+   with a fork and *equals the upstream* under `push.default=upstream` with one.
+2. `reflog_holds`, first half: `rev-list -g refs/heads/<b>` — the reflog, from plumbing:
+   `log -g` and `reflog show` put `log.showSignature`'s and
+   `i18n.logOutputEncoding`'s output on stdout.
+3. `reflog_holds`, second half: `rev-list -1 --stdin`, fed the commit and then `^<sha>`
+   per entry. Nothing left means the commit is reachable from something the branch used
+   to be — `ForcePush`. Stdin because a reflog has no length limit; no
+   `--ignore-missing`, because it would forgive a missing *commit* too and an empty
+   answer reads as yes.
+
+Every doubt — no reflog, the rewrite aged out of it, a pruned object, git failing — is
+`Pull`, logged once per distinct complaint rather than once per poll tick. Nothing is
+cached: the honest key is the upstream's sha, which costs a subprocess of its own, and a
+reflog can change under an unchanged pair of tips (`reflog expire`), which would leave a
+stale *Force Push*. The cost is paid only while a branch is diverged.
+`run_git_with_stdin` is the one "spawn, feed a list, wait" in core, shared with
+`update_index` and `git_add`.
+
+The force push is `push --force-with-lease=refs/heads/<b>:<sha>`, the argument built by
+`sync_ladder::force_push_lease`: `<sha>` is the tip of `refs/remotes/<remote>/<b>`, and
+it is pinned only after `reflog_holds` has shown the branch contained it — otherwise
+`push` fails before spawning git, in core's words. Pinning is what makes the check mean
+something: a bare lease compares the remote with the remote-tracking ref *at push time*,
+which the automatic fetches keep moving, so it compares somebody else's commit with
+itself and passes. Sharing `reflog_holds` and the ref with the ladder is what makes a
+proposed `ForcePush` one that `push` accepts.
+
+It is deliberately not git's `--force-if-includes`, which is the same test with a
+defect (git 2.54, `remote.c`, `is_reachable_in_reflog`): the reflog walk is bounded by
+the newest entry of the **remote-tracking** ref's reflog, and that timestamp is read
+uninitialised when the ref has no reflog — which is every `refs/remotes/origin/*` of a
+fresh clone until a fetch moves it. There, clone → amend → `push --force-with-lease
+--force-if-includes` is refused `(remote ref updated since checkout)`. An explicit lease
+value also turns that flag into a no-op, so the two cannot be combined.
+
+Pinned by `force_push_publishes_a_rewrite_of_pushed_commits`,
+`force_push_publishes_a_rewrite_made_in_a_fresh_clone`,
+`force_push_publishes_a_rewrite_of_a_branch_with_a_slash_in_its_name`,
+`force_push_refuses_a_fetched_commit_this_branch_never_held` (core refuses),
+`force_push_refuses_a_commit_pushed_since_the_last_fetch` (the remote refuses, `stale
+info`), `force_push_refuses_when_the_reflog_cannot_show_the_remote_tip`,
+`force_push_refuses_a_branch_that_was_never_fetched`, and across the bridge by
+`force_push_spares_a_commit_this_branch_never_held`.
+
+`get_status` is a thin wrapper around
 `read_status` that fills the field once, on the single exit — the read itself has
 three returns, and an early one that forgot is exactly the bug the field exists to
 remove. It rides the status rather than answering a separate command for the same
 reason `operation` does, plus one the Tauri host feels directly: a command would be
-an IPC crossing per poll tick, carrying the whole file list up, to run six
+an IPC crossing per poll tick, carrying the whole file list up, to run a handful of
 comparisons. `SyncProposal::Loading` is what an unfilled status maps to (empty
 branch, not detached), which is also what each client holds before its first read —
 so "nothing known yet" reads the same whether the host has no status or an empty
 one. Covered by `sync_ladder_follows_its_precedence`,
+`sync_ladder_never_asks_the_reflog_about_a_branch_that_is_only_behind`,
 `sync_ladder_waits_for_a_real_status`,
-`sync_ladder_offers_publish_for_an_unborn_repository` and
-`get_status_carries_the_proposal`.
+`sync_ladder_offers_publish_for_an_unborn_repository`, the six `sync_proposes_…` tests
+that run the probe against a bare origin and two clones (`test_support::published_repo`,
+`clone_of`), and `get_status_carries_the_proposal`.
 
 Ahead/behind: `# branch.ab` is only emitted when the branch has a tracking upstream. For a branch that was never `push -u`'d but has a matching `refs/remotes/<remote>/<branch>` — `<remote>` being `fallback_remote`'s answer over the same remote list (`origin`, else the first name `git remote` prints), which is where Fetch and Pull go and where Push goes unless `pushRemote` or `pushDefault` redirects it — the shared `remote_tracking_ahead_behind` helper computes the counts with `git rev-list --left-right --count HEAD...<ref>` (left = ahead, right = behind) without flipping `has_upstream` (which still gates whether the next push needs `--set-upstream`). `repo_sync_status` — the lighter sibling powering the picker badges and dirty dot — reuses both that ladder and the helper but runs `status --untracked-files=normal` (an untracked directory stays a single `dir/` record instead of being enumerated, which answers "any change at all?" identically to `-uall`) and optionally fetches the current branch's remote (`tracking_remote_of`, over the list it has already read) first — and then measures against *that* remote rather than the ladder's tail, because refreshing one remote's refs while measuring another's leaves a badge that never moves however well the fetch went. Besides the branch headers it reports `dirty`: whether any `? `/`1 `/`2 `/`u ` record with a UTF-8-decodable path follows them (`is_change_record`) — precisely the records `get_status` turns into Changes-tab rows (it skips non-UTF-8 paths, so the dot must too). The active repo's `dirty` never comes from here: the status poll writes `status.files.length > 0` into the store, so the dot and the visible Changes tab agree by construction. Its fetch is best-effort and **time-boxed** (`run_git_net`, background budget): a failure/timeout swallows so a stale-but-known count still comes back, and the outcome is surfaced as the `fetched` flag for the frontend's connectivity breaker.
 

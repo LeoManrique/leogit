@@ -37,6 +37,7 @@ pub mod progress;
 pub mod render;
 pub mod repos;
 pub mod shell;
+pub mod sync_ladder;
 pub mod terminal;
 #[cfg(test)]
 mod test_support;
