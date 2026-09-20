@@ -15,6 +15,7 @@ export type RepoWriteKind =
   | 'cherryPick'
   | 'squash'
   | 'reorder'
+  | 'undoAction'
   | 'checkout'
   | 'undoCommit'
   | 'discard'

@@ -4,7 +4,7 @@ import SwiftUI
 /// for and was waiting on did not happen.
 ///
 /// The second class — a failure that was never the user's task — belongs in
-/// the screen's `ErrorBanner` instead, and nothing here should be used for it.
+/// the screen's `StatusStrip` instead, and nothing here should be used for it.
 struct ActionFailure: Identifiable {
     let id = UUID()
 

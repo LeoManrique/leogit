@@ -349,14 +349,24 @@ struct ContentView: View {
     /// rather than under the whole window.
     private func repositoryScreen(repoPath: String) -> some View {
         VStack(spacing: 0) {
-            // Two independent lines, not one slot: the poll's is the more
-            // urgent and the one the user cannot dismiss, so it goes on top
-            // and neither can silence the other.
+            // Independent lines, not one slot: the poll's is the most urgent
+            // and the one the user cannot dismiss, so it goes on top, and none
+            // can silence another. The last is the way back from a History
+            // action, which is not a warning at all.
             if let pollFailure = store.pollFailure {
-                ErrorBanner(message: pollFailure)
+                StatusStrip(tone: .warning, message: pollFailure)
             }
             if let errorMessage = store.errorMessage {
-                ErrorBanner(message: errorMessage) { store.errorMessage = nil }
+                StatusStrip(tone: .warning, message: errorMessage) { store.errorMessage = nil }
+            }
+            if let offer = historyActions.undoOffer {
+                StatusStrip(
+                    tone: .done,
+                    message: offer.sentence,
+                    action: .init(label: "Undo", blocked: undoBlocked) {
+                        undoHistoryAction(in: repoPath)
+                    }
+                ) { historyActions.dismissUndo() }
             }
 
             HSplitView {
@@ -467,6 +477,9 @@ struct ContentView: View {
         // terminal's commit the same way a refresh sees a continued rebase.
         .onChange(of: store.status?.headSha) { _, headSha in
             if let headSha { commitStore.endAmendingUnlessHead(is: headSha) }
+            // And the rule that retires an Undo on offer: the branch is no
+            // longer where the action left it.
+            historyActions.retireUndoUnlessStanding(in: store.status)
         }
         // The same kind of rule for where a stopped cherry-pick came from: it
         // is forgotten by the status that shows the pick is over, so finishing
@@ -478,6 +491,7 @@ struct ContentView: View {
         }
         .onChange(of: store.status?.branch) {
             historyActions.forgetCherryPickUnlessOpen(in: store.status)
+            historyActions.retireUndoUnlessStanding(in: store.status)
         }
         .onReceive(NotificationCenter.default.publisher(for: .leogitRefreshRequested)) { _ in
             // ⌘R from the View menu — the keyboard-only successor of the
@@ -1188,6 +1202,9 @@ struct ContentView: View {
     /// to the Changes tab, where the conflicted files are waiting, and takes
     /// the modal with git's own text. A failure is already stated in the sheet
     /// — or, for a reorder that ran without one, by `requestReorder`.
+    ///
+    /// A run that moved the branch also leaves its way back on offer — after
+    /// the re-read, because the rule that retires an offer reads the status.
     @MainActor
     private func finishHistoryAction(_ outcome: HistoryActionOutcome, in repoPath: String) async {
         // git was never asked, so there is nothing new to read — and somebody
@@ -1197,14 +1214,60 @@ struct ContentView: View {
         await branchStore.load(repoPath: repoPath)
         guard store.repoPath == repoPath else { return }
         switch outcome {
-        case let .landed(shas):
-            let landed = Set(shas).intersection(store.commits.map(\.sha))
-            if !landed.isEmpty { historySelection = landed }
+        case let .landed(shas, undo):
+            selectInHistory(shas)
+            historyActions.offer(undo)
         case let .stoppedOnConflict(said):
             tab = .changes
             actionFailure = ActionFailure(said)
         case .failed, .refusedBusy:
             break
+        }
+    }
+
+    /// Select the commits an action produced, or an undo brought back. Ids the
+    /// loaded log does not hold are left out, and with none of them in it the
+    /// selection stays as it was.
+    @MainActor
+    private func selectInHistory(_ shas: [String]) {
+        let present = Set(shas).intersection(store.commits.map(\.sha))
+        if !present.isEmpty { historySelection = present }
+    }
+
+    /// Why Undo cannot run right now, or `nil` when it can. Narrower than the
+    /// actions' own gate: a detached HEAD does not stop an undo, which is about
+    /// a branch and not about where HEAD is.
+    private var undoBlocked: String? {
+        if let operation = store.status?.operation {
+            return "A \(operation.words.noun) is in progress"
+        }
+        return writeGate.isHeld ? "Another operation is still running" : nil
+    }
+
+    /// Take the last History action back. **Reload first, report second**, as
+    /// for the actions: an undo made from a cherry-pick's target also goes back
+    /// to the source branch. An expired point and a refusal take the modal —
+    /// the user asked for this and it did not happen.
+    @MainActor
+    private func undoHistoryAction(in repoPath: String) {
+        Task {
+            let outcome = await historyActions.undo(repoPath: repoPath)
+            if case .refusedBusy = outcome {
+                actionFailure = ActionFailure(RepositoryWriteGate.busyMessage)
+                return
+            }
+            await store.refresh()
+            await branchStore.load(repoPath: repoPath)
+            guard store.repoPath == repoPath else { return }
+            switch outcome {
+            case let .undone(restores, note):
+                selectInHistory(restores)
+                if let note { store.errorMessage = note }
+            case let .expired(why), let .failed(why):
+                actionFailure = ActionFailure(why)
+            case .refusedBusy:
+                break
+            }
         }
     }
 
@@ -1436,43 +1499,3 @@ private struct ReorderRequest {
     let pushedTo: String
 }
 
-/// FRONTEND §6.13's second class: a failure that was never the user's task.
-/// Non-blocking, so the last good data stays on screen behind it.
-struct ErrorBanner: View {
-    let message: String
-
-    /// Retire the banner by hand. Omitted for the status poll's own, whose
-    /// recovery retires it — a ✕ there would hide a repository that is still
-    /// unreadable. Everything else needs one, because nothing else will.
-    var onDismiss: (() -> Void)?
-
-    init(message: String, onDismiss: (() -> Void)? = nil) {
-        self.message = message
-        self.onDismiss = onDismiss
-    }
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-            Text(message)
-                .font(.callout)
-                .textSelection(.enabled)
-            Spacer(minLength: 0)
-
-            if let onDismiss {
-                Button(action: onDismiss) {
-                    Image(systemName: "xmark")
-                        .font(.caption.weight(.semibold))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .help("Dismiss")
-                .accessibilityLabel("Dismiss")
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.orange.opacity(0.12))
-    }
-}

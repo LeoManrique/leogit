@@ -210,6 +210,22 @@ export interface RewriteResult {
   undo: UndoPoint | null
 }
 
+/**
+ * What an undo came to. `undone` false means the point has **expired** — the
+ * branch is not where the action left it, so the offer should go. A rejected
+ * promise is a refusal that may not hold next time (tracked changes, an
+ * operation in progress) or git's own failure. Nothing has moved unless
+ * `undone`.
+ */
+export interface UndoResult {
+  undone: boolean
+  /**
+   * When `undone`: what did not follow — the branch the action had left could
+   * not be checked out again. Otherwise: why the point has expired.
+   */
+  message: string | null
+}
+
 /** Lightweight per-repo sync summary for the picker's pull/push badges. */
 export interface RepoSync {
   ahead: number
@@ -652,6 +668,12 @@ export const gitApi = {
    */
   reorderCommits: (repoPath: string, shas: string[], beforeSha: string | null) =>
     invoke<RewriteResult>('reorder_commits', { repoPath, shas, beforeSha }),
+  /**
+   * Take a History action back: `point.branch` goes back on `before_sha`, as
+   * long as its tip is still `after_sha` — from whichever branch is checked out.
+   */
+  undoOperation: (repoPath: string, point: UndoPoint) =>
+    invoke<UndoResult>('undo_operation', { repoPath, point }),
   /**
    * The folders discovery would actually walk for this config — the
    * configured list, or the stock defaults when it's empty. Lets the picker's

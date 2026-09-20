@@ -51,7 +51,8 @@ leogit/
 │       │   ├── replay.rs            #   the driver: replay the branch from a todo (git rebase -i)
 │       │   ├── lineage.rs           #   place selected commits on the branch: the range a rewrite replays
 │       │   ├── squash.rs            #   fold commits into the oldest; the message draft
-│       │   └── reorder.rs           #   move commits as one block to another place on the branch
+│       │   ├── reorder.rs           #   move commits as one block to another place on the branch
+│       │   └── undo.rs              #   take any of the three back: the branch onto its earlier tip
 │       ├── sync_ladder.rs           # SyncProposal: the sync control's ladder + the reflog test for a rewrite
 │       ├── git_version.rs           # the installed git's version and the 2.45 floor
 │       ├── exclusions.rs            # the commit composer's opt-out grace window
@@ -951,11 +952,11 @@ the Tauri window). `Design/ActionFailureSheet.swift` holds one `ActionFailure` v
 `.actionFailureSheet(_:)` modifier; `ChangesSidebar` exposes `write` and `handOff`, and every
 call site picks one. `write` — both ignore actions — takes the window and carries a retry
 closure, because these fail on a write race far more often than on anything the user would
-have to change first. `handOff` — reveal, open-with — goes to `ErrorBanner`, which grew a ✕
-for exactly this class: nothing else can ever retire it, where the poll's own banner is
+have to change first. `handOff` — reveal, open-with — goes to the strip
+(`Design/StatusStrip.swift`), whose ✕ exists for exactly this class: nothing else can ever retire it, where the poll's own banner is
 retired by its own recovery. That split is two fields rather than one slot with a flag —
 `RepoStore.pollFailure` (`private(set)`, so nothing outside can fake a dismissal) beside
-the writable `errorMessage`, both rendered as their own `ErrorBanner` row with the poll's
+the writable `errorMessage`, both rendered as their own `StatusStrip` row with the poll's
 on top. One slot let whichever arrived first silence the other, and the poll only ever
 wrote into a *free* one, so a dismissable hand-off notice suppressed *this repository has
 stopped being readable* for as long as it stood — the more urgent of the two, and the one
@@ -1827,12 +1828,77 @@ Covered by the `reorder_*`, `an_aborted_reorder_*` and `a_moved_commit_*` tests,
 and through the bridge by
 `reorder_flow_preflights_the_destination_and_moves_the_selection`.
 
+**Undo** ([undo.rs](core/src/history_rewrite/undo.rs)) takes any of the three
+back: `undo_operation(repo, UndoPoint)` puts `branch` on `before_sha`, and only
+while the branch's tip is still exactly `after_sha`. The check is on the branch
+and not on `HEAD`, because after a cherry-pick the user may be anywhere. Its
+answer has the actions' three shapes — `UndoResult { undone, message }`:
+`undone`; **expired** (`undone` false: the branch is gone, its tip has moved, or
+`before_sha` is no longer an object — checked with `rev-parse --verify --quiet
+<sha>^{commit}`, which is silent where `cat-file -e` is not), which can never
+succeed again; and an `Err` for a refusal that may not hold next time. Nothing
+has moved unless `undone`. Refused first: ids that are not object ids, and an
+operation in progress (`open_operation_refusal`, the preflight's sentence).
+
+- **The branch is checked out here**: `tracked_changes` — the preflight's
+  refusal, naming the files — then `update-index -q --refresh`, then **`git
+  reset --keep <before>`**, then `switch_to(return_branch)` for a cherry-pick
+  (shared with `cherry_pick.rs` from `mod.rs`; a refused switch is a `message`
+  on an undo that worked). `--keep` and not `--hard`: on a clean tree the two
+  end in the same place, but `--hard` deletes an untracked file standing where
+  a tracked one comes back, and `--keep` refuses by name. Not `--merge`, which
+  throws away a staged change to a file the two commits differ in, exit 0. Not
+  `switch -C`, which is as careful but runs `post-checkout` and **exits 1 on
+  that hook's failure after moving everything**, and cannot be told from a real
+  refusal. The refresh is not optional: `reset --keep` trusts the index's stat
+  data and refuses a file whose content is unchanged but whose inode is not — an
+  editor's save-by-rename — with `Entry '…' not uptodate`. `status` would have
+  refreshed the index on its way, but core runs every command under
+  `GIT_OPTIONAL_LOCKS=0`. It bites only where the two commits differ in that
+  file, so a squash or a reorder, which end on the tree they began with, never
+  meet it; a cherry-pick's undo does.
+- **It is not**: `git branch -f -- <branch> <before>`. `update-ref <ref> <new>
+  <old>` has the compare-and-swap, and no idea about worktrees: it moves a
+  branch that is checked out — here or in another worktree — and leaves that
+  worktree's index and files describing a commit it is no longer on. Asking
+  first does not close it either: `%(worktreepath)` and `worktree list
+  --porcelain` both report a worktree that is **detached in the middle of a
+  rebase or bisect of the branch** as holding nothing, while `branch -f` reads
+  `rebase-merge/head-name` and `BISECT_START` and refuses (`used by worktree
+  at …`). What is given up is atomicity between the tip check and the move — on
+  a branch nothing has checked out, where only plumbing could move it.
+
+**A reset that fails half way is put back** (`after_a_failed_reset`). `reset
+--keep` writes the index and the files first and the ref last, so a ref it
+cannot lock — a stale `refs/heads/<branch>.lock` left by a git that crashed, a
+`reference-transaction` hook that says no — leaves the old commit's files under
+a branch that has not moved: every file the undo touched reads as a staged
+change, and the next try is refused over them. A refusal made up front leaves
+the index as `HEAD` has it, so `diff-index --quiet --cached HEAD` tells the two
+apart — the tree held no tracked changes a moment earlier. The way back is the
+same two-way merge the other way round, `read-tree -m -u <before> <after>`,
+which moves no ref and so is not stopped by whatever stopped the reset; the
+`Err` then ends *Nothing has changed*, or says where the user was left if that
+failed too. `reset --keep <after>` does not do it: `HEAD` is on `after` already,
+so it resets the index and leaves the files where they are.
+
+Known and not defended: git overwrites an **ignored** file in the way in every
+mode, `--keep` included; and a submodule whose pointer differs between the two
+commits reads as modified afterwards, as after any checkout, which then stops
+the next action's preflight until the submodule is updated. Covered by the
+`undo_*` tests — both sides of a cherry-pick, a detached HEAD, the expiries, an
+untracked file in the way, the stale index, a branch that cannot be locked, both
+worktree holds, a source branch that is gone, and the sync ladder before and
+after a force push — and through the bridge by
+`undo_flow_takes_an_action_back_and_then_says_the_point_has_expired`.
+
 **In the clients a History action ends on one path.** Natively
 `HistoryActionOutcome` (`landed` / `stoppedOnConflict` / `refusedBusy` /
 `failed`) is every action's answer and `ContentView.finishHistoryAction` is what
 follows it; in `MainLayout.svelte` every `run…` hands its `RewriteResult` to
-`finishHistoryAction(repoPath, result, reload, stoppedOnConflict)` — reload, then select
-the resulting commits or go to Changes and say the action stopped — with
+`finishHistoryAction({ repoPath, result, reload, stoppedOnConflict, landed, asked })` —
+reload, then select the resulting commits and put the way back on offer, or go
+to Changes and say the action stopped — with
 `reloadAfterBranchChange` for cherry-pick and `reloadAfterRewrite` for the two
 that rewrite the branch in place. `CommitList.svelte` brings a selection made in
 code into view with an effect on `activeSha` alone (`revealVirtualRow` in
@@ -1893,6 +1959,27 @@ The frontend's pure helpers are tested with Node's own runner — `pnpm test` is
 `node --test 'tests/*.test.ts'`, Node stripping the types — in
 [apps/tauri-app/tests/](apps/tauri-app/tests/), outside `src` so `svelte-check`
 needs no `@types/node`; a helper under test imports only types.
+
+**The way back is client memory too, and one line of the strip.** An
+`UndoOffer` — the sentence, the `UndoPoint`, and the commits the action was
+asked for — is set by `finishHistoryAction` **after the reload** (`undoOffer` in
+`MainLayout.svelte`; `HistoryActionStore.offer(_:)`), because the rule that
+retires it reads the status and the one from before the action still shows the
+old tip. That rule is pure and mirrored —
+[utils/undoOffer.ts](apps/tauri-app/src/lib/utils/undoOffer.ts) `undoStillStands`,
+`Services/UndoOffer.swift` `stillStands(under:)`, with the sentences beside it:
+the offer falls when a status shows the point's branch checked out, not
+detached, at a HEAD other than `after_sha`, and otherwise stands, core being
+the judge of what the status cannot see. It is fed like `cherryPickReturn`'s —
+an `$effect` on the status; natively the `.onChange`s of `headSha` and `branch`
+— and a second `$effect` / `HistoryActionStore.reset()` drops it with the
+repository. `runUndo` / `ContentView.undoHistoryAction` claim the write slot
+(`'undoAction'`; `HistoryActionStore.undo` → `UndoOutcome`), reload with the
+branch list, then select `restores` or raise the modal, keeping the offer on an
+`Err` alone. The strip is one component per client —
+[StatusStrip.svelte](apps/tauri-app/src/lib/components/StatusStrip.svelte),
+`Design/StatusStrip.swift` — with a `warning` and a `done` tone, an optional
+detail, link and ✕; the poll's line and the notice are the same component.
 
 **In the clients the branch a conflicted pick came from is client memory**
 (`cherryPickReturn` in `MainLayout.svelte`, `HistoryActionStore.cherryPickReturn`)

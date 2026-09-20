@@ -35,9 +35,9 @@ static-linking or a local daemon (that decision is open; see the plan).
   Frontends never re-derive git state the core already returns (e.g. file status
   categories, ahead/behind, merge conflicts).
 - Today's surface: **4 events, ~45 DTOs**, and a command catalogue (§3) each host exposes
-  **to the extent it consumes it**. The Tauri host registers **77** `#[tauri::command]`s,
+  **to the extent it consumes it**. The Tauri host registers **78** `#[tauri::command]`s,
   each with a wrapper in `apps/tauri-app/src/lib/api/commands.ts`; the UniFFI bridge
-  exports **77** functions. The two sets are deliberately not identical, and a command
+  exports **78** functions. The two sets are deliberately not identical, and a command
   reaching one host does not oblige the other — what is required is that the difference be
   recorded, here or in §8, never left silent.
   - No native export: `check_auth`, `generate_patch`, `generate_inverse_patch`,
@@ -86,12 +86,12 @@ static-linking or a local daemon (that decision is open; see the plan).
 - **State ownership** — durable state (config, repos MRU, terminal PTY sessions)
   lives in the core. Frontends hold only re-derivable view state.
 
-## 3. Command surface (77)
+## 3. Command surface (78)
 
 Grouped by namespace. `args` are the logical inputs (camelCase on the wire);
 `→` is the return DTO (§5). "async/net" marks network operations that may stream
 progress (§4.1) and can be slow. This is the catalogue of operations core offers a
-frontend — the Tauri host registers all 77; the native bridge exposes the subset it
+frontend — the Tauri host registers all 78; the native bridge exposes the subset it
 consumes, plus seven of its own (§1).
 
 ### 3.1 Config & state — 6
@@ -188,7 +188,7 @@ whole window, and that read is exactly the one that can land mid-rewrite.
 | `get_push_remote` | `repoPath, branch` | `string \| null` |
 | `get_repo_identifier` | `repoPath` | `RepoIdentifier \| null` |
 
-### 3.7 Git — merge — 4, the operation in progress — 2, and history actions — 6
+### 3.7 Git — merge — 4, the operation in progress — 2, and history actions — 7
 | Command | Args | Returns |
 |---|---|---|
 | `merge_branch` | `repoPath, branch` | `MergeResult` |
@@ -203,6 +203,7 @@ whole window, and that read is exactly the one that can land mid-rewrite.
 | `squash_commits` | `repoPath, shas, message` | `RewriteResult` |
 | `reorder_preflight` | `repoPath, shas, beforeSha \| null` | `RewritePreflight` |
 | `reorder_commits` | `repoPath, shas, beforeSha \| null` | `RewriteResult` |
+| `undo_operation` | `repoPath, point` | `UndoResult` |
 
 `RepoStatus.operation` answers "is a merge, rebase, cherry-pick or revert in
 progress" on every refresh, so there is no separate command for it — a second
@@ -319,6 +320,36 @@ the older of the moved commits and the destination — so the merge, the shallow
 boundary and `rewrites_pushed` can only be judged with both in hand, which
 `rewrite_preflight`'s one commit cannot carry. A move that would change nothing
 is ready and rewrites nothing.
+
+`undo_operation` takes a History action back: `point` is the `UndoPoint` the
+action answered with, returned as it came, and `point.branch` goes back on
+`before_sha`. The check is on the **branch, not on HEAD** — after a cherry-pick
+the user may already be back on the source branch, or anywhere else, and the
+undo is still good from there. Three outcomes again, and nothing has moved
+unless the first:
+
+- **`undone: true`** — the branch is on `before_sha`. Made from the branch
+  itself, the working tree went with it, and for a cherry-pick (`return_branch`)
+  the source branch is checked out again; `message` is then set only when that
+  checkout was refused, and says so. Made from anywhere else, only the ref
+  moved and HEAD stays where the user put it.
+- **`undone: false`** — the point has **expired**, and `message` says why: the
+  branch is gone, its tip is no longer `after_sha` (a commit made since is never
+  reset over), or `before_sha` has left the repository. It can never succeed
+  again, so the client drops the offer.
+- **an error** — a refusal that may not hold next time, so the offer stands: an
+  operation in progress, tracked changes (named, as the preflight names them),
+  an untracked file standing where the undo has to put a tracked one back, or
+  the branch held by another worktree — checked out there, or in the middle of
+  a rebase or bisect there. When git moved the files and then could not move
+  the branch (a stale ref lock), core puts them back and the text ends *Nothing
+  has changed*; if that failed too, a last paragraph says where the user was
+  left, as the actions' errors do.
+
+An undo needs no confirmation: the commits it takes off the branch stay in the
+reflog, and it refuses rather than touch anything uncommitted. After a rewrite
+that was already force-pushed it leaves the branch diverged from its upstream,
+and the sync ladder proposes Force Push again by itself (§6.2).
 
 ### 3.8 Git — discovery / init / clone — 7
 | Command | Args | Returns |
@@ -461,7 +492,7 @@ codegen decision is open (plan §10.7).
 | Working tree / status | `FileEntry` (path, status, xy, display_name, display_dir, embedded, submodule_dirty, stat_stamp — an opaque mtime+size string so a status comparison sees content edits; compare, never parse); `RepoStatus` (branch, upstream, ahead, behind, files[], has_remote, unpushed_shas[], detached, head_sha, operation — the `OperationInProgress` the repository is stopped in, or null — and proposal — the sync ladder's answer, carried here for the same reason `operation` is: every refresh path renders it, and a second route to it is how the two clients' ladders drifted); `FileStatusStyle` (status, letter, label — the glyph table, fetched once; colour is per-platform); `DiscardPlan` (restore[], trash[]) |
 | History | `CommitInfo` (sha, short_sha, summary, body, author, committer, parents[], trailers[], co_authors[], body_without_coauthors, tags[]); `CommitStats` (additions, deletions); `CommitDetail` (files[], stats) |
 | Branches / remote | `BranchInfo` (name, is_remote, is_current); `AheadBehind`; `RepoSync` (ahead, behind, has_remote, fetched, dirty); `RepoIdentifier` (owner, name); `MergeResult` (success, fast_forward, conflicts[], error_message?); `OperationInProgress` (enum: `Merge`, `Rebase`, `CherryPick`, `Revert`); `OperationOutcome` (success, conflicts[], error_message?, skipped) |
-| History actions | `RewritePreflight` (blocked? — the refusal, in words for the user; rewrites_pushed); `RewriteResult` (success, conflicts[], error_message?, selection[] — the commits the action produced, newest first, which the client selects in History; undo?); `UndoPoint` (branch, before_sha, after_sha, return_branch? — the branch the user was on when the action moved them off it); `SquashDraft` (summary, description, co_authors[] — `Name <email>` values, as `format_commit_message` takes them) |
+| History actions | `RewritePreflight` (blocked? — the refusal, in words for the user; rewrites_pushed); `RewriteResult` (success, conflicts[], error_message?, selection[] — the commits the action produced, newest first, which the client selects in History; undo?); `UndoPoint` (branch, before_sha, after_sha, return_branch? — the branch the user was on when the action moved them off it), which goes back to core as it came; `UndoResult` (undone, message? — a note when undone, the reason when the point has expired); `SquashDraft` (summary, description, co_authors[] — `Name <email>` values, as `format_commit_message` takes them) |
 | Diff | `DiffLine` (content, line_type, line numbers, `intra_line_diff: IntraLineRange`, and `text?` — the raw patch line, present only on `Hunk` and `NoNewline` rows, which are the only ones that read it); `IntraLineRange`, `HunkHeader`, `Hunk`, `FileDiff` (old_path, new_path, file_header, hunks[], is_binary); `SbsPair`; `DiffOptions` (html, side_by_side, show_anyway); `ParsedDiff` (file_diff, html[], sbs_pairs[], additions, deletions, empty_reason?, size_guard?); `EmptyDiffReason` (`NoChanges`/`WhitespaceOnly`/`NoTextualChanges`); `DiffSizeGuard` (reason, bytes, longest_line); `Token` (start, end, class: `TokenClass`) / `TokenLine` — the structured highlight layer under the HTML (§7); `DiffSelection` |
 | Commit composer | `CommitMessage` (title, description); `Exclusion` (path, absent_ms, absent_reads — how long and over how many consecutive status reads an opt-out's path has been missing from the file list; both zero while it is present, and §6.4's window needs both to expire) |
 | Config / persistence | `Config` (theme, fetch_interval_ms, ai_provider, auto_fetch, syntax_highlighting, scan_paths[], scan_depth, side_by_side_diff, hide_whitespace, tab_size, terminal_shell?, then the `claude` and `ollama` tables — **nothing scalar may follow them**, since a TOML table swallows every key after it); `ClaudeConfig` (model?, timeout_secs); `OllamaConfig` (model?, server_url, timeout_secs); `ConfigPatch` (every field optional — absent means "leave it alone", `""` means "clear it"); `Bounds`/`ConfigBounds`; `ReposState`; `ReposStatePatch` |
@@ -886,15 +917,17 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    door is how *every* failure in the Tauri client, down to "couldn't reveal the file in
    Finder", ended up seizing the window. Each client has exactly one: the Tauri store's
    `reportActionError` / `reportNotice` pair, and native's `ActionFailure` +
-   `.actionFailureSheet` beside `ErrorBanner`.
-   **The strip's two conditions are two channels, not one slot.** *This repository
+   `.actionFailureSheet` beside the `StatusStrip` rows.
+   **The strip's conditions are separate channels, not one slot.** *This repository
    has stopped being readable* and *something the app handed off didn't take* are
    answers to different questions, retired by different things — the first by its
    own recovery, the second only by its ✕ — so each has its own field and both
    may stand at once, the poll's on top. Sharing one slot lets whichever arrived
    first silence the other, and it silences it the wrong way round: the
    dismissable line is the one the user can act on, and the poll's is the one
-   they cannot.
+   they cannot. The way back from a History action (§6.21, *Undo*) is a third
+   line under those two for the same reason — it is not a failure at all, and a
+   notice arriving must not cost the user their Undo.
    **What lands in that modal is git's own text, so the modal is built to carry it**:
    monospaced, selectable, capped in height and scrollable, in both clients (the Tauri
    `ErrorModal`'s `<pre>`, native's `ActionFailureSheet`). Git's refusals are
@@ -1069,7 +1102,7 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
 21. **History actions replay commits, and one repository write runs at a time.**
    *The write slot.* Each window holds **one slot** for everything that rewrites the
    repository: commit, continue, switch, create, delete, merge, abort, cherry-pick,
-   squash, reorder, checking a commit out, undoing a commit, and discard. A write that cannot claim it
+   squash, reorder, undoing any of those three, checking a commit out, undoing a commit, and discard. A write that cannot claim it
    does not start, and a refused start is **never reported as a success** (§6.14's
    trap). Controls whose write is a single click read the slot and disable — Commit,
    Continue, the branch menu's actions, the History actions — so a Continue that takes
@@ -1171,6 +1204,46 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
      (native), and otherwise in the §6.13 modal, there being no dialog for it to stay in.
    - **The slot was taken:** said, in the same place a failure would be.
 
+   *Undo.* An action that lands with an `UndoPoint` leaves **one line in the strip
+   under the header** (§6.13), in the neutral tone — a checkmark, no wash: what it did
+   (*Squashed 3 commits into one.* · *Reordered 1 commit.* · *Cherry-picked 2 commits
+   onto “release”.*, counting the commits it was asked for), an **Undo** link straight
+   after the sentence, and a ✕. It is set **after the reload** that follows the action,
+   never before: the rule below reads the status, and the one from before the action
+   still shows the old tip. The offer is client memory — the point, the sentence and
+   the commits the action was asked for — and is not persisted; after a restart the
+   branch's reflog is the way back. It goes away by exactly these routes:
+   - its ✕, and another action landing with a point of its own, which replaces it (a
+     run that changed nothing carries none and leaves it alone);
+   - the window moving to another repository;
+   - **one rule on the status read**: a status that shows `point.branch` checked out —
+     not detached — at a HEAD other than `after_sha`. A commit, an amend, a pull or a
+     rebase, here or in a terminal, all arrive that way, so an Undo that could only be
+     refused is not left on screen to fail. While another branch is checked out, or
+     HEAD is detached (a rebase of the branch included), the status cannot see that
+     branch's tip: the offer stays, and core is the judge;
+   - Undo itself.
+
+   The link is inert, with the reason on hover, while an operation is in progress and
+   while the write slot is held — and only then: a detached HEAD does not stop an
+   undo, which is about a branch. It asks nothing first (§3.7). It claims the write
+   slot, calls `undo_operation`, and then **reloads first and reports second** —
+   status, history and the branch list, since an undo made from a cherry-pick's target
+   goes back to the source branch:
+   - **`undone`:** the offer goes, and History selects **the commits the action had
+     been asked for**, which are back — ids the reloaded list does not hold are
+     dropped, as for a landing. A `message` (the source branch could not be checked
+     out again) is a §6.14-style notice in the strip: the undo itself worked.
+   - **Expired:** the offer goes, and core's reason takes the §6.13 modal — the user
+     asked for this and it did not happen.
+   - **An error:** the modal, and **the offer stands** — a dirty tree is fixed by
+     committing or discarding, after which the same link is pressed again (unless the
+     fix itself moved the branch, which the rule above then sees).
+   - **The slot was taken:** the modal says so, and the offer stands.
+
+   An action that stopped on a conflict and was then continued offers no Undo:
+   `continue_operation` hands back no point (§3.7).
+
 ## 7. Diff rendering contract
 
 `FileDiff`/`Hunk`/`DiffLine` are the **structured** truth. Syntax highlighting and
@@ -1253,7 +1326,7 @@ every deliberate difference here.
 | Settings surface (§6.15) | a modal overlay inside the one window, with a header ✕ and a footer **Close** — there is nothing to save, so the button only dismisses | the stock SwiftUI `Settings` scene, a separate window with ⌘, and the standard title-bar close and no content buttons at all; a text field also commits on `.onDisappear` |
 | Settings field coverage (§6.15) | every `Config` field the app reads has a control, except `side_by_side_diff` — the diff header owns it in both clients | the same, minus `theme` (a permanent exemption, above) |
 | Teaching the terminal's link modifier (§6.17) | a hint follows the pointer onto a link — *Follow link (⌘ + click)*. Not optional here: xterm's link addon cannot make its own underline conditional, so a gated link draws as underlined-and-dead and simply looks broken without something naming the gesture | nothing until ⌘ goes down, at which point SwiftTerm highlights the link under the pointer and floats the URL beside it. Nothing is drawn beforehand, so there is no broken-looking state to explain — the cost is discoverability alone, and it is not paid by a hint: SwiftTerm publishes no hover callback (it resolves the hovered link and notifies nobody), and on macOS 26 it deliberately drops `.mouseMoved` from its tracking area to dodge a WindowServer bug that synthesizes mouse-downs, so a host hover surface would have to re-enter exactly that hazard |
-| Error surface (§6.13) | three shapes off `repoState`: a centred `ErrorModal` with git's text in a scrollable `<pre>` and an optional **Retry**, a one-line tinted strip under the header for a hand-off that didn't take (with ✕) and for the poll's streak (without), and an `error` prop rendered inside whichever dialog raised it | the same three: an `ActionFailureSheet` at a fixed width with the text mono, selectable and capped — an `.alert` cannot keep git's multi-line text legible — an `ErrorBanner` row above the split for the same two banner conditions and the same ✕ rule, and a local `errorMessage` inside the sheet that raised it. The classification is shared; only the widget is per-platform |
+| Error surface (§6.13) | three shapes off `repoState`: a centred `ErrorModal` with git's text in a scrollable `<pre>` and an optional **Retry**, a one-line strip under the header (`StatusStrip.svelte`) — tinted for a hand-off that didn't take (with ✕) and for the poll's streak (without), untinted for a History action's Undo — and an `error` prop rendered inside whichever dialog raised it | the same three: an `ActionFailureSheet` at a fixed width with the text mono, selectable and capped — an `.alert` cannot keep git's multi-line text legible — a `StatusStrip` row above the split for the same strip conditions and the same ✕ rule, and a local `errorMessage` inside the sheet that raised it. The classification is shared; only the widget is per-platform |
 | Loading presentation (§6.3, §6.2) | the diff pane dims to 0.45 over 120 ms and lays a CSS ring 48 px from the top past the 150 ms threshold; a transfer fills the sync button itself, with git's line in the status bar; no global progress indicator for an explicit reload | the same dim, the same 120 ms, the same 48 pt inset past the same threshold, drawn as a `ProgressView`; a transfer is a top-edge material banner over the content, and an explicit load (open, ⌘R) puts a linear bar in that same slot — macOS has no in-control fill to wipe across a toolbar button, and the banner is the one place both can live |
 | Background-cadence enforcement (§6.1) | the ladder is a self-scheduling `setTimeout` chain, so a WebView free to throttle a backgrounded document can only make the hidden rung *slower* than 30 s; the wake-up resync is what guarantees a current screen | an App Nap assertion is held while a repo is open, so the same ladder's timers are not coalesced away, and the hidden rung is exactly 30 s (`AppNapSuppressor`) |
 | List selection & keyboard, file lists and History (§6.4) | hand-rolled gestures from one module, `utils/listSelection.ts`: click, shift-click and shift-arrow from a sticky anchor, the platform modifier to flip one row, ⌘A, Home/End. The file list's checkbox column keeps a second anchor of its own, which *does* move, for range-toggling inclusion. A gesture **activates the row it landed on**, so the detail pane follows the far end of an extension and a row ⌘-clicked in | one `List(selection: Set<String>)` per list, so the range and multi-row gestures are AppKit's own and behave like every other macOS list, and the checkbox column has no separate anchor. The gesture that produced a selection is not recoverable from a `Set`, so an extension leaves the detail pane on the row it was already showing rather than guessing which row was clicked. AppKit allows an empty selection, so "a list with rows keeps a selection" is a write-back here (`maintainsSelection`) rather than a gesture that never happens |

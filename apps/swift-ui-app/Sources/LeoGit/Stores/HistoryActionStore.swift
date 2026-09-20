@@ -6,8 +6,9 @@ import Foundation
 /// open for Continue or Abort.
 enum HistoryActionOutcome {
     /// Done. The ids are the commits the action produced, newest first — what
-    /// History selects instead of jumping to the tip.
-    case landed([String])
+    /// History selects instead of jumping to the tip — and `undo` is the way
+    /// back, `nil` for a run that changed nothing.
+    case landed([String], undo: UndoOffer?)
 
     /// Stopped on a conflict, with git's own text.
     case stoppedOnConflict(String)
@@ -17,6 +18,25 @@ enum HistoryActionOutcome {
 
     /// Refused, or failed for a reason that is not a conflict. Core has put
     /// the repository back where it began, or the text says where it was left.
+    case failed(String)
+}
+
+/// How an undo ended.
+enum UndoOutcome {
+    /// The branch is back. The ids are the commits the action had been asked
+    /// for, to select again; `note` is what did not follow — the branch the
+    /// action had left could not be checked out again.
+    case undone(restores: [String], note: String?)
+
+    /// The branch is not where the action left it, so this can never be undone
+    /// any more: the offer is gone, and this is why.
+    case expired(String)
+
+    /// The write slot was held; nothing was attempted and nothing changed.
+    case refusedBusy
+
+    /// A refusal that may not hold next time — tracked changes, an operation
+    /// in progress — or git's own failure. Nothing moved, and the offer stands.
     case failed(String)
 }
 
@@ -41,9 +61,10 @@ enum ReorderReadiness {
     case refused(String)
 }
 
-/// The History actions that replay commits — what starts them, under the
-/// window's one write slot — and the one thing about them git keeps no record
-/// of: which branch a cherry-pick came from.
+/// The History actions that replay commits — what starts them and what takes
+/// them back, under the window's one write slot — and the two things about
+/// them git keeps no record of: which branch a cherry-pick came from, and the
+/// way back from the last action.
 ///
 /// Like `BranchStore`, an action returns its outcome instead of storing it,
 /// and re-reading the repository afterwards is the caller's job.
@@ -63,6 +84,11 @@ final class HistoryActionStore {
     /// one data-driven rule — `forgetCherryPickUnlessOpen(in:)`.
     private(set) var cherryPickReturn: CherryPickReturn?
 
+    /// The way back from the last action that moved a branch, while it is still
+    /// good. Retired by its ✕, by an undo, and by one data-driven rule —
+    /// `retireUndoUnlessStanding(in:)`.
+    private(set) var undoOffer: UndoOffer?
+
     /// An action of this store's own is running, for wording its progress.
     private(set) var isRunning = false
 
@@ -77,6 +103,7 @@ final class HistoryActionStore {
     /// Forget everything on repo switch.
     func reset() {
         cherryPickReturn = nil
+        undoOffer = nil
         isRunning = false
     }
 
@@ -111,7 +138,7 @@ final class HistoryActionStore {
         do {
             let result = try await GitBridge.cherryPick(in: repoPath, shas: shas, onto: target)
             if result.success {
-                return .landed(result.selection)
+                return .landing(result, after: .cherryPick(target: target), of: shas)
             }
             cherryPickReturn = CherryPickReturn(source: source, target: target)
             return .stoppedOnConflict(
@@ -164,7 +191,7 @@ final class HistoryActionStore {
             )
             let result = try await GitBridge.squash(in: repoPath, shas: shas, message: message)
             if result.success {
-                return .landed(result.selection)
+                return .landing(result, after: .squash, of: shas)
             }
             return .stoppedOnConflict(result.errorMessage ?? "The squash stopped on a conflict.")
         } catch {
@@ -210,11 +237,55 @@ final class HistoryActionStore {
         do {
             let result = try await GitBridge.reorder(in: repoPath, shas: shas, under: beforeSha)
             if result.success {
-                return .landed(result.selection)
+                return .landing(result, after: .reorder, of: shas)
             }
             return .stoppedOnConflict(result.errorMessage ?? "The reorder stopped on a conflict.")
         } catch {
             print("[history] reorder failed: \(error.displayMessage)")
+            return .failed(error.displayMessage)
+        }
+    }
+
+    // MARK: Undo
+
+    /// Put an action's way back on offer. Called once the repository has been
+    /// re-read: the rule that retires an offer reads the status, and the one
+    /// from before the action still shows the old tip. A run that changed
+    /// nothing offers nothing, and leaves the previous offer as good as it was.
+    func offer(_ undo: UndoOffer?) {
+        if let undo { undoOffer = undo }
+    }
+
+    /// The strip's ✕.
+    func dismissUndo() {
+        undoOffer = nil
+    }
+
+    /// The rule that retires an offer: a status that shows its branch somewhere
+    /// the action did not leave it. A commit, an amend, a pull or a rebase —
+    /// here or in a terminal — all arrive this way, so nothing that moves a
+    /// branch has to remember to clear it.
+    func retireUndoUnlessStanding(in status: RepoStatus?) {
+        guard let undoOffer, let status else { return }
+        if !undoOffer.stillStands(under: status) { self.undoOffer = nil }
+    }
+
+    /// Take the offered action back.
+    func undo(repoPath: String) async -> UndoOutcome {
+        guard let offer = undoOffer else { return .failed("There is nothing to undo.") }
+        guard let claim = gate.claim() else { return .refusedBusy }
+        defer { gate.release(claim) }
+        do {
+            let result = try await GitBridge.undo(in: repoPath, point: offer.point)
+            // Undone or expired, this offer is spent — unless the window has
+            // moved on meanwhile and holds another.
+            if undoOffer == offer { undoOffer = nil }
+            if result.undone {
+                return .undone(restores: offer.restores, note: result.message)
+            }
+            return .expired(result.message ?? "This can no longer be undone.")
+        } catch {
+            print("[history] undo failed: \(error.displayMessage)")
             return .failed(error.displayMessage)
         }
     }
@@ -228,5 +299,20 @@ final class HistoryActionStore {
         if status?.operation != .cherryPick || status?.branch != pending.target {
             cherryPickReturn = nil
         }
+    }
+}
+
+extension HistoryActionOutcome {
+    /// A clean run of `action` over `asked` (newest first): what it produced,
+    /// and its way back when core handed one over.
+    fileprivate static func landing(
+        _ result: RewriteResult,
+        after action: UndoOffer.Action,
+        of asked: [String]
+    ) -> Self {
+        .landed(
+            result.selection,
+            undo: result.undo.map { UndoOffer(after: action, of: asked, point: $0) }
+        )
     }
 }

@@ -82,8 +82,10 @@
     type ListSelection,
   } from '$lib/utils/listSelection'
   import { operationWords } from '$lib/utils/operationWords'
+  import { landedSentence, undoStillStands, type UndoOffer } from '$lib/utils/undoOffer'
 
   import Header from '$lib/components/Header.svelte'
+  import StatusStrip from '$lib/components/StatusStrip.svelte'
   import Icon from '$lib/components/Icon.svelte'
   import PaneEmptyState from '$lib/components/PaneEmptyState.svelte'
   import TabBar from '$lib/components/TabBar.svelte'
@@ -2150,16 +2152,27 @@
   })
 
   /**
+   * Why Undo cannot run right now, or null when it can: an operation is open,
+   * or the window's write slot is held. A detached HEAD does not stop an undo,
+   * which is about a branch and not about where HEAD is.
+   */
+  const undoBlocked = $derived.by(() => {
+    const { operation } = $repoState.status
+    if (operation) return `A ${operationWords(operation).noun} is in progress`
+    if ($activeRepoWrite !== null) return 'Another operation is still running'
+    return null
+  })
+
+  /**
    * Why the History actions cannot start right now, or null when they can —
-   * MS-6's menu-time gate. Core's preflight stays the authority on everything
+   * MS-6's menu-time gate: what stops an undo, and a detached HEAD, which
+   * outranks a held slot. Core's preflight stays the authority on everything
    * that takes a git call to know (a dirty tree, the git floor).
    */
   const historyActionsBlocked = $derived.by(() => {
     const { operation, detached } = $repoState.status
-    if (operation) return `A ${operationWords(operation).noun} is in progress`
-    if (detached) return 'HEAD is detached'
-    if ($activeRepoWrite !== null) return 'Another operation is still running'
-    return null
+    if (!operation && detached) return 'HEAD is detached'
+    return undoBlocked
   })
 
   /**
@@ -2208,19 +2221,18 @@
       return
     }
     const source = $repoState.status.branch
+    const asked = commits.map((c) => c.sha)
     try {
-      const result = await gitApi.cherryPickCommits(
-        repoPath,
-        commits.map((c) => c.sha),
-        target,
-      )
+      const result = await gitApi.cherryPickCommits(repoPath, asked, target)
       showBranches = false
-      await finishHistoryAction(
+      await finishHistoryAction({
         repoPath,
         result,
-        reloadAfterBranchChange,
-        `The cherry-pick stopped on a conflict in ${target}.`,
-      )
+        reload: reloadAfterBranchChange,
+        stoppedOnConflict: `The cherry-pick stopped on a conflict in ${target}.`,
+        landed: landedSentence('cherryPick', asked.length, target),
+        asked,
+      })
       // After the reload: the rule that forgets this reads the status, and the
       // one from before the pick shows no cherry-pick open.
       if (!result.success) cherryPickReturn = { source, target }
@@ -2304,24 +2316,23 @@
       return
     }
     squashError = undefined
+    const asked = request.commits.map((c) => c.sha)
     try {
       const message = await gitApi.formatCommitMessage(
         summary,
         description,
         request.draft.co_authors,
       )
-      const result = await gitApi.squashCommits(
-        repoPath,
-        request.commits.map((c) => c.sha),
-        message,
-      )
+      const result = await gitApi.squashCommits(repoPath, asked, message)
       squashRequest = null
-      await finishHistoryAction(
+      await finishHistoryAction({
         repoPath,
         result,
-        reloadAfterRewrite,
-        'The squash stopped on a conflict.',
-      )
+        reload: reloadAfterRewrite,
+        stoppedOnConflict: 'The squash stopped on a conflict.',
+        landed: landedSentence('squash', asked.length),
+        asked,
+      })
     } catch (error) {
       console.warn('[history] squash failed', error)
       if ($appState.repoPath !== repoPath) {
@@ -2389,19 +2400,18 @@
       reportActionError(REPO_BUSY_MESSAGE)
       return
     }
+    const asked = commits.map((c) => c.sha)
     try {
-      const result = await gitApi.reorderCommits(
-        repoPath,
-        commits.map((c) => c.sha),
-        beforeSha,
-      )
+      const result = await gitApi.reorderCommits(repoPath, asked, beforeSha)
       reorderRequest = null
-      await finishHistoryAction(
+      await finishHistoryAction({
         repoPath,
         result,
-        reloadAfterRewrite,
-        'The reorder stopped on a conflict.',
-      )
+        reload: reloadAfterRewrite,
+        stoppedOnConflict: 'The reorder stopped on a conflict.',
+        landed: landedSentence('reorder', asked.length),
+        asked,
+      })
     } catch (error) {
       console.warn('[history] reorder failed', error)
       reorderRequest = null
@@ -2428,22 +2438,104 @@
    * `repoPath` is the repository the action ran in. If the window has moved on
    * to another — while git ran, or while the reload did — nothing here is said
    * over it: its own load shows what is true of it.
+   *
+   * A run that moved the branch also leaves its way back on offer — **after**
+   * the reload, because the rule that retires an offer reads the status, and
+   * the one from before the run still shows the old tip.
    */
-  async function finishHistoryAction(
-    repoPath: string,
-    result: RewriteResult,
-    reload: () => Promise<void>,
-    stoppedOnConflict: string,
-  ): Promise<void> {
+  async function finishHistoryAction(ending: {
+    repoPath: string
+    result: RewriteResult
+    reload: () => Promise<void>
+    /** What the modal says when git left no text of its own. */
+    stoppedOnConflict: string
+    /** What the strip says the action did, beside its Undo. */
+    landed: string
+    /** The commits the action was asked for, newest first: what an Undo selects again. */
+    asked: string[]
+  }): Promise<void> {
+    const { repoPath, result } = ending
     if ($appState.repoPath !== repoPath) return
-    await reload()
+    await ending.reload()
     if ($appState.repoPath !== repoPath) return
     if (result.success) {
       selectResultingCommits(result.selection)
+      // A run that changed nothing has nothing to take back, and leaves the
+      // previous offer as good as it was.
+      if (result.undo) {
+        undoOffer = {
+          repoPath,
+          sentence: ending.landed,
+          point: result.undo,
+          restores: ending.asked,
+        }
+      }
       return
     }
     setActiveTab('changes')
-    reportActionError(result.error_message || stoppedOnConflict)
+    reportActionError(result.error_message || ending.stoppedOnConflict)
+  }
+
+  /**
+   * The way back from the last History action that moved a branch, while it is
+   * still good. Client memory only: after a restart the reflog is the way back.
+   */
+  let undoOffer = $state<UndoOffer | null>(null)
+
+  // An offer falls by one data-driven rule, as `cherryPickReturn` does: a
+  // status that shows its branch somewhere the action did not leave it. A
+  // commit, an amend, a pull or a rebase — here or in a terminal — all arrive
+  // that way, so nothing that moves a branch has to remember to clear it.
+  $effect(() => {
+    const status = $repoState.status
+    untrack(() => {
+      if (undoOffer && !undoStillStands(undoOffer.point, status)) undoOffer = null
+    })
+  })
+
+  // And it is about one repository: another one's strip never carries it.
+  $effect(() => {
+    const repoPath = $appState.repoPath
+    untrack(() => {
+      if (undoOffer && undoOffer.repoPath !== repoPath) undoOffer = null
+    })
+  })
+
+  /**
+   * Take the last History action back. Three ways out, as core answers: the
+   * branch is back, with the commits the action was asked for selected again; the
+   * point has expired, so the offer goes and the modal says why; or a refusal
+   * that may not hold next time — a dirty tree — which leaves the offer standing.
+   */
+  async function runUndo(): Promise<void> {
+    const offer = undoOffer
+    if (!offer || $appState.repoPath !== offer.repoPath) return
+    if (!beginRepoWrite('undoAction')) {
+      reportActionError(REPO_BUSY_MESSAGE)
+      return
+    }
+    const { repoPath } = offer
+    try {
+      const result = await gitApi.undoOperation(repoPath, offer.point)
+      if (undoOffer === offer) undoOffer = null
+      if ($appState.repoPath !== repoPath) return
+      // Undoing a cherry-pick from its target also goes back to the source.
+      await reloadAfterBranchChange()
+      if ($appState.repoPath !== repoPath) return
+      if (!result.undone) {
+        reportActionError(result.message ?? 'This can no longer be undone.')
+        return
+      }
+      selectResultingCommits(offer.restores)
+      if (result.message) reportNotice(result.message)
+    } catch (error) {
+      console.warn('[history] undo failed', error)
+      if ($appState.repoPath !== repoPath) return
+      await reloadAfterBranchChange()
+      reportActionError(error)
+    } finally {
+      endRepoWrite()
+    }
   }
 
   /**
@@ -2890,35 +2982,33 @@
 
   <div class="main-content">
     <!--
-      Failures that aren't worth the window. Two of them share this strip and
-      differ only in who retires them: the poll's own (a streak of failed ticks
-      — the repo went away) clears the moment a tick succeeds, while an OS
-      hand-off that failed has no later success to disprove it and so carries a
-      ✕. Both leave the last good view of the repository readable behind them,
-      which is the whole point — a modal on every tick hid it.
+      What is worth a line and not the window. Three lines share the strip's
+      shape and differ in who retires them: the poll's own (a streak of failed
+      ticks — the repo went away) clears the moment a tick succeeds; a notice
+      has no later success to disprove it and so carries a ✕; and the way back
+      from the last History action goes with its ✕ or once the branch has
+      moved on. All leave the last good view of the repository readable behind
+      them, which is the whole point — a modal on every tick hid it.
     -->
     {#if $repoState.pollError}
-      <div class="poll-banner" role="status">
-        <!-- Filled, not outlined: every warning banner on the native side uses
-             `exclamationmark.triangle.fill` (`ContentView.swift`), and the
-             outlined variant is reserved there for the full-pane
-             `ContentUnavailableView` states. -->
-        <Icon name="exclamationmark-triangle-fill" size={13} />
-        <span class="poll-banner-text">
-          Can't read this repository — it may have been moved, deleted, or unmounted.
-        </span>
-        <span class="poll-banner-detail">{$repoState.pollError}</span>
-      </div>
+      <StatusStrip
+        tone="warning"
+        message="Can't read this repository — it may have been moved, deleted, or unmounted."
+        detail={$repoState.pollError}
+      />
     {/if}
 
     {#if $repoState.notice}
-      <div class="poll-banner" role="status">
-        <Icon name="exclamationmark-triangle-fill" size={13} />
-        <span class="banner-message">{$repoState.notice}</span>
-        <button class="banner-dismiss" onclick={dismissNotice} aria-label="Dismiss">
-          <Icon name="xmark" size={10} weight="semibold" />
-        </button>
-      </div>
+      <StatusStrip tone="warning" message={$repoState.notice} onDismiss={dismissNotice} />
+    {/if}
+
+    {#if undoOffer}
+      <StatusStrip
+        tone="done"
+        message={undoOffer.sentence}
+        action={{ label: 'Undo', run: () => void runUndo(), blocked: undoBlocked }}
+        onDismiss={() => (undoOffer = null)}
+      />
     {/if}
 
     <div class="content-area">
@@ -3531,79 +3621,6 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
-  }
-
-  /* Poll-failure strip: one line under the header, above the content, so the
-     data behind it stays visible. Deliberately not a toast and not a modal —
-     the condition persists, so it must be able to sit there. */
-  .poll-banner {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-    flex-shrink: 0;
-    padding: 6px 12px;
-    border-bottom: 1px solid var(--border-inactive);
-    background: color-mix(in srgb, var(--status-yellow) 12%, transparent);
-    color: var(--text-primary);
-    font-size: 12px;
-  }
-
-  /* `:global` because the glyph is a child component's element now, and a
-     direct-child combinator so it tints only the banner's own warning mark:
-     the descendant form also caught the dismiss button's ✕ and beat
-     `.banner-dismiss`'s colour on specificity, which is why that button's
-     hover rule below could never fire. `flex-shrink` lives in `Icon`. */
-  .poll-banner > :global(svg) {
-    align-self: center;
-    color: var(--status-yellow);
-  }
-
-  .poll-banner-text {
-    flex-shrink: 0;
-  }
-
-  .poll-banner-detail {
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    min-width: 0;
-    color: var(--text-muted);
-    font-family: var(--font-mono);
-    font-size: 11px;
-    user-select: text;
-  }
-
-  /* The notice's message IS the sentence, not a technical footnote under one,
-     so it reads at body weight rather than in the detail's muted mono. */
-  .banner-message {
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    min-width: 0;
-    user-select: text;
-  }
-
-  .banner-dismiss {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    align-self: center;
-    flex-shrink: 0;
-    width: 18px;
-    height: 18px;
-    padding: 0;
-    background: transparent;
-    border: none;
-    border-radius: 4px;
-    color: var(--text-muted);
-    cursor: pointer;
-  }
-
-  .banner-dismiss:hover {
-    background: var(--surface-hover);
-    color: var(--text-primary);
   }
 
   .commit-body {

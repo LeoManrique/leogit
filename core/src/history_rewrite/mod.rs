@@ -6,7 +6,7 @@
 //! another branch, [`squash`] folds commits of the current branch into one and
 //! [`reorder`] moves them to another place in it. Those two rewrite the branch
 //! by replaying it from a todo: [`lineage`] places the commits on the branch,
-//! and [`replay`] is the driver.
+//! and [`replay`] is the driver. [`undo`] takes any of the three back.
 //!
 //! What an operation looks like once it is open — and how to continue or abort
 //! it — is [`operation`](super::operation)'s. The two meet in one rule: when an
@@ -16,7 +16,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::git::{current_branch, git_dir, has_commits, is_object_id, run_git, run_git_optional};
+use super::git::{
+    current_branch, git_dir, has_commits, is_object_id, run_git, run_git_combined, run_git_optional,
+};
 use super::git_version;
 use super::operation;
 
@@ -27,10 +29,12 @@ mod lineage;
 mod reorder;
 mod replay;
 mod squash;
+mod undo;
 
 pub use cherry_pick::cherry_pick_commits;
 pub use reorder::{reorder_commits, reorder_preflight};
 pub use squash::{SquashDraft, squash_commits, squash_draft};
+pub use undo::{UndoResult, undo_operation};
 
 /// How many changed files a dirty-tree refusal names before it counts the rest.
 const DIRTY_FILES_NAMED: usize = 10;
@@ -189,11 +193,8 @@ fn branch_ready_for_an_action(repo_path: &str) -> Result<Result<String, String>,
     if let Err(too_old) = git_version::require_floor() {
         return Ok(Err(too_old));
     }
-    if let Some(open) = operation::in_progress(git_dir(repo_path).as_deref()) {
-        return Ok(Err(format!(
-            "A {} is in progress. Continue or abort it first.",
-            open.subcommand()
-        )));
+    if let Some(open) = open_operation_refusal(repo_path) {
+        return Ok(Err(open));
     }
     let Some(branch) = current_branch(repo_path)? else {
         return Ok(Err(
@@ -207,6 +208,43 @@ fn branch_ready_for_an_action(repo_path: &str) -> Result<Result<String, String>,
         return Ok(Err(dirty));
     }
     Ok(Ok(branch))
+}
+
+/// The refusal for an operation already in progress: nothing here starts, or
+/// takes back, anything under one.
+fn open_operation_refusal(repo_path: &str) -> Option<String> {
+    operation::in_progress(git_dir(repo_path).as_deref()).map(|open| {
+        format!(
+            "A {} is in progress. Continue or abort it first.",
+            open.subcommand()
+        )
+    })
+}
+
+/// Check the local branch `branch` out, answering by **where HEAD is
+/// afterwards** rather than by git's exit status: `git switch` switches and
+/// *then* exits non-zero when a `post-checkout` hook fails — git-lfs installs
+/// one, and it fails wherever `git-lfs` is not on the app's `PATH` — so the
+/// status alone would report a checkout that happened as one that did not.
+///
+/// `switch --no-guess --` can only ever land on the existing local branch:
+/// `checkout refs/heads/<name>` would detach, and a bare `switch <name>` may
+/// create the branch from a remote-tracking ref of that name.
+///
+/// The `Err` is what git said.
+fn switch_to(repo_path: &str, branch: &str) -> Result<(), String> {
+    let (switched, said) = run_git_combined(repo_path, &["switch", "--no-guess", "--", branch])?;
+    if switched {
+        return Ok(());
+    }
+    if current_branch(repo_path)?.as_deref() == Some(branch) {
+        eprintln!(
+            "[history_rewrite] on {branch}, though the switch complained: {}",
+            said.trim()
+        );
+        return Ok(());
+    }
+    Err(said.trim().to_string())
 }
 
 /// Why the current branch cannot be replayed from `oldest` up, or `None` when

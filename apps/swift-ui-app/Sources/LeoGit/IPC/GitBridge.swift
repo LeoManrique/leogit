@@ -414,6 +414,14 @@ enum GitBridge {
         try reorderCommits(repoPath: repoPath, shas: shas, beforeSha: beforeSha)
     }
 
+    /// Take a History action back: `point.branch` goes back on its `beforeSha`
+    /// as long as its tip is still `afterSha`, from whichever branch is checked
+    /// out. `undone == false` means the point has expired.
+    @concurrent
+    static func undo(in repoPath: String, point: UndoPoint) async throws -> UndoResult {
+        try undoOperation(repoPath: repoPath, point: point)
+    }
+
     /// How many commits merging `branch` would bring in — the merge sheet's
     /// preview number.
     @concurrent

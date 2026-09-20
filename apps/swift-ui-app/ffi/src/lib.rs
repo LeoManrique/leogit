@@ -62,7 +62,9 @@ pub use leogit_core::git::{
     FileStatusStyle, LogOptions, MergeResult, RepoIdentifier, RepoStatus, RepoSync,
 };
 pub use leogit_core::highlight::{BlobSource, Token, TokenClass};
-pub use leogit_core::history_rewrite::{RewritePreflight, RewriteResult, SquashDraft, UndoPoint};
+pub use leogit_core::history_rewrite::{
+    RewritePreflight, RewriteResult, SquashDraft, UndoPoint, UndoResult,
+};
 pub use leogit_core::launch::LaunchTarget;
 pub use leogit_core::operation::{OperationInProgress, OperationOutcome};
 pub use leogit_core::repos::{CloneTarget, RepoRow};
@@ -219,6 +221,13 @@ pub struct RewriteResult {
     pub error_message: Option<String>,
     pub selection: Vec<String>,
     pub undo: Option<UndoPoint>,
+}
+
+/// Mirrors [`leogit_core::history_rewrite::UndoResult`].
+#[uniffi::remote(Record)]
+pub struct UndoResult {
+    pub undone: bool,
+    pub message: Option<String>,
 }
 
 /// Mirrors [`leogit_core::history_rewrite::SquashDraft`].
@@ -1177,6 +1186,21 @@ pub fn reorder_commits(
 ) -> Result<RewriteResult, GitError> {
     history_rewrite::reorder_commits(&repo_path, &shas, before_sha.as_deref())
         .map_err(GitError::from)
+}
+
+/// Take a History action back: put `point.branch` on `point.before_sha`, as
+/// long as its tip is still `point.after_sha` — from whichever branch is
+/// checked out. `undone == false` means the point has expired: the branch has
+/// moved since, so the offer should go.
+///
+/// # Errors
+///
+/// Returns [`GitError`] for a refusal that may not hold next time — tracked
+/// changes, an operation in progress, the branch checked out in another
+/// worktree — or when git fails. Nothing has moved.
+#[uniffi::export]
+pub fn undo_operation(repo_path: String, point: UndoPoint) -> Result<UndoResult, GitError> {
+    history_rewrite::undo_operation(&repo_path, &point).map_err(GitError::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -2823,6 +2847,39 @@ mod tests {
             [run_git_stdout(&dir, &["rev-parse", "HEAD~1"])]
         );
         assert_eq!(get_status(repo).expect("status").operation, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An undo as the Swift client drives it: the point a landed action handed
+    /// over goes back as it came, the branch is where it began — and the same
+    /// point, offered again, has expired as data rather than as an error.
+    #[test]
+    fn undo_flow_takes_an_action_back_and_then_says_the_point_has_expired() {
+        let (dir, repo, _default) = seeded_repo("undo");
+        let mut shas = Vec::new();
+        for name in ["one", "two"] {
+            std::fs::write(dir.join(format!("{name}.txt")), name).expect("write");
+            run_git(&dir, &["add", "."]);
+            run_git(&dir, &["commit", "-m", name]);
+            shas.insert(0, run_git_stdout(&dir, &["rev-parse", "HEAD"]));
+        }
+        let before = shas[0].clone();
+        let squashed =
+            squash_commits(repo.clone(), shas, "one and two".to_string()).expect("squash");
+        let point = squashed.undo.expect("a squash that landed can be undone");
+
+        let undone = undo_operation(repo.clone(), point.clone()).expect("undo");
+
+        assert!(undone.undone);
+        assert_eq!(undone.message, None);
+        assert_eq!(run_git_stdout(&dir, &["rev-parse", "HEAD"]), before);
+        let subjects = run_git_stdout(&dir, &["log", "--format=%s"]);
+        assert_eq!(subjects, "two\none\ninit");
+
+        let again = undo_operation(repo, point).expect("an answer, not an error");
+        assert!(!again.undone);
+        assert!(again.message.is_some());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

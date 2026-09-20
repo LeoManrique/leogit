@@ -96,6 +96,7 @@ fn main() {
             history_rewrite::squash_commits,
             history_rewrite::reorder_preflight,
             history_rewrite::reorder_commits,
+            history_rewrite::undo_operation,
             git::is_git_repo,
             git::init_repo,
             git::clone_repo,

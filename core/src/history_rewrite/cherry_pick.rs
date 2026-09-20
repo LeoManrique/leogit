@@ -1,6 +1,6 @@
 //! Cherry-picking commits onto another branch.
 
-use super::{RewriteResult, UndoPoint, rewrite_preflight};
+use super::{RewriteResult, UndoPoint, rewrite_preflight, switch_to};
 use crate::git::{
     current_branch, git_dir, is_object_id, ls_files_unmerged, run_git, run_git_combined,
     run_git_combined_with_env,
@@ -129,32 +129,6 @@ pub fn cherry_pick_commits(
         Ok(()) => said.to_string(),
         Err(stranded) => format!("{said}\n\n{stranded}"),
     })
-}
-
-/// Check the local branch `branch` out, answering by **where HEAD is
-/// afterwards** rather than by git's exit status: `git switch` switches and
-/// *then* exits non-zero when a `post-checkout` hook fails — git-lfs installs
-/// one, and it fails wherever `git-lfs` is not on the app's `PATH` — so the
-/// status alone would report a checkout that happened as one that did not.
-///
-/// `switch --no-guess --` can only ever land on the existing local branch:
-/// `checkout refs/heads/<name>` would detach, and a bare `switch <name>` may
-/// create the branch from a remote-tracking ref of that name.
-///
-/// The `Err` is what git said.
-fn switch_to(repo_path: &str, branch: &str) -> Result<(), String> {
-    let (switched, said) = run_git_combined(repo_path, &["switch", "--no-guess", "--", branch])?;
-    if switched {
-        return Ok(());
-    }
-    if current_branch(repo_path)?.as_deref() == Some(branch) {
-        eprintln!(
-            "[history_rewrite] on {branch}, though the switch complained: {}",
-            said.trim()
-        );
-        return Ok(());
-    }
-    Err(said.trim().to_string())
 }
 
 /// The way back after a pick that failed without a conflict: end the sequence
