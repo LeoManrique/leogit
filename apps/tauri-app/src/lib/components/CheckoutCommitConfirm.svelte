@@ -7,11 +7,13 @@
     /** The commit being checked out — shown for context in the warning. */
     commit: CommitInfo
     isCheckingOut: boolean
+    /** Why the checkout cannot start right now, or undefined — `ConfirmDialog`'s rule. */
+    blocked?: string
     onConfirm: () => void
     onCancel: () => void
   }
 
-  let { commit, isCheckingOut, onConfirm, onCancel }: Props = $props()
+  let { commit, isCheckingOut, blocked, onConfirm, onCancel }: Props = $props()
 
   function escape(): void {
     if (!isCheckingOut) onCancel()
@@ -49,10 +51,17 @@
       <p class="muted">
         To return, pick a branch from the branch menu. Your branches are unchanged.
       </p>
+      {#if blocked}
+        <p class="muted">{blocked}</p>
+      {/if}
     </div>
     <div class="modal-footer">
       <button class="btn-secondary" onclick={onCancel} disabled={isCheckingOut}>Cancel</button>
-      <button class="btn-primary" onclick={onConfirm} disabled={isCheckingOut}>
+      <button
+        class="btn-primary"
+        onclick={onConfirm}
+        disabled={isCheckingOut || blocked !== undefined}
+      >
         {isCheckingOut ? 'Checking out…' : 'Check Out'}
       </button>
     </div>

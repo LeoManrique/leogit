@@ -3,6 +3,12 @@
   import { get } from 'svelte/store'
   import { repoState, canCommit, reportActionError, reportNotice } from '$lib/stores/repo'
   import { appState } from '$lib/stores/app'
+  import {
+    activeRepoWrite,
+    beginRepoWrite,
+    endRepoWrite,
+    REPO_BUSY_MESSAGE,
+  } from '$lib/stores/repoWrite'
   import { gitApi, aiApi, configApi, type Config, type FileEntry } from '$lib/api/commands'
   import { config } from '$lib/stores/config'
   import { basename } from '$lib/utils/path'
@@ -41,8 +47,16 @@
     $config?.ai_provider === 'ollama' ? 'ollama' : 'claude',
   )
   let isGenerating = $state(false)
-  let isCommitting = $state(false)
-  let isContinuing = $state(false)
+  // The composer's two writes are read off the window's one write slot rather
+  // than kept as flags of its own, so "a commit is running" has one source.
+  const isCommitting = $derived($activeRepoWrite === 'commit')
+  const isContinuing = $derived($activeRepoWrite === 'continue')
+  // Someone else holds the slot — a branch switch, an abort, a cherry-pick.
+  // Commit and Continue go inert; the fields stay live, since typing a message
+  // writes nothing.
+  const isRepoBusyElsewhere = $derived(
+    $activeRepoWrite !== null && !isCommitting && !isContinuing,
+  )
   let error = $state<string | null>(null)
   let charCount = $derived(summary.length)
 
@@ -438,9 +452,9 @@
 
   async function performCommit(files: FileEntry[]) {
     const repoPath = $appState.repoPath
-    if (!repoPath) return
+    // Refused while another write runs: nothing closes, nothing is cleared.
+    if (!repoPath || !beginRepoWrite('commit')) return
 
-    isCommitting = true
     error = null
 
     try {
@@ -460,7 +474,7 @@
     } catch (err) {
       error = `${isAmending ? 'Amend' : 'Commit'} failed: ${String(err)}`
     } finally {
-      isCommitting = false
+      endRepoWrite()
       // Close the confirm modal (if this commit came from it) whether it
       // succeeded or failed, so a failure's error message isn't hidden behind it.
       pendingFiles = []
@@ -481,8 +495,8 @@
     const repoPath = $appState.repoPath
     if (!repoPath || !continueWords || isBusy) return
     const words = continueWords
+    if (!beginRepoWrite('continue')) return
 
-    isContinuing = true
     error = null
     try {
       const outcome = await gitApi.continueOperation(repoPath)
@@ -499,7 +513,7 @@
       await onOperationContinued?.()
       reportActionError(err)
     } finally {
-      isContinuing = false
+      endRepoWrite()
     }
   }
 
@@ -681,7 +695,7 @@
         <button
           class="commit-button"
           onclick={handleContinue}
-          disabled={isBusy}
+          disabled={isBusy || isRepoBusyElsewhere}
           title={`Stage the resolved files and carry the ${continueWords.noun} on (Ctrl+Enter)`}
         >
           Continue {continueWords.title}
@@ -690,7 +704,7 @@
         <button
           class="commit-button"
           onclick={handleCommit}
-          disabled={!canSubmit || isCommitInProgress}
+          disabled={!canSubmit || isCommitInProgress || isRepoBusyElsewhere}
           title={isAmending
             ? 'Rewrite the most recent commit (Ctrl+Enter)'
             : 'Commit the checked files (Ctrl+Enter)'}
@@ -707,6 +721,7 @@
     repos={pendingEmbedded}
     outerRepo={outerRepoName}
     {isCommitting}
+    blocked={isRepoBusyElsewhere ? REPO_BUSY_MESSAGE : undefined}
     onConfirm={() => performCommit(pendingFiles)}
     onCancel={() => (pendingFiles = [])}
   />

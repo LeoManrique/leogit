@@ -119,6 +119,32 @@ final class RepoStore {
     /// and a check that happens once cannot cover a second read done later.
     private var openGeneration = 0
 
+    /// Status reads are numbered as they leave, and the newest to have landed
+    /// is remembered, so one that comes back out of order is dropped.
+    ///
+    /// `openGeneration` cannot do this: it tells repositories apart, and these
+    /// are two reads of the *same* one. A poll tick that left before a
+    /// cherry-pick and came back after its reload would put the source branch
+    /// back on screen — and with it undo everything keyed on the status, the
+    /// branch a conflicted pick came from among them.
+    private var statusReadsIssued = 0
+    private var newestStatusLanded = 0
+
+    /// Number a status read — called **before** its `await`, like the
+    /// generation claim beside it.
+    private func issueStatusRead() -> Int {
+        statusReadsIssued += 1
+        return statusReadsIssued
+    }
+
+    /// Whether the read numbered `ordinal` may publish its status: `false`
+    /// when a read asked after it has already landed.
+    private func landStatusRead(_ ordinal: Int) -> Bool {
+        guard ordinal >= newestStatusLanded else { return false }
+        newestStatusLanded = ordinal
+        return true
+    }
+
     /// Suspend until no explicit load is in flight.
     ///
     /// `open()` publishes `repoPath` *before* it has status, so the
@@ -282,11 +308,12 @@ final class RepoStore {
         // `headSha` to compare against, so the guard below fell through to the
         // full reload every single time.
         let generation = openGeneration
+        let ordinal = issueStatusRead()
         beginLoad(showsProgress: false)
         defer { finishLoad() }
         do {
             let newStatus = try await GitBridge.status(of: repoPath)
-            guard generation == openGeneration else { return false }
+            guard generation == openGeneration, landStatusRead(ordinal) else { return false }
             guard newStatus.headSha == status?.headSha else {
                 await loadRepoData(
                     repoPath,
@@ -333,6 +360,7 @@ final class RepoStore {
         // repository's status under the new repository's path — putting back
         // exactly what `open()` clears, and for as long as the new read takes.
         let generation = openGeneration
+        let ordinal = issueStatusRead()
         let newStatus: RepoStatus
         do {
             newStatus = try await GitBridge.status(of: repoPath)
@@ -344,7 +372,7 @@ final class RepoStore {
             }
             return
         }
-        guard generation == openGeneration else { return }
+        guard generation == openGeneration, landStatusRead(ordinal) else { return }
         quietFailureStreak = 0
         // The repo is readable again; retire the poll's own banner.
         pollFailure = nil
@@ -417,6 +445,7 @@ final class RepoStore {
     /// exactly the guard's job to prevent. Making it a parameter is what forces
     /// every caller to claim it at the only moment that is sound.
     private func loadRepoData(_ path: String, historyLimit: Int32, generation: Int) async {
+        let ordinal = issueStatusRead()
         async let statusResult = GitBridge.status(of: path)
         async let logResult = GitBridge.log(of: path, limit: historyLimit)
 
@@ -428,7 +457,9 @@ final class RepoStore {
             // the tail below unrun is deliberate, since that load owns the
             // banner and the failure streak now.
             guard generation == openGeneration else { return }
-            status = newStatus
+            // Only the status stands down for a newer read: the history beside
+            // it is this load's own answer, and `historyLoaded` with it.
+            if landStatusRead(ordinal) { status = newStatus }
             commits = newCommits
             hasMoreHistory = newCommits.count == Int(historyLimit)
             historyLoaded = true

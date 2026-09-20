@@ -71,6 +71,14 @@
     onAmendCommit?: (commit: CommitInfo) => void
     onUndoCommit?: (commit: CommitInfo) => void
     onCheckoutCommit?: (commit: CommitInfo) => void
+    /** Cherry-pick these commits — the menu's targets, newest first. */
+    onCherryPick?: (commits: CommitInfo[]) => void
+    /**
+     * Why the actions that replay commits cannot start right now (an operation
+     * in progress, a detached HEAD, another write running), or null when they
+     * can. They stay in the menu disabled, with this as their hover text.
+     */
+    historyActionsBlocked?: string | null
   }
 
   let {
@@ -87,6 +95,8 @@
     onAmendCommit,
     onUndoCommit,
     onCheckoutCommit,
+    onCherryPick,
+    historyActionsBlocked = null,
   }: Props = $props()
 
   /** The list as it is drawn, by key — what every selection rule reads. */
@@ -108,7 +118,18 @@
     if (active) onSelect(next, active)
   }
 
-  let contextMenu = $state<{ x: number; y: number; commit: CommitInfo } | null>(null)
+  /**
+   * The open menu: where it is, the row it was raised on, and the commits it
+   * acts on. The targets are captured here rather than re-read from the
+   * selection on click — a re-seat can land between the two, and the menu must
+   * act on the commits whose count it printed.
+   */
+  let contextMenu = $state<{
+    x: number
+    y: number
+    commit: CommitInfo
+    targets: CommitInfo[]
+  } | null>(null)
 
   /**
    * Right-click acts on the whole selection when it lands inside a multi-row
@@ -125,12 +146,12 @@
     // the WebView's own menu.
     e.preventDefault()
     e.stopPropagation()
-    const targets = contextTargets(selection, shas, commit.sha)
-    // Every item below acts on one commit, so a multi-row selection has no
-    // menu to raise — and keeps its rows, which is the point of the rule above.
-    if (targets.length > 1) return
-    selectRow(commit, 'replace')
-    contextMenu = { x: e.clientX, y: e.clientY, commit }
+    const targetShas = new Set(contextTargets(selection, shas, commit.sha))
+    // A multi-row selection keeps its rows — collapsing it to the clicked row
+    // would throw away the very thing the menu is about to act on.
+    if (targetShas.size <= 1) selectRow(commit, 'replace')
+    const targets = targetShas.size > 1 ? commits.filter((c) => targetShas.has(c.sha)) : [commit]
+    contextMenu = { x: e.clientX, y: e.clientY, commit, targets }
   }
 
   /**
@@ -152,7 +173,23 @@
     contextMenu !== null && headSha !== '' && contextMenu.commit.sha !== headSha,
   )
 
-  const menuItems = $derived<ContextMenuItem[]>(
+  /**
+   * Cherry-pick, worded for how many commits it acts on. One item for both
+   * menus: a single commit is the same machinery with N = 1.
+   */
+  const cherryPickItem = $derived.by<ContextMenuItem>(() => {
+    const count = contextMenu?.targets.length ?? 1
+    return {
+      label: count > 1 ? `Cherry-pick ${count} Commits…` : 'Cherry-pick Commit…',
+      enabled: onCherryPick !== undefined && historyActionsBlocked === null,
+      title: historyActionsBlocked ?? undefined,
+      action: () => {
+        if (contextMenu) onCherryPick?.(contextMenu.targets)
+      },
+    }
+  })
+
+  const singleCommitItems = $derived<ContextMenuItem[]>(
     contextMenu === null
       ? []
       : [
@@ -192,6 +229,7 @@
               if (contextMenu) onCheckoutCommit?.(contextMenu.commit)
             },
           },
+          cherryPickItem,
           { separator: true, label: '', action: () => {} },
           {
             label: 'Copy SHA',
@@ -208,6 +246,12 @@
             },
           },
         ],
+  )
+
+  // A multi-row selection offers only what acts on all of it: every
+  // single-commit item would have to pick one row to mean.
+  const menuItems = $derived<ContextMenuItem[]>(
+    contextMenu !== null && contextMenu.targets.length > 1 ? [cherryPickItem] : singleCommitItems,
   )
 
   // Built from the native row rather than chosen, the same way `FileList`

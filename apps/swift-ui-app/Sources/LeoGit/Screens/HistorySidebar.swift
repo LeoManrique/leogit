@@ -46,6 +46,13 @@ struct HistorySidebar: View {
     /// or `nil` once HEAD is actually on the commit — the sheet stays up for
     /// the length of the call and keeps a refusal inside itself.
     let onCheckout: (CommitInfo) async -> String?
+    /// Cherry-pick these commits — the menu's targets, newest first.
+    let onCherryPick: ([CommitInfo]) -> Void
+
+    /// A repository write is running, so the actions that replay commits
+    /// cannot start. The operation in progress and a detached HEAD, which gate
+    /// them too, are read off `status`.
+    let isWriteInFlight: Bool
 
     /// The commit the checkout confirmation is about; `nil` when it's closed.
     @State private var commitToCheckout: CommitInfo?
@@ -82,7 +89,9 @@ struct HistorySidebar: View {
         // a refresh drops every selected sha — which is what an amend does.
         .maintainsSelection($selection, showing: $selectedSha, of: commits)
         .sheet(item: $commitToCheckout) { commit in
-            CheckoutCommitSheet(commit: commit) { await onCheckout(commit) }
+            CheckoutCommitSheet(commit: commit, isWriteInFlight: isWriteInFlight) {
+                await onCheckout(commit)
+            }
         }
     }
 
@@ -120,17 +129,31 @@ struct HistorySidebar: View {
             .alternatingRowBackgrounds()
             .contextMenu(forSelectionType: String.self) { shas in
                 // In list order, newest first — a set has no order, and every
-                // history action names a *range*. Every item in `rowMenu` acts
-                // on one commit, so a multi-row selection raises no menu.
+                // history action names a *range*. Read through `targets`, never
+                // off `selection`: the set AppKit hands over can lag behind a
+                // selection made in code, and `targets` drops what the list no
+                // longer holds.
                 let targets = ListSelection.targets(shas, in: commits)
                 if targets.count == 1, let commit = targets.first {
                     rowMenu(for: commit)
+                } else if targets.count > 1 {
+                    // Only what acts on all of them: every single-commit item
+                    // would have to pick one row to mean.
+                    cherryPickItem(for: targets)
                 }
             }
             .onAppear {
                 // Not animated and not in `.task`: this is a restore, so it
                 // should look like the list was never away.
                 if let selectedSha { proxy.scrollTo(selectedSha) }
+            }
+            // A selection made in code — the commits a cherry-pick just landed
+            // — can be anywhere relative to where the list is scrolled, and
+            // AppKit only follows selections it made itself. With no anchor
+            // this scrolls the least that reveals the row, so for a click or an
+            // arrow key, whose row is already on screen, it does nothing.
+            .onChange(of: selectedSha) { _, sha in
+                if let sha { proxy.scrollTo(sha) }
             }
         }
         .task(id: policy.canTickRelativeDates) { await relativeDateClock() }
@@ -162,10 +185,11 @@ struct HistorySidebar: View {
 
     // MARK: Row actions
 
-    /// The right-clicked commit's menu. The two history-rewriting items only
-    /// make sense on `HEAD`, and Checkout only on anything else, so exactly
-    /// one of the two groups is ever live for a given row — they're shown
-    /// disabled rather than hidden so the menu keeps a stable shape.
+    /// The right-clicked commit's menu. Amend and Undo only make sense on
+    /// `HEAD`, and Checkout only on anything else, so exactly one of those two
+    /// groups is ever live for a given row; Cherry-pick applies to any commit.
+    /// What does not apply is shown disabled rather than hidden, so the menu
+    /// keeps a stable shape.
     @ViewBuilder
     private func rowMenu(for commit: CommitInfo) -> some View {
         let isHead = commit.sha == status?.headSha
@@ -179,11 +203,33 @@ struct HistorySidebar: View {
         Button("Check Out Commit…") { commitToCheckout = commit }
             .disabled(isHead)
 
+        cherryPickItem(for: [commit])
+
         Divider()
 
         Button("Copy SHA") { Clipboard.copy(commit.sha) }
         Button("Copy Tag") { Clipboard.copy(commit.tags.joined(separator: " ")) }
             .disabled(commit.tags.isEmpty)
+    }
+
+    /// Cherry-pick, worded for how many commits it acts on. One item for both
+    /// menus: a single commit is the same machinery with N = 1.
+    private func cherryPickItem(for targets: [CommitInfo]) -> some View {
+        Button(
+            targets.count == 1 ? "Cherry-pick Commit…" : "Cherry-pick \(targets.count) Commits…"
+        ) {
+            onCherryPick(targets)
+        }
+        .disabled(!canStartHistoryAction)
+    }
+
+    /// The menu-time gate on every action that replays commits: not while an
+    /// operation is in progress, not from a detached HEAD, and not under
+    /// another write. Core's preflight stays the authority on everything that
+    /// takes a git call to know — a dirty tree, the git floor.
+    private var canStartHistoryAction: Bool {
+        guard let status else { return false }
+        return status.operation == nil && !status.detached && !isWriteInFlight
     }
 
     /// Undo is offered only while the commit is believed to be local: either

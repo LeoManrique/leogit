@@ -9,11 +9,13 @@
     /** Name of the outer repo the gitlink lands in (for the warning copy). */
     outerRepo: string
     isCommitting: boolean
+    /** Why the commit cannot start right now, or undefined — `ConfirmDialog`'s rule. */
+    blocked?: string
     onConfirm: () => void
     onCancel: () => void
   }
 
-  let { repos, outerRepo, isCommitting, onConfirm, onCancel }: Props = $props()
+  let { repos, outerRepo, isCommitting, blocked, onConfirm, onCancel }: Props = $props()
 
   const many = $derived(repos.length > 1)
 
@@ -63,10 +65,17 @@
         Anyone cloning <code>{outerRepo}</code> won’t get {many ? 'those files' : 'those files'} unless
         {many ? 'each is' : 'it’s'} set up as a submodule.
       </p>
+      {#if blocked}
+        <p class="muted">{blocked}</p>
+      {/if}
     </div>
     <div class="modal-footer">
       <button class="btn-secondary" onclick={onCancel} disabled={!canCancel}>Cancel</button>
-      <button class="btn-primary" onclick={onConfirm} disabled={isCommitting}>
+      <button
+        class="btn-primary"
+        onclick={onConfirm}
+        disabled={isCommitting || blocked !== undefined}
+      >
         {isCommitting ? 'Committing…' : 'Commit as Link'}
       </button>
     </div>

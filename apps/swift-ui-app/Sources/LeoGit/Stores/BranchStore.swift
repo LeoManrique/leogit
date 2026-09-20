@@ -19,8 +19,28 @@ extension BranchInfo: Identifiable {
 final class BranchStore {
     private(set) var branches: [BranchInfo] = []
 
-    /// One branch operation at a time; the menu disables itself while set.
-    private(set) var isBusy = false
+    /// The window's one write slot. Every mutation here claims it, so a branch
+    /// operation and a commit, a Continue or a History action never overlap.
+    private let gate: RepositoryWriteGate
+
+    /// One of *this store's* operations is running. What a surface words its
+    /// own progress from — the spinner in the create and merge sheets, the
+    /// dimmed chip — and never what gates a start: see `isBlocked`.
+    ///
+    /// A count rather than a flag: a bridge call cannot be cancelled, so an
+    /// operation on the repository the window has left can still be finishing
+    /// under one begun on the new repository, and must not announce its end.
+    var isRunning: Bool { running > 0 }
+    private var running = 0
+
+    /// A repository write is running — this store's or anyone else's — so no
+    /// branch operation can start. Items and buttons disable on this; they do
+    /// not claim to be working on it, since the work may be a commit's.
+    var isBlocked: Bool { gate.isHeld }
+
+    init(gate: RepositoryWriteGate) {
+        self.gate = gate
+    }
 
     /// The repository the published `branches` is allowed to describe.
     ///
@@ -94,7 +114,6 @@ final class BranchStore {
         loadGeneration += 1
         currentRepo = repoPath
         branches = []
-        isBusy = false
     }
 
     /// Check out `branch` (a remote-only name becomes a tracking branch).
@@ -123,12 +142,32 @@ final class BranchStore {
     /// revert. `said` is git's own text when the abort worked but did less
     /// than a full rewind (HEAD was moved by hand mid-sequence): something to
     /// read, not a failure.
-    func abortOperation(repoPath: String) async -> (outcome: OpOutcome, said: String?) {
+    ///
+    /// `source` is the branch a cherry-pick begun here came from, when that is
+    /// what is being aborted: the pick checked its target out to do its work,
+    /// and the abort has put that target back, so it ends on the branch the
+    /// commits came from rather than stranding the user on one they never
+    /// chose. Failing to get back there is `stranded`, beside a `succeeded`
+    /// outcome rather than in place of it: the abort worked, saying it had not
+    /// would send the user to retry an abort of nothing, and `said` still has
+    /// to reach them.
+    func abortOperation(
+        returningTo source: String?,
+        repoPath: String
+    ) async -> (outcome: OpOutcome, said: String?, stranded: String?) {
         var said: String?
+        var stranded: String?
         let outcome = await run(repoPath: repoPath) {
             said = try await GitBridge.abortStoppedOperation(in: repoPath)
+            guard let source else { return }
+            do {
+                try await GitBridge.checkout(in: repoPath, branch: source)
+            } catch {
+                stranded =
+                    "The cherry-pick was aborted, but “\(source)” could not be checked out again:\n\(error.displayMessage)"
+            }
         }
-        return (outcome, said)
+        return (outcome, said, stranded)
     }
 
     /// Merge `source` into the current branch. Squash is the same two-call
@@ -170,9 +209,12 @@ final class BranchStore {
         repoPath: String,
         _ body: () async throws -> Void
     ) async -> OpOutcome {
-        guard !isBusy else { return .refusedBusy }
-        isBusy = true
-        defer { isBusy = false }
+        guard let claim = gate.claim() else { return .refusedBusy }
+        running += 1
+        defer {
+            running -= 1
+            gate.release(claim)
+        }
         do {
             try await body()
             await load(repoPath: repoPath)

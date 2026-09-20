@@ -482,7 +482,7 @@ pub(crate) fn run_git(repo_path: &str, args: &[&str]) -> Result<String, String> 
 /// complaint — `config --get` on an unset key, `symbolic-ref --quiet` on a
 /// detached `HEAD` — so that answer arrives as `None` rather than as an error.
 /// Every other failure is still an error.
-fn run_git_optional(repo_path: &str, args: &[&str]) -> Result<Option<String>, String> {
+pub(crate) fn run_git_optional(repo_path: &str, args: &[&str]) -> Result<Option<String>, String> {
     let output = git_cmd(repo_path, args)
         .output()
         .map_err(|e| format!("git: {e}"))?;
@@ -722,7 +722,7 @@ pub(crate) fn progress_forwarder(
 /// file reads give. `git rev-parse --verify --quiet HEAD` is kept as the
 /// fallback for the layouts the shortcut deliberately does not read, so an
 /// unusual repository is answered by git itself rather than guessed at.
-fn has_commits(repo_path: &str) -> bool {
+pub(crate) fn has_commits(repo_path: &str) -> bool {
     if let Some(answer) = has_commits_from_fs(repo_path) {
         return answer;
     }
@@ -733,7 +733,7 @@ fn has_commits(repo_path: &str) -> bool {
 
 /// A 40-hex (SHA-1) or 64-hex (SHA-256) object id — the form a detached `HEAD`
 /// and a loose ref file both hold.
-fn is_object_id(text: &str) -> bool {
+pub(crate) fn is_object_id(text: &str) -> bool {
     matches!(text.len(), 40 | 64) && text.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
@@ -3660,7 +3660,7 @@ fn branch_config(repo_path: &str, branch: &str, key: &str) -> Result<Option<Stri
 
 /// The branch `HEAD` is on, or `None` when it is detached — or on anything
 /// outside `refs/heads/`, which no `branch.*` key describes.
-fn current_branch(repo_path: &str) -> Result<Option<String>, String> {
+pub(crate) fn current_branch(repo_path: &str) -> Result<Option<String>, String> {
     // `--quiet` makes a detached HEAD exit 1, which arrives as None.
     let head = run_git_optional(repo_path, &["symbolic-ref", "--quiet", "HEAD"])?;
     Ok(head.and_then(|h| h.strip_prefix("refs/heads/").map(str::to_string)))

@@ -3,6 +3,8 @@
     label: string
     action: () => void
     enabled?: boolean
+    /** Why a disabled item is disabled — the hover text, as on the branch footer. */
+    title?: string
     destructive?: boolean
     separator?: boolean
   }
@@ -138,7 +140,8 @@
         class="menu-item"
         class:destructive={item.destructive}
         class:focused={i === focusIdx}
-        disabled={item.enabled === false}
+        aria-disabled={item.enabled === false}
+        title={item.title}
         onclick={() => activate(item)}
         onmouseenter={() => {
           if (item.enabled !== false) focusIdx = i
@@ -225,8 +228,11 @@
      which outrank `.menu-item`'s own transparent background — an element in the
      selector beats a class — and would otherwise tint a row the pointer reached
      without firing `mouseenter`, the menu being re-positioned under a still
-     pointer being the case that does it. The highlight below outranks this. */
-  .menu-item:hover {
+     pointer being the case that does it. The highlight below outranks this.
+     The `:active` half is for a disabled row, which is `aria-disabled` rather
+     than `:disabled` and so is not exempted by the global rule's own `:not`. */
+  .menu-item:hover,
+  .menu-item[aria-disabled='true']:active {
     background: transparent;
   }
 
@@ -259,16 +265,21 @@
      would light a second row the moment an arrow key follows a hover — the
      pointer's row and the row Return acts on, both in full accent, with nothing
      saying which is which. AppKit highlights one item at a time. */
-  .menu-item.focused:not(:disabled) {
+  .menu-item.focused:not([aria-disabled='true']) {
     background: var(--border-active);
     color: var(--on-accent);
   }
 
   /* Last, so a disabled item that is also destructive reads disabled: the two
      rules carry equal specificity, and this is the one that must win. A
-     disabled row takes no highlight either, which is what the `:not(:disabled)`
-     above enforces. */
-  .menu-item:disabled {
+     disabled row takes no highlight either, which is what the `:not(…)` above
+     enforces.
+
+     `aria-disabled`, never the `disabled` attribute: a disabled control takes
+     no pointer events, so the `title` saying *why* it is disabled would never
+     appear (STYLE.md, the picker's rule). `activate` and the key handler are
+     what refuse it. */
+  .menu-item[aria-disabled='true'] {
     color: var(--text-faint);
     cursor: default;
   }

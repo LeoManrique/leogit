@@ -156,6 +156,40 @@ export interface OperationOutcome {
   skipped: boolean
 }
 
+/**
+ * Whether a History action may start. `blocked` is the reason it may not, as
+ * one message for the user; `rewrites_pushed` says the next push after the
+ * action would be a force push.
+ */
+export interface RewritePreflight {
+  blocked: string | null
+  rewrites_pushed: boolean
+}
+
+/** The one ref a History action moved, before and after. */
+export interface UndoPoint {
+  branch: string
+  before_sha: string
+  after_sha: string
+  /** The branch the action left to do its work — cherry-pick's source. */
+  return_branch: string | null
+}
+
+/**
+ * What a History action came to. A conflict is data, as it is for a merge —
+ * `success` false, git's own text, the conflicted paths — and it leaves the
+ * operation open for Continue or Abort. A rejected promise means the
+ * repository is back where it began. `selection` is the new ids of the commits
+ * acted on, newest first.
+ */
+export interface RewriteResult {
+  success: boolean
+  conflicts: string[]
+  error_message?: string
+  selection: string[]
+  undo: UndoPoint | null
+}
+
 /** Lightweight per-repo sync summary for the picker's pull/push badges. */
 export interface RepoSync {
   ahead: number
@@ -555,6 +589,16 @@ export const gitApi = {
    * less than a full rewind — text to show, not a failure — and `null` otherwise.
    */
   abortOperation: (repoPath: string) => invoke<string | null>('abort_operation', { repoPath }),
+  /**
+   * Whether a History action may start. `replayedFrom` is the oldest commit
+   * the action would replay on the current branch — null for cherry-pick,
+   * which replays nothing here.
+   */
+  rewritePreflight: (repoPath: string, replayedFrom: string | null) =>
+    invoke<RewritePreflight>('rewrite_preflight', { repoPath, replayedFrom }),
+  /** Copy `shas` (newest first, as History lists them) onto a local branch. */
+  cherryPickCommits: (repoPath: string, shas: string[], targetBranch: string) =>
+    invoke<RewriteResult>('cherry_pick_commits', { repoPath, shas, targetBranch }),
   /**
    * The folders discovery would actually walk for this config — the
    * configured list, or the stock defaults when it's empty. Lets the picker's

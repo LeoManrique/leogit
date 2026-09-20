@@ -23,6 +23,11 @@ struct BranchMenu: View {
     /// switch resizes the leading cluster twice.
     let shown: ToolbarStatus
 
+    /// The branch a cherry-pick begun in History came from, while that pick is
+    /// stopped on a conflict — where aborting it ends. `nil` for every other
+    /// operation, including a cherry-pick begun in a terminal.
+    let cherryPickSource: String?
+
     /// Called after any operation that may move HEAD or touch the working
     /// tree (switch, create, merge, abort) — the owner reloads status/log.
     let onWorkingTreeChanged: () async -> Void
@@ -74,7 +79,7 @@ struct BranchMenu: View {
             current: currentBranch,
             isDetached: isDetached,
             operation: operation,
-            isBusy: store.isBusy,
+            isBlocked: store.isBlocked,
             perform: perform
         )
     }
@@ -86,7 +91,7 @@ struct BranchMenu: View {
             // deleted from an outside terminal appear without a manual
             // refresh (the status poll only catches the ones that move HEAD).
             // `load` replaces rows in place on success and never touches
-            // `isBusy`, so the open menu doesn't flicker.
+            // `isRunning`, so the open menu doesn't flicker.
             BranchMenuContent(command: command) {
                 Task { await store.load(repoPath: repoPath) }
             }
@@ -103,7 +108,10 @@ struct BranchMenu: View {
         // The repo chip beside this one opens a popover with no indicator,
         // so a chevron on only half the pair reads as an inconsistency.
         .menuIndicator(.hidden)
-        .disabled(store.isBusy)
+        // Dimmed for this menu's own operation only. Under someone else's
+        // write — a commit — the chip still opens, so the branch can be read;
+        // it is the items inside that refuse to start (`BranchCommand.isBlocked`).
+        .disabled(store.isRunning)
         .help(isDetached ? "Detached HEAD — pick a branch to return to" : "Switch branch")
         .sheet(isPresented: $isCreating) {
             CreateBranchSheet(store: store, repoPath: repoPath) {
@@ -141,9 +149,7 @@ struct BranchMenu: View {
             Button("Abort \(operation.words.title)", role: .destructive) { abortOperation() }
             Button("Cancel", role: .cancel) { pendingAbort = nil }
         } message: { operation in
-            Text(
-                "Conflict resolutions are discarded, and the branch and working tree return to where they were before the \(operation.words.noun)."
-            )
+            Text(abortConsequence(of: operation))
         }
         // The same items chosen from the menu bar. They arrive as requests
         // rather than as calls because `BranchCommands` lives on the scene,
@@ -160,7 +166,7 @@ struct BranchMenu: View {
     /// and a busy store refuses both alike, rather than one of them.
     @MainActor
     private func perform(_ action: BranchAction) {
-        guard !store.isBusy else { return }
+        guard !store.isBlocked else { return }
         switch action {
         case let .switchTo(branch):
             switchTo(branch)
@@ -251,9 +257,24 @@ struct BranchMenu: View {
         }
     }
 
+    /// What the abort confirmation promises. A cherry-pick begun in History
+    /// also leaves the branch it was picking onto, and says so.
+    private func abortConsequence(of operation: OperationInProgress) -> String {
+        let rewind =
+            "Conflict resolutions are discarded, and the branch and working tree return to where they were before the \(operation.words.noun)."
+        guard let cherryPickSource else { return rewind }
+        return "\(rewind) You will be back on “\(cherryPickSource)”, where the commits came from."
+    }
+
     private func abortOperation() {
+        // Read before the abort: the reload that follows ends the cherry-pick,
+        // and with it the record of where it came from.
+        let source = cherryPickSource
         Task {
-            let (outcome, said) = await store.abortOperation(repoPath: repoPath)
+            let (outcome, said, stranded) = await store.abortOperation(
+                returningTo: source,
+                repoPath: repoPath
+            )
             // A refused abort touched nothing, so there is nothing to re-read
             // and the question stays up, as it does for a refused delete.
             if case .refusedBusy = outcome {
@@ -266,9 +287,13 @@ struct BranchMenu: View {
             await onWorkingTreeChanged()
             if case let .failed(message) = outcome {
                 onFailure(ActionFailure(message))
-            } else if let said {
-                onNotice(said)
+                return
             }
+            // Two separate things to say, and either can come without the
+            // other: where the user has been left, and what git said about
+            // how far the abort rewound.
+            if let stranded { onFailure(ActionFailure(stranded)) }
+            if let said { onNotice(said) }
         }
     }
 }
@@ -300,10 +325,10 @@ struct BranchCommand {
     /// The operation in progress, if any — what Abort is named for, and why
     /// Merge is withheld.
     var operation: OperationInProgress?
-    /// One branch operation runs at a time; a second would contend on
-    /// `index.lock`. The items dim rather than silently refusing, so the menu
-    /// bar says what the toolbar control's own `.disabled` already says.
-    var isBusy: Bool
+    /// One repository write runs at a time; a second would contend on
+    /// `index.lock`. The items dim rather than silently refusing, in the
+    /// toolbar menu and the menu bar alike.
+    var isBlocked: Bool
     var perform: (BranchAction) -> Void
 }
 
@@ -412,7 +437,7 @@ struct BranchMenuContent: View {
                 }
             }
         }
-        .disabled(command.isBusy)
+        .disabled(command.isBlocked)
     }
 }
 
@@ -465,8 +490,10 @@ private struct CreateBranchSheet: View {
                     .lineLimit(3)
             }
 
+            if store.isBlocked, !store.isRunning { WriteBlockedNote() }
+
             HStack {
-                if store.isBusy {
+                if store.isRunning {
                     ProgressView()
                         .controlSize(.small)
                 }
@@ -476,7 +503,7 @@ private struct CreateBranchSheet: View {
                 Button("Create", action: submit)
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(trimmedName.isEmpty || store.isBusy)
+                    .disabled(trimmedName.isEmpty || store.isBlocked)
             }
         }
         .padding(20)
@@ -484,7 +511,7 @@ private struct CreateBranchSheet: View {
 
     private func submit() {
         let branchName = trimmedName
-        guard !branchName.isEmpty, !store.isBusy else { return }
+        guard !branchName.isEmpty, !store.isBlocked else { return }
         failureText = nil
         Task {
             switch await store.createAndSwitch(named: branchName, repoPath: repoPath) {
@@ -545,8 +572,10 @@ private struct MergeSheet: View {
                     .foregroundStyle(.secondary)
             }
 
+            if store.isBlocked, !store.isRunning { WriteBlockedNote() }
+
             HStack {
-                if store.isBusy {
+                if store.isRunning {
                     ProgressView()
                         .controlSize(.small)
                 }
@@ -554,11 +583,11 @@ private struct MergeSheet: View {
                 Button("Cancel", role: .cancel) { dismiss() }
                     .keyboardShortcut(.cancelAction)
                 Button("Squash & Merge") { run(squash: true) }
-                    .disabled(store.isBusy || isUpToDate)
+                    .disabled(store.isBlocked || isUpToDate)
                 Button("Merge") { run(squash: false) }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(store.isBusy || isUpToDate)
+                    .disabled(store.isBlocked || isUpToDate)
             }
         }
         .padding(20)

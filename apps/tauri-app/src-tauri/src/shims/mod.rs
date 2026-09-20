@@ -13,6 +13,7 @@ pub mod exclusions;
 pub mod gh;
 pub mod git;
 pub mod highlight;
+pub mod history_rewrite;
 pub mod launch;
 pub mod operation;
 pub mod os;

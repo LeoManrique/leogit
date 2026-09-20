@@ -15,6 +15,10 @@ struct CheckoutCommitSheet: View {
     /// The commit being checked out, snapshotted when the sheet opened.
     let commit: CommitInfo
 
+    /// Another repository write holds the window's slot, so the checkout
+    /// cannot start: the button disables and the sheet says why.
+    let isWriteInFlight: Bool
+
     /// Run the checkout. Answers with core's error text, or `nil` once HEAD is
     /// on the commit.
     let onCheckout: () async -> String?
@@ -55,6 +59,8 @@ struct CheckoutCommitSheet: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            if isWriteInFlight, !isCheckingOut { WriteBlockedNote() }
+
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
@@ -62,7 +68,7 @@ struct CheckoutCommitSheet: View {
                     .disabled(isCheckingOut)
                 Button(isCheckingOut ? "Checking out…" : "Check Out", action: checkOut)
                     .buttonStyle(.borderedProminent)
-                    .disabled(isCheckingOut)
+                    .disabled(isCheckingOut || isWriteInFlight)
             }
         }
         .padding(16)

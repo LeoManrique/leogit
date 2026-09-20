@@ -15,8 +15,17 @@
     /** The operation in progress, if any — while one is open the only branch
      *  action that makes sense is aborting it. */
     operation: OperationInProgress | null
-    /** A branch operation is in flight; every action here locks until it ends. */
+    /** A repository write is in flight; every action here locks until it ends. */
     busy: boolean
+    /**
+     * How many commits a History cherry-pick is asking a target for, or null
+     * when the popover was opened as the branch menu. While it is set the list
+     * answers that one question and nothing else: the owner armed it, so the
+     * owner — not a mode of this component's own — says when it is over.
+     */
+    cherryPickCount?: number | null
+    /** The target chosen for that cherry-pick. */
+    onPickCherryPickTarget?: (branch: string) => void
     onSwitch: (branch: string) => void
     /**
      * Create and switch. Resolves to core's failure text, or undefined on
@@ -41,6 +50,8 @@
     detached = false,
     operation = null,
     busy = false,
+    cherryPickCount = null,
+    onPickCherryPickTarget,
     onSwitch,
     onCreate,
     onRequestMerge,
@@ -56,11 +67,17 @@
     one into a picking mode: the header says which question is being asked and
     the rows answer it. That is what the native submenus are, and it means the
     keyboard cursor, the filter and the row rendering are written once.
-  */
-  type Mode = 'browse' | 'create' | 'merge' | 'delete'
 
-  let mode = $state<Mode>('browse')
-  const isPicking = $derived(mode === 'merge' || mode === 'delete')
+    A cherry-pick from History borrows the same list for its target, but it is
+    armed from outside: the question arrives as a prop and outranks whatever
+    mode the menu itself is in.
+  */
+  type MenuMode = 'browse' | 'create' | 'merge' | 'delete'
+  type Mode = MenuMode | 'cherryPick'
+
+  let menuMode = $state<MenuMode>('browse')
+  const mode = $derived<Mode>(cherryPickCount !== null ? 'cherryPick' : menuMode)
+  const isPicking = $derived(mode === 'merge' || mode === 'delete' || mode === 'cherryPick')
 
   let filter = $state('')
   let newBranchName = $state('')
@@ -72,13 +89,17 @@
 
   /** Anything but the branch you are on can be merged into it, remotes included. */
   const mergeCandidates = $derived(branches.filter((b) => b.name !== currentBranch))
-  /** Only local, non-current branches are deletable. */
-  const deleteCandidates = $derived(localBranches.filter((b) => b.name !== currentBranch))
+  /**
+   * Every local branch but the one checked out — what can be deleted, and what
+   * a cherry-pick can land on: git will not delete the branch you are on, and
+   * the commits being picked are already on it.
+   */
+  const otherLocalBranches = $derived(localBranches.filter((b) => b.name !== currentBranch))
 
   const operationName = $derived(operation ? operationWords(operation) : null)
 
   const canMerge = $derived(!detached && !operationName && mergeCandidates.length > 0)
-  const canDelete = $derived(deleteCandidates.length > 0)
+  const canDelete = $derived(otherLocalBranches.length > 0)
 
   // The operation is asked about before the detached HEAD: a rebase detaches
   // HEAD itself, and "check out a branch" is the wrong advice in the middle of
@@ -101,7 +122,11 @@
     the predictable answer.
   */
   const candidates = $derived(
-    mode === 'merge' ? mergeCandidates : mode === 'delete' ? deleteCandidates : branches,
+    mode === 'merge'
+      ? mergeCandidates
+      : mode === 'delete' || mode === 'cherryPick'
+        ? otherLocalBranches
+        : branches,
   )
 
   const filtered = $derived.by(() => {
@@ -125,7 +150,9 @@
 
   function activate(branch: BranchInfo) {
     if (busy) return
-    if (mode === 'merge') {
+    if (mode === 'cherryPick') {
+      onPickCherryPickTarget?.(branch.name)
+    } else if (mode === 'merge') {
       onRequestMerge(branch.name)
     } else if (mode === 'delete') {
       onRequestDelete(branch.name)
@@ -140,13 +167,24 @@
   function startPicking(next: 'merge' | 'delete') {
     if (busy) return
     filter = ''
-    mode = next
+    menuMode = next
   }
 
   function backToBrowse() {
     filter = ''
     createError = undefined
-    mode = 'browse'
+    menuMode = 'browse'
+  }
+
+  /**
+   * One step back. From a question the menu asked itself that is the menu;
+   * from a cherry-pick's there is no menu underneath — the popover was opened
+   * for that question alone — so backing out of it closes. Not while the pick
+   * is running: the popover is what is showing that it is.
+   */
+  function stepBack(): void {
+    if (mode !== 'cherryPick') backToBrowse()
+    else if (!busy) onClose()
   }
 
   async function submitCreate() {
@@ -194,7 +232,7 @@
    */
   function escape(): void {
     if (mode === 'browse') onClose()
-    else backToBrowse()
+    else stepBack()
   }
 
   /*
@@ -273,12 +311,20 @@
   {:else}
     {#if isPicking}
       <div class="pick-header">
-        <button class="back-btn" onclick={backToBrowse} aria-label="Back to branches">
+        <button
+          class="back-btn"
+          onclick={stepBack}
+          disabled={mode === 'cherryPick' && busy}
+          aria-label={mode === 'cherryPick' ? 'Cancel' : 'Back to branches'}
+        >
           <Icon name="chevron-left" weight="medium" />
         </button>
         <span class="pick-title">
-          {#if mode === 'merge'}Merge into “{currentBranch}” — pick a branch{:else}Delete which
-            branch?{/if}
+          {#if mode === 'cherryPick'}
+            {#if busy}Cherry-picking…{:else}Cherry-pick {cherryPickCount}
+              {cherryPickCount === 1 ? 'commit' : 'commits'} onto which branch?{/if}
+          {:else if mode === 'merge'}Merge into “{currentBranch}” — pick a branch{:else}Delete
+            which branch?{/if}
         </span>
       </div>
     {/if}
@@ -303,7 +349,8 @@
     <div class="branch-list">
       {#if filtered.length === 0}
         <p class="empty">
-          {#if filter.trim()}No branch matches “{filter.trim()}”.{:else}No branches here.{/if}
+          {#if filter.trim()}No branch matches “{filter.trim()}”.{:else if mode === 'cherryPick'}There
+            is no other local branch to cherry-pick onto.{:else}No branches here.{/if}
         </p>
       {:else}
         {#each filtered as branch, i (branch.name)}
@@ -345,7 +392,7 @@
         noise in every other repository.
       -->
       <div class="footer">
-        <button class="footer-btn" onclick={() => (mode = 'create')} disabled={busy}>
+        <button class="footer-btn" onclick={() => (menuMode = 'create')} disabled={busy}>
           New Branch…
         </button>
         <button

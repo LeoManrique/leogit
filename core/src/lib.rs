@@ -22,6 +22,7 @@ pub mod gh;
 pub mod git;
 pub mod git_version;
 pub mod highlight;
+pub mod history_rewrite;
 pub mod launch;
 pub mod operation;
 pub mod os;

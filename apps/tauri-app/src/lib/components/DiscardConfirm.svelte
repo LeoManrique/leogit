@@ -18,11 +18,13 @@
      *  was about. The outcome line above is re-read alongside it, so what a
      *  retry would do describes the tree as it stands after the refusal. */
     error?: string
+    /** Why the discard cannot start right now, or undefined — `ConfirmDialog`'s rule. */
+    blocked?: string
     onConfirm: () => void
     onCancel: () => void
   }
 
-  let { files, plan, isDiscarding, error, onConfirm, onCancel }: Props = $props()
+  let { files, plan, isDiscarding, error, blocked, onConfirm, onCancel }: Props = $props()
 
   const single = $derived(files.length === 1 ? files[0] : null)
 
@@ -95,10 +97,17 @@
       {#if error}
         <p class="error">{error}</p>
       {/if}
+      {#if blocked}
+        <p class="muted">{blocked}</p>
+      {/if}
     </div>
     <div class="modal-footer">
       <button class="btn-secondary" onclick={onCancel} disabled={isDiscarding}>Cancel</button>
-      <button class="btn-danger" onclick={onConfirm} disabled={isDiscarding}>
+      <button
+        class="btn-danger"
+        onclick={onConfirm}
+        disabled={isDiscarding || blocked !== undefined}
+      >
         {isDiscarding ? 'Discarding…' : 'Discard Changes'}
       </button>
     </div>

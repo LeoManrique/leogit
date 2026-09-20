@@ -39,8 +39,8 @@ use std::sync::Arc;
 
 use leogit_core::events::{CoreEvent, EventSink};
 use leogit_core::{
-    ai, config, diff, exclusions, gh, git, highlight, launch, operation, os, process, repos, shell,
-    terminal, update,
+    ai, config, diff, exclusions, gh, git, highlight, history_rewrite, launch, operation, os,
+    process, repos, shell, terminal, update,
 };
 
 // Re-exported so Swift sees the real core types. Names are used by the
@@ -62,6 +62,7 @@ pub use leogit_core::git::{
     FileStatusStyle, LogOptions, MergeResult, RepoIdentifier, RepoStatus, RepoSync, SyncProposal,
 };
 pub use leogit_core::highlight::{BlobSource, Token, TokenClass};
+pub use leogit_core::history_rewrite::{RewritePreflight, RewriteResult, UndoPoint};
 pub use leogit_core::launch::LaunchTarget;
 pub use leogit_core::operation::{OperationInProgress, OperationOutcome};
 pub use leogit_core::repos::{CloneTarget, RepoRow};
@@ -190,6 +191,32 @@ pub struct OperationOutcome {
     pub conflicts: Vec<String>,
     pub error_message: Option<String>,
     pub skipped: bool,
+}
+
+/// Mirrors [`leogit_core::history_rewrite::RewritePreflight`].
+#[uniffi::remote(Record)]
+pub struct RewritePreflight {
+    pub blocked: Option<String>,
+    pub rewrites_pushed: bool,
+}
+
+/// Mirrors [`leogit_core::history_rewrite::UndoPoint`].
+#[uniffi::remote(Record)]
+pub struct UndoPoint {
+    pub branch: String,
+    pub before_sha: String,
+    pub after_sha: String,
+    pub return_branch: Option<String>,
+}
+
+/// Mirrors [`leogit_core::history_rewrite::RewriteResult`].
+#[uniffi::remote(Record)]
+pub struct RewriteResult {
+    pub success: bool,
+    pub conflicts: Vec<String>,
+    pub error_message: Option<String>,
+    pub selection: Vec<String>,
+    pub undo: Option<UndoPoint>,
 }
 
 /// Mirrors [`leogit_core::git::CommitInfo`].
@@ -1028,6 +1055,47 @@ pub fn continue_operation(repo_path: String) -> Result<OperationOutcome, GitErro
 #[uniffi::export]
 pub fn abort_operation(repo_path: String) -> Result<Option<String>, GitError> {
     operation::abort_operation(&repo_path).map_err(GitError::from)
+}
+
+// ---------------------------------------------------------------------------
+// Exported functions — history actions
+// ---------------------------------------------------------------------------
+//
+// An action that stops on a conflict is data, as a merge is — and it leaves
+// the operation open, so from there on it is the section above that acts.
+
+/// Whether a History action may start. `replayed_from` is the oldest commit
+/// the action would replay on the current branch, and `None` for cherry-pick,
+/// which replays nothing here. A refusal is `blocked`, asked for before any
+/// dialog opens so the user is not walked through one that cannot finish.
+///
+/// # Errors
+///
+/// Returns [`GitError`] only when git can't run.
+#[uniffi::export]
+pub fn rewrite_preflight(
+    repo_path: String,
+    replayed_from: Option<String>,
+) -> Result<RewritePreflight, GitError> {
+    history_rewrite::rewrite_preflight(&repo_path, replayed_from.as_deref()).map_err(GitError::from)
+}
+
+/// Copy `shas` (newest first, as History lists them) onto the local branch
+/// `target_branch`, which becomes the checked-out branch. A conflict is
+/// `success == false` with the cherry-pick left open on the target.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when the action is refused or fails for any reason
+/// that is not a conflict — the repository is then back on the branch it
+/// started from, or the message says where it was left.
+#[uniffi::export]
+pub fn cherry_pick_commits(
+    repo_path: String,
+    shas: Vec<String>,
+    target_branch: String,
+) -> Result<RewriteResult, GitError> {
+    history_rewrite::cherry_pick_commits(&repo_path, &shas, &target_branch).map_err(GitError::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -2578,6 +2646,60 @@ mod tests {
         assert_eq!(get_status(repo).expect("status").operation, None);
         let subject = run_git_stdout(&dir, &["log", "-1", "--format=%s"]);
         assert_eq!(subject, "their edit", "the pick keeps its own message");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A cherry-pick begun *in* the app, as the Swift client drives it: the
+    /// preflight answers before any sheet opens, a clean pick lands the user
+    /// on the target with the new commits to select, and a conflicting one is
+    /// data that leaves the operation open for the branch menu's Abort.
+    #[test]
+    fn cherry_pick_flow_preflights_copies_and_stops_on_a_conflict() {
+        let (dir, repo, default) = seeded_repo("cherry-pick");
+        create_branch(repo.clone(), "target".to_string(), String::new()).expect("create");
+        switch_branch(repo.clone(), default.clone()).expect("switch back");
+        std::fs::write(dir.join("new.txt"), "new\n").expect("write");
+        run_git(&dir, &["add", "."]);
+        run_git(&dir, &["commit", "-m", "adds a file"]);
+        let clean = run_git_stdout(&dir, &["rev-parse", "HEAD"]);
+
+        std::fs::write(dir.join("base.txt"), "edited\n").expect("edit");
+        let dirty = rewrite_preflight(repo.clone(), None).expect("preflight");
+        assert!(dirty.blocked.is_some_and(|why| why.contains("base.txt")));
+        run_git(&dir, &["checkout", "--", "base.txt"]);
+        let ready = rewrite_preflight(repo.clone(), None).expect("preflight");
+        assert_eq!(ready.blocked, None);
+
+        let result = cherry_pick_commits(repo.clone(), vec![clean], "target".to_string())
+            .expect("a clean pick");
+        assert!(result.success);
+        assert_eq!(get_status(repo.clone()).expect("status").branch, "target");
+        assert_eq!(
+            result.selection,
+            [run_git_stdout(&dir, &["rev-parse", "HEAD"])]
+        );
+        let undo = result.undo.expect("an undo point");
+        assert_eq!(undo.return_branch, Some(default.clone()));
+
+        // Both branches now rewrite the same line from the same base.
+        std::fs::write(dir.join("base.txt"), "target\n").expect("write");
+        run_git(&dir, &["commit", "-am", "target edit"]);
+        switch_branch(repo.clone(), default).expect("switch back");
+        std::fs::write(dir.join("base.txt"), "source\n").expect("write");
+        run_git(&dir, &["commit", "-am", "source edit"]);
+        let conflicting = run_git_stdout(&dir, &["rev-parse", "HEAD"]);
+
+        let stopped = cherry_pick_commits(repo.clone(), vec![conflicting], "target".to_string())
+            .expect("a conflict is data");
+        assert!(!stopped.success && stopped.undo.is_none());
+        assert_eq!(stopped.conflicts, ["base.txt"]);
+        assert_eq!(
+            get_status(repo.clone()).expect("status").operation,
+            Some(OperationInProgress::CherryPick)
+        );
+        abort_operation(repo.clone()).expect("abort");
+        assert_eq!(get_status(repo).expect("status").operation, None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

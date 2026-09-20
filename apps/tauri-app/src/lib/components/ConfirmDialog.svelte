@@ -19,6 +19,13 @@
      */
     isBusy: boolean
     /**
+     * Why confirming cannot start right now — another repository write holds
+     * the slot — or undefined when it can. Said as a line in the dialog with
+     * the button disabled, and live: it clears the moment the slot does. A
+     * button left enabled would be a click that does nothing.
+     */
+    blocked?: string
+    /**
      * A dialog whose confirmation loses work gets the red button and refuses a
      * backdrop dismiss — declining has to be deliberate (STYLE.md, *Modals /
      * dialogs*). Escape still works, because Escape is a deliberate keypress.
@@ -34,6 +41,7 @@
     confirmLabel,
     busyLabel,
     isBusy,
+    blocked,
     destructive = false,
     onConfirm,
     onCancel,
@@ -67,13 +75,16 @@
     </div>
     <div class="modal-body">
       {@render body()}
+      {#if blocked}
+        <p class="muted">{blocked}</p>
+      {/if}
     </div>
     <div class="modal-footer">
       <button class="btn-secondary" onclick={onCancel} disabled={isBusy}>Cancel</button>
       <button
         class={destructive ? 'btn-danger' : 'btn-primary'}
         onclick={onConfirm}
-        disabled={isBusy}
+        disabled={isBusy || blocked !== undefined}
       >
         {isBusy ? busyLabel : confirmLabel}
       </button>

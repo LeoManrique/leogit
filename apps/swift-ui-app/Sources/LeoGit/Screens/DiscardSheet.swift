@@ -19,6 +19,10 @@ struct DiscardSheet: View {
     /// widen what the user agreed to.
     let files: [FileEntry]
 
+    /// The window's one write slot: a discard rewrites the working tree, so it
+    /// waits its turn behind a commit or a branch switch like any other write.
+    let gate: RepositoryWriteGate
+
     /// Called once the working tree has actually changed.
     let onDiscarded: () async -> Void
 
@@ -51,6 +55,8 @@ struct DiscardSheet: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            if gate.isHeld, !isDiscarding { WriteBlockedNote() }
+
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
@@ -59,7 +65,7 @@ struct DiscardSheet: View {
                 Button(isDiscarding ? "Discarding…" : "Discard Changes", action: discard)
                     .buttonStyle(.borderedProminent)
                     .tint(.red)
-                    .disabled(isDiscarding)
+                    .disabled(gate.isHeld)
             }
         }
         .padding(16)
@@ -129,10 +135,19 @@ struct DiscardSheet: View {
 
     private func discard() {
         guard !isDiscarding else { return }
+        guard let claim = gate.claim() else {
+            // The button disables while the slot is held, so this is the slot
+            // being taken between that read and this claim.
+            errorMessage = RepositoryWriteGate.busyMessage
+            return
+        }
         isDiscarding = true
         errorMessage = nil
         Task {
-            defer { isDiscarding = false }
+            defer {
+                isDiscarding = false
+                gate.release(claim)
+            }
             do {
                 // One call for the whole set, not one per row: core runs at
                 // most three git subprocesses however many files it is given.

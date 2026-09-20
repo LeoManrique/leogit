@@ -25,8 +25,9 @@ pub enum OperationInProgress {
 }
 
 impl OperationInProgress {
-    /// The git subcommand that continues, skips and aborts this operation.
-    fn subcommand(self) -> &'static str {
+    /// The git subcommand that continues, skips and aborts this operation —
+    /// which is also the plain word for it in a sentence.
+    pub(crate) fn subcommand(self) -> &'static str {
         match self {
             Self::Merge => "merge",
             Self::Rebase => "rebase",
@@ -339,56 +340,14 @@ fn resolved_to_nothing(
 mod tests {
     use super::*;
     use crate::git::get_status;
-    use crate::test_support::{git, git_stdout, init_test_repo};
+    use crate::test_support::{
+        commit_file, conflicting_repo, git, git_stdout, git_stopping, init_test_repo, subjects,
+    };
     use std::fs;
-    use tempfile::{TempDir, tempdir};
-
-    /// A repository whose `main` and `side` both rewrote `shared.txt` from the
-    /// same base — so merging, rebasing or picking across them conflicts — with
-    /// `main` checked out. `side` carries a second, independent commit so a
-    /// sequence has somewhere to go after its conflict.
-    fn conflicting_repo() -> (TempDir, String) {
-        let tmp = tempdir().expect("tempdir");
-        let dir = tmp.path();
-        init_test_repo(dir);
-        git(dir, &["checkout", "-q", "-b", "main"]);
-        commit_file(dir, "shared.txt", "base\n", "base");
-        git(dir, &["checkout", "-q", "-b", "side"]);
-        commit_file(dir, "shared.txt", "side\n", "side edits shared");
-        commit_file(dir, "side-only.txt", "s\n", "side adds a file");
-        git(dir, &["checkout", "-q", "main"]);
-        commit_file(dir, "shared.txt", "main\n", "main edits shared");
-        let repo_path = dir.to_str().expect("utf-8 path").to_string();
-        (tmp, repo_path)
-    }
-
-    fn commit_file(dir: &Path, name: &str, content: &str, message: &str) {
-        fs::write(dir.join(name), content).expect("write");
-        git(dir, &["add", "--", name]);
-        git(dir, &["commit", "-q", "-m", message]);
-    }
-
-    /// Run a git command that is *expected* to stop on a conflict.
-    fn git_stopping(dir: &Path, args: &[&str]) {
-        let status = std::process::Command::new("git")
-            .current_dir(dir)
-            .args(args)
-            .env("GIT_EDITOR", ":")
-            .output()
-            .expect("spawn git")
-            .status;
-        assert!(!status.success(), "git {args:?} was meant to conflict");
-    }
+    use tempfile::tempdir;
 
     fn operation_of(repo_path: &str) -> Option<OperationInProgress> {
         get_status(repo_path.to_string()).expect("status").operation
-    }
-
-    fn subjects(dir: &Path) -> Vec<String> {
-        git_stdout(dir, &["log", "--format=%s"])
-            .lines()
-            .map(str::to_string)
-            .collect()
     }
 
     #[test]

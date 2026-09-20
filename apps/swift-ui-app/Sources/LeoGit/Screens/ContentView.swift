@@ -90,7 +90,14 @@ struct ContentView: View {
     /// The picker rows' "no repositories found — choose folders" action.
     @Environment(\.openSettings) private var openSettings
 
-    @State private var branchStore = BranchStore()
+    /// The window's one "a repository write is in flight" slot, shared by the
+    /// three stores below and by the writes this screen runs itself — so a
+    /// commit, a branch switch, an abort and a cherry-pick never overlap.
+    @State private var writeGate: RepositoryWriteGate
+    @State private var branchStore: BranchStore
+    /// The History actions that replay commits, and where a stopped
+    /// cherry-pick came from.
+    @State private var historyActions: HistoryActionStore
     @State private var directoryStore: RepoDirectoryStore
     @State private var terminalStore = TerminalStore()
 
@@ -204,7 +211,11 @@ struct ContentView: View {
         )
         _directoryStore = State(initialValue: directory)
         _cloneStore = State(initialValue: CloneStore(config: appConfig))
-        _commitStore = State(initialValue: CommitStore(config: appConfig))
+        let gate = RepositoryWriteGate()
+        _writeGate = State(initialValue: gate)
+        _branchStore = State(initialValue: BranchStore(gate: gate))
+        _historyActions = State(initialValue: HistoryActionStore(gate: gate))
+        _commitStore = State(initialValue: CommitStore(config: appConfig, gate: gate))
     }
 
     var body: some View {
@@ -290,8 +301,18 @@ struct ContentView: View {
                     switchRepo(repoPath)
                 }
             case let .discard(files):
-                DiscardSheet(repoPath: store.repoPath ?? "", files: files) {
+                DiscardSheet(repoPath: store.repoPath ?? "", files: files, gate: writeGate) {
                     await store.refreshWorkingTree()
+                }
+            case let .cherryPick(request):
+                CherryPickSheet(
+                    commits: request.commits,
+                    source: request.source,
+                    candidates: request.candidates,
+                    store: historyActions,
+                    repoPath: request.repoPath
+                ) { outcome in
+                    await finishCherryPick(outcome, in: request.repoPath)
                 }
             }
         }
@@ -349,6 +370,10 @@ struct ContentView: View {
                 // describes any other repository, and this is where it is told
                 // which one it now speaks for.
                 branchStore.reset(for: repoPath)
+                // A write still running for the repository being left finishes
+                // late and releases nothing: the slot is this repository's now.
+                writeGate.reset()
+                historyActions.reset()
                 syncStore.reset()
                 actionFailure = nil
                 // The sidebars re-seed these from the new repository's lists.
@@ -423,6 +448,17 @@ struct ContentView: View {
         .onChange(of: store.status?.headSha) { _, headSha in
             if let headSha { commitStore.endAmendingUnlessHead(is: headSha) }
         }
+        // The same kind of rule for where a stopped cherry-pick came from: it
+        // is forgotten by the status that shows the pick is over, so finishing
+        // or aborting it — here or in a terminal — needs no clearing of its own.
+        // Keyed on the two facts the rule reads rather than on the whole status,
+        // which would compare the file list on every evaluation.
+        .onChange(of: store.status?.operation) {
+            historyActions.forgetCherryPickUnlessOpen(in: store.status)
+        }
+        .onChange(of: store.status?.branch) {
+            historyActions.forgetCherryPickUnlessOpen(in: store.status)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .leogitRefreshRequested)) { _ in
             // ⌘R from the View menu — the keyboard-only successor of the
             // toolbar Refresh button: a full visible reload of status,
@@ -469,6 +505,7 @@ struct ContentView: View {
                     repoPath: repoPath,
                     status: store.status,
                     shown: shownStatus,
+                    cherryPickSource: historyActions.cherryPickReturn?.source,
                     onWorkingTreeChanged: { await store.refresh() },
                     onNotice: { store.errorMessage = $0 },
                     onFailure: { actionFailure = $0 }
@@ -596,7 +633,9 @@ struct ContentView: View {
                     policy: schedulingPolicy,
                     onAmend: startAmending,
                     onUndo: { undoCommit($0, in: repoPath) },
-                    onCheckout: { await checkoutCommit($0, in: repoPath) }
+                    onCheckout: { await checkoutCommit($0, in: repoPath) },
+                    onCherryPick: { requestCherryPick($0, in: repoPath) },
+                    isWriteInFlight: writeGate.isHeld
                 )
             }
         }
@@ -684,7 +723,7 @@ struct ContentView: View {
             current: store.status?.branch ?? "",
             isDetached: store.status?.detached ?? false,
             operation: store.status?.operation,
-            isBusy: branchStore.isBusy
+            isBlocked: branchStore.isBlocked
         ) { action in
             NotificationCenter.default.post(
                 name: .leogitBranchActionRequested,
@@ -955,7 +994,11 @@ struct ContentView: View {
     /// and doesn't refetch a log this call has just read.
     @MainActor
     private func undoCommit(_ commit: CommitInfo, in repoPath: String) {
+        // Nothing to report when the slot is held: nothing was attempted, and
+        // the menu item is still there to ask again.
+        guard let claim = writeGate.claim() else { return }
         Task {
+            defer { writeGate.release(claim) }
             do {
                 try await GitBridge.undoCommit(in: repoPath)
                 commitStore.restoreDraft(from: commit)
@@ -981,6 +1024,8 @@ struct ContentView: View {
     /// refinement keeps a dialog's own failure inside it.
     @MainActor
     private func checkoutCommit(_ commit: CommitInfo, in repoPath: String) async -> String? {
+        guard let claim = writeGate.claim() else { return RepositoryWriteGate.busyMessage }
+        defer { writeGate.release(claim) }
         do {
             try await GitBridge.checkout(in: repoPath, commit: commit.sha)
             await store.refresh()
@@ -988,6 +1033,68 @@ struct ContentView: View {
             return nil
         } catch {
             return error.displayMessage
+        }
+    }
+
+    /// History ▸ Cherry-pick…: ask core whether it can start at all, then raise
+    /// the target sheet. The preflight comes first so nobody is walked through
+    /// choosing a branch for an action a dirty tree will refuse — and its
+    /// refusal takes the modal, there being no sheet yet for it to stay in.
+    ///
+    /// `commits` are the menu's targets, newest first, and they are what the
+    /// sheet keeps: never the live selection, which a poll can re-seat while
+    /// the sheet is up.
+    @MainActor
+    private func requestCherryPick(_ commits: [CommitInfo], in repoPath: String) {
+        guard sheet == nil, !commits.isEmpty, let source = store.status?.branch else { return }
+        Task {
+            let refusal = await historyActions.refusal(replayedFrom: nil, repoPath: repoPath)
+            // The candidates are snapshotted into the sheet, so a branch made
+            // in the terminal has to be listed by now.
+            if refusal == nil { await branchStore.load(repoPath: repoPath) }
+            // The answer is about the repository that was asked. A write that
+            // took the slot meanwhile does not stop the sheet opening: it says
+            // so itself, and frees its button when the slot does.
+            guard store.repoPath == repoPath, sheet == nil else { return }
+            if let refusal {
+                actionFailure = ActionFailure(refusal)
+                return
+            }
+            sheet = .cherryPick(
+                CherryPickRequest(
+                    repoPath: repoPath,
+                    commits: commits,
+                    source: source,
+                    candidates: branchStore.localBranches.map(\.name).filter { $0 != source }
+                )
+            )
+        }
+    }
+
+    /// What follows a cherry-pick git was actually asked for. **Reload first,
+    /// report second**: a pick that stopped on a conflict has already moved the
+    /// repository onto the target, and one that failed was moved there and
+    /// back. The branch list is re-read with it — the checkmark moved.
+    ///
+    /// A clean pick selects the new commits, *after* the log that holds them
+    /// has landed: `maintainsSelection` prunes ids the list does not have, so
+    /// assigned any earlier they would be dropped at once. A conflict goes to
+    /// the Changes tab, where the conflicted files are waiting, and takes the
+    /// modal with git's own text. A failure is already stated in the sheet.
+    @MainActor
+    private func finishCherryPick(_ outcome: CherryPickOutcome, in repoPath: String) async {
+        await store.refresh()
+        await branchStore.load(repoPath: repoPath)
+        guard store.repoPath == repoPath else { return }
+        switch outcome {
+        case let .picked(shas):
+            let landed = Set(shas).intersection(store.commits.map(\.sha))
+            if !landed.isEmpty { historySelection = landed }
+        case let .stoppedOnConflict(said):
+            tab = .changes
+            actionFailure = ActionFailure(said)
+        case .failed, .refusedBusy:
+            break
         }
     }
 
@@ -1152,13 +1259,34 @@ private enum RootSheet: Identifiable {
     /// one — it is the same slot, contended for.
     case discard([FileEntry])
 
+    /// The target sheet for History ▸ Cherry-pick…. Here rather than on the
+    /// History sidebar, whose view a tab switch rebuilds: a conflict sends the
+    /// window to Changes, and the sheet must not be torn down by the very
+    /// outcome it is reporting.
+    case cherryPick(CherryPickRequest)
+
     var id: String {
         switch self {
         case .clone: "clone"
         case let .initRepo(path): "init:\(path)"
         case let .discard(files): "discard:\(files.map(\.path).joined(separator: "\n"))"
+        case let .cherryPick(request):
+            "cherry-pick:\(request.commits.map(\.sha).joined(separator: "\n"))"
         }
     }
+}
+
+/// Everything the cherry-pick sheet is about, snapshotted when it was asked
+/// for — the repository included, so a late answer is never applied to
+/// whichever one the window has moved on to.
+private struct CherryPickRequest {
+    let repoPath: String
+    /// The menu's targets, newest first.
+    let commits: [CommitInfo]
+    /// The checked-out branch, which the commits are on.
+    let source: String
+    /// Every other local branch.
+    let candidates: [String]
 }
 
 /// FRONTEND §6.13's second class: a failure that was never the user's task.

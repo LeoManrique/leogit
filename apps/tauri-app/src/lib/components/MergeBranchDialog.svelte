@@ -14,12 +14,23 @@
      */
     commitCount: number | null
     isMerging: boolean
+    /** Why a merge cannot start right now, or undefined — `ConfirmDialog`'s rule. */
+    blocked?: string
     onMerge: () => void
     onSquashMerge: () => void
     onCancel: () => void
   }
 
-  let { source, target, commitCount, isMerging, onMerge, onSquashMerge, onCancel }: Props = $props()
+  let {
+    source,
+    target,
+    commitCount,
+    isMerging,
+    blocked,
+    onMerge,
+    onSquashMerge,
+    onCancel,
+  }: Props = $props()
 
   /*
     Nothing to bring in. Say so and disable the primary rather than offering a
@@ -28,6 +39,8 @@
     nothing and then reports success.
   */
   const upToDate = $derived(commitCount === 0)
+
+  const cannotStart = $derived(isMerging || upToDate || blocked !== undefined)
 
   function escape(): void {
     if (!isMerging) onCancel()
@@ -71,13 +84,16 @@
         <strong>Squash &amp; Merge</strong> replaces them with a single commit on
         <code>{target}</code>.
       </p>
+      {#if blocked}
+        <p class="muted">{blocked}</p>
+      {/if}
     </div>
     <div class="modal-footer">
       <button class="btn-secondary" onclick={onCancel} disabled={isMerging}>Cancel</button>
-      <button class="btn-secondary" onclick={onSquashMerge} disabled={isMerging || upToDate}>
+      <button class="btn-secondary" onclick={onSquashMerge} disabled={cannotStart}>
         Squash &amp; Merge
       </button>
-      <button class="btn-primary" onclick={onMerge} disabled={isMerging || upToDate}>
+      <button class="btn-primary" onclick={onMerge} disabled={cannotStart}>
         {isMerging ? 'Merging…' : 'Merge'}
       </button>
     </div>

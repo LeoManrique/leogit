@@ -46,6 +46,7 @@ leogit/
 │       ├── config.rs                # load/save Config + ReposState
 │       ├── git.rs                   # git operations (status, log, branch, discard, ignore, …)
 │       ├── operation.rs             # the merge/rebase/pick/revert in progress: probe, continue, abort
+│       ├── history_rewrite.rs       # History's multi-commit actions: preflight, cherry-pick
 │       ├── git_version.rs           # the installed git's version and the 2.45 floor
 │       ├── exclusions.rs            # the commit composer's opt-out grace window
 │       ├── launch.rs                # `leogit <dir>` resolution + pending-target state
@@ -566,20 +567,36 @@ the error banner after three, with a flag marking the message poll-owned so only
 poll's own recovery clears it (an explicit action's failure text is never swept away by a
 background tick), and the branch list stays fresh because `BranchMenu`'s content reloads
 on open (menu content is built when the menu opens) while the status poll reloads it whenever
-`head_sha` moved — both through `BranchStore.load`, which never touches `isBusy`, so an
+`head_sha` moved — both through `BranchStore.load`, which never touches `isRunning`, so an
 open menu doesn't flicker.
 
-**`BranchStore.run` answers a three-case `OpOutcome`, not `String?`.** Every mutation is
-serialized behind one `isBusy` flag so a double-click cannot put two checkouts on the same
-`index.lock`, but the guard used to return the same `nil` that meant success — so a refused
-start was indistinguishable from a completed one, and the surface that asked acted on it: the
-create sheet dismissed and reported a branch that was never created, the merge sheet reported
-a merge that never ran, and a refused delete cleared its own confirmation while leaving the
-branch. `succeeded` / `refusedBusy` / `failed(String)` separates them, and `refusedBusy` is
-deliberately **not** an error to show: nothing went wrong and nothing changed, so the surface
-simply stays open for the user to ask again. The UI's `.disabled(store.isBusy)` checks remain,
-but they are a `Bool` read before an `await` and therefore always a race — the enum is what
-makes the outcome correct rather than merely unlikely to be wrong.
+**One `RepositoryWriteGate` per window serializes every repository write.**
+[Stores/RepositoryWriteGate.swift](apps/swift-ui-app/Sources/LeoGit/Stores/RepositoryWriteGate.swift)
+is an `@Observable` slot built once in `ContentView.init` and handed to every store and sheet
+that writes — `BranchStore`, `CommitStore`, `HistoryActionStore`, `DiscardSheet`, and
+`ContentView`'s own undo-commit and checkout-commit. `claim()` answers a `Claim?`; `release(_:)`
+takes it back; `reset()` on a repository switch bumps a generation, so a write that outlives
+its repository releases a claim the new repository never sees as held. **"Cannot start" and
+"I am working" are two facts and every store keeps them apart**: `isBlocked` is `gate.isHeld`
+— anyone's write — and is what items and buttons disable on, while `isRunning` is the store's
+own write and is the only thing a spinner, a *Merging…* label or the dimmed branch chip may
+read. One flag for both is how a merge sheet comes to show a spinner for someone's commit, and
+how the branch chip stops opening while one runs. A sheet that can sit open under another
+write shows `WriteBlockedNote` beside its disabled button (`RepositoryWriteGate.busyMessage`,
+the Tauri client's wording) — live, so it goes when the slot does — and keeps the same words
+as the answer to a claim lost in the gap between that read and the click. Per-store flags
+cannot do any of this: an Abort confirmed during a minute-long Continue is two stores each
+believing itself idle, racing on `index.lock`.
+
+**A refused claim is its own outcome, never success.** `BranchStore.run` answers a three-case
+`OpOutcome` — `succeeded` / `refusedBusy` / `failed(String)` — because a guard that returns the
+success value makes a refused start indistinguishable from a completed one, and the surface
+that asked then acts on it: a create sheet dismissing over a branch that was never created, a
+delete clearing its confirmation while leaving the branch. `refusedBusy` is deliberately
+**not** an error to show: nothing went wrong and nothing changed, so the surface stays open
+for the user to ask again. `CherryPickOutcome` carries the same third case. The UI's
+`.disabled` checks remain, but they are a `Bool` read before an `await` and therefore always
+a race — the claim is what makes the outcome correct rather than merely unlikely to be wrong.
 
 `SyncStore.run` shares the type, guarding the single network slot the same way. It had the
 same collapse and no symptom, because every caller only refreshed afterwards — until the
@@ -1295,6 +1312,7 @@ The frontend never touches Tauri's raw `invoke` API directly; every backend call
 | `configApi` | `loadConfig`, `patchConfig`, `configBounds`, `loadState`, `patchState`, `recordRecentRepo` | `core/src/config.rs` |
 | `gitApi` | `getStatus`, `fileStatusStyles`, `getSelectedDiff`, `getLog`, `getCommitDetail`, `listBranches`, `createBranch`, `switchBranch`, `checkoutCommit`, `deleteBranch`, `commit`, `undoLastCommit`, `classifyDiscard`, `discardFiles`, `appendToGitignore`, `ignorePaths`, `formatCommitMessage`, `repoSyncStatus`, `fetch`, `fetchAll`, `pull`, `push`, `getTrackingRemote`, `getPushRemote`, `getRepoIdentifier`, `mergeBranch`, `mergeSquash`, `commitSquashMerge`, `countCommitsToMerge`, `effectiveScanPaths`, `isGitRepo`, `initRepo`, `cloneRepo` | `core/src/git.rs` |
 | `gitApi` (cont.) | `continueOperation`, `abortOperation` | `core/src/operation.rs` |
+| `gitApi` (cont.) | `rewritePreflight`, `cherryPickCommits` | `core/src/history_rewrite.rs` |
 | `reposApi` | `knownRepos`, `filterRepos`, `deriveCloneTarget`, `cloneTargetPath` | `core/src/repos.rs` |
 | `exclusionsApi` | `reconcile` | `core/src/exclusions.rs` |
 | `diffApi` | `getParsedDiff`, `getParsedCommitDiff`, `copyDiffText`, `generatePatch`, `generateInversePatch` | `core/src/diff.rs` |
@@ -1316,7 +1334,11 @@ The three core writable Svelte stores, all in [src/lib/stores](apps/tauri-app/sr
 - **`repoState`** — everything tied to the currently open repo: status (branch, upstream, ahead/behind, files, the operation in progress), log pagination, branches, the user's selection sets (`selectedFiles`, `userDeselected`), per-file diff selection (`Map<path, DiffSelection>`), active file/diff, active commit/files/diff, loading flags, a `statusLoaded` flag (default status ≠ loaded status — anything that *skips* work on a status field has to know the difference, since `hasRemote` defaults to false and a switch resets it), and **three failure fields with different owners**, written through `reportActionError` / `reportNotice` in the store rather than by each call site building its own `repoState.update` — the classification is then a choice of function, not a shape copied from the site next door, which is how reveal-in-Finder came to seize the window. `error` (with an optional `errorRetry` bound to the same attempt) is an operation the user was waiting on and goes to the blocking `ErrorModal`; `notice` is an OS hand-off that didn't take and goes to a dismissible strip, dismissible because nothing else can ever disprove it; `pollError` is written only by refreshes the app started itself — set after three consecutive failures, cleared by any successful read, rendered in the same strip without a ✕ because its own recovery retires it. `refreshStatus` takes `{silent, background}` as two separate opts for exactly this: *silent* means "don't write `error`", which a user action's follow-up refresh also wants, while *background* means "this one is mine" and is what feeds the streak. Conflating them let three `index.lock` races behind a commit and two discards accuse a healthy repository of having vanished. Keeping the three apart is what lets a repository that really has gone away say so without a modal the user must dismiss every two seconds. A **fourth** kind never reaches any of them: `activeFileDiffError` / `activeCommitFileDiffError` are per-pane and render inline where the diff would have been, always alongside a cleared payload. A failed read of one file blocks nothing (the rest of the repository is on screen and correct) and is the user's own task (so the strip above the content is the wrong place), which puts it outside §6.13's two classes entirely. Re-selecting the row is the retry, and works because the payload is gone: the loader's "already open" short-circuit tests it.
 - **`config`** — the live Config object, and the only copy in the client: Settings renders from it rather than loading a second one, so the form and the diff viewers cannot disagree about what is set. Publishing goes through `applyConfig(cfg)` — the store, `applyTheme()` (which flips `document.documentElement.dataset.theme`), and the resolved `scanFolders`, that last one re-asked only when `scan_paths` actually moved. `refreshConfig()` is `load_config` plus that; Settings hands it `patch_config`'s return value directly, since the patch already answers with the whole normalized config and a second read would only re-ask what it was just told.
 
-Alongside these are smaller purpose-built stores: **`networkOps`** holds the user-initiated network op in flight (`activeNetworkOp` — the poll/auto-fetch/scheduler pause on it and the sync handlers use it for mutual exclusion) and its live transfer progress (`networkProgress`, fed from `git-progress` events), **`repoIdentifiers`** lazily caches each repo's GitHub identifier (a module-level map that re-publishes on each fetch, so reopening the repo picker is free), **`repoSync`** caches each repo's ahead/behind counts and working-tree `dirty` flag for the picker's pull/push badges and dirty dot (`setRepoSync` records values the active poll already computed; `syncRepo` fetches + recomputes one repo, with per-path in-flight de-duplication; its change-equality guard compares every field, so a new one must be added there too or its transitions get swallowed), and **`reposState`** mirrors the persisted `repos-state.json` document — the `repoSortMode` / `cloneSortMode` / `recentRepos` writables plus thin wrappers over the backend's atomic writers: `patchReposState` → the `patch_state` command (one field-wise read-modify-write under a process-wide lock, so a patch can never clobber another writer's field), `recordRecentRepo` → the `record_recent_repo` command (backend owns the MRU move-to-front/de-dupe/cap, records `last_opened_repo` in the same write, and returns the authoritative list, which reseeds the `recentRepos` store), and `hydrateReposState` (startup seed). Both wrappers log-and-swallow failures, so callers never need a rejection path for lost preferences.
+Alongside these are smaller purpose-built stores: **`networkOps`** holds the user-initiated network op in flight (`activeNetworkOp` — the poll/auto-fetch/scheduler pause on it and the sync handlers use it for mutual exclusion) and its live transfer progress (`networkProgress`, fed from `git-progress` events), **`repoWrite`** holds the one repository write in flight (below), **`repoIdentifiers`** lazily caches each repo's GitHub identifier (a module-level map that re-publishes on each fetch, so reopening the repo picker is free), **`repoSync`** caches each repo's ahead/behind counts and working-tree `dirty` flag for the picker's pull/push badges and dirty dot (`setRepoSync` records values the active poll already computed; `syncRepo` fetches + recomputes one repo, with per-path in-flight de-duplication; its change-equality guard compares every field, so a new one must be added there too or its transitions get swallowed), and **`reposState`** mirrors the persisted `repos-state.json` document — the `repoSortMode` / `cloneSortMode` / `recentRepos` writables plus thin wrappers over the backend's atomic writers: `patchReposState` → the `patch_state` command (one field-wise read-modify-write under a process-wide lock, so a patch can never clobber another writer's field), `recordRecentRepo` → the `record_recent_repo` command (backend owns the MRU move-to-front/de-dupe/cap, records `last_opened_repo` in the same write, and returns the authoritative list, which reseeds the `recentRepos` store), and `hydrateReposState` (startup seed). Both wrappers log-and-swallow failures, so callers never need a rejection path for lost preferences.
+
+**One repository write at a time, window-wide** ([stores/repoWrite.ts](apps/tauri-app/src/lib/stores/repoWrite.ts)). `activeRepoWrite` is a `RepoWriteKind` or null — commit, continue, switch, create, delete, merge, abort, cherry-pick, checkout, undo-commit, discard. Every handler that writes opens with `beginRepoWrite(kind)` and returns without touching its surface when that answers `false` — a refused start is never a success — then `endRepoWrite()` in its `finally`. The **kind** is kept so a surface can tell its own work (`$activeRepoWrite === 'merge'` holds the merge dialog open under *Merging…*) from someone else's (`$activeRepoWrite !== null` greys the branch popover, the composer's buttons and the History actions). It is a store rather than layout state because `CommitMessage.svelte` claims it too and shares no prop with `MainLayout.svelte` for it, and a flag on each side would let an Abort be confirmed under a running Continue. A confirmation that can sit open under another write takes `blocked={blockedFor(kind)}` — `REPO_BUSY_MESSAGE` while `isHeldByAnother`, else undefined — and renders it as its last body line with the confirming button disabled; `ConfirmDialog`, `MergeBranchDialog`, `CheckoutCommitConfirm`, `DiscardConfirm` and `EmbeddedRepoConfirm` all carry the prop, so a claim refused on the click is a race's backstop rather than something a user can reach. The native counterpart is `RepositoryWriteGate` (see *Swift host*).
+
+**Status reads publish in the order they were asked.** `refreshStatus` numbers each read before its `await` (`statusReadsIssued`) and drops one that returns after a later-numbered read has landed (`newestStatusLanded`); natively `RepoStore.issueStatusRead()` / `landStatusRead(_:)` do the same for its three status writers, beside — not instead of — `openGeneration`, which tells *repositories* apart and cannot order two reads of one. The poll is not paused by a repository write, so without this a tick that left before a cherry-pick and came back after its reload repaints the source branch and, through the rules keyed on the status, ends amend mode or forgets the branch a conflicted pick came from.
 
 `MainLayout.svelte` is the orchestrator: it owns the polling intervals, focus listeners, and most of the cross-cutting handlers (commit, switch branch, merge, etc.). Components stay dumb — they receive props and emit callbacks; they don't read or write the stores directly when avoidable.
 
@@ -1568,9 +1590,90 @@ the third word of `git --version` so every vendor's decoration parses
 (`2.54.0 (Apple Git-157)`, `2.46.0.windows.1`, `2.47.0-rc1`, `2.54.GIT`),
 `installed()` asks once per process and remembers only a successful answer, and
 `require_floor()` is the one-sentence refusal naming both versions. There is no
-degraded mode and no second spelling of any flag. Nothing calls
-`require_floor()` yet: `continue` and `abort` use no flag that young, and the
-history-rewrite preflight is its first caller.
+degraded mode and no second spelling of any flag. Its caller is
+`rewrite_preflight`, so every History action stands behind it; `continue` and
+`abort` use no flag that young and do not ask.
+
+**History's multi-commit actions are
+[core/src/history_rewrite.rs](core/src/history_rewrite.rs), behind one
+preflight.** `rewrite_preflight(repo, replayed_from)` answers a
+`RewritePreflight` whose refusal is **data** (`blocked`), in this order: the git
+floor, an operation in progress, a detached HEAD, an unborn one, then tracked
+changes — `git status --porcelain=v1 -z --untracked-files=no
+--ignore-submodules=dirty`, the first ten named, because "you have uncommitted
+changes" without the names sends the user hunting. `-z` is what keeps the names
+right: the line format quotes odd paths and writes a rename as `old -> new`,
+where `-z` leaves paths raw and puts a rename's origin in a field of its own,
+which is skipped.
+Untracked files pass: git refuses the one that is actually in the way, by name,
+and that is a failure path the action already has. `replayed_from` is the oldest
+commit the action would replay on the current branch — `None` for cherry-pick —
+and turns on the two checks that only a rewrite needs: a **merge commit in the
+replayed range** (`rev-list -1 --merges HEAD --not <oldest>^@`, read by stdout
+since it exits 0 either way, and spelled with `^@` so a root commit is a valid
+oldest), and `rewrites_pushed` — `merge-base --is-ancestor <oldest> <upstream>`,
+the upstream read with `for-each-ref --format=%(upstream)` so a branch with no
+upstream is a quiet *no* rather than an error. Someone else's push moves the
+upstream without containing the commit, and rightly answers *no*.
+
+`cherry_pick_commits(repo, shas, target)` takes the shas newest first — History's
+order — and **its three outcomes are a contract** (FRONTEND §3.7): `Ok(success)`
+on the target with the new commits; `Ok(!success)` **only** for a conflict, left
+open on the target; `Err` with the repository back where it began. Everything
+that can be refused is refused before anything moves: no shas, a sha that is not
+an object id (which is also what keeps a `-`-leading string out of git's
+arguments), a blocked preflight, a target equal to the current branch, a target
+that is not a local branch (`rev-parse --verify --quiet refs/heads/<t>^{commit}`,
+which also yields the `before_sha` the `UndoPoint` records). Then `git switch
+--no-guess -- <target>` — `checkout refs/heads/x` would detach, and a bare
+`switch x` would *create* `x` from a same-named remote branch — **judged by
+where HEAD is afterwards, not by the exit status** (`switch_to`): git switches
+and *then* exits non-zero when a `post-checkout` hook fails, which is what
+git-lfs's hook does wherever `git-lfs` is not on a GUI app's `PATH`, and reading
+that as "still on the source" would answer `Err` with the user on the target.
+Then one `git cherry-pick --empty=keep -m 1 <oldest … newest>` under
+`GIT_EDITOR=:`.
+`--empty=keep` is the 2.45 flag the floor exists for: without it a pick the
+target already contains stops the sequence with `CHERRY_PICK_HEAD` set and no
+conflict, a state with no good button. `-m 1` is a no-op on an ordinary commit
+and lets a merge commit be picked as what it brought to its first parent. On
+success the selection is `rev-list <before>..HEAD`; if the new tip cannot be
+read back the answer is still `Ok(success)`, with no selection and no undo
+point, because an `Err` there would claim a rollback that did not happen.
+
+**A failure is a conflict exactly when `CHERRY_PICK_HEAD` exists *and* the index
+holds unmerged paths** — two facts read off the repository, not a reading of
+git's translated stderr. The file alone is not enough: a signer that cannot run
+(`commit.gpgsign` with no `gpg` on the app's `PATH`) and a failing
+`prepare-commit-msg` hook both stop the sequence on a commit with nothing to
+resolve, and Continue would re-run the same failure forever. Those, like an
+untracked file the pick would overwrite (sequencer open, no `CHERRY_PICK_HEAD`),
+leave the user on the wrong branch with some picks already made, so `return_to`
+runs `cherry-pick --abort` and then switches back to the source, in that order:
+git refuses to switch branches while cherry-picking. `--abort` restores the target's tip and keeps nothing of the
+partial run; it is never `--quit`, which would leave the picks on the target.
+When either step fails the `Err` carries a second paragraph saying where the
+user has been left. A clean pick runs only `prepare-commit-msg` and
+`post-commit`; `--continue` runs `pre-commit` and `commit-msg` as well, so a
+hook can refuse a continue that it let through as a pick. Covered by the
+`cherry_pick_*`, `preflight_*`, `rewrite_refuses_*` and `rewrites_pushed_*`
+tests, and through the bridge by
+`cherry_pick_flow_preflights_copies_and_stops_on_a_conflict`.
+
+**In the clients the branch a conflicted pick came from is client memory**
+(`cherryPickReturn` in `MainLayout.svelte`, `HistoryActionStore.cherryPickReturn`)
+— git records the pre-pick tip but not the branch the user left. It is set from
+a conflict result and dropped by one rule on the status read (no cherry-pick
+open on that target), which is how finishing it, aborting it, doing either in a
+terminal and switching repositories all clear it without a line each. Abort
+reads it *before* aborting and switches back afterwards in its own `try`, so a
+failed switch is reported as that and not as a failed abort.
+
+**Test fixtures shared across core's modules live in
+[core/src/test_support.rs](core/src/test_support.rs)** — `init_test_repo`,
+`commit_file`, `subjects`, `git_stopping` (run a git command that is expected to
+stop) and `conflicting_repo()` — so `operation.rs` and `history_rewrite.rs` build
+their stopped repositories the same way.
 
 **In the clients the operation is one table of words and one swapped button.**
 [utils/operationWords.ts](apps/tauri-app/src/lib/utils/operationWords.ts) and
@@ -1581,10 +1684,11 @@ show a rebase as a merge. Both also hold the one rule `continuesFromComposer`
 (everything but a merge). The abort confirmation is worded from the operation
 captured when it opened (`abortTarget` in `MainLayout.svelte`, `pendingAbort` in
 `BranchMenu.swift`), so a status poll landing underneath cannot reword the
-question; core aborts whatever is open when it is answered. Continue is owned by
-the composer's own lock, the one a commit takes — `isContinuing` folded into
-`isCommitInProgress` in `CommitMessage.svelte`, `CommitStore.continueOperation`
-running under `isCommitting` natively — and answers through the owner:
+question; core aborts whatever is open when it is answered. Continue claims
+the window's write slot as a commit does — `isContinuing` is
+`$activeRepoWrite === 'continue'` in `CommitMessage.svelte`, and
+`CommitStore.continueOperation` claims the `RepositoryWriteGate` natively — and
+answers through the owner:
 `onOperationContinued` → `reloadAfterBranchChange` (status, history and
 branches, since finishing a rebase re-attaches HEAD), and natively
 `ChangesSidebar.continueOperation` → `onCommitted` then `onFailure`. The native

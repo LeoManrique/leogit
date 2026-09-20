@@ -24,6 +24,14 @@
     noteFetched,
   } from '$lib/stores/repoSync'
   import { activeNetworkOp } from '$lib/stores/networkOps'
+  import {
+    activeRepoWrite,
+    beginRepoWrite,
+    endRepoWrite,
+    isHeldByAnother,
+    REPO_BUSY_MESSAGE,
+    type RepoWriteKind,
+  } from '$lib/stores/repoWrite'
   import { repoSyncScheduler } from '$lib/services/repoSyncScheduler'
   import { rediscoverRepos } from '$lib/services/repoDiscovery'
   import { resolveCloneDefaultDir, rememberCloneDir } from '$lib/services/cloneFlow'
@@ -65,7 +73,12 @@
     type ActivityState,
   } from '$lib/services/backgroundPolicy'
   import { pacedLoop } from '$lib/services/pacedLoop'
-  import { activeKey, reseated, type ListSelection } from '$lib/utils/listSelection'
+  import {
+    activeKey,
+    reseated,
+    selectKeys,
+    type ListSelection,
+  } from '$lib/utils/listSelection'
   import { operationWords } from '$lib/utils/operationWords'
 
   import Header from '$lib/components/Header.svelte'
@@ -475,6 +488,11 @@
   */
   let lastStatusJson: string | null = null
 
+  // Status reads are numbered as they leave and the newest to have landed is
+  // remembered, so one that comes back out of order is dropped (`refreshStatus`).
+  let statusReadsIssued = 0
+  let newestStatusLanded = 0
+
   /*
     How long, and over how many status reads, each excluded path has been
     missing from the file list.
@@ -552,8 +570,16 @@
   ): Promise<GitStatus | null> {
     const repoPath = $appState.repoPath
     if (!repoPath) return null
+    const issued = ++statusReadsIssued
     try {
       const status = await gitApi.getStatus(repoPath)
+      // Reads land in whatever order git answers them. One asked *before* a
+      // read that has already been published describes an older repository —
+      // a poll tick that left before a cherry-pick and came back after its
+      // reload would put the source branch back on screen, and with it undo
+      // everything keyed on the status (`cherryPickReturn`, amend mode).
+      if (issued < newestStatusLanded) return null
+      newestStatusLanded = issued
       // A read the user has moved on from is thrown away rather than published.
       // A switch resets the poll's memory and publishes the new repository
       // immediately, so a tick still in flight against the old one would
@@ -1513,7 +1539,6 @@
   // ---- Check Out Commit (detached HEAD) ------------------------------------
   // Commit pending a checkout confirmation; null when the dialog is closed.
   let checkoutTarget = $state<CommitInfo | null>(null)
-  let isCheckingOut = $state(false)
 
   function handleCheckoutCommit(commit: CommitInfo): void {
     checkoutTarget = commit
@@ -1522,8 +1547,7 @@
   async function confirmCheckout(): Promise<void> {
     const repoPath = $appState.repoPath
     const commit = checkoutTarget
-    if (!repoPath || !commit) return
-    isCheckingOut = true
+    if (!repoPath || !commit || !beginRepoWrite('checkout')) return
     try {
       await gitApi.checkoutCommit(repoPath, commit.sha)
       // The checked-out commit is now HEAD. Seed lastHeadSha so the poll doesn't
@@ -1542,17 +1566,17 @@
     } finally {
       // Always close the dialog so any error surfaces in the ErrorModal alone.
       checkoutTarget = null
-      isCheckingOut = false
+      endRepoWrite()
     }
   }
 
   function cancelCheckout(): void {
-    if (!isCheckingOut) checkoutTarget = null
+    if ($activeRepoWrite !== 'checkout') checkoutTarget = null
   }
 
   async function handleUndoCommit(commit: CommitInfo): Promise<void> {
     const repoPath = $appState.repoPath
-    if (!repoPath) return
+    if (!repoPath || !beginRepoWrite('undoCommit')) return
     try {
       await gitApi.undoLastCommit(repoPath)
       // Set the seed BEFORE refresh so the composer prefills as soon as the
@@ -1575,6 +1599,8 @@
       await refreshBranches()
     } catch (error) {
       reportActionError(error)
+    } finally {
+      endRepoWrite()
     }
   }
 
@@ -1648,7 +1674,6 @@
   // decision the discard itself runs on, so the dialog can't promise something
   // the action then doesn't do. Null until the answer arrives.
   let discardPlan = $state<DiscardPlan | null>(null)
-  let isDiscarding = $state(false)
   // Why the last attempt was refused, kept in the dialog that raised it rather
   // than sent to the action modal — see `DiscardConfirm`'s `error` prop.
   let discardError = $state<string | undefined>(undefined)
@@ -1705,8 +1730,7 @@
   async function confirmDiscard(): Promise<void> {
     const repoPath = $appState.repoPath
     const files = discardTarget
-    if (!repoPath || !files) return
-    isDiscarding = true
+    if (!repoPath || !files || !beginRepoWrite('discard')) return
     discardError = undefined
     try {
       await gitApi.discardFiles(repoPath, files)
@@ -1724,12 +1748,12 @@
       await refreshStatus({ silent: true })
       await classifyDiscard(files)
     } finally {
-      isDiscarding = false
+      endRepoWrite()
     }
   }
 
   function cancelDiscard(): void {
-    if (isDiscarding) return
+    if ($activeRepoWrite === 'discard') return
     discardTarget = null
     discardPlan = null
     discardError = undefined
@@ -1847,17 +1871,12 @@
 
   // ---- Branches & merge ----------------------------------------------------
 
-  /**
-   * The branch operation in flight, or null.
-   *
-   * One at a time. Two checkouts issued by a double-click contend on
-   * `index.lock`, and until now nothing here said a slow one was still running.
-   * Every handler below refuses to start a second, and **a refusal is never
-   * reported as a success**: each returns without dismissing the surface that
-   * asked, so no dialog closes as though the work had been done.
-   */
-  type BranchOp = 'switch' | 'create' | 'delete' | 'merge' | 'abort'
-  let branchOp = $state<BranchOp | null>(null)
+  // One write at a time, for the whole window: every handler below claims the
+  // shared slot (`stores/repoWrite`) and refuses to start while it is taken.
+  // Two checkouts issued by a double-click contend on `index.lock`, and so
+  // does an Abort confirmed under a Continue that is still replaying. **A
+  // refusal is never reported as a success**: each returns without dismissing
+  // the surface that asked, so no dialog closes as though the work were done.
 
   /** Source branch of the pending merge dialog; null when it is closed. */
   let mergeSource = $state<string | null>(null)
@@ -1883,6 +1902,15 @@
   }
 
   /**
+   * The user's ways of closing the popover — the backdrop, ⌘B, its own back
+   * arrow. Refused while a cherry-pick runs: the popover's header is the only
+   * thing on screen saying that it is, and the pick closes it itself.
+   */
+  function closeBranches(): void {
+    if ($activeRepoWrite !== 'cherryPick') showBranches = false
+  }
+
+  /**
    * Post-op reload for anything that moves HEAD between branches or along
    * one — a switch, a create-and-switch, a merge, a continued or aborted
    * operation. Status, history and the branch list together, from one status
@@ -1894,11 +1922,11 @@
 
   async function handleSwitchBranch(branch: string): Promise<void> {
     const repoPath = $appState.repoPath
-    if (!repoPath || branchOp) return
+    if (!repoPath) return
     // Checking out the branch you are already on spends a checkout and a full
     // refresh chain to arrive exactly where you started.
     if (branch === $repoState.status.branch) return
-    branchOp = 'switch'
+    if (!beginRepoWrite('switch')) return
     try {
       await gitApi.switchBranch(repoPath, branch)
       showBranches = false
@@ -1910,7 +1938,7 @@
       showBranches = false
       reportActionError(error, () => void handleSwitchBranch(branch))
     } finally {
-      branchOp = null
+      endRepoWrite()
     }
   }
 
@@ -1925,8 +1953,7 @@
   async function handleCreateBranch(name: string): Promise<string | undefined> {
     const repoPath = $appState.repoPath
     if (!repoPath) return 'No repository is open.'
-    if (branchOp) return 'Another branch operation is still running.'
-    branchOp = 'create'
+    if (!beginRepoWrite('create')) return REPO_BUSY_MESSAGE
     try {
       await gitApi.createBranch(repoPath, name, '')
       await gitApi.switchBranch(repoPath, name)
@@ -1936,7 +1963,7 @@
     } catch (error) {
       return String(error)
     } finally {
-      branchOp = null
+      endRepoWrite()
     }
   }
 
@@ -1947,8 +1974,7 @@
 
   async function deleteBranch(name: string): Promise<void> {
     const repoPath = $appState.repoPath
-    if (!repoPath || branchOp) return
-    branchOp = 'delete'
+    if (!repoPath || !beginRepoWrite('delete')) return
     try {
       await gitApi.deleteBranch(repoPath, name)
       // HEAD cannot move: git refuses to delete the branch you are on, and the
@@ -1959,7 +1985,7 @@
       deleteTarget = null
       reportActionError(error, () => void deleteBranch(name))
     } finally {
-      branchOp = null
+      endRepoWrite()
     }
   }
 
@@ -2013,8 +2039,7 @@
   async function runMerge(squash: boolean): Promise<void> {
     const repoPath = $appState.repoPath
     const source = mergeSource
-    if (!repoPath || !source || branchOp) return
-    branchOp = 'merge'
+    if (!repoPath || !source || !beginRepoWrite('merge')) return
     try {
       const result = squash
         ? await gitApi.mergeSquash(repoPath, source)
@@ -2031,7 +2056,7 @@
       await reloadAfterBranchChange()
       reportActionError(error)
     } finally {
-      branchOp = null
+      endRepoWrite()
     }
   }
 
@@ -2047,12 +2072,29 @@
    */
   async function abortOperation(): Promise<void> {
     const repoPath = $appState.repoPath
-    if (!repoPath || branchOp) return
-    branchOp = 'abort'
+    if (!repoPath || !beginRepoWrite('abort')) return
+    // Read before the abort: the reload below ends the cherry-pick, and the
+    // effect that forgets where it came from runs on that same status.
+    const comeBack = cherryPickReturn
     try {
       const said = await gitApi.abortOperation(repoPath)
       abortTarget = null
+      // A cherry-pick begun here checked its target out to do its work, so
+      // aborting it ends on the branch the commits came from — the abort has
+      // put the target back, and staying on it would strand the user on a
+      // branch they never chose to be on.
+      // Its own failure, not the abort's: the abort worked, and a retry of it
+      // would only be told that nothing is in progress.
+      let stranded: string | null = null
+      if (comeBack) {
+        try {
+          await gitApi.switchBranch(repoPath, comeBack.source)
+        } catch (error) {
+          stranded = `The cherry-pick was aborted, but “${comeBack.source}” could not be checked out again:\n${String(error)}`
+        }
+      }
       await reloadAfterBranchChange()
+      if (stranded) reportActionError(stranded)
       // Git did less than a full rewind and said why (HEAD was moved by hand
       // mid-sequence). Worth reading, but the abort itself worked.
       if (said) reportNotice(said)
@@ -2063,8 +2105,138 @@
       await reloadAfterBranchChange()
       reportActionError(error, () => void abortOperation())
     } finally {
-      branchOp = null
+      endRepoWrite()
     }
+  }
+
+  /**
+   * What the confirmation for a `mine` write says while a *different* write
+   * holds the slot, or undefined when it may start. Every confirmation that can
+   * sit open under someone else's write passes this as `blocked`, so its button
+   * is disabled with the reason beside it rather than live and inert.
+   */
+  function blockedFor(mine: RepoWriteKind): string | undefined {
+    return isHeldByAnother($activeRepoWrite, mine) ? REPO_BUSY_MESSAGE : undefined
+  }
+
+  // ---- History actions ------------------------------------------------------
+
+  /**
+   * The commits a cherry-pick is asking a target branch for, newest first as
+   * History lists them; null when the picker is not armed for it.
+   */
+  let cherryPickCommits = $state<CommitInfo[] | null>(null)
+
+  /**
+   * Where a cherry-pick begun here came from, while it is stopped on a
+   * conflict — so aborting it can end on that branch. Git keeps no record of
+   * it. Forgotten by one data-driven rule, below: a status that no longer shows
+   * a cherry-pick open on the target. Finishing it, aborting it, doing either
+   * from the terminal and switching repositories all arrive that way.
+   */
+  let cherryPickReturn = $state<{ source: string; target: string } | null>(null)
+
+  $effect(() => {
+    const { operation, branch } = $repoState.status
+    untrack(() => {
+      if (!cherryPickReturn) return
+      if (operation !== 'CherryPick' || branch !== cherryPickReturn.target) {
+        cherryPickReturn = null
+      }
+    })
+  })
+
+  /**
+   * Why the History actions cannot start right now, or null when they can —
+   * MS-6's menu-time gate. Core's preflight stays the authority on everything
+   * that takes a git call to know (a dirty tree, the git floor).
+   */
+  const historyActionsBlocked = $derived.by(() => {
+    const { operation, detached } = $repoState.status
+    if (operation) return `A ${operationWords(operation).noun} is in progress`
+    if (detached) return 'HEAD is detached'
+    if ($activeRepoWrite !== null) return 'Another operation is still running'
+    return null
+  })
+
+  /**
+   * History ▸ Cherry-pick…: ask core whether it can start at all, then borrow
+   * the branch popover for the target. The preflight comes first so nobody is
+   * walked through choosing a branch for an action a dirty tree will refuse.
+   */
+  async function requestCherryPick(commits: CommitInfo[]): Promise<void> {
+    const repoPath = $appState.repoPath
+    if (!repoPath || commits.length === 0 || historyActionsBlocked) return
+    try {
+      const preflight = await gitApi.rewritePreflight(repoPath, null)
+      if (preflight.blocked) {
+        reportActionError(preflight.blocked)
+        return
+      }
+    } catch (error) {
+      reportActionError(error)
+      return
+    }
+    cherryPickCommits = commits
+    openBranches()
+  }
+
+  // The popover closes by many routes — a pick, Escape, the backdrop, another
+  // overlay taking its place — and every one of them disarms the picker, so
+  // the next ordinary opening is never still asking for a cherry-pick target.
+  $effect(() => {
+    if (!showBranches) cherryPickCommits = null
+  })
+
+  /**
+   * Copy the armed commits onto `target`. Reload first, report second, as a
+   * merge does: a pick that stopped on a conflict has already moved the
+   * repository onto the target, and the conflicted files are waiting in
+   * Changes — so that is the tab the failure is read over.
+   */
+  async function runCherryPick(target: string): Promise<void> {
+    const repoPath = $appState.repoPath
+    const commits = cherryPickCommits
+    if (!repoPath || !commits || !beginRepoWrite('cherryPick')) return
+    const source = $repoState.status.branch
+    try {
+      const result = await gitApi.cherryPickCommits(
+        repoPath,
+        commits.map((c) => c.sha),
+        target,
+      )
+      showBranches = false
+      await reloadAfterBranchChange()
+      if (result.success) {
+        selectPickedCommits(result.selection)
+        return
+      }
+      cherryPickReturn = { source, target }
+      setActiveTab('changes')
+      reportActionError(
+        result.error_message || `The cherry-pick stopped on a conflict in ${target}.`,
+      )
+    } catch (error) {
+      showBranches = false
+      // Core has put the repository back where it began, or said where it was
+      // left; either way the screen is re-read before the reason is shown.
+      await reloadAfterBranchChange()
+      reportActionError(error)
+    } finally {
+      endRepoWrite()
+    }
+  }
+
+  /**
+   * Select the commits an action produced, once the log that holds them has
+   * landed — before that the History re-seat would prune every one of them.
+   * Commits beyond the loaded window are simply not selected.
+   */
+  function selectPickedCommits(shas: string[]): void {
+    const commits = get(repoState).log.commits
+    const present = shas.filter((sha) => commits.some((c) => c.sha === sha))
+    if (present.length === 0) return
+    selectCommits(selectKeys(present), commits.find((c) => c.sha === present[0]) ?? null)
   }
 
   // Retry closes the modal first: the second attempt reports its own outcome,
@@ -2190,7 +2362,7 @@
 
     if (meta && e.key === 'b') {
       e.preventDefault()
-      if (showBranches) showBranches = false
+      if (showBranches) closeBranches()
       else openBranches()
     } else if (e.key === '?' && !meta) {
       e.preventDefault()
@@ -2474,6 +2646,8 @@
             onAmendCommit={handleStartAmending}
             onUndoCommit={handleUndoCommit}
             onCheckoutCommit={handleCheckoutCommit}
+            onCherryPick={(commits) => void requestCherryPick(commits)}
+            {historyActionsBlocked}
           />
         </div>
       </div>
@@ -2821,7 +2995,7 @@
       class="popover-layer"
       role="presentation"
       onclick={(e) => {
-        if (e.target === e.currentTarget) showBranches = false
+        if (e.target === e.currentTarget) closeBranches()
       }}
     >
       <div
@@ -2836,13 +3010,15 @@
           currentBranch={$repoState.status.branch}
           detached={$repoState.status.detached}
           operation={$repoState.status.operation}
-          busy={branchOp !== null}
+          busy={$activeRepoWrite !== null}
+          cherryPickCount={cherryPickCommits?.length ?? null}
+          onPickCherryPickTarget={(branch) => void runCherryPick(branch)}
           onSwitch={handleSwitchBranch}
           onCreate={handleCreateBranch}
           onRequestMerge={requestMerge}
           onRequestDelete={requestDeleteBranch}
           onRequestAbort={requestAbort}
-          onClose={() => (showBranches = false)}
+          onClose={closeBranches}
         />
       </div>
     </div>
@@ -2853,11 +3029,12 @@
       source={mergeSource}
       target={$repoState.status.branch}
       commitCount={mergeCommitCount}
-      isMerging={branchOp === 'merge'}
+      isMerging={$activeRepoWrite === 'merge'}
+      blocked={blockedFor('merge')}
       onMerge={() => void runMerge(false)}
       onSquashMerge={() => void runMerge(true)}
       onCancel={() => {
-        if (branchOp !== 'merge') mergeSource = null
+        if ($activeRepoWrite !== 'merge') mergeSource = null
       }}
     />
   {/if}
@@ -2868,11 +3045,12 @@
       title="Delete Branch?"
       confirmLabel="Delete"
       busyLabel="Deleting…"
-      isBusy={branchOp === 'delete'}
+      isBusy={$activeRepoWrite === 'delete'}
+      blocked={blockedFor('delete')}
       destructive
       onConfirm={() => void deleteBranch(branchName)}
       onCancel={() => {
-        if (branchOp !== 'delete') deleteTarget = null
+        if ($activeRepoWrite !== 'delete') deleteTarget = null
       }}
     >
       {#snippet body()}
@@ -2888,11 +3066,12 @@
       title={`Abort ${words.title}?`}
       confirmLabel={`Abort ${words.title}`}
       busyLabel="Aborting…"
-      isBusy={branchOp === 'abort'}
+      isBusy={$activeRepoWrite === 'abort'}
+      blocked={blockedFor('abort')}
       destructive
       onConfirm={() => void abortOperation()}
       onCancel={() => {
-        if (branchOp !== 'abort') abortTarget = null
+        if ($activeRepoWrite !== 'abort') abortTarget = null
       }}
     >
       {#snippet body()}
@@ -2901,6 +3080,11 @@
           Conflict resolutions are discarded, and the branch and working tree return to where they
           were before the {words.noun}.
         </p>
+        {#if cherryPickReturn}
+          <p class="muted">
+            You will be back on <code>{cherryPickReturn.source}</code>, where the commits came from.
+          </p>
+        {/if}
       {/snippet}
     </ConfirmDialog>
   {/if}
@@ -2912,8 +3096,9 @@
     <DiscardConfirm
       files={discardTarget}
       plan={discardPlan}
-      {isDiscarding}
+      isDiscarding={$activeRepoWrite === 'discard'}
       error={discardError}
+      blocked={blockedFor('discard')}
       onConfirm={confirmDiscard}
       onCancel={cancelDiscard}
     />
@@ -2922,7 +3107,8 @@
   {#if checkoutTarget}
     <CheckoutCommitConfirm
       commit={checkoutTarget}
-      {isCheckingOut}
+      isCheckingOut={$activeRepoWrite === 'checkout'}
+      blocked={blockedFor('checkout')}
       onConfirm={confirmCheckout}
       onCancel={cancelCheckout}
     />

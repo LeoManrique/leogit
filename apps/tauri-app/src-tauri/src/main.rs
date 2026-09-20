@@ -3,8 +3,8 @@
 use leogit_core::launch as core_launch;
 use leogit_lib::launch_glue;
 use leogit_lib::shims::{
-    ai, config, diff, exclusions, gh, git, highlight, launch, operation, os, repos, shell,
-    terminal, update,
+    ai, config, diff, exclusions, gh, git, highlight, history_rewrite, launch, operation, os,
+    repos, shell, terminal, update,
 };
 
 fn main() {
@@ -90,6 +90,8 @@ fn main() {
             git::count_commits_to_merge,
             operation::continue_operation,
             operation::abort_operation,
+            history_rewrite::rewrite_preflight,
+            history_rewrite::cherry_pick_commits,
             git::is_git_repo,
             git::init_repo,
             git::clone_repo,

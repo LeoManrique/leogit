@@ -72,9 +72,19 @@ export function isSelectAllChord(e: KeyboardEvent): boolean {
   return platformModifierHeld(e) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'a'
 }
 
+/**
+ * Exactly these rows — the shape an action hands back when it has produced the
+ * rows to show. The anchor is the first of them, so it is always one of the
+ * keys and the next shift gesture starts from a selected row.
+ */
+export function selectKeys(keys: readonly string[]): ListSelection {
+  if (keys.length === 0) return EMPTY_SELECTION
+  return { keys: new Set(keys), anchor: keys[0] }
+}
+
 /** One row, which is also where the next shift gesture starts. */
 function selectOnly(key: string): ListSelection {
-  return { keys: new Set([key]), anchor: key }
+  return selectKeys([key])
 }
 
 /**

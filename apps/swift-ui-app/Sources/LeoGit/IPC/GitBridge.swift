@@ -344,6 +344,31 @@ enum GitBridge {
         try abortOperation(repoPath: repoPath)
     }
 
+    // MARK: - History actions
+
+    /// Whether a History action may start. `replayedFrom` is the oldest commit
+    /// it would replay on the current branch — `nil` for cherry-pick, which
+    /// replays nothing here. A refusal is `blocked`, not a throw.
+    @concurrent
+    static func historyActionPreflight(
+        in repoPath: String,
+        replayedFrom: String?
+    ) async throws -> RewritePreflight {
+        try rewritePreflight(repoPath: repoPath, replayedFrom: replayedFrom)
+    }
+
+    /// Copy `shas` (newest first, as History lists them) onto a local branch,
+    /// which becomes the checked-out one. A conflict is data, as it is for a
+    /// merge, and leaves the cherry-pick open on the target.
+    @concurrent
+    static func cherryPick(
+        in repoPath: String,
+        shas: [String],
+        onto target: String
+    ) async throws -> RewriteResult {
+        try cherryPickCommits(repoPath: repoPath, shas: shas, targetBranch: target)
+    }
+
     /// How many commits merging `branch` would bring in — the merge sheet's
     /// preview number.
     @concurrent

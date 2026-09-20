@@ -46,8 +46,19 @@ final class CommitStore {
     /// A dependency rather than composer state, hence unobserved.
     @ObservationIgnored private let configStore: AppConfigStore
 
-    init(config: AppConfigStore) {
+    /// The window's one write slot, shared with the branch menu and the
+    /// History actions. `isCommitting` stays this store's own — it words the
+    /// composer's progress — while the slot is what keeps a commit or a
+    /// Continue from overlapping a write started anywhere else.
+    private let gate: RepositoryWriteGate
+
+    /// Someone else's write is running, so Commit and Continue cannot start.
+    /// The fields stay live: typing a message writes nothing.
+    var isRepositoryBusyElsewhere: Bool { gate.isHeld && !isCommitting }
+
+    init(config: AppConfigStore, gate: RepositoryWriteGate) {
         configStore = config
+        self.gate = gate
     }
 
     /// AI provider driving Generate.
@@ -375,10 +386,14 @@ final class CommitStore {
         // BranchStore's double-fire guard.
         guard !trimmedSummary.isEmpty, !isCommitting, !isGenerating else { return false }
         guard !files.isEmpty || isAmending else { return false }
+        guard let claim = gate.claim() else { return false }
         isCommitting = true
         errorMessage = nil
         let amending = isAmending
-        defer { isCommitting = false }
+        defer {
+            isCommitting = false
+            gate.release(claim)
+        }
 
         let message = await GitBridge.commitMessage(
             summary: trimmedSummary,
@@ -419,10 +434,15 @@ final class CommitStore {
     /// of a further conflict alike: the stopped commit was dropped for having
     /// nothing left to commit, which git does without a word.
     func continueOperation(repoPath: String) async -> (outcome: OpOutcome, skipped: Bool) {
-        guard !isCommitting, !isGenerating else { return (.refusedBusy, false) }
+        guard !isCommitting, !isGenerating, let claim = gate.claim() else {
+            return (.refusedBusy, false)
+        }
         isCommitting = true
         errorMessage = nil
-        defer { isCommitting = false }
+        defer {
+            isCommitting = false
+            gate.release(claim)
+        }
         do {
             let outcome = try await GitBridge.continueStoppedOperation(in: repoPath)
             guard outcome.success else {

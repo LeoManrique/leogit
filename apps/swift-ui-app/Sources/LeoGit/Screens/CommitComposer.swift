@@ -62,6 +62,7 @@ struct CommitComposer: View {
         !effectiveSummary.isEmpty
             && (includedCount > 0 || store.isAmending)
             && !isBusy
+            && !store.isRepositoryBusyElsewhere
     }
 
     /// Committing and generating share one busy treatment: the fields lock
@@ -142,7 +143,7 @@ struct CommitComposer: View {
                     Button("Continue \(continuing.title)", action: onContinue)
                         .buttonStyle(.borderedProminent)
                         .keyboardShortcut(.return, modifiers: .command)
-                        .disabled(isBusy)
+                        .disabled(isBusy || store.isRepositoryBusyElsewhere)
                         .help("Stage the resolved files and carry the \(continuing.noun) on (⌘↩)")
                 } else {
                     Button(action: onSubmit) {
