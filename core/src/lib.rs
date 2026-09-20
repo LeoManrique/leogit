@@ -20,8 +20,10 @@ pub mod diff;
 pub mod exclusions;
 pub mod gh;
 pub mod git;
+pub mod git_version;
 pub mod highlight;
 pub mod launch;
+pub mod operation;
 pub mod os;
 // Crate-internal, and only where there is a login shell to cache the answer of:
 // on Windows a GUI launch already inherits the user's full environment, so
@@ -35,4 +37,6 @@ pub mod render;
 pub mod repos;
 pub mod shell;
 pub mod terminal;
+#[cfg(test)]
+mod test_support;
 pub mod update;

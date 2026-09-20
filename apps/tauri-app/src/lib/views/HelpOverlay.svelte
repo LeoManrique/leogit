@@ -10,7 +10,10 @@
   let { isOpen, onClose }: Props = $props()
 
   const shortcuts = [
-    { key: 'Ctrl/Cmd + Enter', description: 'Commit selected files' },
+    {
+      key: 'Ctrl/Cmd + Enter',
+      description: 'Commit selected files — or continue a stopped rebase, cherry-pick or revert',
+    },
     { key: 'Ctrl/Cmd + G', description: 'Generate commit message with AI' },
     // Named after what the button says rather than after one of its states:
     // the chord runs whatever the sync ladder proposes.

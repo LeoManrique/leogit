@@ -200,11 +200,6 @@ pub fn commit_squash_merge(repo_path: String) -> Result<(), String> {
 }
 
 #[tauri::command(async)]
-pub fn merge_abort(repo_path: String) -> Result<(), String> {
-    git::merge_abort(repo_path)
-}
-
-#[tauri::command(async)]
 pub fn count_commits_to_merge(repo_path: String, target_branch: String) -> Result<i32, String> {
     git::count_commits_to_merge(repo_path, target_branch)
 }

@@ -81,7 +81,7 @@
   --status-yellow: #f59e0b;
   /* Modified files, and the commit summary's over-length counter — both are
      `.orange` on the native side (`FileStatusStyle.swift:41`,
-     `CommitComposer.swift:151`), and `--status-yellow` is an amber that reads
+     `CommitComposer.swift`), and `--status-yellow` is an amber that reads
      as a different status beside it. These are Apple's *current* systemOrange:
      the published values changed on 2025-06-09 with the macOS 26 cycle, so the
      familiar #FF9500 / #FF9F0A pair is now the previous generation's. */

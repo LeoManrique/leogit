@@ -44,6 +44,12 @@ export interface FileEntry {
 export type SyncProposal =
   'Loading' | 'Detached' | 'PublishRepository' | 'PublishBranch' | 'Pull' | 'Push' | 'Fetch'
 
+/**
+ * A multi-step git operation the repository is stopped in the middle of —
+ * whether LeoGit started it or a terminal did.
+ */
+export type OperationInProgress = 'Merge' | 'Rebase' | 'CherryPick' | 'Revert'
+
 export interface RepoStatus {
   branch: string
   upstream: string
@@ -60,11 +66,11 @@ export interface RepoStatus {
   /** Full SHA of HEAD; empty only on an unborn branch. Labels the detached-HEAD state. */
   head_sha: string
   /**
-   * Whether a merge is in progress (`MERGE_HEAD` exists). Carried here rather
-   * than fetched separately: every refresh path needs it, one of them used to
-   * forget, and core answers it from a file check that costs the poll nothing.
+   * The operation in progress, or `null`. Carried here rather than fetched
+   * separately: every refresh path needs it, and core answers it from a file
+   * check that costs the poll nothing.
    */
-  merging: boolean
+  operation: OperationInProgress | null
   /** The sync ladder's answer for this status — see {@link SyncProposal}. */
   proposal: SyncProposal
 }
@@ -135,6 +141,19 @@ export interface MergeResult {
   fast_forward: boolean
   conflicts: string[]
   error_message?: string
+}
+
+/**
+ * What continuing an operation came to. A further conflict is data, as it is
+ * for a merge: `success` false, git's own text, and the conflicted paths.
+ * `skipped` says the stopped pick or revert was dropped rather than committed,
+ * its resolution having left nothing to commit — git is silent about that.
+ */
+export interface OperationOutcome {
+  success: boolean
+  conflicts: string[]
+  error_message?: string
+  skipped: boolean
 }
 
 /** Lightweight per-repo sync summary for the picker's pull/push badges. */
@@ -526,9 +545,16 @@ export const gitApi = {
   mergeSquash: (repoPath: string, branch: string) =>
     invoke<MergeResult>('merge_squash', { repoPath, branch }),
   commitSquashMerge: (repoPath: string) => invoke<void>('commit_squash_merge', { repoPath }),
-  mergeAbort: (repoPath: string) => invoke<void>('merge_abort', { repoPath }),
   countCommitsToMerge: (repoPath: string, targetBranch: string) =>
     invoke<number>('count_commits_to_merge', { repoPath, targetBranch }),
+  /** Stage the resolved conflicts and carry the operation in progress on. */
+  continueOperation: (repoPath: string) =>
+    invoke<OperationOutcome>('continue_operation', { repoPath }),
+  /**
+   * Abort the operation in progress. Resolves to git's own words when it did
+   * less than a full rewind — text to show, not a failure — and `null` otherwise.
+   */
+  abortOperation: (repoPath: string) => invoke<string | null>('abort_operation', { repoPath }),
   /**
    * The folders discovery would actually walk for this config — the
    * configured list, or the stock defaults when it's empty. Lets the picker's

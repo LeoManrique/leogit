@@ -36,7 +36,7 @@ struct ToolbarStatus: Equatable, Sendable {
     var branch = ""
     var isDetached = false
     var headSha = ""
-    var isMerging = false
+    var operation: OperationInProgress?
     var changesCount = 0
     var ahead: Int32 = 0
     var behind: Int32 = 0
@@ -53,7 +53,7 @@ struct ToolbarStatus: Equatable, Sendable {
         branch = status.branch
         isDetached = status.detached
         headSha = status.headSha
-        isMerging = status.merging
+        operation = status.operation
         changesCount = status.files.count
         ahead = status.ahead
         behind = status.behind
@@ -418,6 +418,11 @@ struct ContentView: View {
         .onChange(of: hasFailedWithoutStatus) { _, failed in
             if failed { heldStatus = .unknown }
         }
+        // Every status that lands, whoever asked for it: the poll sees a
+        // terminal's commit the same way a refresh sees a continued rebase.
+        .onChange(of: store.status?.headSha) { _, headSha in
+            if let headSha { commitStore.endAmendingUnlessHead(is: headSha) }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .leogitRefreshRequested)) { _ in
             // ⌘R from the View menu — the keyboard-only successor of the
             // toolbar Refresh button: a full visible reload of status,
@@ -464,8 +469,8 @@ struct ContentView: View {
                     repoPath: repoPath,
                     status: store.status,
                     shown: shownStatus,
-                    isMerging: store.isMerging,
                     onWorkingTreeChanged: { await store.refresh() },
+                    onNotice: { store.errorMessage = $0 },
                     onFailure: { actionFailure = $0 }
                 )
             }
@@ -557,6 +562,7 @@ struct ContentView: View {
                     repoPath: repoPath,
                     files: store.status?.files ?? [],
                     statusLoaded: store.status != nil,
+                    operation: store.status?.operation,
                     commitStore: commitStore,
                     selection: $changesSelection,
                     selectedPath: $selectedPath,
@@ -677,7 +683,7 @@ struct ContentView: View {
             remoteBranches: branchStore.remoteBranches,
             current: store.status?.branch ?? "",
             isDetached: store.status?.detached ?? false,
-            isMerging: store.isMerging,
+            operation: store.status?.operation,
             isBusy: branchStore.isBusy
         ) { action in
             NotificationCenter.default.post(

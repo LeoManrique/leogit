@@ -335,6 +335,17 @@ final class CommitStore {
         coAuthors = []
     }
 
+    /// Amend rewrites HEAD, so the mode lasts only while HEAD is the commit it
+    /// was armed on. Called with every status that lands, which makes it one
+    /// rule for every way HEAD moves — a switch, a merge, a continued or
+    /// aborted operation, a commit made in a terminal — instead of a clear at
+    /// each call site. Without it the amended message would be written over
+    /// whatever commit HEAD had become.
+    func endAmendingUnlessHead(is headSha: String) {
+        guard let amendTarget, amendTarget.sha != headSha else { return }
+        stopAmending()
+    }
+
     /// Seed the composer from a commit that was just undone, so its message
     /// isn't lost with it. Not amend mode — the commit is gone, and what
     /// follows is an ordinary commit of the changes it left behind.
@@ -386,6 +397,41 @@ final class CommitStore {
         } catch {
             errorMessage = "\(amending ? "Amend" : "Commit") failed: \(error.displayMessage)"
             return false
+        }
+    }
+
+    /// Carry a stopped rebase, cherry-pick or revert on. Core stages the
+    /// resolved conflicts itself and refuses while one still holds conflict
+    /// markers, so this neither reads the checkboxes nor touches the index —
+    /// the replayed commit's own staged changes are in there, and `commit`'s
+    /// reset would throw them away.
+    ///
+    /// It runs under `isCommitting` because it is the same lockout under
+    /// another name: it writes commits too. The draft is left alone — it was
+    /// never part of this.
+    ///
+    /// Three answers, like every serialized operation: a continue that stopped
+    /// on the next conflict is `.failed` with git's own text, and the caller
+    /// re-reads the repository on anything but `.refusedBusy`, since a failed
+    /// continue has usually still written commits.
+    ///
+    /// `skipped` rides beside the outcome because it is true of a success and
+    /// of a further conflict alike: the stopped commit was dropped for having
+    /// nothing left to commit, which git does without a word.
+    func continueOperation(repoPath: String) async -> (outcome: OpOutcome, skipped: Bool) {
+        guard !isCommitting, !isGenerating else { return (.refusedBusy, false) }
+        isCommitting = true
+        errorMessage = nil
+        defer { isCommitting = false }
+        do {
+            let outcome = try await GitBridge.continueStoppedOperation(in: repoPath)
+            guard outcome.success else {
+                let message = outcome.errorMessage ?? "The operation stopped on another conflict."
+                return (.failed(message), outcome.skipped)
+            }
+            return (.succeeded, outcome.skipped)
+        } catch {
+            return (.failed(error.displayMessage), false)
         }
     }
 

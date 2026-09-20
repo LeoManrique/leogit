@@ -28,7 +28,17 @@ struct CommitComposer: View {
     /// silently dropped or, worse, cleared by a commit it never described.
     let isConfirmationPending: Bool
 
+    /// The words for a rebase, cherry-pick or revert the repository is stopped
+    /// in, or `nil` when the composer is its usual self — a merge included.
+    /// While set there is nothing to compose: the commits being replayed
+    /// already carry their messages, so the fields lock and **Continue** takes
+    /// the Commit button's place.
+    let continuing: OperationWords?
+
     let onSubmit: () -> Void
+
+    /// Carry the stopped operation on. Only reachable while `continuing`.
+    let onContinue: () -> Void
 
     /// Generate a commit message with AI from the checked files' diff.
     let onGenerate: () -> Void
@@ -66,12 +76,18 @@ struct CommitComposer: View {
     /// and fails every request. Not knowing is not blocking: an unanswered
     /// probe leaves the button live and lets the request report itself.
     private var canGenerate: Bool {
-        !isBusy && includedCount > 0 && store.blockingProvider == nil
+        !isLocked && includedCount > 0 && store.blockingProvider == nil
     }
+
+    /// The message cannot be edited: something is running, or an operation is
+    /// stopped and the message is not this composer's to write.
+    private var isLocked: Bool { isBusy || continuing != nil }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if store.isAmending {
+            if let continuing {
+                operationNotice(continuing)
+            } else if store.isAmending {
                 amendNotice
             }
 
@@ -80,7 +96,7 @@ struct CommitComposer: View {
                     prompt: autoSummary.isEmpty ? "Summary (required)" : autoSummary,
                     text: $store.summary
                 )
-                .disabled(isBusy)
+                .disabled(isLocked)
 
                 summaryCounter
             }
@@ -99,7 +115,7 @@ struct CommitComposer: View {
                 .pickerStyle(.menu)
                 .labelsHidden()
                 .fixedSize()
-                .disabled(isBusy)
+                .disabled(isLocked)
                 .help("AI provider used by Generate")
 
                 Button(store.isGenerating ? "Generating…" : "Generate") {
@@ -117,20 +133,42 @@ struct CommitComposer: View {
                         .controlSize(.small)
                 }
 
-                Button(action: onSubmit) {
-                    Text(commitLabel)
+                if let continuing {
+                    // Enabled while files still read as conflicted, on
+                    // purpose: a resolved file stays unmerged in the index
+                    // until it is staged, and staging it is what Continue
+                    // does. Core is the one that can tell a resolved file from
+                    // one still holding markers, and it refuses by name.
+                    Button("Continue \(continuing.title)", action: onContinue)
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.return, modifiers: .command)
+                        .disabled(isBusy)
+                        .help("Stage the resolved files and carry the \(continuing.noun) on (⌘↩)")
+                } else {
+                    Button(action: onSubmit) {
+                        Text(commitLabel)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .disabled(!canCommit)
+                    .help(
+                        store.isAmending
+                            ? "Rewrite the most recent commit (⌘↩)"
+                            : "Commit the checked files (⌘↩)"
+                    )
                 }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.return, modifiers: .command)
-                .disabled(!canCommit)
-                .help(
-                    store.isAmending
-                        ? "Rewrite the most recent commit (⌘↩)"
-                        : "Commit the checked files (⌘↩)"
-                )
             }
         }
         .padding(10)
+    }
+
+    /// Why the fields are locked, said where they are. It takes the conflict
+    /// colour of the branch chip's suffix and the conflicted rows: all three
+    /// are one state.
+    private func operationNotice(_ words: OperationWords) -> some View {
+        Text("A \(Text(words.noun).bold()) is in progress. Resolve the conflicted files, then continue.")
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .composerNotice(rule: .conflict)
     }
 
     /// How long the summary is against git's conventional 72-character first
@@ -168,17 +206,7 @@ struct CommitComposer: View {
                 .buttonStyle(.link)
                 .disabled(isBusy)
         }
-        .font(.caption)
-        .foregroundStyle(.secondary)
-        .padding(.leading, 8)
-        .padding(.vertical, 4)
-        // A leading rule instead of a filled banner: the composer is a dense
-        // stack of fields, and a tinted block here would read as another one.
-        .overlay(alignment: .leading) {
-            Rectangle()
-                .fill(.yellow)
-                .frame(width: 2)
-        }
+        .composerNotice(rule: .yellow)
     }
 
     /// One strip for everything that went wrong, so a failure and the standing
@@ -285,7 +313,7 @@ struct CommitComposer: View {
                 .scrollContentBackground(.hidden)
                 .contentMargins(4, for: .scrollContent)
                 .frame(maxHeight: .infinity)
-                .disabled(isBusy)
+                .disabled(isLocked)
 
             if store.details.isEmpty {
                 Text("Description")
@@ -320,5 +348,23 @@ struct CommitComposer: View {
         case 1: "Commit 1 File"
         default: "Commit \(includedCount) Files"
         }
+    }
+}
+
+private extension View {
+    /// A standing state said above the composer's fields: caption type behind
+    /// a 2 pt leading rule in the state's colour. A rule instead of a filled
+    /// banner because the composer is a dense stack of fields, and a tinted
+    /// block here would read as another one.
+    func composerNotice(rule: Color) -> some View {
+        font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.leading, 8)
+            .padding(.vertical, 4)
+            .overlay(alignment: .leading) {
+                Rectangle()
+                    .fill(rule)
+                    .frame(width: 2)
+            }
     }
 }

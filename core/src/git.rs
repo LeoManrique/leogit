@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, UNIX_EPOCH};
 
+use super::operation::{self, OperationInProgress};
 use super::paths;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -240,16 +241,20 @@ pub struct RepoStatus {
     /// `# branch.oid`. Empty only for an unborn branch (a freshly initialised
     /// repo with no commits). Powers the detached-HEAD label ("On <short>").
     pub head_sha: String,
-    /// Whether a merge is in progress (`MERGE_HEAD` exists in the git dir).
+    /// The multi-step git operation the repository is stopped in the middle
+    /// of, if any — a merge, a rebase, a cherry-pick or a revert, whether
+    /// `LeoGit` started it or a terminal did.
     ///
-    /// Carried here rather than left to a separate [`is_merging`] call: every
-    /// refresh path needs it, and one that forgot to ask produced a header
-    /// claiming a clean branch mid-merge. Filled from a filesystem probe (see
-    /// [`git_dir`]), so it costs no subprocess on the status poll.
-    pub merging: bool,
+    /// Carried here rather than left to a separate call: every refresh path
+    /// needs it, and one that forgot to ask produced a header claiming a clean
+    /// branch mid-merge. One field rather than a flag per operation, because
+    /// flags that can disagree are how that same header would come back.
+    /// Filled from a filesystem probe ([`operation::in_progress`]), so it costs
+    /// no subprocess on the status poll.
+    pub operation: Option<OperationInProgress>,
     /// What the sync control should offer to do next, from the fields above.
     ///
-    /// Carried on the status for the same reason [`RepoStatus::merging`] is:
+    /// Carried on the status for the same reason [`RepoStatus::operation`] is:
     /// every client renders it on every refresh, so asking for it separately
     /// would be a crossing per tick for six comparisons — and a second route to
     /// the same answer is how the two clients' ladders drifted apart in the
@@ -348,7 +353,7 @@ pub fn sync_proposal(status: &RepoStatus) -> SyncProposal {
 /// next is worse than one that is mangled everywhere. It is not the whole
 /// story: git escapes `"`, `\` and the control characters whatever this says,
 /// so output still has to go through [`unquote_path`].
-fn git_cmd(repo_path: &str, args: &[&str]) -> Command {
+pub(crate) fn git_cmd(repo_path: &str, args: &[&str]) -> Command {
     let mut cmd = Command::new("git");
     cmd.current_dir(repo_path)
         .env("TERM", "dumb")
@@ -468,7 +473,7 @@ fn command_failed(args: &[&str], stderr: &[u8]) -> String {
 
 /// Run a git command and return stdout as a UTF-8 string with trailing whitespace trimmed.
 /// Use this for line-oriented git output (NOT for NUL-delimited formats).
-fn run_git(repo_path: &str, args: &[&str]) -> Result<String, String> {
+pub(crate) fn run_git(repo_path: &str, args: &[&str]) -> Result<String, String> {
     let bytes = run_git_raw(repo_path, args)?;
     Ok(String::from_utf8_lossy(&bytes).trim_end().to_string())
 }
@@ -496,8 +501,19 @@ fn run_git_optional(repo_path: &str, args: &[&str]) -> Result<Option<String>, St
 
 /// Run a git command and return combined stdout+stderr, regardless of exit status.
 /// The bool indicates whether the command succeeded.
-fn run_git_combined(repo_path: &str, args: &[&str]) -> Result<(bool, String), String> {
+pub(crate) fn run_git_combined(repo_path: &str, args: &[&str]) -> Result<(bool, String), String> {
+    run_git_combined_with_env(repo_path, args, &[])
+}
+
+/// [`run_git_combined`] with extra environment variables on the child — how a
+/// command that would open an editor is told not to (`GIT_EDITOR=:`).
+pub(crate) fn run_git_combined_with_env(
+    repo_path: &str,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Result<(bool, String), String> {
     let output = git_cmd(repo_path, args)
+        .envs(env.iter().copied())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -791,10 +807,10 @@ fn has_commits_from_fs(repo_path: &str) -> Option<bool> {
 /// than a fact only git knows: `<repo>/.git` is either the directory itself or,
 /// for a linked worktree or a submodule, a one-line `gitdir: <path>` pointer.
 /// That path costs no subprocess, which is what lets [`get_status`] carry
-/// `merging` for free on a 2 s poll. `git rev-parse --git-dir` is kept as the
+/// `operation` for free on a 2 s poll. `git rev-parse --git-dir` is kept as the
 /// fallback for the shapes the shortcut can't see — a bare repo, or a path
 /// somewhere *inside* the work tree rather than at its root.
-fn git_dir(repo_path: &str) -> Option<PathBuf> {
+pub(crate) fn git_dir(repo_path: &str) -> Option<PathBuf> {
     let dot_git = Path::new(repo_path).join(".git");
     if let Ok(meta) = std::fs::metadata(&dot_git) {
         if meta.is_dir() {
@@ -874,7 +890,7 @@ pub(crate) fn common_dir(git_dir: &Path) -> PathBuf {
 /// The git dir is passed in rather than resolved again because [`git_dir`] can
 /// itself spawn (`rev-parse --git-dir`, for a layout the filesystem shortcut
 /// cannot see), so a second resolution risks being a second subprocess — and
-/// `read_status` has already made the first one to answer `merging`.
+/// `read_status` has already made the first one to answer `operation`.
 fn remote_names_in(repo_path: &str, git_dir: Option<&Path>) -> Vec<String> {
     match config_remotes(git_dir) {
         Some(names) => names,
@@ -1618,7 +1634,7 @@ fn parse_unmerged_entry(seg: &str) -> Option<FileEntry> {
 /// Deliberately one call rather than a status read followed by a separate ask
 /// for the ladder: the proposal is a pure function of the fields below it, so a
 /// second crossing to run six comparisons would be a real cost on the host that
-/// pays for crossings — and `merging` already established that a value every
+/// pays for crossings — and `operation` already established that a value every
 /// refresh path needs belongs on the status it is derived from, where no path
 /// can forget to fetch it.
 ///
@@ -1652,7 +1668,7 @@ fn read_status(repo_path: String) -> Result<RepoStatus, String> {
         ],
     )?;
 
-    // Resolved once and used twice: `merging` is a file probe inside it, and
+    // Resolved once and used twice: `operation` is a file probe inside it, and
     // the remote lookup below reads the config file beside that. Both are
     // filesystem answers, and [`git_dir`] is the one step of either that can
     // fall back to a subprocess.
@@ -1669,7 +1685,7 @@ fn read_status(repo_path: String) -> Result<RepoStatus, String> {
         unpushed_shas: Vec::new(),
         detached: false,
         head_sha: String::new(),
-        merging: is_merging_in(git_dir.as_deref()),
+        operation: operation::in_progress(git_dir.as_deref()),
         // Overwritten by `get_status` once every field it reads is filled.
         proposal: SyncProposal::Loading,
     };
@@ -2782,13 +2798,22 @@ fn stage_files(repo_path: &str, files: &[FileEntry]) -> Result<(), String> {
 /// arg-length and quoting limits, mirroring [`update_index`]. Embedded-repo
 /// advice is silenced (`advice.addEmbeddedRepo=false`) because the UI already
 /// explains the gitlink before the user gets here.
-fn git_add(repo_path: &str, paths: &[String]) -> Result<(), String> {
+///
+/// `--literal-pathspecs` because these are file names, not patterns: `git add`
+/// reads `weird[1].txt` as a glob, and would stage a modified `weird1.txt`
+/// nobody asked for along with it. A missing file is staged as its removal,
+/// which is what lets a conflict resolved by deleting the file go through
+/// here too.
+///
+/// An empty list is a no-op by construction, never a bare `git add`.
+pub(crate) fn git_add(repo_path: &str, paths: &[String]) -> Result<(), String> {
     if paths.is_empty() {
         return Ok(());
     }
     let mut child = git_cmd(
         repo_path,
         &[
+            "--literal-pathspecs",
             "-c",
             "advice.addEmbeddedRepo=false",
             "add",
@@ -3732,7 +3757,7 @@ pub fn get_repo_identifier(repo_path: String) -> Option<RepoIdentifier> {
 /// Collect unique paths from `git ls-files --unmerged`. Output format is:
 ///   <mode> <sha> <stage>\t<path>
 /// We split on tab and take the trailing column 4 (path).
-fn ls_files_unmerged(repo_path: &str) -> Vec<String> {
+pub(crate) fn ls_files_unmerged(repo_path: &str) -> Vec<String> {
     let output = match run_git(repo_path, &["ls-files", "--unmerged"]) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
@@ -3805,35 +3830,6 @@ pub fn commit_squash_merge(repo_path: String) -> Result<(), String> {
         return Err(format!("git commit failed: {}", combined.trim()));
     }
     Ok(())
-}
-
-pub fn merge_abort(repo_path: String) -> Result<(), String> {
-    let (ok, combined) = run_git_combined(&repo_path, &["merge", "--abort"])?;
-    if !ok {
-        return Err(format!("git merge --abort failed: {}", combined.trim()));
-    }
-    Ok(())
-}
-
-/// Whether `git_dir` holds a `MERGE_HEAD` — git's own record of an
-/// in-progress merge. `None` (no git dir could be resolved) reads as "not
-/// merging" so a non-repo path degrades to a calm answer rather than an error.
-fn is_merging_in(git_dir: Option<&Path>) -> bool {
-    git_dir.is_some_and(|dir| dir.join("MERGE_HEAD").exists())
-}
-
-/// Standalone merge probe.
-///
-/// [`RepoStatus::merging`] carries the same answer on every status refresh and
-/// is what the UI should read; this stays for callers that hold no status —
-/// and never gained one, since removing it would only push the same filesystem
-/// probe out to each host.
-///
-/// # Errors
-/// Never fails today; the `Result` is kept so hosts' generated bindings don't
-/// churn when a future probe can.
-pub fn is_merging(repo_path: String) -> Result<bool, String> {
-    Ok(is_merging_in(git_dir(&repo_path).as_deref()))
 }
 
 pub fn count_commits_to_merge(repo_path: String, target_branch: String) -> Result<i32, String> {
@@ -4271,27 +4267,9 @@ pub fn get_repo_name(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::init_test_repo;
     use std::fs;
     use tempfile::tempdir;
-
-    /// Initialise a throwaway repo with a committer identity. Local config
-    /// disables commit signing so the tests don't depend on the developer's
-    /// global git setup.
-    fn init_test_repo(dir: &Path) {
-        let git = |args: &[&str]| {
-            let ok = Command::new("git")
-                .current_dir(dir)
-                .args(args)
-                .status()
-                .expect("spawn git")
-                .success();
-            assert!(ok, "git {args:?} failed");
-        };
-        git(&["init", "-q"]);
-        git(&["config", "user.email", "test@example.com"]);
-        git(&["config", "user.name", "Test User"]);
-        git(&["config", "commit.gpgsign", "false"]);
-    }
 
     fn new_file(path: &str) -> FileEntry {
         FileEntry {
@@ -6024,81 +6002,15 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Status carries `merging` (H-1)
+    // The git dir, through a worktree
     // -----------------------------------------------------------------------
 
-    /// `get_status` answers the merge question itself, so no refresh path can
-    /// forget to ask it — and it agrees with the standalone probe in every
-    /// state, since both read the same `MERGE_HEAD`.
+    /// The operation probe reads the git dir from the filesystem, so it must
+    /// survive the shape where `.git` is a *file* pointing elsewhere — a linked
+    /// worktree. Resolving to the main git dir there would silently report
+    /// every worktree as never being mid-operation.
     #[test]
-    fn status_reports_a_merge_in_progress_and_its_end() {
-        let tmp = tempdir().expect("tempdir");
-        let repo = tmp.path();
-        init_test_repo(repo);
-        let repo_path = repo.to_str().expect("utf-8 path").to_string();
-
-        fs::write(repo.join("shared.txt"), "base\n").expect("write base");
-        commit(
-            repo_path.clone(),
-            "base".into(),
-            vec![new_file("shared.txt")],
-            None,
-        )
-        .expect("commit base");
-        let main = get_status(repo_path.clone()).expect("status").branch;
-
-        create_branch(repo_path.clone(), "feature".into(), "HEAD".into()).expect("branch");
-        switch_branch(repo_path.clone(), "feature".into()).expect("switch");
-        fs::write(repo.join("shared.txt"), "feature\n").expect("write feature");
-        commit(
-            repo_path.clone(),
-            "feature".into(),
-            vec![new_file("shared.txt")],
-            None,
-        )
-        .expect("commit feature");
-
-        switch_branch(repo_path.clone(), main).expect("switch back");
-        fs::write(repo.join("shared.txt"), "main\n").expect("write main");
-        commit(
-            repo_path.clone(),
-            "main".into(),
-            vec![new_file("shared.txt")],
-            None,
-        )
-        .expect("commit main");
-
-        assert!(
-            !get_status(repo_path.clone()).expect("status").merging,
-            "a clean branch is not merging"
-        );
-
-        let merge = merge_branch(repo_path.clone(), "feature".into()).expect("merge runs");
-        assert!(!merge.success, "the conflicting merge stops mid-way");
-
-        let during = get_status(repo_path.clone()).expect("status mid-merge");
-        assert!(during.merging, "status sees the in-progress merge");
-        assert_eq!(
-            during.merging,
-            is_merging(repo_path.clone()).expect("probe"),
-            "the folded-in flag and the standalone probe agree"
-        );
-
-        merge_abort(repo_path.clone()).expect("abort");
-        assert!(
-            !get_status(repo_path.clone())
-                .expect("status after abort")
-                .merging,
-            "aborting ends the merge state"
-        );
-    }
-
-    /// The merge flag is resolved from the filesystem, so it must survive the
-    /// shape where `.git` is a *file* pointing elsewhere — a linked worktree.
-    /// That is the case the old `rev-parse --git-dir` call existed to handle,
-    /// and losing it would silently report every worktree as never merging.
-    #[test]
-    fn merge_state_resolves_through_a_worktree_git_file() {
+    fn git_dir_resolves_through_a_worktree_git_file() {
         let tmp = tempdir().expect("tempdir");
         let repo = tmp.path();
         init_test_repo(repo);
@@ -6138,9 +6050,12 @@ mod tests {
             "resolved the per-worktree git dir, got {}",
             resolved.display()
         );
-        assert!(
-            !get_status(linked_path).expect("status in worktree").merging,
-            "a fresh worktree is not merging"
+        assert_eq!(
+            get_status(linked_path)
+                .expect("status in worktree")
+                .operation,
+            None,
+            "a fresh worktree is not in the middle of anything"
         );
     }
 
@@ -7028,7 +6943,7 @@ mod tests {
             unpushed_shas: Vec::new(),
             detached: false,
             head_sha: "a".repeat(40),
-            merging: false,
+            operation: None,
             proposal: SyncProposal::Fetch,
         }
     }

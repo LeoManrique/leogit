@@ -45,6 +45,8 @@ leogit/
 │       ├── events.rs                # EventSink seam: CoreEvent + trait (git progress, PTY out)
 │       ├── config.rs                # load/save Config + ReposState
 │       ├── git.rs                   # git operations (status, log, branch, discard, ignore, …)
+│       ├── operation.rs             # the merge/rebase/pick/revert in progress: probe, continue, abort
+│       ├── git_version.rs           # the installed git's version and the 2.45 floor
 │       ├── exclusions.rs            # the commit composer's opt-out grace window
 │       ├── launch.rs                # `leogit <dir>` resolution + pending-target state
 │       ├── diff.rs                  # parse_diff + build/apply patches (structured FileDiff)
@@ -295,8 +297,9 @@ costing anything while unwired: `DiffViewer` renders the hunk header as a contro
 and no longer one focusable no-op button per hunk on an unvirtualized list.
 
 Branches and merge cross 1:1 as well (`list_branches`, `create_branch`, `switch_branch`,
-`delete_branch`; `merge_branch`, `merge_squash`, `commit_squash_merge`, `merge_abort`,
-`count_commits_to_merge`), with two flat mirrors (`BranchInfo`, `MergeResult`)
+`delete_branch`; `merge_branch`, `merge_squash`, `commit_squash_merge`,
+`count_commits_to_merge`; `continue_operation`, `abort_operation`), with flat mirrors
+(`BranchInfo`, `MergeResult`, `OperationInProgress`, `OperationOutcome`)
 and none of the `EventSink` machinery — every branch/merge function in core is a plain
 synchronous `Result<T, String>`. The multi-call sequences belong to the clients:
 "New Branch" is `create_branch` then `switch_branch`, squash is `merge_squash` then
@@ -625,7 +628,7 @@ rather than with what to do next. With the repo name on the chip
 the toolbar title became duplication, so `.toolbar(removing: .title)` hides it
 (`navigationTitle` still names the window for Mission Control and the Window menu), the
 `navigationSubtitle` is gone entirely, and its exceptional states moved into
-`BranchMenu.menuLabel` ("Detached at <sha7>", "<branch> · merging"): repo name, branch,
+`BranchMenu.menuLabel` ("Detached at <sha7>", "<branch> · merging", "Detached at <sha7> · rebasing"): repo name, branch,
 and counts each appear exactly once in the toolbar.
 
 The ladder also reaches the menu bar. Its states live in `SyncProposal`, a pure type over
@@ -958,7 +961,10 @@ Amend mode lives in `CommitStore` (`amendTarget` plus the commit's `co_authors`,
 composer has no field for and simply re-attaches to the next message). Two behaviours are
 load-bearing: re-entering amend on the same sha is a no-op, so right-clicking Amend twice can't
 wipe edits in progress, and leaving it clears the seeded draft so an amended message can't be
-re-submitted as a new commit. `commit` then relaxes its empty-file guard, because
+re-submitted as a new commit. The mode ends by itself when HEAD stops being `amendTarget`:
+`ContentView` hands every landed `status.headSha` to `CommitStore.endAmendingUnlessHead(is:)`,
+and the Tauri client applies the same test inside `refreshStatus`'s one `repoState.update`, so no
+action that moves HEAD has to remember to clear it. `commit` then relaxes its empty-file guard, because
 `git commit --amend` with nothing staged *is* the message-only edit. This forced one structural
 fix: `CommitStore` moved from the Changes pane (now `ChangesSidebar`) to `ContentView`, since the tab bar swaps panes by
 rebuilding them — which discarded any in-progress message on every tab switch, and would have
@@ -1287,7 +1293,8 @@ The frontend never touches Tauri's raw `invoke` API directly; every backend call
 | Namespace | Commands | Backend file |
 |---|---|---|
 | `configApi` | `loadConfig`, `patchConfig`, `configBounds`, `loadState`, `patchState`, `recordRecentRepo` | `core/src/config.rs` |
-| `gitApi` | `getStatus`, `fileStatusStyles`, `getSelectedDiff`, `getLog`, `getCommitDetail`, `listBranches`, `createBranch`, `switchBranch`, `checkoutCommit`, `deleteBranch`, `commit`, `undoLastCommit`, `classifyDiscard`, `discardFiles`, `appendToGitignore`, `ignorePaths`, `formatCommitMessage`, `repoSyncStatus`, `fetch`, `fetchAll`, `pull`, `push`, `getTrackingRemote`, `getPushRemote`, `getRepoIdentifier`, `mergeBranch`, `mergeSquash`, `commitSquashMerge`, `mergeAbort`, `countCommitsToMerge`, `effectiveScanPaths`, `isGitRepo`, `initRepo`, `cloneRepo` | `core/src/git.rs` |
+| `gitApi` | `getStatus`, `fileStatusStyles`, `getSelectedDiff`, `getLog`, `getCommitDetail`, `listBranches`, `createBranch`, `switchBranch`, `checkoutCommit`, `deleteBranch`, `commit`, `undoLastCommit`, `classifyDiscard`, `discardFiles`, `appendToGitignore`, `ignorePaths`, `formatCommitMessage`, `repoSyncStatus`, `fetch`, `fetchAll`, `pull`, `push`, `getTrackingRemote`, `getPushRemote`, `getRepoIdentifier`, `mergeBranch`, `mergeSquash`, `commitSquashMerge`, `countCommitsToMerge`, `effectiveScanPaths`, `isGitRepo`, `initRepo`, `cloneRepo` | `core/src/git.rs` |
+| `gitApi` (cont.) | `continueOperation`, `abortOperation` | `core/src/operation.rs` |
 | `reposApi` | `knownRepos`, `filterRepos`, `deriveCloneTarget`, `cloneTargetPath` | `core/src/repos.rs` |
 | `exclusionsApi` | `reconcile` | `core/src/exclusions.rs` |
 | `diffApi` | `getParsedDiff`, `getParsedCommitDiff`, `copyDiffText`, `generatePatch`, `generateInversePatch` | `core/src/diff.rs` |
@@ -1306,7 +1313,7 @@ Every command is registered in [src-tauri/src/main.rs](apps/tauri-app/src-tauri/
 The three core writable Svelte stores, all in [src/lib/stores](apps/tauri-app/src/lib/stores):
 
 - **`appState`** — top-level phase machine (`loading` / `repo-picker` / `main` / `error`), the discovered repo list, the chosen repo path, and whether `gh` is authenticated. `App.svelte` renders `MainLayout` for `main` and, for every other phase, a `.pre-main` column of `<Header>` + the phase's content — so app-level chrome exists in all of them (see *Repo-less phases*).
-- **`repoState`** — everything tied to the currently open repo: status (branch, upstream, ahead/behind, files, isMerging), log pagination, branches, the user's selection sets (`selectedFiles`, `userDeselected`), per-file diff selection (`Map<path, DiffSelection>`), active file/diff, active commit/files/diff, loading flags, a `statusLoaded` flag (default status ≠ loaded status — anything that *skips* work on a status field has to know the difference, since `hasRemote` defaults to false and a switch resets it), and **three failure fields with different owners**, written through `reportActionError` / `reportNotice` in the store rather than by each call site building its own `repoState.update` — the classification is then a choice of function, not a shape copied from the site next door, which is how reveal-in-Finder came to seize the window. `error` (with an optional `errorRetry` bound to the same attempt) is an operation the user was waiting on and goes to the blocking `ErrorModal`; `notice` is an OS hand-off that didn't take and goes to a dismissible strip, dismissible because nothing else can ever disprove it; `pollError` is written only by refreshes the app started itself — set after three consecutive failures, cleared by any successful read, rendered in the same strip without a ✕ because its own recovery retires it. `refreshStatus` takes `{silent, background}` as two separate opts for exactly this: *silent* means "don't write `error`", which a user action's follow-up refresh also wants, while *background* means "this one is mine" and is what feeds the streak. Conflating them let three `index.lock` races behind a commit and two discards accuse a healthy repository of having vanished. Keeping the three apart is what lets a repository that really has gone away say so without a modal the user must dismiss every two seconds. A **fourth** kind never reaches any of them: `activeFileDiffError` / `activeCommitFileDiffError` are per-pane and render inline where the diff would have been, always alongside a cleared payload. A failed read of one file blocks nothing (the rest of the repository is on screen and correct) and is the user's own task (so the strip above the content is the wrong place), which puts it outside §6.13's two classes entirely. Re-selecting the row is the retry, and works because the payload is gone: the loader's "already open" short-circuit tests it.
+- **`repoState`** — everything tied to the currently open repo: status (branch, upstream, ahead/behind, files, the operation in progress), log pagination, branches, the user's selection sets (`selectedFiles`, `userDeselected`), per-file diff selection (`Map<path, DiffSelection>`), active file/diff, active commit/files/diff, loading flags, a `statusLoaded` flag (default status ≠ loaded status — anything that *skips* work on a status field has to know the difference, since `hasRemote` defaults to false and a switch resets it), and **three failure fields with different owners**, written through `reportActionError` / `reportNotice` in the store rather than by each call site building its own `repoState.update` — the classification is then a choice of function, not a shape copied from the site next door, which is how reveal-in-Finder came to seize the window. `error` (with an optional `errorRetry` bound to the same attempt) is an operation the user was waiting on and goes to the blocking `ErrorModal`; `notice` is an OS hand-off that didn't take and goes to a dismissible strip, dismissible because nothing else can ever disprove it; `pollError` is written only by refreshes the app started itself — set after three consecutive failures, cleared by any successful read, rendered in the same strip without a ✕ because its own recovery retires it. `refreshStatus` takes `{silent, background}` as two separate opts for exactly this: *silent* means "don't write `error`", which a user action's follow-up refresh also wants, while *background* means "this one is mine" and is what feeds the streak. Conflating them let three `index.lock` races behind a commit and two discards accuse a healthy repository of having vanished. Keeping the three apart is what lets a repository that really has gone away say so without a modal the user must dismiss every two seconds. A **fourth** kind never reaches any of them: `activeFileDiffError` / `activeCommitFileDiffError` are per-pane and render inline where the diff would have been, always alongside a cleared payload. A failed read of one file blocks nothing (the rest of the repository is on screen and correct) and is the user's own task (so the strip above the content is the wrong place), which puts it outside §6.13's two classes entirely. Re-selecting the row is the retry, and works because the payload is gone: the loader's "already open" short-circuit tests it.
 - **`config`** — the live Config object, and the only copy in the client: Settings renders from it rather than loading a second one, so the form and the diff viewers cannot disagree about what is set. Publishing goes through `applyConfig(cfg)` — the store, `applyTheme()` (which flips `document.documentElement.dataset.theme`), and the resolved `scanFolders`, that last one re-asked only when `scan_paths` actually moved. `refreshConfig()` is `load_config` plus that; Settings hands it `patch_config`'s return value directly, since the patch already answers with the whole normalized config and a second read would only re-ask what it was just told.
 
 Alongside these are smaller purpose-built stores: **`networkOps`** holds the user-initiated network op in flight (`activeNetworkOp` — the poll/auto-fetch/scheduler pause on it and the sync handlers use it for mutual exclusion) and its live transfer progress (`networkProgress`, fed from `git-progress` events), **`repoIdentifiers`** lazily caches each repo's GitHub identifier (a module-level map that re-publishes on each fetch, so reopening the repo picker is free), **`repoSync`** caches each repo's ahead/behind counts and working-tree `dirty` flag for the picker's pull/push badges and dirty dot (`setRepoSync` records values the active poll already computed; `syncRepo` fetches + recomputes one repo, with per-path in-flight de-duplication; its change-equality guard compares every field, so a new one must be added there too or its transitions get swallowed), and **`reposState`** mirrors the persisted `repos-state.json` document — the `repoSortMode` / `cloneSortMode` / `recentRepos` writables plus thin wrappers over the backend's atomic writers: `patchReposState` → the `patch_state` command (one field-wise read-modify-write under a process-wide lock, so a patch can never clobber another writer's field), `recordRecentRepo` → the `record_recent_repo` command (backend owns the MRU move-to-front/de-dupe/cap, records `last_opened_repo` in the same write, and returns the authoritative list, which reseeds the `recentRepos` store), and `hydrateReposState` (startup seed). Both wrappers log-and-swallow failures, so callers never need a rejection path for lost preferences.
@@ -1382,7 +1389,7 @@ Three background loops run while a repository is open, and they share one policy
 
 **The loop** ([services/pacedLoop.ts](apps/tauri-app/src/lib/services/pacedLoop.ts)) is a self-scheduling `setTimeout` chain: it asks when the next run is due *after* each run settles. `setInterval` cannot express a cadence that changes, and three properties fall out of re-deciding late — runs can never overlap (so no in-flight guard), a state change applies immediately via `reschedule()` rather than after the current period drains, and a `dueAt` of `Infinity` parks the loop entirely, which is what "auto-fetch is off" means. A 250 ms floor keeps a deadline already in the past from spinning.
 
-- **Status poll** — the ladder above. Every status write in this client goes through the one `refreshStatus` in `MainLayout`, including the header's post-transfer reload (which takes it as a prop) and `Ctrl+R`, because a status write is more than storing what `get_status` returns: it ages the exclusion set, drops the open diff when its file leaves the working tree, and feeds `repoSync`'s badge for this repo. A second implementation forgets some of those, which is how the `MERGING` chip used to outlive an abort — the chip now reads `RepoStatus.merging`, so that particular omission is no longer expressible. HEAD is compared against `RepoStatus.head_sha` from the read that just landed; when it moved, the commit log is refreshed in place keeping the same loaded count (so the user doesn't lose scroll position) and the branch list reloads with it, since a checkout made in the terminal moves the menu's checkmark too. Each publishing run also pushes the active repo's ahead/behind + dirty flag into `repoSync` via `setRepoSync`, so the picker badges and dot for the open repo stay live without a dedicated fetch. The poll pauses entirely while `activeNetworkOp` is set.
+- **Status poll** — the ladder above. Every status write in this client goes through the one `refreshStatus` in `MainLayout`, including the header's post-transfer reload (which takes it as a prop) and `Ctrl+R`, because a status write is more than storing what `get_status` returns: it ages the exclusion set, drops the open diff when its file leaves the working tree, and feeds `repoSync`'s badge for this repo. A second implementation would forget some of those. The branch chip's operation suffix is the case that cannot be forgotten at all: it reads `RepoStatus.operation`, which arrives on the status itself. HEAD is compared against `RepoStatus.head_sha` from the read that just landed; when it moved, the commit log is refreshed in place keeping the same loaded count (so the user doesn't lose scroll position) and the branch list reloads with it, since a checkout made in the terminal moves the menu's checkmark too. Each publishing run also pushes the active repo's ahead/behind + dirty flag into `repoSync` via `setRepoSync`, so the picker badges and dot for the open repo stay live without a dedicated fetch. The poll pauses entirely while `activeNetworkOp` is set.
   - **A tick that changes nothing publishes nothing.** `refreshStatus` compares `JSON.stringify(status)` against the previous reply and returns without touching the store when they match — whole-value, like the native client's `Equatable` compare, rather than a hand-picked list of fields that a later field would silently fall out of. `stat_stamp` rides inside it, which is the only reason an idle repository is recognizable at all: porcelain v2 carries no worktree hash, so a file that was modified and still is reads identically without it. Only *silent* refreshes take the shortcut — an explicit one also clears the error modal on success, which is a change even when the status is not — and a standing poll banner still retires on a skipped tick, because a successful read is what disproves it.
   - **The open diff reloads from the same stamp.** A `$derived` key of the active file's `path`, `xy` and `stat_stamp` plus the status's `head_sha` feeds an `untrack`ed effect that re-fetches the diff when the *same* path's key moves; a different path means the selection changed and its own load is already in flight. Per-file, so an unrelated edit elsewhere in the tree re-tokenizes nothing. `head_sha` covers the half a stamp cannot see: the diff is HEAD against the working tree, so a `--mixed` reset changes it while leaving the bytes on disk and the status letters exactly as they were.
 - **Auto-fetch** — `fetch_interval_ms` (default 30 000) through the policy's multiplier, rescheduled by an effect watching those two config fields, so a Settings change applies at once and one made in the native client applies on the next wake-up (which re-reads the config). Switched off, the loop parks rather than idling; switching it on reschedules against the last fetch, so it runs as soon as the configured interval says it is due. The first run carries a once-per-session 0–30 s skew so two windows started together don't stay in lockstep on the same repositories. Skipped while a network op is in flight or **text has the keyboard** — asked at the tick through `isTextInputFocused()` rather than latched, since a latch set from `focusin` is only cleared by another one and closing a focused terminal panel used to strand it at `true`, leaving auto-fetch dead for the session. That predicate is `document.hasFocus() && isTextInputElement(document.activeElement)`, and the first half is not decoration: `activeElement` does **not** clear when the window loses focus, so asking about the element alone would answer "still typing" for the entire time the user was away in another app and hold back every fetch the ladder is stretching rather than pausing. The native client gets the same answer for free — `NSApp.keyWindow` is nil while the app is inactive, so its first responder is nil. Calls `fetchActiveRemote` (`git fetch --prune --recurse-submodules=on-demand` against the current branch's remote, `get_tracking_remote`) then a silent `get_status`. `fetchActiveRemote` self-skips when offline / backing off, claims the per-repo in-flight slot so no two silent fetches overlap, and reports its outcome to the connectivity breaker (see *Network resilience*). The loop's own tick never consults the 60 s fetch cooldown — it *is* the cadence the user configured; the catch-up triggers (cold open, wake, reconnect, refocus, switch) do.
@@ -1464,22 +1471,130 @@ when `file_header` is empty, which real git output never is.
 
 Branch fallback: if `# branch.head` is absent (empty repo) the code calls `git rev-parse --abbrev-ref HEAD` to fill in.
 
-**Two more answers come from disk rather than from git, for the same reason `merging` does — a subprocess costs ~8 ms of fork/exec whatever it asks, so the status poll is one `git status` and nothing else.** `RepoStatus.has_remote` and the remote names behind it (`remote_names_in` on the status path, `remote_names` for `repo_sync_status` and the remote resolvers in *Notable invariants*, which need a failure reported rather than swallowed) are read from `<common_dir>/config` through a port of git's own `config.c` lexer — section headers, quoted subsections with escapes, the legacy `[remote.Name]` form lowercased, comments, continuation lines — and byte-sorted and de-duplicated exactly as `git remote` prints them. It declines, and `git remote` is spawned instead, for every shape the file cannot answer: any `GIT_CONFIG*` variable in the process, an `include`/`includeIf` section, `extensions.worktreeConfig`, an unreadable or malformed file, and a global or system config that defines a remote (probed once per process with `git config --includes`, re-keyed on the global files' mtime; an `includeIf` there means permanent fallback, since it can only be answered from inside the matching repo). `common_dir` follows a linked worktree's `commondir` pointer, which is where a worktree's remotes actually live. Likewise `has_commits` — which anchors every diff at `HEAD` or the empty tree and gates the first history page — reads `HEAD` and then the loose ref or the `packed-refs` line it names, and falls back to `git rev-parse --verify HEAD` for a reftable ref store, a symbolic-ref chain or a torn ref file. Each of these has an equivalence test per shape that asserts *which* path answered and that the answer matches git's, because a silent regression to the spawn would still be correct and is the whole thing being removed.
+**Two more answers come from disk rather than from git, for the same reason `operation` does — a subprocess costs ~8 ms of fork/exec whatever it asks, so the status poll is one `git status` and nothing else.** `RepoStatus.has_remote` and the remote names behind it (`remote_names_in` on the status path, `remote_names` for `repo_sync_status` and the remote resolvers in *Notable invariants*, which need a failure reported rather than swallowed) are read from `<common_dir>/config` through a port of git's own `config.c` lexer — section headers, quoted subsections with escapes, the legacy `[remote.Name]` form lowercased, comments, continuation lines — and byte-sorted and de-duplicated exactly as `git remote` prints them. It declines, and `git remote` is spawned instead, for every shape the file cannot answer: any `GIT_CONFIG*` variable in the process, an `include`/`includeIf` section, `extensions.worktreeConfig`, an unreadable or malformed file, and a global or system config that defines a remote (probed once per process with `git config --includes`, re-keyed on the global files' mtime; an `includeIf` there means permanent fallback, since it can only be answered from inside the matching repo). `common_dir` follows a linked worktree's `commondir` pointer, which is where a worktree's remotes actually live. Likewise `has_commits` — which anchors every diff at `HEAD` or the empty tree and gates the first history page — reads `HEAD` and then the loose ref or the `packed-refs` line it names, and falls back to `git rev-parse --verify HEAD` for a reftable ref store, a symbolic-ref chain or a torn ref file. Each of these has an equivalence test per shape that asserts *which* path answered and that the answer matches git's, because a silent regression to the spawn would still be correct and is the whole thing being removed.
 
-Merge state: `RepoStatus.merging` is `MERGE_HEAD`'s existence in the repo's git
-directory, resolved by `git_dir` — a **filesystem** answer, not a git one.
-`<repo>/.git` is either the directory itself or, for a linked worktree or a
-submodule, a one-line `gitdir: <path>` pointer; reading it costs no subprocess,
-which is what lets the status poll carry the flag for free. `git rev-parse
---git-dir` stays as the fallback for shapes that file can't describe (a bare
-repo, or a path somewhere inside the work tree rather than at its root). Folding
-it into the status is what removed a per-tick subprocess *and* the class of bug
-where one refresh path forgot to ask; there is deliberately no separate
-"is merging" command, because a second route to the same answer is how they
-diverge. Covered by `status_reports_a_merge_in_progress_and_its_end` and
-`merge_state_resolves_through_a_worktree_git_file`.
+Operation in progress: `RepoStatus.operation` is an
+`Option<OperationInProgress>` — `Merge`, `Rebase`, `CherryPick`, `Revert` — read
+by `operation::in_progress` from the files git keeps in the repo's git directory,
+which `git_dir` resolves — a **filesystem** answer, not a git one. `<repo>/.git`
+is either the directory itself or, for a linked worktree or a submodule, a
+one-line `gitdir: <path>` pointer; reading it costs no subprocess, which is what
+lets the status poll carry the field for free, and it is as true of an operation
+begun in a terminal as of one begun here. `git rev-parse --git-dir` stays as the
+fallback for shapes that file can't describe (a bare repo, or a path somewhere
+inside the work tree rather than at its root). It is one field rather than a
+flag per operation because flags that can disagree are how a header ends up
+claiming a clean branch mid-rebase, and there is deliberately no separate "is
+anything in progress" command, because a second route to the same answer is how
+they diverge. The probe order is load-bearing, each rung checked against git:
 
-HEAD identity: `# branch.head` reading `(detached)` sets `RepoStatus.detached` (and leaves `branch` empty) so the UI can distinguish a detached HEAD from a still-loading status; `# branch.oid` yields `head_sha` for free (no extra `rev-parse`), or stays empty for an unborn branch (`(initial)`). The branch chip shows `Detached at <short-sha>` — the native chip's own label (`BranchMenu.swift:160`), which reports the state in the control rather than in a separate badge beside it — and the sync button disables itself while detached; the History "Check Out Commit…" item is disabled on the current HEAD. Covered by `get_status_reports_branch_and_head_sha`.
+| Order | Probe (in the git dir) | Answer | Why here |
+| --- | --- | --- | --- |
+| 1 | `rebase-merge/` | Rebase | a rebase stopped on a `merge` line of its todo (`--rebase-merges`) also has `MERGE_HEAD`, and `git merge --abort` there strands the rebase |
+| 2 | `rebase-apply/` | Rebase — or **nothing** when `rebase-apply/applying` exists | that is `git am`; every `git rebase` command refuses there, so reporting a rebase would offer two buttons that can only fail |
+| 3 | `sequencer/todo`, first command word | `revert` → Revert, otherwise CherryPick | cherry-pick and revert share the sequencer and git does not keep them apart — `cherry-pick --abort` silently aborts a revert. The todo outlives `CHERRY_PICK_HEAD`: after a conflicted pick is committed by hand the head file is gone and the sequence is still open |
+| 4 | `REVERT_HEAD`, then `CHERRY_PICK_HEAD` | Revert, CherryPick | a single-commit revert or pick has no sequencer at all |
+| 5 | `MERGE_HEAD` | Merge | the only state none of the others can also be |
+
+`AUTO_MERGE` is never a signal: it exists after a `stash pop` conflict, which is
+an unmerged index with no operation open. Covered by
+`status_reports_a_merge_in_progress_and_its_end`,
+`status_reports_a_rebase_and_a_cherry_pick_in_progress_and_their_end`,
+`a_revert_is_not_mistaken_for_a_cherry_pick`,
+`a_hand_committed_pick_still_reads_as_a_cherry_pick_in_progress`,
+`an_am_in_progress_is_not_reported_as_a_rebase` and
+`git_dir_resolves_through_a_worktree_git_file`.
+
+**The two ways out live beside the probe, in
+[core/src/operation.rs](core/src/operation.rs), and dispatch on it.**
+`continue_operation` runs, in order — **both refusals before the first write, so
+an `Err` leaves the index exactly as it found it**: (1) **the marker check** —
+`git --literal-pathspecs diff --check -- <unmerged paths>` under `LC_ALL=C`, in
+batches of 500 paths because `git diff` takes no pathspec on stdin and a large
+conflicted merge must not outgrow the argument limit. It is read line by line
+for `: leftover conflict marker` rather than by exit status, because run bare it
+also reports trailing whitespace in any dirty file; a `fatal:` line is an `Err`,
+so a check that could not run never reads as "no markers". `--check` prints
+paths raw where `ls-files` quotes them, so a reported line is matched against
+the unmerged paths already in hand rather than parsed — exact whatever the name
+holds, colons included — and a flagged line no held path accounts for is refused
+as git wrote it. It looks at added lines only, so a fixture that legitimately
+contains marker text is not mistaken for a conflict, and a flagged line counts
+only when the worktree line opens or closes a conflict (`<<<<<<<` / `>>>>>>>`),
+because a bare `=======` is also a Markdown heading underline and a refusal
+nobody can get past is the worse failure; (2) **for a rebase only, the
+unstaged-edits check** — `git diff --name-only --ignore-submodules`, mirroring
+git's own `has_unstaged_changes(ignore_submodules)`, with the unmerged paths
+left out (`git diff` lists each of them, once per conflicted stage, and staging
+is what is about to happen to them), because `rebase --continue` refuses there
+with "You must edit all merge conflicts…", which names the wrong cause (a merge
+or a pick does not mind); (3) **staging** — `git_add` over exactly the paths
+`ls_files_unmerged` reported, never `git add -u`, which would sweep a file
+edited for some other reason into the replayed commit; a resolution that deleted
+the file is staged as its removal; (4) **the step** — `git <op> --continue` under
+`GIT_EDITOR=:`, so the replayed commit keeps its own message and nothing waits on
+a terminal that isn't there, or `--skip` when a pick or revert is stopped on a
+commit (`CHERRY_PICK_HEAD` / `REVERT_HEAD` exists) whose resolution left the
+index identical to `HEAD`. `--continue` refuses that case and asks for a
+decision, `--empty=keep` does not cover it (it is about commits that were empty
+to begin with), and a rebase in the same position drops the commit without
+asking; the index is asked (`git diff --cached --quiet`) rather than git's
+translated refusal matched. The answer is an `OperationOutcome` shaped like
+`MergeResult`: stopping on the next conflict is data, and only a refusal before
+git was asked is an `Err`. Its `skipped` flag says the step was a `--skip` —
+git drops the commit without a word, so both clients put
+"The resolution left nothing to commit, so the *cherry-pick* skipped that
+commit." in the notice banner, or a commit that never landed would read as one
+that did. `abort_operation` is `git <op> --abort` and returns
+whatever git printed on success — nothing for a full rewind, and
+`You seem to have moved HEAD. Not rewinding` when a multi-commit pick had a
+hand-made commit in the middle, in which case git clears the sequence and keeps
+HEAD. The core never resets over commits the user made themselves. Covered by
+the `continue_*`, `a_continue_that_conflicts_again_is_data`,
+`a_pick_resolved_to_nothing_is_skipped_and_the_sequence_goes_on` and
+`abort_after_a_hand_made_commit_…` tests, and end to end through the bridge by
+`operation_flow_names_refuses_and_continues_a_cherry_pick`.
+
+**`git_add` is literal.** It runs `git --literal-pathspecs add
+--pathspec-from-file=-`, for the ordinary commit path as much as for a continue:
+the paths are file names, and as pathspecs `weird[1].txt` is a glob that would
+also stage a modified `weird1.txt`. A directory and an embedded repository still
+stage as before — literal only turns the glob characters off.
+
+**The git floor** is [core/src/git_version.rs](core/src/git_version.rs):
+`FLOOR` is 2.45 (the newest flag the history-rewrite plan relies on,
+`cherry-pick --empty=keep`), `GitVersion::parse` reads the leading numbers of
+the third word of `git --version` so every vendor's decoration parses
+(`2.54.0 (Apple Git-157)`, `2.46.0.windows.1`, `2.47.0-rc1`, `2.54.GIT`),
+`installed()` asks once per process and remembers only a successful answer, and
+`require_floor()` is the one-sentence refusal naming both versions. There is no
+degraded mode and no second spelling of any flag. Nothing calls
+`require_floor()` yet: `continue` and `abort` use no flag that young, and the
+history-rewrite preflight is its first caller.
+
+**In the clients the operation is one table of words and one swapped button.**
+[utils/operationWords.ts](apps/tauri-app/src/lib/utils/operationWords.ts) and
+`Services/OperationWords.swift` give each `OperationInProgress` its noun, Title
+Case and gerund, and the chip suffix, the abort item, its confirmation and the
+composer all read from it — a `switch` per site is how a fifth site comes to
+show a rebase as a merge. Both also hold the one rule `continuesFromComposer`
+(everything but a merge). The abort confirmation is worded from the operation
+captured when it opened (`abortTarget` in `MainLayout.svelte`, `pendingAbort` in
+`BranchMenu.swift`), so a status poll landing underneath cannot reword the
+question; core aborts whatever is open when it is answered. Continue is owned by
+the composer's own lock, the one a commit takes — `isContinuing` folded into
+`isCommitInProgress` in `CommitMessage.svelte`, `CommitStore.continueOperation`
+running under `isCommitting` natively — and answers through the owner:
+`onOperationContinued` → `reloadAfterBranchChange` (status, history and
+branches, since finishing a rebase re-attaches HEAD), and natively
+`ChangesSidebar.continueOperation` → `onCommitted` then `onFailure`. The native
+answer is an `OpOutcome`, so a busy refusal re-reads and reports nothing.
+`BranchMenu.menuLabel` appends the suffix to whatever `placeLabel` says —
+including `Detached at <sha7>`, since a rebase detaches HEAD for as long as it
+runs — and both clients ask about the operation before the detached HEAD when
+explaining why Merge is unavailable, for the same reason.
+
+HEAD identity: `# branch.head` reading `(detached)` sets `RepoStatus.detached` (and leaves `branch` empty) so the UI can distinguish a detached HEAD from a still-loading status; `# branch.oid` yields `head_sha` for free (no extra `rev-parse`), or stays empty for an unborn branch (`(initial)`). The branch chip shows `Detached at <short-sha>` — the native chip's own label (`BranchMenu.placeLabel`), which reports the state in the control rather than in a separate badge beside it — and the sync button disables itself while detached; the History "Check Out Commit…" item is disabled on the current HEAD. Covered by `get_status_reports_branch_and_head_sha`.
 
 Sync proposal: `RepoStatus.proposal` is `sync_proposal(&status)` — the precedence
 ladder (detached → publish repository → publish branch → pull → push → fetch) as a
@@ -1490,7 +1605,7 @@ rejected state has no way to be proposed. `get_status` is a thin wrapper around
 `read_status` that fills the field once, on the single exit — the read itself has
 three returns, and an early one that forgot is exactly the bug the field exists to
 remove. It rides the status rather than answering a separate command for the same
-reason `merging` does, plus one the Tauri host feels directly: a command would be
+reason `operation` does, plus one the Tauri host feels directly: a command would be
 an IPC crossing per poll tick, carrying the whole file list up, to run six
 comparisons. `SyncProposal::Loading` is what an unfilled status maps to (empty
 branch, not detached), which is also what each client holds before its first read —

@@ -35,9 +35,9 @@ static-linking or a local daemon (that decision is open; see the plan).
   Frontends never re-derive git state the core already returns (e.g. file status
   categories, ahead/behind, merge conflicts).
 - Today's surface: **4 events, ~45 DTOs**, and a command catalogue (§3) each host exposes
-  **to the extent it consumes it**. The Tauri host registers **70** `#[tauri::command]`s,
+  **to the extent it consumes it**. The Tauri host registers **71** `#[tauri::command]`s,
   each with a wrapper in `apps/tauri-app/src/lib/api/commands.ts`; the UniFFI bridge
-  exports **70** functions. The two sets are deliberately not identical, and a command
+  exports **71** functions. The two sets are deliberately not identical, and a command
   reaching one host does not oblige the other — what is required is that the difference be
   recorded, here or in §8, never left silent.
   - No native export: `check_auth`, `generate_patch`, `generate_inverse_patch`,
@@ -188,18 +188,33 @@ whole window, and that read is exactly the one that can land mid-rewrite.
 | `get_push_remote` | `repoPath, branch` | `string \| null` |
 | `get_repo_identifier` | `repoPath` | `RepoIdentifier \| null` |
 
-### 3.7 Git — merge — 5
+### 3.7 Git — merge — 4, and the operation in progress — 2
 | Command | Args | Returns |
 |---|---|---|
 | `merge_branch` | `repoPath, branch` | `MergeResult` |
 | `merge_squash` | `repoPath, branch` | `MergeResult` |
 | `commit_squash_merge` | `repoPath` | `void` |
-| `merge_abort` | `repoPath` | `void` |
 | `count_commits_to_merge` | `repoPath, targetBranch` | `number` |
+| `continue_operation` | `repoPath` | `OperationOutcome` |
+| `abort_operation` | `repoPath` | `string \| null` |
 
-`RepoStatus.merging` answers "is a merge in progress" on every refresh, so
-there is no separate command for it — a second route to the same answer is how
-one refresh path came to forget to ask.
+`RepoStatus.operation` answers "is a merge, rebase, cherry-pick or revert in
+progress" on every refresh, so there is no separate command for it — a second
+route to the same answer is how a refresh path comes to forget to ask. The two
+commands act on whatever it names, and both refuse when it names nothing.
+
+`continue_operation` stages **only the paths git reports as unmerged** and
+carries on under the replayed commit's own message. It **refuses** — an error,
+nothing touched — while one of those files still holds a `<<<<<<<` or `>>>>>>>`
+marker, naming the files, and, for a rebase, while another tracked file has
+unstaged edits (git refuses that itself, by claiming there are conflicts).
+Stopping on the *next* conflict is data, as it is for a merge: `success` false,
+git's text, the conflicted paths. A pick or revert resolved to nothing is
+skipped, which is what a rebase does with one.
+
+`abort_operation` rewinds exactly as far as git does. Its string is git's own
+words when the abort worked but was not a full rewind — HEAD was moved by hand
+in the middle of a sequence — and is shown as a notice, not as a failure.
 
 ### 3.8 Git — discovery / init / clone — 7
 | Command | Args | Returns |
@@ -336,9 +351,9 @@ codegen decision is open (plan §10.7).
 ### 5.2 Structures by domain
 | Domain | Types (key fields) |
 |---|---|
-| Working tree / status | `FileEntry` (path, status, xy, display_name, display_dir, embedded, submodule_dirty, stat_stamp — an opaque mtime+size string so a status comparison sees content edits; compare, never parse); `RepoStatus` (branch, upstream, ahead, behind, files[], has_remote, unpushed_shas[], detached, head_sha, merging, proposal — the sync ladder's answer, carried here for the same reason `merging` is: every refresh path renders it, and a second route to it is how the two clients' ladders drifted); `FileStatusStyle` (status, letter, label — the glyph table, fetched once; colour is per-platform); `DiscardPlan` (restore[], trash[]) |
+| Working tree / status | `FileEntry` (path, status, xy, display_name, display_dir, embedded, submodule_dirty, stat_stamp — an opaque mtime+size string so a status comparison sees content edits; compare, never parse); `RepoStatus` (branch, upstream, ahead, behind, files[], has_remote, unpushed_shas[], detached, head_sha, operation — the `OperationInProgress` the repository is stopped in, or null — and proposal — the sync ladder's answer, carried here for the same reason `operation` is: every refresh path renders it, and a second route to it is how the two clients' ladders drifted); `FileStatusStyle` (status, letter, label — the glyph table, fetched once; colour is per-platform); `DiscardPlan` (restore[], trash[]) |
 | History | `CommitInfo` (sha, short_sha, summary, body, author, committer, parents[], trailers[], co_authors[], body_without_coauthors, tags[]); `CommitStats` (additions, deletions); `CommitDetail` (files[], stats) |
-| Branches / remote | `BranchInfo` (name, is_remote, is_current); `AheadBehind`; `RepoSync` (ahead, behind, has_remote, fetched, dirty); `RepoIdentifier` (owner, name); `MergeResult` (success, fast_forward, conflicts[], error_message?) |
+| Branches / remote | `BranchInfo` (name, is_remote, is_current); `AheadBehind`; `RepoSync` (ahead, behind, has_remote, fetched, dirty); `RepoIdentifier` (owner, name); `MergeResult` (success, fast_forward, conflicts[], error_message?); `OperationInProgress` (enum: `Merge`, `Rebase`, `CherryPick`, `Revert`); `OperationOutcome` (success, conflicts[], error_message?, skipped) |
 | Diff | `DiffLine` (content, line_type, line numbers, `intra_line_diff: IntraLineRange`, and `text?` — the raw patch line, present only on `Hunk` and `NoNewline` rows, which are the only ones that read it); `IntraLineRange`, `HunkHeader`, `Hunk`, `FileDiff` (old_path, new_path, file_header, hunks[], is_binary); `SbsPair`; `DiffOptions` (html, side_by_side, show_anyway); `ParsedDiff` (file_diff, html[], sbs_pairs[], additions, deletions, empty_reason?, size_guard?); `EmptyDiffReason` (`NoChanges`/`WhitespaceOnly`/`NoTextualChanges`); `DiffSizeGuard` (reason, bytes, longest_line); `Token` (start, end, class: `TokenClass`) / `TokenLine` — the structured highlight layer under the HTML (§7); `DiffSelection` |
 | Commit composer | `CommitMessage` (title, description); `Exclusion` (path, absent_ms, absent_reads — how long and over how many consecutive status reads an opt-out's path has been missing from the file list; both zero while it is present, and §6.4's window needs both to expire) |
 | Config / persistence | `Config` (theme, fetch_interval_ms, ai_provider, auto_fetch, syntax_highlighting, scan_paths[], scan_depth, side_by_side_diff, hide_whitespace, tab_size, terminal_shell?, then the `claude` and `ollama` tables — **nothing scalar may follow them**, since a TOML table swallows every key after it); `ClaudeConfig` (model?, timeout_secs); `OllamaConfig` (model?, server_url, timeout_secs); `ConfigPatch` (every field optional — absent means "leave it alone", `""` means "clear it"); `Bounds`/`ConfigBounds`; `ReposState`; `ReposStatePatch` |
@@ -782,11 +797,35 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    message is git's. A refused merge belongs to §6.13's **first** class, not its dialog
    refinement: it has already changed the repository, and pressing the same button again
    cannot resolve a conflict — the work continues in the changes list, where the
-   conflicted files are. **Abort is offered only while `RepoStatus.merging`**, the one
-   action with no meaning outside that state, and it is what makes a merge begun in a
-   terminal escapable from the app. Every branch action that moves HEAD reloads status,
-   history *and* the branch list, and drops amend mode with them: the commit the
-   composer was amending is no longer HEAD, and may not be on this branch at all.
+   conflicted files are. **Abort is offered only while `RepoStatus.operation` is set,
+   and is named for it** — *Abort Merge…*, *Abort Rebase…*, *Abort Cherry-pick…*, *Abort
+   Revert…* — the one action with no meaning outside that state, and what makes an
+   operation begun in a terminal escapable from the app. Merge is withheld for as long,
+   and says so before it says anything about a detached HEAD, since a rebase detaches
+   HEAD itself. The confirmation is worded when it opens and `abort_operation` acts on
+   whatever is open when it is answered; a string back from it is a §6.13 notice.
+   **While the operation is a rebase, cherry-pick or revert, the composer continues
+   instead of committing:** the fields and Generate lock under one line saying why, and
+   the primary button — and its ⌘↩ / Ctrl+Enter — becomes **Continue Rebase** (or
+   *Cherry-pick*, *Revert*), calling `continue_operation`. It ignores the checkboxes and
+   never goes near `commit`, whose index reset would throw the replayed commit's own
+   staged changes away. It is **enabled while files still read as conflicted**, because
+   a resolved file stays unmerged until it is staged and staging it is what Continue
+   does; core is what can tell a resolved file from one still holding markers, and
+   refuses by name. Every answer other than a busy refusal reloads status and history,
+   then a refusal or a further conflict takes the §6.13 modal — git's text runs to
+   several lines, and the work it points at is in the file list. A refusal has staged
+   nothing. An outcome with `skipped` set also raises a §6.13 notice, in these words:
+   "The resolution left nothing to commit, so the *cherry-pick* skipped that commit." —
+   git drops such a commit silently, and a commit that never landed must not read as
+   one that did. A merge keeps the
+   ordinary Commit button: concluding one *is* a commit, with a message the user
+   writes. Every branch action that moves HEAD reloads status,
+   history *and* the branch list. **Amend mode ends when a status lands whose
+   `head_sha` is not the commit being amended** — one rule on the status read, not a
+   clear per action, so it also covers a continued or aborted operation and a commit
+   made in a terminal: the commit the composer was amending is no longer HEAD, and
+   may not be on this branch at all.
    How the menu is *shaped* is presentation (§8).
 15. **Settings apply as they are changed.** There is no Save button in either client
    and nothing to cancel: a discrete control (checkbox, picker) writes on the click, a
@@ -964,7 +1003,7 @@ every deliberate difference here.
 | Scrollbars | one rule on `*` in `app.css` — `scrollbar-width: thin`, `scrollbar-color: var(--border-strong) transparent` — and no `::-webkit-scrollbar` anywhere, since either standard property disables that vocabulary outright. Overlay everywhere is the target, and neither platform gets it from CSS. **Linux:** WebKitGTK paints overlay scrollbars by default and honours `scrollbar-color` from 2.52.3, so the thumb is the app's neutral grey; Adwaita branches only on `ScrollbarWidth::None`, so `thin` sets no thickness and the scroller keeps GTK's own width. That the Adwaita theme is the one in play at all is wry's doing, not a given: on GTK3 the native theme is `ScrollbarThemeGtk`, which paints through GTK gadgets and knows nothing of `scrollbar-color`, and delegates to Adwaita only while system appearance is off — which wry sets (`set_use_system_appearance_for_scrollbars(false)`). A wry release that changed its mind would cost Linux the thumb colour silently. **Windows:** WebView2's Fluent scrollbars take a column by default, so overlay is requested at the embedder — `"scrollBarStyle": "fluentOverlay"` on the `main` window — which needs runtime 125.0.2535.41+ and is silently ignored below it. That fallback is why `.rows-viewport` keeps `scrollbar-gutter: stable`: inert under overlay, and under classic scrollbars it stops the file list shifting sideways as it grows past the viewport | stock `ScrollView`/`List` with nothing styled — no `.scrollIndicators`, no custom scrollbar — so macOS's own overlay scrollbars are what draw, which is the behaviour the other two are chasing |
 | Terminal scrollbar | outside the rule above, unavoidably: `@xterm/xterm` draws its own scrollbar in JS as a VS Code scrollable element, so no CSS scrollbar property reaches it. Auto-fading overlay — the right behaviour — at xterm's 14 px width, in a colour xterm derives as the emulator's foreground grey at 20 % because the client sets only `background` and `foreground` on `ITheme`; overriding it would mean setting `ITheme`'s `scrollbarSlider*` keys rather than any CSS. Identical on both engines, since it is `<div>`s and opacity | SwiftTerm draws a real AppKit `NSScroller`, whose `scrollerStyle` the client leaves at SwiftTerm's `.overlay` default, so the native terminal floats a system scroller like every other pane |
 | Commit-list place across a tab round trip (§6.8) | both panes stay mounted behind the tab bar, so the scroller keeps its exact offset — paid for with two live subtrees and a tick that must test its own visibility | the pane is removed and rebuilt, and a `ScrollViewReader` scrolls back to the hoisted selected sha. A row id survives a log refresh where a pixel offset does not — the list may have grown a page or lost the selected commit meanwhile — but it restores the *selection*, so a deep scroll made without selecting anything still returns to the top |
-| Detached / merging markers (§6.14) | an icon swap plus two badges beside the branch chip | both ride the branch chip's own label, since the toolbar has no room for a second control: `Detached at <sha>`, and a `· merging` suffix in the conflicted-file colour, which is also the first thing macOS truncates when the toolbar narrows |
+| Detached / operation markers (§6.14) | both ride the branch chip's own label: `Detached at <sha>`, and a `· merging` / `· rebasing` / `· cherry-picking` / `· reverting` suffix in the conflicted-file colour — on the detached label too, which is where a rebase shows | the same label and the same suffix, since the toolbar has no room for a second control; the suffix is also the first thing macOS truncates when the toolbar narrows |
 | Pane geometry persistence | `localStorage` (sidebar width, composer height, commit-files width) | `UserDefaults` (composer height, `commitComposerHeight`); sidebar and commit-files widths are per-session |
 | Window frame persistence | `tauri-plugin-window-state` saves size and position on exit and restores them at launch; the `tauri.conf.json` size is the first-run default | AppKit frame autosave on the `Window`, with `.defaultSize` as the first-run default |
 | Settings surface (§6.15) | a modal overlay inside the one window, with a header ✕ and a footer **Close** — there is nothing to save, so the button only dismisses | the stock SwiftUI `Settings` scene, a separate window with ⌘, and the standard title-bar close and no content buttons at all; a text field also commits on `.onDisappear` |

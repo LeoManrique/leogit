@@ -5,6 +5,7 @@ import type {
   CommitStats,
   BranchInfo,
   DiffSelection,
+  OperationInProgress,
   ParsedDiff,
   SyncProposal,
 } from '$lib/api/commands'
@@ -19,7 +20,8 @@ export interface RepoStatus {
   ahead: number
   behind: number
   files: FileEntry[]
-  isMerging: boolean
+  /** The operation the repository is stopped in the middle of, if any. */
+  operation: OperationInProgress | null
   /** Whether the repo has any configured remote. False → offer "Publish to GitHub". */
   hasRemote: boolean
   /** SHAs of commits the user still needs to push, used to mark History rows. */
@@ -157,7 +159,7 @@ const defaultStatus: RepoStatus = {
   ahead: 0,
   behind: 0,
   files: [],
-  isMerging: false,
+  operation: null,
   hasRemote: false,
   unpushedShas: new Set(),
   detached: false,

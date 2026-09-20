@@ -7,7 +7,7 @@ A calm desktop Git client over one Rust core: native SwiftUI on macOS, Tauri 2 a
 - **Stage and commit** via a checkbox file list with live diffs — unified or side by side, switched from the diff's own header and remembered (native syntect syntax highlighting, optional whitespace-hidden). Shift-click or shift-arrow to select several rows, Space to include or exclude the lot, and a tri-state header checkbox that says how many of them are going in. Right-click a file to discard it — one row or a whole selection, and never-committed files go to the Trash, not oblivion — add it or its extension to `.gitignore`, copy its path, or hand it to Finder.
 - **AI commit messages** generated from the selected diff via the local `claude` CLI or a self-hosted Ollama instance. Each provider keeps its own model, so switching between them never needs a Settings trip.
 - **Browse history** with a virtualized commit list — keyboard-navigable, the newest commit selected for you — plus per-commit file diffs, SHA and tag copy, and checkout of any past commit (detached HEAD). Right-click the last commit to amend it (its message and co-authors reload into the composer) or undo it, keeping its changes.
-- **Manage branches** from one menu in both clients — switch, create, delete, and **merge** (regular or squash, with a commit-count preview, conflicts reported as git wrote them, and an abort that is reachable even for a merge you started in the terminal). The list is re-read whenever the menu opens, so a branch made outside the app is there.
+- **Manage branches** from one menu in both clients — switch, create, delete, and **merge** (regular or squash, with a commit-count preview, conflicts reported as git wrote them). A merge, rebase, cherry-pick or revert that stops on a conflict — started here or in a terminal — is named in the header, continued from the composer once the files are resolved, and aborted from the branch menu. The list is re-read whenever the menu opens, so a branch made outside the app is there.
 - **Sync from one adaptive button** whose face is whatever the repository needs next — Publish, Publish Branch, Pull, Push, Fetch — with both ahead-behind counts on it, live transfer progress (an in-button fill plus git's own `Writing objects… MiB/s` line in the header), Fetch and force-push-with-lease (only on a genuinely diverged branch) under its chevron, and the same ladder on ⌘P. Or **publish a remote-less repo to GitHub** in one click via the GitHub CLI.
 - **Embedded terminal** docked under the diff pane (⌃`), running the user's `$SHELL` in the repo directory — links open on ⌘/Ctrl-click, `vim` and `tmux` can set the system clipboard through OSC 52 (never read it), and nothing the shell prints is lost, including a shell that dies on its own startup file.
 - **Auto-fetch** + a status poll that keeps the UI in sync with anything the user does in another terminal, on a cadence that follows the window: 2 s while you are in it, slower while you are not, and nothing at all published when nothing changed.
@@ -15,7 +15,7 @@ A calm desktop Git client over one Rust core: native SwiftUI on macOS, Tauri 2 a
 
 ## Requirements
 
-- `git` and (optionally) `gh` in `$PATH`.
+- `git` 2.45 or newer and (optionally) `gh` in `$PATH`.
 - macOS 26+, Ubuntu 20.04+, or Windows 10+.
 - Node.js 18+ and `pnpm` for development.
 - Rust 1.85+ for building from source (the workspace is on the 2024 edition).
@@ -83,7 +83,7 @@ logic — only the marshaling differs. It needs Xcode and `brew install xcodegen
 `just mac-run`. It currently covers open a repo → changes with per-file syntax-highlighted
 diffs → commit (multi-select checkbox file list + message composer, AI-generated messages via the claude
 CLI or Ollama sharing the Tauri client's config) → branches (switch / create / delete
-and merge or squash-merge, with conflict + abort handling) → sync (pull / push / fetch with
+and merge or squash-merge, plus continue / abort for any stopped operation) → sync (pull / push / fetch with
 live transfer progress, publish-branch first push, force-push-with-lease, and one-click
 publish of a remote-less repo to GitHub, plus auto-fetch, status polling, and resync
 on app re-activation) → history → an embedded terminal (SwiftTerm, ⌃` to toggle, fed by

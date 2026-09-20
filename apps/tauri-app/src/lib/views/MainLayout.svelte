@@ -46,6 +46,7 @@
     type EmptyDiffReason,
     type LaunchTarget,
     type MergeResult,
+    type OperationInProgress,
     type ParsedDiff,
     type RepoStatus as GitStatus,
   } from '$lib/api/commands'
@@ -65,6 +66,7 @@
   } from '$lib/services/backgroundPolicy'
   import { pacedLoop } from '$lib/services/pacedLoop'
   import { activeKey, reseated, type ListSelection } from '$lib/utils/listSelection'
+  import { operationWords } from '$lib/utils/operationWords'
 
   import Header from '$lib/components/Header.svelte'
   import Icon from '$lib/components/Icon.svelte'
@@ -118,7 +120,7 @@
     Where a picker hangs. The native repo chip presents an `NSPopover`
     (`RepoSwitcher.swift:44`): centred on the chip, an arrow pointing back at
     it, no scrim. The native branch chip is a pull-down `Menu`
-    (`BranchMenu.swift:56`), which AppKit hangs from the control's leading edge
+    (`BranchMenu.swift`), which AppKit hangs from the control's leading edge
     with no arrow. Each surface here takes its counterpart's geometry — the
     branch popover's *shape* is a recorded divergence (FRONTEND.md §8); its
     placement never was.
@@ -614,7 +616,7 @@
             ahead: status.ahead,
             behind: status.behind,
             files: status.files,
-            isMerging: status.merging,
+            operation: status.operation,
             hasRemote: status.has_remote,
             unpushedShas: new Set(status.unpushed_shas ?? []),
             detached: status.detached,
@@ -626,6 +628,15 @@
           activeFile: activeFileGone ? null : s.activeFile,
           activeFileDiff: activeFileGone ? null : s.activeFileDiff,
           isDiffLoading: activeFileGone ? false : s.isDiffLoading,
+          // Amend rewrites HEAD, so the mode lasts only while HEAD is the
+          // commit it was armed on. Decided here, on every status that lands,
+          // so it is one rule for every way HEAD moves — a switch, a merge, a
+          // continued or aborted operation, a commit made in a terminal —
+          // rather than a clear at each call site.
+          commitToAmend:
+            s.commitToAmend !== null && s.commitToAmend.sha !== status.head_sha
+              ? null
+              : s.commitToAmend,
           error: opts.silent ? s.error : undefined,
           // Any successful read proves the repository is back, so the banner
           // goes whoever asked for the read. Only the background path *sets*
@@ -1854,7 +1865,9 @@
   let mergeCommitCount = $state<number | null>(null)
   /** Branch pending a delete confirmation; null when it is closed. */
   let deleteTarget = $state<string | null>(null)
-  let showAbortMerge = $state(false)
+  /** The operation the abort confirmation is asking about; null when closed. */
+  let abortTarget = $state<OperationInProgress | null>(null)
+  const abortWords = $derived(abortTarget ? operationWords(abortTarget) : null)
 
   /**
    * Open the branch popover, re-reading the list on the way.
@@ -1870,17 +1883,12 @@
   }
 
   /**
-   * Post-op reload for anything the branch menu does that moves HEAD — a
-   * switch, a create-and-switch, a merge, an abort. Status, history and the
-   * branch list together.
-   *
-   * These handlers used to call `refreshStatus()` and then `handleCommitted()`,
-   * which reads status a second time and throws the first read away.
+   * Post-op reload for anything that moves HEAD between branches or along
+   * one — a switch, a create-and-switch, a merge, a continued or aborted
+   * operation. Status, history and the branch list together, from one status
+   * read; amend mode ends with it when HEAD really moved (see `refreshStatus`).
    */
   async function reloadAfterBranchChange(): Promise<void> {
-    // Amend targets HEAD, and HEAD just moved — quite possibly onto a branch
-    // where the commit being amended doesn't exist at all.
-    repoState.update((s) => ({ ...s, commitToAmend: null }))
     await Promise.all([reloadAfterHeadMove({ silent: true }), refreshBranches()])
   }
 
@@ -2027,30 +2035,33 @@
     }
   }
 
-  function requestAbortMerge(): void {
+  function requestAbort(): void {
     showBranches = false
-    showAbortMerge = true
+    abortTarget = $repoState.status.operation
   }
 
   /**
-   * Abort the merge in progress. Until now this client had no route to one at
-   * all: a merge started in the embedded terminal showed `MERGING` in the
-   * header with no way out of it that wasn't the terminal again.
+   * Abort the operation in progress — the way out of a merge, rebase,
+   * cherry-pick or revert, including one begun in the embedded terminal. Core
+   * aborts whatever is open *now*; `abortTarget` only words the question.
    */
-  async function abortMerge(): Promise<void> {
+  async function abortOperation(): Promise<void> {
     const repoPath = $appState.repoPath
     if (!repoPath || branchOp) return
     branchOp = 'abort'
     try {
-      await gitApi.mergeAbort(repoPath)
-      showAbortMerge = false
+      const said = await gitApi.abortOperation(repoPath)
+      abortTarget = null
       await reloadAfterBranchChange()
+      // Git did less than a full rewind and said why (HEAD was moved by hand
+      // mid-sequence). Worth reading, but the abort itself worked.
+      if (said) reportNotice(said)
     } catch (error) {
-      showAbortMerge = false
-      // A failed abort may still have unwound part of the merge, so reload
+      abortTarget = null
+      // A failed abort may still have unwound part of the operation, so reload
       // before saying so.
       await reloadAfterBranchChange()
-      reportActionError(error, () => void abortMerge())
+      reportActionError(error, () => void abortOperation())
     } finally {
       branchOp = null
     }
@@ -2441,6 +2452,7 @@
           <CommitMessage
             bind:this={composer}
             onCommitted={handleCommitted}
+            onOperationContinued={reloadAfterBranchChange}
             onStopAmending={handleStopAmending}
             onRunInTerminal={runInTerminal}
           />
@@ -2493,7 +2505,7 @@
     {#if $repoState.pollError}
       <div class="poll-banner" role="status">
         <!-- Filled, not outlined: every warning banner on the native side uses
-             `exclamationmark.triangle.fill` (`ContentView.swift:1055`), and the
+             `exclamationmark.triangle.fill` (`ContentView.swift`), and the
              outlined variant is reserved there for the full-pane
              `ContentUnavailableView` states. -->
         <Icon name="exclamationmark-triangle-fill" size={13} />
@@ -2823,13 +2835,13 @@
           branches={$repoState.branches}
           currentBranch={$repoState.status.branch}
           detached={$repoState.status.detached}
-          merging={$repoState.status.isMerging}
+          operation={$repoState.status.operation}
           busy={branchOp !== null}
           onSwitch={handleSwitchBranch}
           onCreate={handleCreateBranch}
           onRequestMerge={requestMerge}
           onRequestDelete={requestDeleteBranch}
-          onRequestAbortMerge={requestAbortMerge}
+          onRequestAbort={requestAbort}
           onClose={() => (showBranches = false)}
         />
       </div>
@@ -2870,22 +2882,24 @@
     </ConfirmDialog>
   {/if}
 
-  {#if showAbortMerge}
+  {#if abortWords}
+    {@const words = abortWords}
     <ConfirmDialog
-      title="Abort Merge?"
-      confirmLabel="Abort Merge"
+      title={`Abort ${words.title}?`}
+      confirmLabel={`Abort ${words.title}`}
       busyLabel="Aborting…"
       isBusy={branchOp === 'abort'}
       destructive
-      onConfirm={() => void abortMerge()}
+      onConfirm={() => void abortOperation()}
       onCancel={() => {
-        if (branchOp !== 'abort') showAbortMerge = false
+        if (branchOp !== 'abort') abortTarget = null
       }}
     >
       {#snippet body()}
-        <p>Abort the merge in progress?</p>
+        <p>Abort the {words.noun} in progress?</p>
         <p class="muted">
-          Conflict resolutions are discarded and the working tree returns to its pre-merge state.
+          Conflict resolutions are discarded, and the branch and working tree return to where they
+          were before the {words.noun}.
         </p>
       {/snippet}
     </ConfirmDialog>

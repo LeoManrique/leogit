@@ -610,7 +610,7 @@
     gap: 10px;
     /* 6 here on top of the scroller's own 6 puts a row's checkbox 12px from
        the pane's edge — exactly where the header above puts its select-all
-       checkbox (`ChangesSidebar.swift:241` pads that stack by 12). The two
+       checkbox (`ChangesSidebar.swift` pads that stack by 12). The two
        checkboxes are the leading item of their respective stacks and read as
        one column, so they have to start on the same line; splitting the 12
        across the two boxes is what leaves the rounded selection inset from the
@@ -708,7 +708,7 @@
     border-radius: 0;
   }
 
-  /* `.font(.caption)` at `ChangesSidebar.swift:236`, which on macOS — unlike
+  /* `.font(.caption)` at `ChangesSidebar.swift`, which on macOS — unlike
      iOS — is 10pt regular (`docs/plans/tauri-reskin.md` §10.2 P-19 reads the
      same pair off both clients). Smaller and lighter than the filenames it
      counts, which is what keeps it reading as a header rather than as the

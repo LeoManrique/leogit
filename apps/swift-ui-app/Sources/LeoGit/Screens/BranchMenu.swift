@@ -23,10 +23,14 @@ struct BranchMenu: View {
     /// switch resizes the leading cluster twice.
     let shown: ToolbarStatus
 
-    let isMerging: Bool
     /// Called after any operation that may move HEAD or touch the working
     /// tree (switch, create, merge, abort) — the owner reloads status/log.
     let onWorkingTreeChanged: () async -> Void
+
+    /// Something worth reading that is not a failure — §6.13's second class,
+    /// the screen's dismissible strip. An abort that worked but could not
+    /// rewind all the way says so here, in git's words.
+    let onNotice: (String) -> Void
 
     /// A branch operation the user was waiting on that failed — §6.13's first
     /// class. Reported rather than presented, for the reason `ChangesSidebar`
@@ -40,6 +44,10 @@ struct BranchMenu: View {
     @State private var mergeSource: MergeSource?
     @State private var pendingDelete: String?
     @State private var isConfirmingDelete = false
+    /// The operation the abort confirmation is asking about. Held apart from
+    /// the live `operation` so the question keeps its wording if a status poll
+    /// lands while it is up; core aborts whatever is open when it is answered.
+    @State private var pendingAbort: OperationInProgress?
     @State private var isConfirmingAbort = false
 
     /// Current branch by name comparison against status, like the Tauri
@@ -51,6 +59,9 @@ struct BranchMenu: View {
     /// previous one was on.
     private var currentBranch: String { status?.branch ?? "" }
     private var isDetached: Bool { status?.detached ?? false }
+    /// The operation the repository is stopped in the middle of — live, like
+    /// everything else here that an item acts on.
+    private var operation: OperationInProgress? { status?.operation }
 
     /// This control's items as data, with every closure wired straight to the
     /// state beside it. The identical value is published to the menu bar from
@@ -62,7 +73,7 @@ struct BranchMenu: View {
             remoteBranches: store.remoteBranches,
             current: currentBranch,
             isDetached: isDetached,
-            isMerging: isMerging,
+            operation: operation,
             isBusy: store.isBusy,
             perform: perform
         )
@@ -123,13 +134,16 @@ struct BranchMenu: View {
             Text("Are you sure you want to delete “\(name)”? Unmerged commits are lost.")
         }
         .confirmationDialog(
-            "Abort Merge?",
-            isPresented: $isConfirmingAbort
-        ) {
-            Button("Abort Merge", role: .destructive) { abortMerge() }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Conflict resolutions are discarded and the working tree returns to its pre-merge state.")
+            "Abort \(pendingAbort?.words.title ?? "Operation")?",
+            isPresented: $isConfirmingAbort,
+            presenting: pendingAbort
+        ) { operation in
+            Button("Abort \(operation.words.title)", role: .destructive) { abortOperation() }
+            Button("Cancel", role: .cancel) { pendingAbort = nil }
+        } message: { operation in
+            Text(
+                "Conflict resolutions are discarded, and the branch and working tree return to where they were before the \(operation.words.noun)."
+            )
         }
         // The same items chosen from the menu bar. They arrive as requests
         // rather than as calls because `BranchCommands` lives on the scene,
@@ -154,7 +168,10 @@ struct BranchMenu: View {
             isCreating = true
         case let .merge(branch):
             mergeSource = MergeSource(name: branch)
-        case .abortMerge:
+        case .abortOperation:
+            // Nothing to ask about if the operation ended since the menu drew.
+            guard let operation else { return }
+            pendingAbort = operation
             isConfirmingAbort = true
         case let .delete(branch):
             pendingDelete = branch
@@ -167,31 +184,38 @@ struct BranchMenu: View {
     /// renders (the repo name lives on the switcher chip).
     ///
     /// An `AttributedString` rather than a `String` for one reason: the
-    /// `· merging` suffix carries the merge colour, so the one state that
-    /// changes what half this menu's items *do* stops reading as more of the
-    /// branch name. It is still the first thing macOS truncates — a toolbar
-    /// label has the width it has — but a coloured run survives being clipped
-    /// far better than a grey one, and the conflicted files in the Changes
-    /// tab wear the same colour.
+    /// operation suffix (`· merging`, `· rebasing`, …) carries the conflict
+    /// colour, so the one state that changes what half this menu's items *do*
+    /// stops reading as more of the branch name. It is still the first thing
+    /// macOS truncates — a toolbar label has the width it has — but a coloured
+    /// run survives being clipped far better than a grey one, and the
+    /// conflicted files in the Changes tab wear the same colour.
     ///
-    /// Every state here — the detached label, the merge suffix, the name
+    /// The suffix rides the detached label as well as a branch name: a rebase
+    /// detaches HEAD for as long as it runs, so that is where it shows most.
+    ///
+    /// Every state here — the detached label, the operation suffix, the name
     /// itself — is drawn from `shown`, the held read, so none of them can drop
     /// to the bare "Branches" for the window in which the newly opened
     /// repository has no status.
     private var menuLabel: AttributedString {
-        if shown.isDetached {
-            if !shown.headSha.isEmpty {
-                return AttributedString("Detached at \(String(shown.headSha.prefix(7)))")
-            }
-            return AttributedString("Detached")
-        }
-        guard !shown.branch.isEmpty else { return AttributedString("Branches") }
-        var label = AttributedString(shown.branch)
-        guard shown.isMerging else { return label }
-        var suffix = AttributedString(" · merging")
-        suffix.foregroundColor = .merging
+        var label = AttributedString(placeLabel)
+        guard let operation = shown.operation else { return label }
+        var suffix = AttributedString(" · \(operation.words.gerund)")
+        suffix.foregroundColor = .conflict
         label.append(suffix)
         return label
+    }
+
+    /// Where HEAD is, in words: the branch, the detached commit, or the
+    /// control's own name before any status has landed.
+    private var placeLabel: String {
+        if shown.isDetached {
+            return shown.headSha.isEmpty
+                ? "Detached"
+                : "Detached at \(String(shown.headSha.prefix(7)))"
+        }
+        return shown.branch.isEmpty ? "Branches" : shown.branch
     }
 
     private func switchTo(_ branch: String) {
@@ -227,20 +251,24 @@ struct BranchMenu: View {
         }
     }
 
-    private func abortMerge() {
+    private func abortOperation() {
         Task {
-            let outcome = await store.abortMerge(repoPath: repoPath)
-            guard case .refusedBusy = outcome else {
-                // Success or not, MERGE_HEAD and the working tree may have
-                // changed — reload before surfacing any failure.
-                await onWorkingTreeChanged()
-                if case let .failed(message) = outcome {
-                    onFailure(ActionFailure(message))
-                }
+            let (outcome, said) = await store.abortOperation(repoPath: repoPath)
+            // A refused abort touched nothing, so there is nothing to re-read
+            // and the question stays up, as it does for a refused delete.
+            if case .refusedBusy = outcome {
+                isConfirmingAbort = true
                 return
             }
-            // A refused abort touched neither, so there is nothing to re-read.
-            isConfirmingAbort = true
+            pendingAbort = nil
+            // Success or not, git's state files and the working tree may have
+            // changed — reload before surfacing anything.
+            await onWorkingTreeChanged()
+            if case let .failed(message) = outcome {
+                onFailure(ActionFailure(message))
+            } else if let said {
+                onNotice(said)
+            }
         }
     }
 }
@@ -257,7 +285,7 @@ enum BranchAction: Sendable {
     case switchTo(String)
     case create
     case merge(String)
-    case abortMerge
+    case abortOperation
     case delete(String)
 }
 
@@ -269,7 +297,9 @@ struct BranchCommand {
     var remoteBranches: [BranchInfo]
     var current: String
     var isDetached: Bool
-    var isMerging: Bool
+    /// The operation in progress, if any — what Abort is named for, and why
+    /// Merge is withheld.
+    var operation: OperationInProgress?
     /// One branch operation runs at a time; a second would contend on
     /// `index.lock`. The items dim rather than silently refusing, so the menu
     /// bar says what the toolbar control's own `.disabled` already says.
@@ -353,10 +383,11 @@ struct BranchMenuContent: View {
                 Button("New Branch…") { command.perform(.create) }
                     .modifier(OptionalShortcut(key: "n", isActive: bindsShortcuts))
 
-                // Hidden mid-merge: git refuses a second merge over an
-                // unresolved one, so offering the submenu there is an
-                // invitation to a refusal. Abort takes its place below.
-                if !command.isDetached && !command.isMerging && !mergeCandidates.isEmpty {
+                // Hidden while an operation is open: git refuses a merge over
+                // an unfinished merge, rebase or pick, so offering the submenu
+                // there is an invitation to a refusal. Abort takes its place
+                // below, named for whatever is running.
+                if !command.isDetached && command.operation == nil && !mergeCandidates.isEmpty {
                     Menu("Merge into “\(command.current)”…") {
                         ForEach(mergeCandidates) { branch in
                             Button(branch.name) { command.perform(.merge(branch.name)) }
@@ -364,8 +395,10 @@ struct BranchMenuContent: View {
                     }
                 }
 
-                if command.isMerging {
-                    Button("Abort Merge…", role: .destructive) { command.perform(.abortMerge) }
+                if let operation = command.operation {
+                    Button("Abort \(operation.words.title)…", role: .destructive) {
+                        command.perform(.abortOperation)
+                    }
                 }
 
                 if !deletableBranches.isEmpty {

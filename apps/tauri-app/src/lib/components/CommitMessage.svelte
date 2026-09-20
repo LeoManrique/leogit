@@ -1,15 +1,26 @@
 <script lang="ts">
   import { untrack } from 'svelte'
   import { get } from 'svelte/store'
-  import { repoState, canCommit } from '$lib/stores/repo'
+  import { repoState, canCommit, reportActionError, reportNotice } from '$lib/stores/repo'
   import { appState } from '$lib/stores/app'
   import { gitApi, aiApi, configApi, type Config, type FileEntry } from '$lib/api/commands'
   import { config } from '$lib/stores/config'
   import { basename } from '$lib/utils/path'
+  import {
+    continuesFromComposer,
+    operationWords,
+    skippedNotice,
+  } from '$lib/utils/operationWords'
   import EmbeddedRepoConfirm from './EmbeddedRepoConfirm.svelte'
 
   interface Props {
     onCommitted?: () => void
+    /**
+     * A Continue ran, whatever it came to: the operation finished, stopped on
+     * the next conflict, or was refused. HEAD and the branch may both have
+     * moved, so the owner reloads status, history and branches.
+     */
+    onOperationContinued?: () => void | Promise<void>
     onStopAmending?: () => void
     /**
      * Run a shell command in the app's own terminal. Supplied by the view that
@@ -19,7 +30,7 @@
     onRunInTerminal?: (command: string) => void
   }
 
-  let { onCommitted, onStopAmending, onRunInTerminal }: Props = $props()
+  let { onCommitted, onOperationContinued, onStopAmending, onRunInTerminal }: Props = $props()
 
   let summary = $state('')
   let description = $state('')
@@ -31,6 +42,7 @@
   )
   let isGenerating = $state(false)
   let isCommitting = $state(false)
+  let isContinuing = $state(false)
   let error = $state<string | null>(null)
   let charCount = $derived(summary.length)
 
@@ -46,9 +58,21 @@
   // directly — past `canSubmit`. Without folding the pending state in here, the
   // composer stays live behind the dialog and Generate can still be started,
   // landing its result on a composer the confirmed commit has just cleared.
-  const isCommitInProgress = $derived(isCommitting || pendingFiles.length > 0)
+  //
+  // A Continue is the same lockout under another name: it writes commits too.
+  const isCommitInProgress = $derived(isCommitting || isContinuing || pendingFiles.length > 0)
+
+  // While a rebase, cherry-pick or revert is stopped, the composer has nothing
+  // to compose: the commits being replayed already carry their messages, and
+  // what the repository needs next is to be carried on. The words for that
+  // operation, or null when the composer is its usual self — a merge included,
+  // since concluding one *is* a commit with a message the user writes.
+  const continueWords = $derived.by(() => {
+    const operation = $repoState.status.operation
+    return operation && continuesFromComposer(operation) ? operationWords(operation) : null
+  })
   // Committing and generating share one busy treatment, as they do natively
-  // (CommitComposer.swift:60-62): the fields lock, and one spinner in the
+  // (CommitComposer.swift): the fields lock, and one spinner in the
   // button row stands for whichever of the two is running. Purely a display
   // condition — every gate below still asks its own question.
   const isBusy = $derived(isGenerating || isCommitInProgress)
@@ -85,7 +109,7 @@
   // single-file auto-summary. Also drives the input placeholder so the user
   // sees the message they'll commit before typing.
   const effectiveSummary = $derived(summary.trim() || autoSummary)
-  // "(required)" is the native composer's wording (CommitComposer.swift:80).
+  // "(required)" is the native composer's wording (CommitComposer.swift).
   // The disabled Commit button already carries the requirement, so the bare
   // noun was defensible — but the two clients shipped different words for one
   // control, and the reference is the one that decides.
@@ -101,7 +125,7 @@
   )
 
   // The Commit button names what it is about to do, in the native's wording and
-  // title case (CommitComposer.swift:314-323): the count spelled out, "File"
+  // title case (CommitComposer.swift): the count spelled out, "File"
   // singular at one. Zero drops the count rather than saying "Commit 0 Files" —
   // the button is disabled there anyway, and a count of nothing is not a
   // sentence. Amending names the rewrite instead of a count, because the file
@@ -209,13 +233,17 @@
   // in again." and "Failed to authenticate: OAuth session expired" are one
   // fact, and stacking both is what made this strip unreadable.
   const blockedDetail = $derived(blocked?.detail ?? '')
-  // The native's own fallback hint (CommitComposer.swift:110-111), with its
+  // The native's own fallback hint (CommitComposer.swift), with its
   // shortcut written the way this client's hosts write it.
   const generateHint = $derived(
     blockedReason || 'Generate a commit message from the checked files (Ctrl+G)',
   )
   const canGenerate = $derived(
-    !isGenerating && !isCommitInProgress && !blocked && $repoState.selectedFiles.size > 0,
+    !isGenerating &&
+      !isCommitInProgress &&
+      !continueWords &&
+      !blocked &&
+      $repoState.selectedFiles.size > 0,
   )
 
   /*
@@ -439,6 +467,42 @@
     }
   }
 
+  /**
+   * Carry the stopped operation on. Core stages the resolved conflicts itself
+   * and refuses while one still holds conflict markers, so this neither reads
+   * the checkboxes nor touches the index — the replayed commit's own staged
+   * changes are in there, and the commit path's reset would throw them away.
+   *
+   * Whatever it comes to is reported through the modal rather than the strip
+   * below, as a merge's refusal is: git's text runs to several lines, and the
+   * work it points at is in the file list, not in this box.
+   */
+  async function handleContinue() {
+    const repoPath = $appState.repoPath
+    if (!repoPath || !continueWords || isBusy) return
+    const words = continueWords
+
+    isContinuing = true
+    error = null
+    try {
+      const outcome = await gitApi.continueOperation(repoPath)
+      // Reload before reporting: a continue that stopped again has still
+      // written commits and left new conflicted files behind.
+      await onOperationContinued?.()
+      if (outcome.skipped) reportNotice(skippedNotice(words))
+      if (!outcome.success) {
+        reportActionError(
+          outcome.error_message || `The ${words.noun} stopped on another conflict.`,
+        )
+      }
+    } catch (err) {
+      await onOperationContinued?.()
+      reportActionError(err)
+    } finally {
+      isContinuing = false
+    }
+  }
+
   // A single-line <input> scrolls horizontally as the caret moves but ignores
   // wheel / trackpad gestures, so a long summary can't be swiped through. Map a
   // wheel delta onto scrollLeft (dominant axis, so both vertical scroll and a
@@ -463,7 +527,9 @@
 
   /** ⌘↩ / Ctrl+↩ from anywhere in the repo view. */
   export function requestCommit() {
-    if (canSubmit && !isCommitInProgress) handleCommit()
+    // The chord follows the button: while it reads Continue, so does ⌘↩.
+    if (continueWords) void handleContinue()
+    else if (canSubmit && !isCommitInProgress) handleCommit()
   }
 
   /** ⌘G / Ctrl+G from anywhere in the repo view. */
@@ -473,9 +539,21 @@
 </script>
 
 <div class="commit-message-container" role="form" aria-label="Commit message">
-  {#if isAmending}
-    <div class="amend-notice" role="status">
-      <span class="amend-notice-text">
+  {#if continueWords}
+    <!--
+      Why the fields are locked, said where they are. It takes the conflict
+      colour of the branch chip's suffix and the conflicted rows: all three are
+      one state.
+    -->
+    <div class="composer-notice operation" role="status">
+      <span class="composer-notice-text">
+        A <strong>{continueWords.noun}</strong> is in progress. Resolve the conflicted files, then
+        continue.
+      </span>
+    </div>
+  {:else if isAmending}
+    <div class="composer-notice" role="status">
+      <span class="composer-notice-text">
         Your changes will modify your <strong>most recent commit</strong>.
       </span>
       <button
@@ -497,7 +575,7 @@
       placeholder={summaryPlaceholder}
       bind:value={summary}
       maxlength="200"
-      disabled={isGenerating || isCommitInProgress}
+      disabled={isGenerating || isCommitInProgress || continueWords !== null}
       onwheel={handleSummaryWheel}
     />
     <span class="char-count" class:warning={charCount > 72}>{charCount}/72</span>
@@ -509,7 +587,7 @@
       class="description-input"
       placeholder="Description"
       bind:value={description}
-      disabled={isGenerating || isCommitInProgress}
+      disabled={isGenerating || isCommitInProgress || continueWords !== null}
     ></textarea>
   </div>
 
@@ -577,7 +655,7 @@
 
     <!--
       The spinner sits between the row's trailing edge and the Commit button,
-      where the native puts it (CommitComposer.swift:113-118). It is what lets
+      where the native puts it (CommitComposer.swift). It is what lets
       the button keep naming the commit while one is running instead of
       swapping its label out for "Committing…" — the label answers "what will
       this do?", which is still worth reading mid-flight, and the spinner
@@ -593,16 +671,33 @@
         override reading only "Commit" would hide that from a screen reader and
         put the accessible name at odds with the label on screen.
       -->
-      <button
-        class="commit-button"
-        onclick={handleCommit}
-        disabled={!canSubmit || isCommitInProgress}
-        title={isAmending
-          ? 'Rewrite the most recent commit (Ctrl+Enter)'
-          : 'Commit the checked files (Ctrl+Enter)'}
-      >
-        {commitLabel}
-      </button>
+      {#if continueWords}
+        <!--
+          Enabled while files still read as conflicted, on purpose: a resolved
+          file stays unmerged in the index until it is staged, and staging it
+          is what Continue does. Core is the one that can tell a resolved file
+          from one still holding markers, and it refuses by name.
+        -->
+        <button
+          class="commit-button"
+          onclick={handleContinue}
+          disabled={isBusy}
+          title={`Stage the resolved files and carry the ${continueWords.noun} on (Ctrl+Enter)`}
+        >
+          Continue {continueWords.title}
+        </button>
+      {:else}
+        <button
+          class="commit-button"
+          onclick={handleCommit}
+          disabled={!canSubmit || isCommitInProgress}
+          title={isAmending
+            ? 'Rewrite the most recent commit (Ctrl+Enter)'
+            : 'Commit the checked files (Ctrl+Enter)'}
+        >
+          {commitLabel}
+        </button>
+      {/if}
     </div>
   </div>
 </div>
@@ -620,7 +715,7 @@
 <style>
   /* 10px inset and an 8px rhythm between the rows: the native composer's
      `.padding(10)` and its `VStack(alignment: .leading, spacing: 8)`
-     (CommitComposer.swift:73, :133).
+     (CommitComposer.swift).
 
      No `border-top` of its own. The rule above the composer belongs to the
      resize handle, exactly as it does natively — there the handle *is* a
@@ -639,7 +734,7 @@
     box-sizing: border-box;
   }
 
-  .amend-notice {
+  .composer-notice {
     display: flex;
     align-items: baseline;
     gap: 6px;
@@ -651,12 +746,16 @@
     flex-shrink: 0;
   }
 
-  .amend-notice-text {
+  .composer-notice.operation {
+    border-left-color: var(--status-purple);
+  }
+
+  .composer-notice-text {
     flex: 1;
     min-width: 0;
   }
 
-  .amend-notice-text strong {
+  .composer-notice-text strong {
     color: var(--text-primary);
     font-weight: 500;
   }
@@ -682,9 +781,9 @@
   }
 
   /* The counter sits *beside* the field, not on top of it, and the 6px between
-     them is the native row's `HStack(spacing: 6)` (CommitComposer.swift:78).
+     them is the native row's `HStack(spacing: 6)` (CommitComposer.swift).
      Overlaying it inside the input is what the native deliberately refused to
-     do (CommitComposer.swift:143-146), and for a reason that applies just as
+     do (CommitComposer.swift), and for a reason that applies just as
      well here: a single-line input scrolls its own text under the caret, so a
      long summary ends up running underneath the digits counting it. */
   .summary-section {
@@ -702,7 +801,7 @@
   }
 
   /* macOS `.caption` with monospaced digits, in the tertiary rank
-     (CommitComposer.swift:148-153). `flex-shrink: 0` is that view's
+     (CommitComposer.swift). `flex-shrink: 0` is that view's
      `.fixedSize()`: the digits never compress, the field yields instead. */
   .char-count {
     flex-shrink: 0;
@@ -713,7 +812,7 @@
   }
 
   /* Advisory only, and only past git's conventional 72. Nothing is truncated
-     and nothing is blocked — the native says why (CommitComposer.swift:136-141):
+     and nothing is blocked — the native says why (CommitComposer.swift):
      a silent hard cap chops pasted and AI-generated summaries with no warning. */
   .char-count.warning {
     color: var(--status-orange);
@@ -760,7 +859,7 @@
 
      The inset is 4px down the top and 9px in from the leading edge, which is
      where the native editor puts its first character and its placeholder
-     (CommitComposer.swift:286, :294-296): a 4pt scroll-content margin on every
+     (CommitComposer.swift): a 4pt scroll-content margin on every
      side, plus the text view's own 5pt line-fragment padding on the two
      horizontal ones. */
   .description-input {
@@ -848,7 +947,7 @@
 
   /* 8px between every control in this row. Natively it is one
      `HStack(alignment: .center, spacing: 8)` with a `Spacer` doing the split
-     (CommitComposer.swift:94, :113), so the picker-to-Generate gap and the
+     (CommitComposer.swift), so the picker-to-Generate gap and the
      spinner-to-Commit gap are the same measure; the two groups here only exist
      to put the `Spacer` between them. */
   .button-bar {
@@ -866,7 +965,7 @@
   }
 
   /* The native's `ProgressView().controlSize(.small)`
-     (CommitComposer.swift:115-118), drawn with this codebase's own spinner ring
+     (CommitComposer.swift), drawn with this codebase's own spinner ring
      rather than the system's thinner arcs — so it is stepped below AppKit's
      16pt small indicator to carry the same visual weight beside a 23px button. */
   .commit-progress {
@@ -954,7 +1053,7 @@
 
   /* A disabled prominent button gives up the accent entirely, the way
      `.buttonStyle(.borderedProminent)` does under `.disabled(!canCommit)`
-     (CommitComposer.swift:123, :125). Fading the blue instead — which is all
+     (CommitComposer.swift). Fading the blue instead — which is all
      `opacity` can do — leaves a button that still reads as the accent-coloured
      thing you are meant to press, so the composer looked available with an
      empty summary and the click did nothing. Losing the fill is the signal;

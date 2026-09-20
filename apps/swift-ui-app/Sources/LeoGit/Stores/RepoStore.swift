@@ -56,14 +56,6 @@ final class RepoStore {
     /// the flash back on every ⌘R.
     private(set) var historyLoaded = false
 
-    /// Whether a merge is in progress (`MERGE_HEAD` exists) — drives the
-    /// branch chip's `· merging` suffix and the branch menu's Abort Merge item.
-    ///
-    /// Read straight off the status rather than asked for separately: every
-    /// refresh path needs it, one of them used to forget, and core answers it
-    /// from a file check that costs the poll nothing.
-    var isMerging: Bool { status?.merging ?? false }
-
     /// The dismissable banner line: an explicit read that failed, or something
     /// the app handed to the OS that didn't take. Cleared by its ✕ and by the
     /// next explicit load.

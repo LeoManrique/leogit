@@ -27,6 +27,11 @@ struct ChangesSidebar: View {
     /// same gate on the History side, and exists for the same sentence.
     let statusLoaded: Bool
 
+    /// The operation the repository is stopped in the middle of, if any. While
+    /// it is one that replays commits, the composer continues it rather than
+    /// committing.
+    let operation: OperationInProgress?
+
     /// Owned by the repository screen, not by this view: the tab bar swaps
     /// tabs by rebuilding the pane, which would take an in-progress draft —
     /// and amend mode, which the History tab is what puts the composer into —
@@ -144,7 +149,9 @@ struct ChangesSidebar: View {
                 includedCount: includedFiles.count,
                 autoSummary: CommitStore.autoSummary(for: includedFiles),
                 isConfirmationPending: isConfirmingEmbedded,
+                continuing: continuingWords,
                 onSubmit: submit,
+                onContinue: continueOperation,
                 onGenerate: generate,
                 onRunFixCommand: onRunInTerminal
             )
@@ -454,6 +461,34 @@ struct ChangesSidebar: View {
                 await onCommitted()
             }
             pendingFiles = []
+        }
+    }
+
+    /// The words for the operation the composer continues, or `nil` when it
+    /// composes as usual — no operation, or a merge, which a commit concludes.
+    private var continuingWords: OperationWords? {
+        guard let operation, operation.continuesFromComposer else { return nil }
+        return operation.words
+    }
+
+    /// Whatever it comes to is reported through the blocking sheet rather than
+    /// the composer's strip, as a merge's refusal is: git's text runs to
+    /// several lines, and the work it points at is in the file list above.
+    private func continueOperation() {
+        // Read now: once the reload lands the operation may be over, and its
+        // words gone with it.
+        let words = continuingWords
+        Task {
+            let (outcome, skipped) = await commitStore.continueOperation(repoPath: repoPath)
+            // Nothing was attempted, so there is nothing to re-read or report.
+            if case .refusedBusy = outcome { return }
+            // Reload before reporting: a continue that stopped again has still
+            // written commits and left new conflicted files behind.
+            await onCommitted()
+            if skipped, let words { onNotice(words.skippedNotice) }
+            if case let .failed(message) = outcome {
+                onFailure(ActionFailure(message))
+            }
         }
     }
 

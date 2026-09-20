@@ -119,11 +119,16 @@ final class BranchStore {
         }
     }
 
-    /// Abort an in-progress merge, restoring the pre-merge working tree.
-    func abortMerge(repoPath: String) async -> OpOutcome {
-        await run(repoPath: repoPath) {
-            try await GitBridge.abortMerge(in: repoPath)
+    /// Abort the operation in progress — a merge, rebase, cherry-pick or
+    /// revert. `said` is git's own text when the abort worked but did less
+    /// than a full rewind (HEAD was moved by hand mid-sequence): something to
+    /// read, not a failure.
+    func abortOperation(repoPath: String) async -> (outcome: OpOutcome, said: String?) {
+        var said: String?
+        let outcome = await run(repoPath: repoPath) {
+            said = try await GitBridge.abortStoppedOperation(in: repoPath)
         }
+        return (outcome, said)
     }
 
     /// Merge `source` into the current branch. Squash is the same two-call
@@ -158,6 +163,9 @@ final class BranchStore {
     /// listing of the wrong repository or dropping the right one. The outcome
     /// still goes back to whoever asked, so the merge is reported where it was
     /// started.
+    ///
+    /// `body` is non-escaping and runs before this returns, on purpose:
+    /// `abortOperation` hands git's words back through a variable it captures.
     private func run(
         repoPath: String,
         _ body: () async throws -> Void

@@ -328,10 +328,20 @@ enum GitBridge {
         try commitSquashMerge(repoPath: repoPath)
     }
 
-    /// Abort an in-progress merge, restoring the pre-merge working tree.
+    // MARK: - The operation in progress
+
+    /// Stage the resolved conflicts and carry the stopped operation on. A
+    /// further conflict is data, as it is for a merge.
     @concurrent
-    static func abortMerge(in repoPath: String) async throws {
-        try mergeAbort(repoPath: repoPath)
+    static func continueStoppedOperation(in repoPath: String) async throws -> OperationOutcome {
+        try continueOperation(repoPath: repoPath)
+    }
+
+    /// Abort the operation in progress. Answers git's own words when it did
+    /// less than a full rewind — text to show, not a failure.
+    @concurrent
+    static func abortStoppedOperation(in repoPath: String) async throws -> String? {
+        try abortOperation(repoPath: repoPath)
     }
 
     /// How many commits merging `branch` would bring in — the merge sheet's

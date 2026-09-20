@@ -187,7 +187,7 @@
     ],
     // A commit with the branch line passing through it. Nothing draws this:
     // the branch chip deliberately shows `branch` whether or not HEAD is
-    // detached, following `BranchMenu.swift:70`, and reports the detachment in
+    // detached, following `BranchMenu.swift`, and reports the detachment in
     // its label instead. Kept because "a commit" is a shape this app will want
     // again, and because re-deriving it is the expensive part.
     commit: [{ path: ring(8, 8, 2.4) }, { path: 'M2.3 8h3.3' }, { path: 'M10.4 8h3.3' }],

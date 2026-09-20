@@ -39,8 +39,8 @@ use std::sync::Arc;
 
 use leogit_core::events::{CoreEvent, EventSink};
 use leogit_core::{
-    ai, config, diff, exclusions, gh, git, highlight, launch, os, process, repos, shell, terminal,
-    update,
+    ai, config, diff, exclusions, gh, git, highlight, launch, operation, os, process, repos, shell,
+    terminal, update,
 };
 
 // Re-exported so Swift sees the real core types. Names are used by the
@@ -63,6 +63,7 @@ pub use leogit_core::git::{
 };
 pub use leogit_core::highlight::{BlobSource, Token, TokenClass};
 pub use leogit_core::launch::LaunchTarget;
+pub use leogit_core::operation::{OperationInProgress, OperationOutcome};
 pub use leogit_core::repos::{CloneTarget, RepoRow};
 pub use leogit_core::shell::ShellOption;
 pub use leogit_core::terminal::StartedTerminal;
@@ -169,8 +170,26 @@ pub struct RepoStatus {
     pub unpushed_shas: Vec<String>,
     pub detached: bool,
     pub head_sha: String,
-    pub merging: bool,
+    pub operation: Option<OperationInProgress>,
     pub proposal: SyncProposal,
+}
+
+/// Mirrors [`leogit_core::operation::OperationInProgress`].
+#[uniffi::remote(Enum)]
+pub enum OperationInProgress {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+}
+
+/// Mirrors [`leogit_core::operation::OperationOutcome`].
+#[uniffi::remote(Record)]
+pub struct OperationOutcome {
+    pub success: bool,
+    pub conflicts: Vec<String>,
+    pub error_message: Option<String>,
+    pub skipped: bool,
 }
 
 /// Mirrors [`leogit_core::git::CommitInfo`].
@@ -967,21 +986,6 @@ pub fn commit_squash_merge(repo_path: String) -> Result<(), GitError> {
     git::commit_squash_merge(repo_path).map_err(GitError::from)
 }
 
-/// Abort an in-progress merge (`git merge --abort`), restoring the pre-merge
-/// working tree.
-///
-/// # Errors
-///
-/// Returns [`GitError`] when there is no merge to abort or the abort fails.
-#[uniffi::export]
-pub fn merge_abort(repo_path: String) -> Result<(), GitError> {
-    git::merge_abort(repo_path).map_err(GitError::from)
-}
-
-// `is_merging` stays unexported (the dead-surface rule): `RepoStatus.merging`
-// carries the same answer on every refresh, which is where the UI reads it —
-// and a separate call is what let one refresh path forget to ask.
-
 /// How many commits merging `target_branch` would bring into the current
 /// branch — the merge dialog's preview number.
 ///
@@ -992,6 +996,38 @@ pub fn merge_abort(repo_path: String) -> Result<(), GitError> {
 #[uniffi::export]
 pub fn count_commits_to_merge(repo_path: String, target_branch: String) -> Result<i32, GitError> {
     git::count_commits_to_merge(repo_path, target_branch).map_err(GitError::from)
+}
+
+// ---------------------------------------------------------------------------
+// Exported functions — the operation in progress
+// ---------------------------------------------------------------------------
+//
+// Which operation is open rides `RepoStatus.operation`, so there is no call
+// for it here (the dead-surface rule): a separate question is what let one
+// refresh path forget to ask. These two act on whatever that field names.
+
+/// Stage the resolved conflicts and carry the operation in progress on. A
+/// further conflict is data, as it is for a merge: `success == false`, git's
+/// text, and the conflicted paths.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when nothing is in progress, when a conflicted file
+/// still holds conflict markers, or when git can't run.
+#[uniffi::export]
+pub fn continue_operation(repo_path: String) -> Result<OperationOutcome, GitError> {
+    operation::continue_operation(&repo_path).map_err(GitError::from)
+}
+
+/// Abort the operation in progress. `Some` carries what git said when it did
+/// less than a full rewind — text for the user to read, not a failure.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when nothing is in progress or the abort fails.
+#[uniffi::export]
+pub fn abort_operation(repo_path: String) -> Result<Option<String>, GitError> {
+    operation::abort_operation(&repo_path).map_err(GitError::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -2439,8 +2475,8 @@ mod tests {
 
     /// The three merge outcomes end-to-end: a fast-forward `merge_branch`, the
     /// two-call squash flow, and a conflict — which must come back as data
-    /// (`success == false` + conflicted paths), flip the status's `merging`
-    /// flag, and clean up via `merge_abort`.
+    /// (`success == false` + conflicted paths), show on the status as the
+    /// operation in progress, and clean up via `abort_operation`.
     #[test]
     fn merge_flow_fast_forwards_squashes_and_surfaces_conflicts() {
         let (dir, repo, default) = seeded_repo("merge");
@@ -2486,18 +2522,62 @@ mod tests {
         assert!(!conflict.success, "conflict is data, not an Err");
         assert_eq!(conflict.conflicts, ["base.txt"]);
         assert!(conflict.error_message.is_some());
-        assert!(
-            get_status(repo.clone()).expect("status").merging,
+        assert_eq!(
+            get_status(repo.clone()).expect("status").operation,
+            Some(OperationInProgress::Merge),
             "MERGE_HEAD exists, and the status the UI reads says so"
         );
 
-        merge_abort(repo.clone()).expect("abort");
-        assert!(
-            !get_status(repo).expect("status").merging,
+        let said = abort_operation(repo.clone()).expect("abort");
+        assert_eq!(said, None, "a full rewind has nothing to add");
+        assert_eq!(
+            get_status(repo).expect("status").operation,
+            None,
             "abort clears the merge"
         );
         let restored = std::fs::read_to_string(dir.join("base.txt")).expect("read");
         assert_eq!(restored, "ours\n", "abort restores the pre-merge tree");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An operation begun outside the app, as the Swift client meets it: the
+    /// status names it, a Continue over unresolved markers is a thrown refusal,
+    /// and a Continue after resolving stages the file and finishes the pick.
+    #[test]
+    fn operation_flow_names_refuses_and_continues_a_cherry_pick() {
+        let (dir, repo, default) = seeded_repo("operation");
+
+        create_branch(repo.clone(), "theirs".to_string(), String::new()).expect("create");
+        switch_branch(repo.clone(), "theirs".to_string()).expect("switch");
+        std::fs::write(dir.join("base.txt"), "theirs\n").expect("write");
+        run_git(&dir, &["add", "."]);
+        run_git(&dir, &["commit", "-m", "their edit"]);
+        switch_branch(repo.clone(), default).expect("switch back");
+        std::fs::write(dir.join("base.txt"), "ours\n").expect("write");
+        run_git(&dir, &["add", "."]);
+        run_git(&dir, &["commit", "-m", "our edit"]);
+
+        let picked = std::process::Command::new("git")
+            .current_dir(&dir)
+            .args(["cherry-pick", "theirs"])
+            .output()
+            .expect("spawn git");
+        assert!(!picked.status.success(), "the pick conflicts");
+        assert_eq!(
+            get_status(repo.clone()).expect("status").operation,
+            Some(OperationInProgress::CherryPick)
+        );
+
+        let refusal = continue_operation(repo.clone()).expect_err("markers remain");
+        assert!(matches!(refusal, GitError::Failed { .. }));
+
+        std::fs::write(dir.join("base.txt"), "both\n").expect("resolve");
+        let outcome = continue_operation(repo.clone()).expect("continue");
+        assert!(outcome.success && outcome.conflicts.is_empty());
+        assert_eq!(get_status(repo).expect("status").operation, None);
+        let subject = run_git_stdout(&dir, &["log", "-1", "--format=%s"]);
+        assert_eq!(subject, "their edit", "the pick keeps its own message");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

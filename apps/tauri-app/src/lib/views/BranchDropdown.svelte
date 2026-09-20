@@ -1,6 +1,7 @@
 <script lang="ts">
-  import type { BranchInfo } from '$lib/api/commands'
+  import type { BranchInfo, OperationInProgress } from '$lib/api/commands'
   import { autofocus } from '$lib/actions/autofocus'
+  import { operationWords } from '$lib/utils/operationWords'
   import { dismissOnEscape } from '$lib/actions/overlayStack'
   import { nextActiveIndex, scrollIntoViewWhenActive } from '$lib/actions/listNavigation'
   import ContextMenu, { type ContextMenuItem } from '$lib/components/ContextMenu.svelte'
@@ -11,9 +12,9 @@
     currentBranch: string
     /** HEAD is on a commit, not a branch: there is no target to merge into. */
     detached: boolean
-    /** A merge is in progress — the only branch action that makes sense is
-     *  aborting it. */
-    merging: boolean
+    /** The operation in progress, if any — while one is open the only branch
+     *  action that makes sense is aborting it. */
+    operation: OperationInProgress | null
     /** A branch operation is in flight; every action here locks until it ends. */
     busy: boolean
     onSwitch: (branch: string) => void
@@ -27,8 +28,8 @@
     onRequestMerge: (source: string) => void
     /** Open the delete confirmation for a local branch. */
     onRequestDelete: (name: string) => void
-    /** Open the abort-merge confirmation. */
-    onRequestAbortMerge: () => void
+    /** Open the confirmation for aborting the operation in progress. */
+    onRequestAbort: () => void
     /** Dismiss the popover. Registered on the overlay stack, so Escape reaches
      *  it wherever focus happens to be. */
     onClose: () => void
@@ -38,13 +39,13 @@
     branches = [],
     currentBranch = '',
     detached = false,
-    merging = false,
+    operation = null,
     busy = false,
     onSwitch,
     onCreate,
     onRequestMerge,
     onRequestDelete,
-    onRequestAbortMerge,
+    onRequestAbort,
     onClose,
   }: Props = $props()
 
@@ -74,14 +75,19 @@
   /** Only local, non-current branches are deletable. */
   const deleteCandidates = $derived(localBranches.filter((b) => b.name !== currentBranch))
 
-  const canMerge = $derived(!detached && !merging && mergeCandidates.length > 0)
+  const operationName = $derived(operation ? operationWords(operation) : null)
+
+  const canMerge = $derived(!detached && !operationName && mergeCandidates.length > 0)
   const canDelete = $derived(deleteCandidates.length > 0)
 
+  // The operation is asked about before the detached HEAD: a rebase detaches
+  // HEAD itself, and "check out a branch" is the wrong advice in the middle of
+  // one.
   const mergeHelp = $derived(
-    detached
-      ? 'Detached HEAD — check out a branch before merging into it'
-      : merging
-        ? 'Finish or abort the merge in progress first'
+    operationName
+      ? `Finish or abort the ${operationName.noun} in progress first`
+      : detached
+        ? 'Detached HEAD — check out a branch before merging into it'
         : mergeCandidates.length === 0
           ? 'There is no other branch to merge from'
           : `Merge another branch into ${currentBranch}`,
@@ -333,10 +339,10 @@
       <!--
         The branch menu's actions, in the order the native menu carries them.
         Merge and Delete need a branch, so they hand the list above the
-        question instead of opening a second one. Abort appears only while a
-        merge is in progress: it is the one action that has no meaning outside
-        that state, and a permanently greyed row would be noise in every other
-        repository.
+        question instead of opening a second one. Abort appears only while an
+        operation is in progress, named for it: it is the one action that has
+        no meaning outside that state, and a permanently greyed row would be
+        noise in every other repository.
       -->
       <div class="footer">
         <button class="footer-btn" onclick={() => (mode = 'create')} disabled={busy}>
@@ -350,9 +356,9 @@
         >
           Merge into “{currentBranch || 'this branch'}”…
         </button>
-        {#if merging}
-          <button class="footer-btn destructive" onclick={onRequestAbortMerge} disabled={busy}>
-            Abort Merge…
+        {#if operationName}
+          <button class="footer-btn destructive" onclick={onRequestAbort} disabled={busy}>
+            Abort {operationName.title}…
           </button>
         {/if}
         <button

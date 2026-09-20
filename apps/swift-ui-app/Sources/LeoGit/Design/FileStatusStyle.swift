@@ -1,15 +1,16 @@
 import SwiftUI
 
 extension Color {
-    /// The colour of an unfinished merge, wherever one shows: the `U` badge on
-    /// a conflicted file, and the branch chip's `· merging` suffix.
+    /// The colour of a conflict, wherever one shows: the `U` badge on a
+    /// conflicted file, the branch chip's operation suffix (`· merging`,
+    /// `· rebasing`, …) and the rule of the composer's operation notice.
     ///
     /// Deliberately not red — red already means Deleted, and a glance has to
     /// separate "you deleted this" from "git couldn't merge this", opposite
     /// actions of which only one blocks the commit. STYLE.md's
-    /// `--status-purple`, and named here once so the two places a merge
-    /// surfaces cannot drift apart the way the letter itself once did.
-    static let merging = Color.purple
+    /// `--status-purple`, and named here once so the places a stopped
+    /// operation surfaces cannot drift apart the way the letter itself once did.
+    static let conflict = Color.purple
 }
 
 /// Presentation for core's `FileStatus`.
@@ -41,7 +42,7 @@ extension FileStatus {
         case .modified: .orange
         case .deleted: .red
         case .renamed: .blue
-        case .conflicted: .merging
+        case .conflicted: .conflict
         }
     }
 }

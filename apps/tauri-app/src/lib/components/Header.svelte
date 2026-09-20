@@ -22,6 +22,7 @@
   import { ensureRepoIdentifiers, repoIdentifiers } from '$lib/stores/repoIdentifiers'
   import { basename } from '$lib/utils/path'
   import { isFromTerminal } from '$lib/utils/keyboard'
+  import { operationWords } from '$lib/utils/operationWords'
   import ContextMenu, { type ContextMenuItem } from './ContextMenu.svelte'
   import ForcePushConfirm from './ForcePushConfirm.svelte'
   import Icon from './Icon.svelte'
@@ -50,11 +51,10 @@
      * commits History would otherwise show up to two seconds late.
      *
      * Owned by `MainLayout` because a status write is more than the fields
-     * `get_status` returns: it also carries `is_merging`, reconciles
-     * `userDeselected` against the files that still exist, drops a diff whose
-     * file is gone, and feeds the picker's badge for this repo. The header used
-     * to hand-roll its own write and forgot all four, which is how a stale
-     * `MERGING` badge outlived an abort.
+     * `get_status` returns: it also reconciles `userDeselected` against the
+     * files that still exist, drops a diff whose file is gone, and feeds the
+     * picker's badge for this repo. A second, hand-rolled write here would be
+     * a second chance to forget one of them.
      *
      * Optional like the other repo-scoped callbacks: everything that can reach
      * it is inside the `hasRepo` block, so the pre-main header never supplies
@@ -166,19 +166,24 @@
 
   /**
    * The branch chip's face, in the native client's own words
-   * (`BranchMenu.swift:160` `menuLabel`): the branch name, `Detached at
+   * (`BranchMenu.swift` `menuLabel`): the branch name, `Detached at
    * <7-char sha>` off a branch, `Detached` when even the sha is missing, and
    * `Branches` before the first status lands.
    *
    * The chip is the only place either client says which branch it is on, so
    * the two saying it differently was the difference a user would notice
-   * first. `· merging` is appended in the markup rather than here because it
-   * carries its own colour — see the `.merging-suffix` rule.
+   * first. The operation in progress is appended in the markup rather than
+   * here because it carries its own colour — see the `.operation-suffix` rule.
    */
   const branchLabel = $derived.by(() => {
     if (detached) return detachedShort ? `Detached at ${detachedShort}` : 'Detached'
     return $repoState.status.branch || 'Branches'
   })
+
+  /** `merging`, `rebasing`, … — or nothing when the repository is at rest. */
+  const operationGerund = $derived(
+    $repoState.status.operation ? operationWords($repoState.status.operation).gerund : null,
+  )
 
   /**
    * The one action the repository needs next, decided by core's ladder rather
@@ -554,7 +559,7 @@
       title={detached ? 'Detached HEAD — pick a branch to return to' : 'Switch branch (Ctrl+B)'}
     >
       <!--
-        One glyph in both states, as on the native chip: `BranchMenu.swift:70`
+        One glyph in both states, as on the native chip: `BranchMenu.swift`
         draws `arrow.triangle.branch` whether or not HEAD is detached. The
         *label* is what reports the state; swapping the icon as well made a
         detached HEAD look like a different control rather than the same one
@@ -562,14 +567,14 @@
       -->
       <Icon name="branch" size={TOOLBAR_GLYPH} class="chip-icon" />
       <!--
-        An unfinished merge reads as a suffix on the branch, not as a badge
-        somewhere else in the bar — `BranchMenu.swift:170` appends the same
-        ` · merging` run to the same label. The one state that changes what
-        half this control's items *do* belongs on the control.
+        An unfinished operation reads as a suffix on the branch, not as a badge
+        somewhere else in the bar — `BranchMenu.menuLabel` appends the same
+        ` · merging` / ` · rebasing` run to the same label. The one state that
+        changes what half this control's items *do* belongs on the control.
       -->
       <span class="chip-label"
-        >{branchLabel}{#if $repoState.status.isMerging}<span class="merging-suffix">
-            · merging</span
+        >{branchLabel}{#if operationGerund}<span class="operation-suffix">
+            · {operationGerund}</span
           >{/if}</span
       >
     </button>
@@ -856,12 +861,12 @@
   }
 
   /* Purple, not the yellow a warning would take, and not the red that already
-     means Deleted: `Color.merging` (FileStatusStyle.swift:12) is the one hue
+     means Deleted: `Color.conflict` (FileStatusStyle.swift) is the one hue
      that says "git couldn't merge this", and the conflicted rows in the
      Changes tab wear it too. A coloured run also survives being clipped far
      better than a grey one, which matters because the branch name truncates
      ahead of it in a narrow window. */
-  .merging-suffix {
+  .operation-suffix {
     color: var(--status-purple);
   }
 
