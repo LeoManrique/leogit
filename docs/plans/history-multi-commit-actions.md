@@ -2,17 +2,18 @@
 
 > Status: **WS-A (a selection that is a set, `5ff2a4c`), WS-B (operations in
 > progress, `d0b68df`), WS-C (cherry-pick, the preflight and the window-wide
-> write gate, `ff0e195`) and WS-D (force push recommended, `d979bf2`) are built,
-> confirmed and committed. WS-E (the rewrite driver and squash) is built in both
-> clients, 2026-09-20, and awaits the owner's visual check; WS-F (reorder) is
-> next — do not start it before that check.** The owner's decisions
+> write gate, `ff0e195`), WS-D (force push recommended, `d979bf2`) and WS-E (the
+> rewrite driver and squash, `bc8f3db`) are built, confirmed and committed. WS-F
+> (reorder) is built in both clients, 2026-09-20, and awaits the owner's visual
+> check; WS-G (undo) is next and is the last — do not start it before that
+> check.** The owner's decisions
 > are marked **Decided**; the ones this plan made on its own are marked
 > **Proposed** and are open to change until their workstream starts. One question
 > is open and is the owner's — whether network transfers and repository writes
-> exclude each other (§5.2) — and nothing in WS-F or WS-G waits on it; §9 records
+> exclude each other (§5.2) — and nothing in WS-G waits on it; §9 records
 > the standing decision on where rewriting runs. §3 describes
-> the code as it stands *after* WS-E, and §4.2 – §4.6, §5.1 – §5.3 record what
-> the next workstreams inherit.
+> the code as it stands *after* WS-F, and §4.2 – §4.6, §5.1 – §5.4 record what
+> WS-G inherits.
 > Produced from a three-way read of the native client, the Tauri client, and
 > the GitHub Desktop source at
 > `/Users/leo/Dev/LeoManrique/Desktop/lms-github-desktop` — whose history and
@@ -42,8 +43,9 @@ whole selection:
 The work is three layers, in this order: **a selection that is a set** (built,
 WS-A), **a core that can detect, continue and abort a multi-step git
 operation** (built, WS-B), **and then the three actions on top** — cherry-pick
-(built, WS-C) and squash (built, WS-E); reorder is what is left. The core has no
-stash and no undo beyond `undo_last_commit` (`core/src/git.rs`).
+(WS-C), squash (WS-E) and reorder (WS-F), all built. What is left is **undo**
+(WS-G): the core has no stash and no undo beyond `undo_last_commit`
+(`core/src/git.rs`), though every action already answers with an `UndoPoint`.
 
 ## 2. What the reference does
 
@@ -122,11 +124,11 @@ git's current spelling, and §4.7 sets the floor.
 ⌘A are AppKit's, not ours; `selectedSha` beside it is the one commit the detail
 pane shows, derived from the set. Its `.contextMenu(forSelectionType:)` puts
 the ids in list order with `ListSelection.targets` and builds `rowMenu(for:)`
-for one target and, for several, `cherryPickItem(for:)` and `squashItem(for:)`
-— **that `targets.count > 1` branch is where WS-F adds Reorder** (and
-`rowMenu` its single-commit form), and `canStartHistoryAction` beside it is the
-shared menu-time gate (no operation, not detached, no write in flight); Squash
-adds `HistoryRange.replaysMergeCommit`, which Reorder needs too. A selection made in
+for one target and, for several, `cherryPickItem(for:)`, `squashItem(for:)` and
+`reorderItem(for:)` (which `rowMenu` carries too), and `canStartHistoryAction`
+beside it is the shared menu-time gate (no operation, not detached, no write in
+flight); Squash and Reorder add `canReplay(_:)` — `HistoryRange.replaysMergeCommit`.
+The list also holds reorder's insertion mode (`ReorderMode`, §5.3). A selection made in
 code is scrolled into view by the list's `.onChange(of: selectedSha)`. The
 rules are `Services/ListSelection.swift`, generic
 over any `Identifiable` row and shared with the file lists: `activeID` (the
@@ -146,34 +148,42 @@ prunes and re-seats on the sha list changing. The rules are
 `contextTargets`, `activeKey`, `selectKeys` for a selection made in code, the
 key and click helpers) shared with `FileList.svelte`. `openContextMenu` keeps
 the targets, in list order and newest first, on the menu's own state, and
-`menuItems` is `[cherryPickItem, squashItem]` for several targets and
-`singleCommitItems` for one — **that array is where WS-F adds Reorder.** An
+`menuItems` is `[cherryPickItem, squashItem, reorderItem]` for several targets
+and `singleCommitItems` (which holds `reorderItem` too) for one. An
 item's `enabled` / `title` come from the `historyActionsBlocked` prop, the
-shared menu-time gate, worded in `MainLayout.svelte`; `squashItem` adds
-`replaysMergeCommit` (`utils/historyRange.ts`), which Reorder needs too. `ContextMenu.svelte` items are
+shared menu-time gate, worded in `MainLayout.svelte`; squash and reorder add
+`replayBlocked` — `replaysMergeCommit` (`utils/historyRange.ts`). The component
+also holds reorder's insertion mode (§5.3). `ContextMenu.svelte` items are
 `aria-disabled`, not `disabled`, so that `title` can show.
 
-**History actions** (WS-C, WS-E) — `core/src/history_rewrite/`: `mod.rs` holds
-`rewrite_preflight(repo, replayed_from)` → `RewritePreflight { blocked,
-rewrites_pushed }`, `RewriteResult` with its two constructors (`landed`,
-`stopped`) and `UndoPoint`; `cherry_pick.rs` has `cherry_pick_commits` and the
+**History actions** (WS-C, WS-E, WS-F) — `core/src/history_rewrite/`: `mod.rs`
+holds `rewrite_preflight(repo, replayed_from)` → `RewritePreflight { blocked,
+rewrites_pushed }` (constructors `ready`, `refused`, `for_a_replay`),
+`RewriteResult` with its three (`landed`, `unchanged`, `stopped`) and
+`UndoPoint`; `cherry_pick.rs` has `cherry_pick_commits` and the
 private `switch_to` / `return_to`; **`replay.rs` is the rewrite driver**
-(`Replay { repo_path, onto, todo, message }.run()` → `Replayed::Done |
-Conflict`, §4.5); `squash.rs` has `squash_commits(repo, shas, message)`,
-`squash_draft(repo, shas)` → `SquashDraft { summary, description, co_authors }`
-and **`Lineage::of`, which places any shas on the branch (oldest, range,
-selected in history order) — reorder starts from it too**; `fixtures.rs` is the
-tests' `linear_repo()`, `failing_hook()`, `sha`, `branch`. All four commands are
+(`Replay { repo_path, onto, todo, message: Option }.run()` → `Replayed::Done |
+Conflict`, §4.5); **`lineage.rs` is `Lineage::of(repo, shas, landmark)`, which
+places any shas on the branch (oldest, range, selected in history order)**;
+`squash.rs` has `squash_commits(repo, shas, message)` and
+`squash_draft(repo, shas)` → `SquashDraft { summary, description, co_authors }`;
+`reorder.rs` has `reorder_commits(repo, shas, before_sha)` and
+`reorder_preflight(…)`; `fixtures.rs` is the tests' `linear_repo()`,
+`five_commits()`, `edits_of_one_line()`, `failing_hook()`, `sha`, `branch`. All
+six commands are
 on both bridges (`ffi/src/lib.rs`, *history actions*;
 `src-tauri/src/shims/history_rewrite.rs`). Client side: `MainLayout.svelte`'s
-*History actions* section — `requestCherryPick` / `runCherryPick`,
-`requestSquash` / `runSquash` with `SquashDialog.svelte`, and the generic
-`selectResultingCommits` — and natively `Stores/HistoryActionStore.swift`
+*History actions* section — a `request…` / `run…` pair per action,
+`SquashDialog.svelte`, and **`finishHistoryAction(repoPath, result, reload,
+stoppedOnConflict)`, every action's ending** — and natively
+`Stores/HistoryActionStore.swift`
 (`HistoryActionOutcome` — every action's answer — `refusal`, `cherryPick`,
-`prepareSquash` → `SquashReadiness`, `squash`, `cherryPickReturn`) with
-`ContentView.requestCherryPick` / `requestSquash` / **`finishHistoryAction`**
-(every action's ending) and `Screens/CherryPickSheet.swift`,
-`Screens/SquashSheet.swift`. **A new action copies that shape: preflight on the
+`prepareSquash` → `SquashReadiness`, `squash`, `prepareReorder` →
+`ReorderReadiness`, `reorder`, `cherryPickReturn`) with
+`ContentView.requestCherryPick` / `requestSquash` / `requestReorder` /
+**`finishHistoryAction`** (every action's ending) and
+`Screens/CherryPickSheet.swift`, `Screens/SquashSheet.swift`,
+`Screens/ReorderSheet.swift`. **A new action copies that shape: preflight on the
 menu click, then the dialog, then one core call, then reload → select
 `RewriteResult.selection` or go to Changes on a conflict.**
 
@@ -198,9 +208,9 @@ holds `FLOOR`, the `git --version` parser and `require_floor()`, whose one
 caller is `rewrite_preflight`. `core/src/test_support.rs` (`git`, `git_stdout`,
 `git_stopping` for a command expected to stop, `init_test_repo`, `commit_file`,
 `subjects`, and `conflicting_repo()`) is what every core test module builds its
-repositories with; `history_rewrite/fixtures.rs` and `squash.rs`'s
-`five_commits()` / `edits_of_one_line()` (a fold that conflicts, then a replayed
-commit that conflicts) are the fixtures to reuse for a rewrite. `git.rs` lends
+repositories with; `history_rewrite/fixtures.rs` — `five_commits()`,
+`edits_of_one_line()` (every commit rewrites one line, so any replay out of
+order conflicts) — holds the fixtures to reuse for a rewrite. `git.rs` lends
 `pub(crate)` `git_cmd`, `run_git`, `run_git_optional` (exit 1 is `None`),
 `run_git_combined`, `run_git_combined_with_env`, `read_commits` (full
 `CommitInfo`s for a list of ids, in the order given), `git_dir`, `current_branch`, `has_commits`,
@@ -245,8 +255,8 @@ core union. `git.rs` also lends `run_git_with_stdin` (feed git a list on
 stdin, judge the exit status yourself).
 
 **Surfaces** — one sheet slot per window on the native side, driven by
-`RootSheet` (the enum at the foot of `ContentView.swift`, with `.cherryPick`
-and `.squash` cases — RO-2's confirmation is another case there);
+`RootSheet` (the enum at the foot of `ContentView.swift`, with `.cherryPick`,
+`.squash` and `.reorder` cases);
 `ConfirmDialog.svelte` and the one-off dialogs on the Tauri side, all with the
 `blocked` prop; the branch dropdown's *picking mode* (`STYLE.md`, *Branch
 picker*), which `BranchDropdown.svelte` enters from outside when
@@ -296,12 +306,13 @@ workstream has to know:
   (WS-C).** Mechanics are `TECHNICAL.md`, *History's multi-commit actions*.
   A refusal is **data** (`blocked`), in this order: the git floor, an operation
   in progress, a detached HEAD, an unborn one, tracked changes (named, up to
-  ten; untracked files pass). **`Some(oldest)` is already built and tested for
-  WS-E and WS-F** — it adds the merge-commit-in-range refusal and fills
-  `rewrites_pushed`; cherry-pick passes `None`, squash the oldest selected
-  commit. Both clients call it **on the
+  ten; untracked files pass). **`Some(oldest)`** adds the merge-commit-in-range
+  and shallow-boundary refusals and fills `rewrites_pushed`; cherry-pick passes
+  `None`, squash the oldest selected commit, and reorder has
+  `reorder_preflight` (§4.5), the same checks from where *its* replay starts.
+  Both clients call it **on the
   menu click, before any dialog opens**, and the action calls it again itself.
-  What WS-E and WS-F inherit:
+  What any later action inherits:
   - **Block, no stash** stands: the core has no stash, and one left behind
     after a conflicted rebase is a worse place to leave someone than "commit or
     discard first". Stash-and-restore belongs with `ROADMAP.md`'s *Stash
@@ -320,12 +331,13 @@ workstream has to know:
   by file name, stage **exactly the unmerged paths** (never `git add -u`,
   §4.8-12), for a rebase refuse unrelated unstaged edits, then `--continue` —
   or `--skip` for a pick or revert whose resolution left nothing to commit —
-  under `GIT_EDITOR=:`. It returns `OperationOutcome { success, conflicts,
+  under `GIT_EDITOR=:`; a rebase in that position drops the commit by itself on
+  `--continue`, and only the report changes (§4.5). It returns `OperationOutcome { success, conflicts,
   error_message, skipped }`; a step that stops on the next conflict is
   `success: false` with the conflicts, not an `Err`. An `Err` always means git
   was never asked to continue **and nothing was staged** — both refusals run
   before the first write. `skipped` exists because git drops the commit
-  silently; both clients turn it into a notice. What WS-C … WS-F inherit:
+  silently; both clients turn it into a notice. What the actions rely on:
   - **The squash message survives because the amend is a todo line (§4.5)**,
     rescheduled by git if it fails, not because of anything continue does —
     continue always runs under `GIT_EDITOR=:` and has no message parameter. A
@@ -439,93 +451,112 @@ actions; the core reverses for cherry-pick and re-derives order from the range
 walk for squash and reorder. Every sha is checked with `is_object_id` before
 it becomes an argument — it is also what keeps `--abort` out of argv.
 
-### 4.5 The rewrite driver and squash — built (WS-E); reorder (RO)
+### 4.5 The rewrite driver, squash and reorder — built (WS-E, WS-F)
 
-**The driver and squash are built**; mechanics are `TECHNICAL.md`, *History's
-multi-commit actions* (the command line, the todo, the message file), and the
-contract is `FRONTEND.md` §3.7. What WS-F inherits, and where the build differs
-from this plan's draft:
+**The driver, squash and reorder are built**; mechanics are `TECHNICAL.md`,
+*History's multi-commit actions* (the command line, the todos, the message
+file, `Move::plan`), and the contract is `FRONTEND.md` §3.7. What a later
+rewrite (edit, drop, a drag) inherits, and where the build differs from this
+plan's draft:
 
-- **The driver is `replay.rs`: give it a todo, an `onto` and a message.**
-  `Replay { repo_path, onto: Option<&str>, todo, message }.run()` answers
-  `Done`, `Conflict(paths, text)` or `Err` with the rebase already aborted.
-  `onto` is the parent of the oldest commit in the todo (`rev-list --parents -1
-  <sha>`, second field), `None` → `--root`. **Reorder has no message**: make
-  `message` an `Option` and have the sequence editor skip the second `cp` when
-  `LEOGIT_MESSAGE` is unset — it was left required because an `Option` nobody
-  passes `None` to is dead code.
-- **The message file lives in `rebase-merge/`, not in the git dir's root** as
-  the draft had it. The sequence editor is handed the todo's path, which sits in
-  that directory, so one `sh` line copies both files there. git then owns the
-  file's lifetime: it survives every conflict round and is deleted with the
-  rebase on finish *and* on abort, from the app or a terminal. The draft's
-  "removed on success and on abort" needed `continue_operation` and
-  `abort_operation` to know about squash, and still leaked on a terminal abort.
-- **The scratch todo and message are in a `tempfile::tempdir()`** (now a real
-  dependency of core, not a dev one): unique per run, removed on drop.
-- **Flags beyond the draft's**: `--no-rebase-merges`, `--no-autosquash` (both
-  measured harmless without the flag on a linear range; pinned anyway, since a
-  flag is cheaper than the next git's changed default) and
-  **`--reschedule-failed-exec`**, which is not optional: a failed `exec` is
-  crossed off the todo *as it fails*, so the next `--continue` finishes the
-  rebase without it — a squash under the wrong message, silently. Any `exec`
-  line WS-F adds gets the same protection for free.
+- **The driver is `replay.rs`: give it a todo, an `onto` and, optionally, a
+  message.** `Replay { repo_path, onto: Option<&str>, todo, message:
+  Option<&str> }.run()` answers `Done`, `Conflict(paths, text)` or `Err` with
+  the rebase already aborted. `onto` is the parent of the oldest commit in the
+  todo (`parent_of`), `None` → `--root`. With no message `LEOGIT_MESSAGE` is
+  empty and the sequence editor copies the todo alone.
+- **A message travels inside the rebase**, at `rebase-merge/leogit-message`,
+  so git owns its lifetime — every conflict round, finish and abort, from the
+  app or a terminal. Nothing in `continue_operation` or `abort_operation` knows
+  which action opened the rebase, and nothing should.
+- **`--reschedule-failed-exec` is not optional**: a failed `exec` is crossed off
+  the todo *as it fails*, so the next `--continue` finishes the rebase without
+  it. Any `exec` line a later todo adds gets the same protection for free. The
+  other pinned flags are `TECHNICAL.md`'s.
 - **A stop is a conflict only with unmerged paths**, as for cherry-pick. Every
   other stop — signer, `prepare-commit-msg` (which runs on every pick, fixup
   *and* the amend despite `--no-verify`), an untracked file in the way, a failed
   `exec`, a fold that would come to nothing — is aborted by the driver. A
   refusal before the rebase opened (`pre-rebase` hook, a broken sequence
   editor) leaves no `rebase-merge/`, so the driver checks before aborting.
-- **Rebase output carries its progress meter into a pipe** (`Rebasing
-  (2/5)\r…`); `operation::without_progress` strips it, for the driver and for
-  `continue_operation`.
-- **`Lineage::of(repo, shas)` does not trust the order shas arrive in.** Oldest
-  = `merge-base --octopus`; range = `rev-list --reverse HEAD --not <oldest>^@`;
-  refused unless every sha is in the range and the range starts at the oldest.
-  For reorder the range must start at the older of *the oldest selected commit*
-  and *the destination*, so `Lineage` needs the destination as one more sha to
-  place — it is not a selected commit, so keep it out of `selected`.
-- **`squash_todo` is squash-only on purpose.** The reference's buffering
-  algorithm reduces, for a squash onto the oldest commit, to "target, the other
-  selected, the amend, then everything unselected", and the general form was not
-  written ahead of its second user. Reorder's is the same walk with a different
-  gathering point: emit every unselected commit in range order, and the selected
-  ones (in range order, all `pick`) just before `before_sha`'s line — or at the
-  end for `None`.
-- **Squash's `selection` is `HEAD~<unselected commits in the range>`**; for
-  reorder the moved commits are contiguous, so it is `rev-list` of that stretch.
-  `--empty=keep` keeps every replayed commit, which is what makes counting from
-  HEAD safe; a commit dropped by a conflict resolved to nothing (§4.2) would
-  shift it — after a *continue*, which hands back no selection anyway.
-- **A fold that comes to nothing is an `Err`** (B adds a line, D removes it):
-  git refuses to amend a commit into emptiness, `--empty=keep` does not cover a
-  `fixup`, and `--continue` there only fails again at the amend. The driver
-  aborts and git's "would make it empty" text is what the user reads.
+- **`Lineage::of(repo, shas, landmark)` (`lineage.rs`) does not trust the order
+  shas arrive in.** Oldest = `merge-base --octopus <shas> <landmark>`; range =
+  `rev-list --reverse HEAD --not <oldest>^@`; refused unless every sha *and the
+  landmark* are in the range and the range starts at the oldest. The landmark
+  is a commit the range must reach without being selected — reorder's
+  destination. **It answers a `Result` in a `Result`**: the inner `Err` is
+  `merge_refusal`, asked of the merge-base *before* the walk — a walk across a
+  merge is not one line, and without that order a merge commit is reported as
+  "not all on the current branch". The opposite mistake is closed just before
+  it: the base must be one of the named commits and an ancestor of `HEAD`, or
+  any merge in the branch's past gets blamed for a commit that is somewhere
+  else. An id that names no commit fails `merge-base` and gets the same
+  sentence.
+- **Each action writes its own todo; there is no general todo builder.**
+  Squash's is "target, the other selected as `fixup`, the amend, then everything
+  unselected"; reorder's (`Move::plan`) emits every unselected commit in range
+  order and the block just before the destination's line, or at the end for the
+  tip. They share the driver and `Lineage`, which is where the sharing pays.
+- **A selection is read back by counting from HEAD** — squash's is
+  `HEAD~<unselected commits in the range>`, reorder's `rev-list -n <above +
+  moved> HEAD` from `above` on. `--empty=keep` keeps every replayed commit,
+  which is what makes counting safe; a commit dropped by a conflict resolved to
+  nothing would shift it — after a *continue*, which hands back no selection
+  anyway.
+- **Reorder judges a no-op by building the new order and comparing**, and then
+  runs no git at all: even a rebase that ends where it began writes `ORIG_HEAD`
+  and two HEAD reflog entries (measured), and a move that changes nothing should
+  leave no trace. The answer is `RewriteResult::unchanged` — success, no `undo`,
+  so WS-G's banner has nothing to offer for it.
+- **Reorder trims the leading commits that keep their place out of its todo**,
+  so the replay starts at the first *displaced* commit. That is what
+  `reorder_preflight` judges — which is why reorder has a preflight command of
+  its own: `rewrite_preflight(replayed_from)` needs a start the client cannot
+  know without the destination.
+- **A rebase silently drops a commit whose conflict is resolved to nothing**, on
+  `--continue`, whatever `--empty` says (measured; pinned by
+  `a_moved_commit_resolved_to_nothing_is_dropped_and_continue_says_so`).
+  `continue_operation` now answers `skipped: true` there, and both clients say
+  so in the notice banner, as for a skipped pick. **The sign is git's own state:
+  `rebase-merge/stopped-sha` exists and `rebase-merge/amend` does not**
+  (`rebase_stopped_on_a_pick`). The first draft used "this continue staged a
+  conflict" and was wrong both ways — a resolution staged from the terminal
+  leaves nothing unmerged and the commit still goes; a conflicted `fixup`
+  resolved to HEAD staged a conflict and lost nothing. Measured stops: pick
+  conflict Y/n, `edit` Y/Y, `fixup` conflict Y/Y, `break` n/n, failed `exec`
+  n/n (`stopped-sha` / `amend`).
+- **`core.commentChar` set to a command's first letter (`p`) turns every `pick`
+  into a comment**; git answers "error: nothing to do" before touching anything
+  (reproduced by hand). Left alone: `-c core.commentChar=#` for the run would
+  desynchronise the rounds Continue runs. git checks nothing about a todo it is
+  handed beyond its syntax — that every commit of the range appears once is
+  entirely `Move::plan`'s to get right.
+- **`--no-update-refs` leaves any other branch that pointed into the range on
+  the old commits.** Deliberate, as for squash. And making a commit that
+  *modifies* a file the new root usually conflicts, since the file does not
+  exist under it yet — correct, and continued or aborted like any conflict.
+- **300 replayed commits take about 1.5 – 1.8 s** here; no progress streaming
+  was added (§10).
 - **A shallow clone's boundary commit reads as a root** — `rev-list --parents`,
   `<sha>^@` and `rev-parse <sha>^` all hide its parent — and `rebase --root`
   from it *succeeds*, severing the branch from the history below. WS-E's
   verifier found it; `replay_refusal` (the preflight's replay half) now compares
-  the walk with the commit object (`cat-file commit`) and refuses. Reorder is
-  covered by calling the same preflight; **anything else that derives "this is
+  the walk with the commit object (`cat-file commit`) and refuses. Reorder asks
+  the same function of its `from`; **anything else that derives "this is
   the root" from a parent list needs the same check** (`parent_of` /
   `records_a_parent` in `mod.rs`).
 - **The preflight is two functions**, `branch_ready_for_an_action` (the shared
   refusals, answered before an action reads anything else off the repository —
   otherwise a detached HEAD surfaces as "not on the current branch") and
   `replay_refusal(oldest)`; `rewrite_preflight` composes them for the clients.
-- **A `prepare-commit-msg` hook runs for the amend despite `--no-verify`, and
-  may rewrite the typed message.** Left to the repository, as it is for the
-  composer's commit; stated in `FRONTEND.md` §3.7.
 - **A terminal `git rebase --skip` on a conflicted `fixup` drops that commit's
-  changes and the amend still stamps the typed message.** The app never skips a
-  rebase step (`resolved_to_nothing` is pick/revert only), so it is reachable
-  from a terminal alone — git's own semantics, not defended against.
-- **While a squash is stopped, HEAD's message may be git's working text** (`#
+  changes and the amend still stamps the typed message.** The app never runs
+  `rebase --skip` (for a rebase `resolved_to_nothing` changes the report, not
+  the step), so it is reachable from a terminal alone — git's own semantics,
+  not defended against.
+- **While a rewrite is stopped, HEAD's message may be git's working text** (`#
   This is a combination of 2 commits…`). Nothing in either client shows HEAD's
   message during a rebase today; keep it so.
-- **`commit()` and the squash amend both pass `--cleanup=whitespace`**:
-  `commit.cleanup=strip` deletes any line beginning with `#` from a `-F`
-  message.
 
 **Decided (2026-09-19): the squash target is the oldest selected commit, in
 both clients** — `contextMenu(forSelectionType:)` hands the native client the
@@ -534,11 +565,11 @@ and the two clients stay identical in something that rewrites history.
 **Decided: non-contiguous selections are allowed**, for squash and reorder
 alike.
 
-**RO — `reorder_commits(repo, shas, before_sha: Option<String>)`.**
-`before_sha` is the commit the moved ones land just *under* in the list;
-`None` moves them to the tip. The core refuses a no-op (the destination is
-inside or adjacent to a contiguous selection) with `success: true` and an
-unchanged tip rather than an error.
+**RO — `reorder_commits(repo, shas, before_sha: Option<&str>)`.** `before_sha`
+is the commit the moved ones land just *under* in a newest-first list; `None`
+moves them to the tip; it may itself be one of the moved commits ("take the
+moved rows out, put them back where the line is"). A destination that is not on
+the branch is an `Err` from `Lineage::of`, like a selected commit that is not.
 
 ### 4.6 Force push recommended (FP) — built (WS-D)
 
@@ -849,6 +880,27 @@ agents and re-run by hand before they were built on:
     shows it; `rebase --root` from it exits 0 and produces a parentless
     branch. ✅
     (`squash_refuses_to_replay_from_the_commit_a_shallow_clone_ends_on`)
+52. A todo of `pick` lines in a new order, replayed with the driver's flags,
+    moves commits to the tip, into the middle and under the first commit (a new
+    root, `--root`); a commit the new order made empty is kept by
+    `--empty=keep`. ✅ (`reorder_moves_*`, `reorder_under_the_first_commit_*`,
+    `reorder_keeps_a_commit_that_became_empty`)
+53. **A rebase that ends where it began still writes `ORIG_HEAD` and two HEAD
+    reflog entries**, so reorder's no-op runs no git. ✅
+    (`reorder_of_a_no_op_destination_changes_nothing`)
+54. **`rebase --continue` drops a commit whose conflict was resolved to
+    nothing**, without a word and whatever `--empty` says; the rebase then goes
+    on — also when the resolution was staged by hand. `rebase-merge/stopped-sha`
+    without `rebase-merge/amend` is the stop where that can happen. ✅
+    (`a_moved_commit_resolved_to_nothing_is_dropped_and_continue_says_so`,
+    `a_resolution_staged_from_a_terminal_still_reports_the_dropped_commit`,
+    `a_fold_resolved_to_nothing_is_not_reported_as_a_skipped_commit`)
+55. `core.commentChar=p` makes every `pick` line a comment: "error: nothing to
+    do", exit 1, no `rebase-merge/`, nothing moved. ✅ (by hand)
+56. A walk across a merge (`rev-list HEAD --not <oldest>^@`) is not one line, so
+    "every sha is in the range and it starts at the oldest" fails before any
+    merge check placed after it. ✅
+    (`reorder_refuses_a_merge_between_the_commits_and_the_destination`)
 
 **Not verified:** any git between the 2.45 floor and 2.54; and anything on
 Windows, in particular that Git for Windows' `sh` resolves `cp` for the
@@ -884,42 +936,43 @@ sequence editor (§4.7, *Platforms*).
     half is a write-back in `maintainsSelection` (AppKit allows ⌘-click and a
     click below the rows to empty a `Set` selection), done from `onChange`
     rather than by refusing the write in the binding's setter, so that the
-    table redraws. RO-1's "selection frozen" while insertion mode is armed
-    will need its own guard there, since AppKit keeps answering clicks.
+    table redraws. RO-1's "selection frozen" is `.selectionDisabled` while
+    the mode is armed (§5.3, RO-3).
   - **Known AppKit hazard, not yet observed here:** `contextMenu(
     forSelectionType:)` has been reported to hand back a stale set after a
-    *programmatic* selection change (Apple forum thread 710492). WS-C … WS-F
-    set the selection programmatically, so `ListSelection.targets` — which
+    *programmatic* selection change (Apple forum thread 710492). Every action
+    sets the selection programmatically, so `ListSelection.targets` — which
     drops ids the list no longer holds — stays between the closure and any
     action.
   - **The Tauri file list changed with it**, by decision during WS-A: sharing
     the gestures gave it ⌘/Ctrl-click, shift-arrow and ⌘A, which the native
     file list always had from AppKit, and a shift-click straight after
     arriving now extends from the file that opened itself.
-  - **No frontend test runner exists.** `utils/listSelection.ts` was checked
-    with a throwaway `node --experimental-strip-types` script. MS-6's merge
-    predicate and RO-1's insertion arithmetic are the next pure helpers, and
-    are the point at which adding one (vitest) is worth proposing.
-- **MS-5 — The menus. Cherry-pick's and squash's items are built (WS-C,
-  WS-E); reorder's arrive with it.** Multi-row: the three actions and nothing
-  else — today **Cherry-pick N Commits…** and **Squash N Commits…**. Single row
-  has **Cherry-pick Commit…** after *Check Out Commit…* and gains **Reorder
-  Commit…** beside it in WS-F, since N = 1 is the same machinery and the
+  - **The frontend's test runner is Node's own** (WS-F): `pnpm test` is
+    `node --test 'tests/*.test.ts'`, Node stripping the types, no dependency
+    added. It holds RO-1's placement tests; `utils/listSelection.ts` and MS-6's
+    `historyRange.ts` are pure, import only types, and can join them as they
+    are. A helper that imports a value through `$lib` cannot be loaded this way.
+- **MS-5 — The menus. Built (WS-C, WS-E, WS-F).** Multi-row: the three actions
+  and nothing else — **Cherry-pick N Commits…**, **Squash N Commits…**,
+  **Reorder N Commits…**. Single row has **Cherry-pick Commit…** and **Reorder
+  Commit…** after *Check Out Commit…*, since N = 1 is the same machinery and the
   reference has both. Title Case and a real `…` in both clients. No
   single-commit squash. **No item ships before its action** (the dead-surface
   rule).
-- **MS-6 — Menu-time gates, disable don't hide. Built (WS-C, WS-E).** Every
+- **MS-6 — Menu-time gates, disable don't hide. Built (WS-C, WS-E, WS-F).** Every
   History action is disabled while `status.operation` is set, HEAD is detached,
   or a repository write is in flight (`historyActionsBlocked`, which is also the
-  Tauri item's hover reason; `canStartHistoryAction`). Squash — and reorder,
-  when it comes — is also disabled when a merge commit sits anywhere from HEAD
+  Tauri item's hover reason; `canStartHistoryAction`). Squash and reorder are
+  also disabled when a merge commit sits anywhere from HEAD
   down to the oldest selected commit: `replaysMergeCommit`, one pure helper per
   client (`utils/historyRange.ts`, `Services/HistoryRange.swift`) over the
   loaded rows' `parents`, which works because the list is append-only from HEAD
   (`stores/repo.ts`). **The oldest selected commit being a merge itself blocks
   too**, matching core's `rev-list --merges HEAD --not <oldest>^@`. For reorder
   the stretch runs down to the *destination* when that is older than the
-  selection — pass it in with the selected shas. The core preflight stays the
+  selection, which the placement model covers from the other side: no slot
+  exists under the newest merge commit (§5.3). The core preflight stays the
   authority.
 
 ### 5.2 In-progress operations (OP)
@@ -962,7 +1015,7 @@ sequence editor (§4.7, *Platforms*).
     owner's call, and the roadmap item now carries three candidates — the
     recommended one being that **Pull alone claims the write slot too**, as the
     only transfer that writes the working tree. A squash or reorder started
-    under a pull is the case that matters to WS-E and WS-F; until the rule
+    under a pull is the case that matters; until the rule
     exists, git's own `index.lock` refusal is what the user would see, and it
     arrives as the action's `Err`.
   - **The status poll does not pause for a write**, so both clients now drop a
@@ -998,7 +1051,7 @@ sequence editor (§4.7, *Platforms*).
   from core's `squash_draft` (one implementation, so both clients open with the
   same words; the reference's shape — the oldest summary, then every message
   oldest first). The contract is `FRONTEND.md` §6.21 and the metrics are
-  `STYLE.md`, *Modals*. What WS-F and WS-G inherit:
+  `STYLE.md`, *Modals*. What WS-G inherits:
   - **Neither client has a co-author field** — co-authors are invisible state
     in the composer too — so the dialog *names* the draft's co-authors under the
     fields and passes them through `format_commit_message` untouched. A
@@ -1011,26 +1064,45 @@ sequence editor (§4.7, *Platforms*).
     it (the message is already inside the rebase). `⌘/Ctrl+↩` submits — plain
     Return belongs to the description, and natively a focused `TextEditor`
     swallows it before a `.defaultAction` button could see it.
-  - **Natively every action now ends in `ContentView.finishHistoryAction`** and
-    answers with `HistoryActionOutcome`; on the Tauri side the generic half is
-    `selectResultingCommits`. Reorder plugs into both. `DescriptionEditor` and
-    `RefusalText` (`Design/`) are shared views now.
-- **RO-1 — Insertion mode. Decided: like the reference, plus a sober hint.**
-  The menu item arms the list: selection frozen, context menu suppressed, a
-  2 px accent insertion line between rows, ↑/↓ move it, ⏎ confirms, Esc or a
-  click cancels, and the list scrolls to keep the line visible. The line
-  cannot travel below the newest merge commit (MS-6). A small caption —
-  `↑ ↓ choose a position · ⏎ move · esc cancel` — fades in when the mode arms
-  and fades out after a few seconds or on the first arrow key; under Reduce
-  Motion it appears and disappears without the fade.
-- **RO-2 — A reorder that rewrites pushed commits asks first**, in a
-  `ConfirmDialog` / sheet after ⏎, since reorder has no dialog of its own to
-  carry a caption.
-- **RO-3 — Native key handling is a spike gate.** `ChangedFileList.swift:118`
-  already intercepts Space on a `List` with `.onKeyPress`; whether the arrows
-  can be taken from `NSTableView` the same way is checked in a scratch project
-  *before* WS-F is sized. The fallback is a focusable overlay that owns the
-  keyboard while armed.
+  - **Every action ends on one path in each client**:
+    `ContentView.finishHistoryAction` over `HistoryActionOutcome` natively,
+    `finishHistoryAction(repoPath, result, reload, stoppedOnConflict)` in
+    `MainLayout.svelte`. WS-G's banner hangs off those two functions.
+    `DescriptionEditor` and `RefusalText` (`Design/`) are shared views.
+- **RO-1 — Insertion mode. Built (WS-F)**, decided as "like the reference, plus
+  a sober hint". The contract is `FRONTEND.md` §6.21 (*Reorder*), the metrics
+  `STYLE.md` (*Commit list*), the mechanics `TECHNICAL.md`. What differs from
+  the reference, and what a drag would inherit:
+  - **The placement model is pure and mirrored** — `utils/reorderPlacement.ts`
+    (tested: `pnpm test`) and `Services/ReorderPlacement.swift`. A *slot* `i` is
+    the gap above row `i`; its destination for core is the sha of the row above
+    it, `null` for slot 0. A drop target is a slot.
+  - **↑/↓ skip the slots that would change nothing, except home** (above the
+    topmost moved row, where the line starts), and ⏎ at home just ends the
+    mode. The reference steps one row at a time and ignores ⏎ on a no-op; the
+    two research agents disagreed on which to build, and this was chosen so
+    that every step is a different move. **Proposed — the owner may prefer the
+    reference's.** Either way the two clients must match: it is one helper.
+  - **The slot under the last loaded row is real** even with more history to
+    page in (core takes any commit of the branch), and paging only adds slots,
+    so the mode survives a page load. It ends on a list reset, a moved commit
+    gone, a slot no longer allowed, or another action starting.
+  - **No slot under the newest merge commit** (MS-6); with a merge at or above a
+    moved commit the item is off, and with nowhere to go it says so.
+- **RO-2 — A reorder that rewrites pushed commits asks first. Built (WS-F)**:
+  `reorder_preflight` on ⏎, then a `ConfirmDialog` / `ReorderSheet` only when
+  `rewrites_pushed`. A failure after the confirmation is a modal in Tauri and
+  stays inside the sheet natively (`FRONTEND.md` §8).
+- **RO-3 — Native key handling: the spike passed (WS-F), measured on the
+  owner's OS (Darwin 27).** `.onKeyPress(.upArrow / .downArrow / .return / .escape)` on a `List`
+  runs before `NSTableView` and `.handled` keeps the selection still;
+  `.selectionDisabled(true)` freezes clicks and arrows without dimming the
+  highlight. **Apple documents no precedence between `onKeyPress` and `List` —
+  re-run the spike on an OS bump.** What did *not* work: `.onMoveCommand` never
+  fires on a `List`; a clear overlay with a tap gesture kills scroll-wheel
+  scrolling (hence `Design/MouseDownMonitor.swift`, an `NSEvent` local monitor
+  that only observes); a row overlay is clipped 4pt outside the row's content
+  box, which is the whole of the insertion line's room.
 
 ### 5.4 Undo (UN)
 
@@ -1069,17 +1141,23 @@ is tested by hand before the next starts.
    table per client. Before squash on purpose: an amended pushed commit already
    produces this state, and squash lands into a sync button that knows what to
    say.
-5. **WS-E — Squash. Built 2026-09-20**; the owner's visual check is pending.
+5. **WS-E — Squash. Built 2026-09-20, confirmed and committed (`bc8f3db`).**
    The rewrite driver, squash's todo, SQ, MS-6's merge gate, and
    `history_rewrite` split into a module per action.
-6. **WS-F — Reorder. Next.** RO, starting with the RO-3 spike; generalise the
-   todo and `Lineage` as §4.5 describes.
-7. **WS-G — Undo.** UN, for all three actions at once.
+6. **WS-F — Reorder. Built 2026-09-20**; the owner's visual check is pending.
+   RO, `reorder_preflight`, `Lineage` in its own module with a landmark, the
+   driver's optional message, a rebase's dropped commit reported as `skipped`,
+   one ending for every action in `MainLayout.svelte`, and the frontend's test
+   runner.
+7. **WS-G — Undo. Next, and the last.** UN, for all three actions at once. The
+   `UndoPoint` is already in every `RewriteResult` that landed (`None` for a
+   reorder that changed nothing); the banner hangs off the two
+   `finishHistoryAction`s.
 
 ## 7. Verification gates
 
-Per workstream: zero-warning `just mac-build`; `pnpm check`; `cargo test
---workspace` green; `cargo clippy --workspace --all-targets -- -W
+Per workstream: zero-warning `just mac-build`; `pnpm check`, `pnpm lint` and
+`pnpm test`; `cargo test --workspace` green; `cargo clippy --workspace --all-targets -- -W
 clippy::pedantic` no worse than before; `pnpm tauri build` for the Tauri half;
 a visual check by the user, **asked for and confirmed — no screenshots**.
 
@@ -1113,7 +1191,11 @@ Facts about running them on the owner's machine:
 - **Run `pnpm tauri build` in the foreground.** Detached, its `bundle_dmg.sh`
   step fails (it scripts Finder) after the app itself has compiled and
   bundled, and leaves a scratch image mounted at `/Volumes/dmg.*` —
-  `hdiutil detach` it before the retry. Nothing to do with the code.
+  `hdiutil detach` it before the retry. Nothing to do with the code. From an
+  agent's shell it also fails in the foreground more often than not (WS-F:
+  three runs of five), leaving `target/release/bundle/macos/rw.*.dmg` behind and
+  nothing mounted. **`pnpm tauri build --bundles app` is the gate on the
+  code**; the DMG is the owner's to build from a terminal of their own.
 - **`pnpm lint` does check `commands.ts`**, and prettier here takes no trailing
   comma after the last parameter of a multi-line arrow function.
 - **A test that needs a remote** starts from `test_support::published_repo()`
@@ -1131,6 +1213,38 @@ Facts about running them on the owner's machine:
   it, which is what surfaced the skipped `exec` (item 47); its verifier found
   the shallow boundary (item 51) by attacking where `--root` comes from —
   thirteen passing tests had not.
+- **Two research agents can disagree about the reference, and then the code
+  decides nothing** (WS-F: whether ↑/↓ skip no-op slots). Read the reference
+  yourself, pick one, write it in one mirrored helper, and mark it *Proposed*.
+- **A native behaviour question is answered by a scratch Swift package, not by
+  documentation** (WS-F's RO-3 spike). Synthetic *keys* posted with
+  `CGEvent.postToPid` reach a SwiftUI `List`; synthetic *mouse* events do not,
+  so clicks were checked by hand. Apple's docs are fetchable as JSON at
+  `https://developer.apple.com/tutorials/data/documentation/swiftui/<path>.json`
+  when the HTML page is an empty shell.
+- **WS-F's core verifier could not break `Move::plan`** — it wrote its own model
+  of the list semantics and ran all 627 selection × destination shapes of a
+  five- and a six-commit branch against the real function — and broke the
+  heuristic beside it instead (§4.5, `skipped`). A flag derived from "what this
+  call happened to do" is a guess; ask git's state files. It also found four
+  tests weaker than their names (a commit that *was* empty standing in for one
+  that *became* empty; an `if` around a conflict round). Name a test after what
+  it sets up, and pin the number of rounds.
+- **Svelte 5: never read a `$derived` of X after writing X in the same
+  function.** WS-F's `confirmReorder` cleared the mode and then asked a set
+  derived from it whether the move was a no-op; the set was already empty, the
+  guard was dead, and ⏎ at home ran a reorder. `svelte-check` and the helper's
+  tests were green — a verifier caught it by compiling the shape. Take what you
+  need off the state first.
+- **Native: a watcher attached to a view that can unmount stops watching.**
+  `HistorySidebar`'s list leaves the hierarchy whenever `commits` empties (a
+  repository switch publishes `[]` first), while `@State` on the sidebar
+  survives; the reorder mode's `.onChange`s and click monitor therefore sit on
+  `body`'s `Group`. `.onChange` without `initial: true` does not fire on
+  remount.
+- **A generated UniFFI function is a global**, so a `GitBridge` method of the
+  same name shadows it inside the type and recurses (`preflightReorder`, not
+  `reorderPreflight`).
 - **`#[tokio::test]` is available in core** for the async commands; an
   `EventSink` that drops everything is three lines (`NoProgress` in `git.rs`'s
   tests).
@@ -1147,10 +1261,15 @@ message across two conflict rounds, a failed amend run again by the next
 continue, a fold that comes to nothing, an abort, a stop with nothing to
 resolve, the refusals, a shallow boundary, ids in either case, the settings
 that would bend the todo, an odd repository path, and the draft — with `squash_flow_drafts_the_message_and_folds_the_selection` through
-the bridge. Still to write, at minimum, named as sentences:
-`reorder_moves_commits_to_the_tip_and_into_the_middle`,
-`reorder_keeps_a_commit_that_became_empty`,
-`reorder_of_a_no_op_destination_changes_nothing`,
+the bridge — and WS-F's in `history_rewrite/reorder.rs`: moves to the tip, the
+middle and under the first commit, a selection with gaps, a selected
+destination, a no-op that leaves the reflog alone, the trimmed replay, a kept
+empty commit, a conflict continued, a moved commit resolved to nothing, an
+abort, a stop with nothing to resolve, the refusals, a merge between the commits
+and the destination, a shallow boundary, `rewrites_pushed`, and the bending
+settings — with `reorder_flow_preflights_the_destination_and_moves_the_selection`
+through the bridge and the placement model's in `apps/tauri-app/tests/`. Still to
+write, at minimum, named as sentences:
 `undo_refuses_once_the_branch_tip_has_moved`,
 `undo_of_a_cherry_pick_works_from_the_source_branch`.
 Two probe claims in `operation.rs` rest on a scratch run rather than a test and
@@ -1180,19 +1299,21 @@ branch…*. WS-E's: `FRONTEND.md` §1 and §3 (75 commands per host), §3.7
 shortcut table; `STYLE.md` (*Modals*: the 480px message dialog and its rows);
 `TECHNICAL.md` (the layout tree, the driver, squash, the clients' one ending);
 `README.md`; and `ROADMAP.md`'s entry, with *Rebase (interactive UI)* reworded
-and left open. What is still owed:
+and left open. WS-F's: `FRONTEND.md` §1 and §3 (77 commands per host), §3.7
+(`reorder_preflight`, `reorder_commits`, the rebase case of `skipped`), §6.21
+(*Reorder*) and two §8 rows; `DESIGN.md` flow 5's reorder bullet, the menus and
+the shortcut table; `STYLE.md` (the insertion line and the key caption under
+*Commit list*, the confirmation under *Modals*); `TECHNICAL.md` (the layout
+tree, `Lineage`, the optional message, *Reorder*, the insertion mode in each
+client, `pnpm test`); `README.md`; and `ROADMAP.md`'s entry, with *Rebase
+(interactive UI)* reworded and left open. What is still owed, all of it WS-G's:
 
-- **`FRONTEND.md`** — §1 command counts again; §3.7 rows for `reorder_commits`
-  and `undo_operation`; §6.21 rules for insertion mode and the undo banner's
-  lifetime.
-- **`DESIGN.md`** — one bullet per action that states the failure path as
-  carefully as the happy one (cherry-pick's is the model).
-- **`STYLE.md`** — the insertion line, the hint caption and the banner action
-  get their metrics.
-- **`TECHNICAL.md`** — reorder's todo and the generalised `Lineage`; undo.
-- **`ROADMAP.md`** — entries for reorder and undo (*Rebase (interactive UI)*
-  keeps edit, drop and drag open).
-- **`README.md`** — *Browse history* gains reorder.
+- **`FRONTEND.md`** — §1 command counts again; a §3.7 row for `undo_operation`;
+  a §6.21 rule for the undo banner's lifetime.
+- **`DESIGN.md`** — what Undo offers after each action, and when it goes away.
+- **`STYLE.md`** — the banner action gets its metrics.
+- **`TECHNICAL.md`** — undo.
+- **`ROADMAP.md`** — the entry for undo.
 
 ## 9. Standing decision — where history rewriting runs
 
@@ -1213,7 +1334,7 @@ that drives cherry-pick and a todo-style rebase, signs per the user's config,
 runs hooks and the LFS filter process, and leaves sequencer state the embedded
 terminal can continue or abort. `gix` is the candidate to watch; its
 `crate-status.md` is the page that answers it. The seam is already in place:
-§4 is two modules (`operation.rs`, `history_rewrite/`) behind six bridge
+§4 is two modules (`operation.rs`, `history_rewrite/`) behind eight bridge
 calls today, so the backend can change without the bridges or the clients noticing.
 
 ## 10. Non-goals

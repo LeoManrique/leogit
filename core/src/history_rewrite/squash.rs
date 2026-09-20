@@ -10,9 +10,10 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
+use super::lineage::Lineage;
 use super::replay::{MESSAGE_GIT_PATH, Replay, Replayed};
 use super::{RewriteResult, UndoPoint, branch_ready_for_an_action, parent_of, replay_refusal};
-use crate::git::{CommitInfo, is_object_id, read_commits, run_git};
+use crate::git::{CommitInfo, read_commits, run_git};
 
 /// The message a squash sheet opens with, in the composer's three parts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,64 +24,24 @@ pub struct SquashDraft {
     pub co_authors: Vec<String>,
 }
 
-/// The selected commits as the current branch holds them.
-struct Lineage {
-    /// Every commit from the oldest selected one up to `HEAD`, oldest first.
-    range: Vec<String>,
-    /// The selected commits, oldest first. The first is the squash target.
-    selected: Vec<String>,
+/// `shas` placed on the current branch — at least two of them, or there is
+/// nothing to fold.
+///
+/// Counted before they are placed: one commit is too few wherever it sits, and
+/// placing it first would answer with whatever is wrong with where it sits.
+fn commits_to_fold(repo_path: &str, shas: &[String]) -> Result<Lineage, String> {
+    let distinct: HashSet<String> = shas.iter().map(|sha| sha.to_ascii_lowercase()).collect();
+    if distinct.len() < 2 {
+        return Err("Select at least two commits to squash.".to_string());
+    }
+    // For a squash a refusal is a failure like any other: it has no preflight
+    // of its own to hand one back as data.
+    Lineage::of(repo_path, shas, None)?
 }
 
-impl Lineage {
-    /// Place `shas` — in any order — on the current branch.
-    ///
-    /// The oldest is the one commit all the others descend from, which on one
-    /// line of history is their octopus merge base; the order of the rest is
-    /// read off the walk from `HEAD` down to it, never off the order they
-    /// arrived in.
-    fn of(repo_path: &str, shas: &[String]) -> Result<Self, String> {
-        if let Some(odd) = shas.iter().find(|sha| !is_object_id(sha)) {
-            return Err(format!("Not a commit id: {odd}"));
-        }
-        // git prints ids in lowercase, and takes them in either case.
-        let shas: Vec<String> = shas.iter().map(|sha| sha.to_ascii_lowercase()).collect();
-        let wanted: HashSet<&str> = shas.iter().map(String::as_str).collect();
-        if wanted.len() < 2 {
-            return Err("Select at least two commits to squash.".to_string());
-        }
-
-        let mut args = vec!["merge-base", "--octopus"];
-        args.extend(shas.iter().map(String::as_str));
-        let oldest = run_git(repo_path, &args)?;
-        // `^@` is every parent, so the walk includes `oldest` itself and is
-        // not a fatal error when it is the root.
-        let walked = run_git(
-            repo_path,
-            &[
-                "rev-list",
-                "--reverse",
-                "HEAD",
-                "--not",
-                &format!("{oldest}^@"),
-            ],
-        )?;
-        let range: Vec<String> = walked.lines().map(str::to_string).collect();
-        let selected: Vec<String> = range
-            .iter()
-            .filter(|sha| wanted.contains(sha.as_str()))
-            .cloned()
-            .collect();
-        // Both fail together when a selected commit is not on this branch: the
-        // merge base is then a commit nobody selected, or the walk misses one.
-        if selected.len() != wanted.len() || range.first() != Some(&oldest) {
-            return Err("The selected commits are not all on the current branch.".to_string());
-        }
-        Ok(Self { range, selected })
-    }
-
-    fn target(&self) -> &str {
-        &self.selected[0]
-    }
+/// The squash target: the oldest selected commit, which every other folds into.
+fn target(lineage: &Lineage) -> &str {
+    &lineage.selected[0]
 }
 
 /// What the squash sheet opens with: the target's summary; as the description,
@@ -90,7 +51,7 @@ impl Lineage {
 /// # Errors
 /// As [`squash_commits`], short of running anything.
 pub fn squash_draft(repo_path: &str, shas: &[String]) -> Result<SquashDraft, String> {
-    let lineage = Lineage::of(repo_path, shas)?;
+    let lineage = commits_to_fold(repo_path, shas)?;
     let commits = read_commits(repo_path, &lineage.selected)?;
     Ok(draft_of(&commits))
 }
@@ -159,7 +120,7 @@ fn draft_of(commits: &[CommitInfo]) -> SquashDraft {
 /// it may the composer's; that is the repository's own rule, and is left to it.
 fn squash_todo(lineage: &Lineage) -> String {
     let folded: HashSet<&str> = lineage.selected.iter().map(String::as_str).collect();
-    let mut todo = format!("pick {}\n", lineage.target());
+    let mut todo = format!("pick {}\n", target(lineage));
     for sha in &lineage.selected[1..] {
         let _ = writeln!(todo, "fixup {sha}");
     }
@@ -204,24 +165,24 @@ pub fn squash_commits(
     // otherwise surface as whatever git makes of placing commits on a detached
     // or unborn HEAD.
     let branch = branch_ready_for_an_action(repo_path)??;
-    let lineage = Lineage::of(repo_path, shas)?;
-    if let Some(reason) = replay_refusal(repo_path, lineage.target())? {
+    let lineage = commits_to_fold(repo_path, shas)?;
+    if let Some(reason) = replay_refusal(repo_path, target(&lineage))? {
         return Err(reason);
     }
     let before_sha = run_git(repo_path, &["rev-parse", "HEAD"])?;
-    let onto = parent_of(repo_path, lineage.target())?;
+    let onto = parent_of(repo_path, target(&lineage))?;
 
     eprintln!(
         "[history_rewrite] squash {} commit(s) into {} on {branch}, replaying {}",
         lineage.selected.len(),
-        lineage.target(),
+        target(&lineage),
         lineage.range.len()
     );
     let replayed = Replay {
         repo_path,
         onto: onto.as_deref(),
         todo: &squash_todo(&lineage),
-        message: &format!("{}\n", message.trim_end()),
+        message: Some(&format!("{}\n", message.trim_end())),
     }
     .run()?;
 
@@ -253,7 +214,7 @@ pub fn squash_commits(
 mod tests {
     #[cfg(unix)]
     use super::super::fixtures::failing_hook;
-    use super::super::fixtures::{branch, sha};
+    use super::super::fixtures::{branch, edits_of_one_line, five_commits, sha};
     use super::super::rewrite_preflight;
     use super::*;
     use crate::git::get_status;
@@ -261,20 +222,7 @@ mod tests {
     use crate::test_support::{commit_file, git, git_stdout, init_test_repo, subjects};
     use std::fs;
     use std::path::Path;
-    use tempfile::{TempDir, tempdir};
-
-    /// `main` with five commits, `one` … `five`, each adding its own file.
-    fn five_commits() -> (TempDir, String) {
-        let tmp = tempdir().expect("tempdir");
-        let dir = tmp.path();
-        init_test_repo(dir);
-        git(dir, &["checkout", "-q", "-b", "main"]);
-        for name in ["one", "two", "three", "four", "five"] {
-            commit_file(dir, &format!("{name}.txt"), &format!("{name}\n"), name);
-        }
-        let repo_path = dir.to_str().expect("utf-8 path").to_string();
-        (tmp, repo_path)
-    }
+    use tempfile::tempdir;
 
     fn message_of(dir: &Path, rev: &str) -> String {
         git_stdout(dir, &["log", "-1", "--format=%B", rev])
@@ -345,21 +293,6 @@ mod tests {
         assert_eq!(files_of(dir, "HEAD~3"), ["one.txt", "two.txt"]);
     }
 
-    /// `main`: `base`, then `shared.txt` edited by `first edit`, an unrelated
-    /// `between`, and `second edit` of the same line.
-    fn edits_of_one_line() -> (TempDir, String) {
-        let tmp = tempdir().expect("tempdir");
-        let dir = tmp.path();
-        init_test_repo(dir);
-        git(dir, &["checkout", "-q", "-b", "main"]);
-        commit_file(dir, "shared.txt", "base\n", "base");
-        commit_file(dir, "shared.txt", "first\n", "first edit");
-        commit_file(dir, "other.txt", "other\n", "between");
-        commit_file(dir, "shared.txt", "second\n", "second edit");
-        let repo_path = dir.to_str().expect("utf-8 path").to_string();
-        (tmp, repo_path)
-    }
-
     #[test]
     fn squash_keeps_the_message_across_a_conflict() {
         let (tmp, repo) = edits_of_one_line();
@@ -395,6 +328,25 @@ mod tests {
             "the typed message landed, and `second edit` was folded"
         );
         assert!(!dir.join(".git/rebase-merge").exists());
+    }
+
+    #[test]
+    fn a_fold_resolved_to_nothing_is_not_reported_as_a_skipped_commit() {
+        let (tmp, repo) = edits_of_one_line();
+        let dir = tmp.path();
+        let picks = vec![sha(dir, "HEAD"), sha(dir, "HEAD~3")];
+        let stopped = squash_commits(&repo, &picks, "base, kept").expect("data, not Err");
+        assert!(!stopped.success);
+
+        // Resolving the `fixup` to what `base` already holds leaves nothing
+        // staged — but a fold amends a commit that exists, and loses none.
+        // `first edit` then replays onto the very file it was written against.
+        fs::write(dir.join("shared.txt"), "base\n").expect("resolve");
+        let outcome = continue_operation(&repo).expect("continue");
+
+        assert!(outcome.success, "{:?}", outcome.error_message);
+        assert!(!outcome.skipped, "nothing was dropped by the fold");
+        assert_eq!(subjects(dir), ["between", "first edit", "base, kept"]);
     }
 
     #[test]
@@ -496,12 +448,11 @@ mod tests {
         let tip = sha(dir, "HEAD");
         let two = vec![sha(dir, "HEAD"), sha(dir, "HEAD~1")];
 
-        assert!(squash_commits(&repo, &two[..1], "m").is_err(), "one commit");
-        let twice = vec![two[0].clone(), two[0].clone()];
-        assert!(
-            squash_commits(&repo, &twice, "m").is_err(),
-            "the same twice"
-        );
+        // Too few is said as that, whatever else is true of where the one sits.
+        for too_few in [&two[..0], &two[..1], &[two[0].clone(), two[0].clone()][..]] {
+            let refusal = squash_commits(&repo, too_few, "m").expect_err("too few");
+            assert!(refusal.contains("at least two"), "{refusal}");
+        }
         assert!(squash_commits(&repo, &two, " \n").is_err(), "no message");
         let option = vec![two[0].clone(), "--abort".to_string()];
         assert!(squash_commits(&repo, &option, "m").is_err());

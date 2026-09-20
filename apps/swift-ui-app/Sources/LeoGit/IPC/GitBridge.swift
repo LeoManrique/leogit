@@ -389,6 +389,31 @@ enum GitBridge {
         try squashCommits(repoPath: repoPath, shas: shas, message: message)
     }
 
+    /// Whether `shas` may be moved to just under `beforeSha` in History's
+    /// newest-first list — `nil` is the tip — and whether that rewrites pushed
+    /// commits. Asked once the destination is chosen: where a reorder starts
+    /// replaying depends on it, which `historyActionPreflight` cannot know.
+    @concurrent
+    static func preflightReorder(
+        in repoPath: String,
+        shas: [String],
+        under beforeSha: String?
+    ) async throws -> RewritePreflight {
+        try reorderPreflight(repoPath: repoPath, shas: shas, beforeSha: beforeSha)
+    }
+
+    /// Move `shas` (any order; they keep their own) as one block to just under
+    /// `beforeSha`, or to the tip. A conflict is data and leaves the rebase
+    /// open; a move that would change nothing succeeds without running git.
+    @concurrent
+    static func reorder(
+        in repoPath: String,
+        shas: [String],
+        under beforeSha: String?
+    ) async throws -> RewriteResult {
+        try reorderCommits(repoPath: repoPath, shas: shas, beforeSha: beforeSha)
+    }
+
     /// How many commits merging `branch` would bring in — the merge sheet's
     /// preview number.
     @concurrent

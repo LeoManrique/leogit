@@ -1139,6 +1139,46 @@ pub fn squash_commits(
     history_rewrite::squash_commits(&repo_path, &shas, &message).map_err(GitError::from)
 }
 
+/// Whether `shas` may be moved to just under `before_sha` in a newest-first
+/// list — `None` is the tip — and whether that rewrites pushed commits. Asked
+/// once the destination is chosen: where a reorder starts replaying depends on
+/// it, which [`rewrite_preflight`] cannot know. A move that would change
+/// nothing is ready and rewrites nothing.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when git can't run, or the commits and the destination
+/// are not all on the current branch.
+#[uniffi::export]
+pub fn reorder_preflight(
+    repo_path: String,
+    shas: Vec<String>,
+    before_sha: Option<String>,
+) -> Result<RewritePreflight, GitError> {
+    history_rewrite::reorder_preflight(&repo_path, &shas, before_sha.as_deref())
+        .map_err(GitError::from)
+}
+
+/// Move `shas` (any order; they keep their own) as one block to just under
+/// `before_sha`, or to the tip, replaying the rest of the branch around them.
+/// A conflict is `success == false` with the rebase left open. A move that
+/// would change nothing succeeds without running git, with no `undo`.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when the action is refused or fails for any reason
+/// that is not a conflict — the branch is then back where it began, or the
+/// message says the rebase is still open.
+#[uniffi::export]
+pub fn reorder_commits(
+    repo_path: String,
+    shas: Vec<String>,
+    before_sha: Option<String>,
+) -> Result<RewriteResult, GitError> {
+    history_rewrite::reorder_commits(&repo_path, &shas, before_sha.as_deref())
+        .map_err(GitError::from)
+}
+
 // ---------------------------------------------------------------------------
 // Exported functions — sync (fetch / pull / push / clone)
 // ---------------------------------------------------------------------------
@@ -2782,6 +2822,47 @@ mod tests {
             result.selection,
             [run_git_stdout(&dir, &["rev-parse", "HEAD~1"])]
         );
+        assert_eq!(get_status(repo).expect("status").operation, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A reorder as the Swift client drives it: the destination's preflight,
+    /// then one call — and the moved commits come back as the selection, where
+    /// the insertion line was.
+    #[test]
+    fn reorder_flow_preflights_the_destination_and_moves_the_selection() {
+        let (dir, repo, _default) = seeded_repo("reorder");
+        let mut shas = Vec::new();
+        for name in ["one", "two", "three"] {
+            std::fs::write(dir.join(format!("{name}.txt")), name).expect("write");
+            run_git(&dir, &["add", "."]);
+            run_git(&dir, &["commit", "-m", name]);
+            shas.insert(0, run_git_stdout(&dir, &["rev-parse", "HEAD"]));
+        }
+        // `three` to just under `one`.
+        let selected = vec![shas[0].clone()];
+        let under = Some(shas[2].clone());
+
+        let ready =
+            reorder_preflight(repo.clone(), selected.clone(), under.clone()).expect("preflight");
+        assert_eq!(ready.blocked, None);
+        assert!(!ready.rewrites_pushed);
+        let result = reorder_commits(repo.clone(), selected.clone(), under).expect("reorder");
+
+        assert!(result.success);
+        let subjects = run_git_stdout(&dir, &["log", "--format=%s"]);
+        assert_eq!(subjects, "two\none\nthree\ninit");
+        assert_eq!(
+            result.selection,
+            [run_git_stdout(&dir, &["rev-parse", "HEAD~2"])]
+        );
+
+        // Where it already is: nothing runs, and there is nothing to undo.
+        let tip = run_git_stdout(&dir, &["rev-parse", "HEAD"]);
+        let still = reorder_commits(repo.clone(), vec![tip.clone()], None).expect("no-op");
+        assert!(still.success && still.undo.is_none());
+        assert_eq!(still.selection, [tip]);
         assert_eq!(get_status(repo).expect("status").operation, None);
 
         let _ = std::fs::remove_dir_all(&dir);

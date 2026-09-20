@@ -26,6 +26,35 @@ interface FocusVirtualRowOptions extends RevealVirtualRowOptions {
   rowSelector: string
 }
 
+interface RevealVirtualBandOptions {
+  container: HTMLElement | null | undefined
+  /** The band's top edge and height, in the list's own coordinates, in px. */
+  top: number
+  height: number
+  onScroll: (scrollTop: number) => void
+}
+
+/**
+ * Bring a band of the list into view by the shortest scroll. A band already in
+ * view does not move. A row is one such band; History's insertion line is the
+ * two rows it sits between, so the line always arrives with a row on each side.
+ */
+export function revealVirtualBand(options: RevealVirtualBandOptions): void {
+  const { container, top, height, onScroll } = options
+  if (!container || top < 0) return
+
+  const bottom = top + height
+  let scrollTop = container.scrollTop
+  if (top < scrollTop) scrollTop = top
+  else if (bottom > scrollTop + container.clientHeight) scrollTop = bottom - container.clientHeight
+  if (scrollTop !== container.scrollTop) {
+    container.scrollTop = scrollTop
+    // Read back, not echoed: the browser clamps a band that reaches past the
+    // end of the content, and the caller's copy has to match the scroller.
+    onScroll(container.scrollTop)
+  }
+}
+
 /**
  * Bring a row into view by the shortest scroll. A row already in view does not
  * move, and keyboard focus stays where it is — what a selection made in code
@@ -33,17 +62,7 @@ interface FocusVirtualRowOptions extends RevealVirtualRowOptions {
  */
 export function revealVirtualRow(options: RevealVirtualRowOptions): void {
   const { container, index, rowHeight, onScroll } = options
-  if (!container || index < 0) return
-
-  const top = index * rowHeight
-  const bottom = top + rowHeight
-  let scrollTop = container.scrollTop
-  if (top < scrollTop) scrollTop = top
-  else if (bottom > scrollTop + container.clientHeight) scrollTop = bottom - container.clientHeight
-  if (scrollTop !== container.scrollTop) {
-    container.scrollTop = scrollTop
-    onScroll(scrollTop)
-  }
+  revealVirtualBand({ container, top: index * rowHeight, height: rowHeight, onScroll })
 }
 
 /**

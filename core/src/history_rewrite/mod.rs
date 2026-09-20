@@ -3,9 +3,10 @@
 //! This module holds what they share — what has to be true before one may
 //! begin ([`rewrite_preflight`]) and what one comes to ([`RewriteResult`]) —
 //! and each action has a module of its own: [`cherry_pick`] copies commits onto
-//! another branch, [`squash`] folds commits of the current branch into one, and
-//! [`replay`] is the driver under every action that rewrites the current branch
-//! by replaying it from a todo.
+//! another branch, [`squash`] folds commits of the current branch into one and
+//! [`reorder`] moves them to another place in it. Those two rewrite the branch
+//! by replaying it from a todo: [`lineage`] places the commits on the branch,
+//! and [`replay`] is the driver.
 //!
 //! What an operation looks like once it is open — and how to continue or abort
 //! it — is [`operation`](super::operation)'s. The two meet in one rule: when an
@@ -22,10 +23,13 @@ use super::operation;
 mod cherry_pick;
 #[cfg(test)]
 mod fixtures;
+mod lineage;
+mod reorder;
 mod replay;
 mod squash;
 
 pub use cherry_pick::cherry_pick_commits;
+pub use reorder::{reorder_commits, reorder_preflight};
 pub use squash::{SquashDraft, squash_commits, squash_draft};
 
 /// How many changed files a dirty-tree refusal names before it counts the rest.
@@ -42,6 +46,33 @@ pub struct RewritePreflight {
     /// so the next push after it is a force push. Always `false` for an action
     /// that replays nothing on the current branch.
     pub rewrites_pushed: bool,
+}
+
+impl RewritePreflight {
+    fn ready(rewrites_pushed: bool) -> Self {
+        Self {
+            blocked: None,
+            rewrites_pushed,
+        }
+    }
+
+    fn refused(reason: String) -> Self {
+        eprintln!("[history_rewrite] preflight refused: {reason}");
+        Self {
+            blocked: Some(reason),
+            rewrites_pushed: false,
+        }
+    }
+
+    /// The answer for an action that would replay the current branch —
+    /// `branch`, which [`branch_ready_for_an_action`] has passed — from
+    /// `oldest` up.
+    fn for_a_replay(repo_path: &str, branch: &str, oldest: &str) -> Result<Self, String> {
+        Ok(match replay_refusal(repo_path, oldest)? {
+            Some(reason) => Self::refused(reason),
+            None => Self::ready(is_on_upstream(repo_path, branch, oldest)),
+        })
+    }
 }
 
 /// What a History action came to. Shaped like
@@ -82,6 +113,18 @@ impl RewriteResult {
             error_message: None,
             selection,
             undo,
+        }
+    }
+
+    /// There was nothing to do, and nothing was run: the commits asked for are
+    /// the `selection` as they stand, and there is no step to undo.
+    fn unchanged(selection: Vec<String>) -> Self {
+        Self {
+            success: true,
+            conflicts: Vec::new(),
+            error_message: None,
+            selection,
+            undo: None,
         }
     }
 
@@ -128,31 +171,14 @@ pub fn rewrite_preflight(
     repo_path: &str,
     replayed_from: Option<&str>,
 ) -> Result<RewritePreflight, String> {
-    let blocked = |reason: String| {
-        eprintln!("[history_rewrite] preflight refused: {reason}");
-        Ok(RewritePreflight {
-            blocked: Some(reason),
-            rewrites_pushed: false,
-        })
-    };
-
     let branch = match branch_ready_for_an_action(repo_path)? {
         Ok(branch) => branch,
-        Err(reason) => return blocked(reason),
+        Err(reason) => return Ok(RewritePreflight::refused(reason)),
     };
-    let Some(oldest) = replayed_from else {
-        return Ok(RewritePreflight {
-            blocked: None,
-            rewrites_pushed: false,
-        });
-    };
-    if let Some(reason) = replay_refusal(repo_path, oldest)? {
-        return blocked(reason);
+    match replayed_from {
+        Some(oldest) => RewritePreflight::for_a_replay(repo_path, &branch, oldest),
+        None => Ok(RewritePreflight::ready(false)),
     }
-    Ok(RewritePreflight {
-        blocked: None,
-        rewrites_pushed: is_on_upstream(repo_path, &branch, oldest),
-    })
 }
 
 /// The half of the preflight every History action shares: the branch an action
@@ -189,7 +215,30 @@ fn replay_refusal(repo_path: &str, oldest: &str) -> Result<Option<String>, Strin
     if !is_object_id(oldest) {
         return Err(format!("Not a commit id: {oldest}"));
     }
-    let short = |sha: &str| sha[..sha.len().min(7)].to_string();
+    if let Some(merge) = merge_refusal(repo_path, oldest)? {
+        return Ok(Some(merge));
+    }
+    if parent_of(repo_path, oldest)?.is_none() && records_a_parent(repo_path, oldest)? {
+        return Ok(Some(format!(
+            "This is a shallow clone, and its history ends at {}. Commits cannot be replayed \
+             from the commit a shallow clone ends on — fetch the history below it first \
+             (git fetch --unshallow).",
+            short(oldest)
+        )));
+    }
+    Ok(None)
+}
+
+/// An object id as a refusal names it.
+fn short(sha: &str) -> &str {
+    &sha[..sha.len().min(7)]
+}
+
+/// The refusal for a merge commit anywhere from `HEAD` down to `oldest`, itself
+/// included. Only a range without one is a single line of history, which is
+/// what a todo of `pick` lines can replay — and what [`lineage`] can place
+/// commits on.
+fn merge_refusal(repo_path: &str, oldest: &str) -> Result<Option<String>, String> {
     // `^@` is every parent of the commit, so this is "merges from HEAD down to
     // and including it" — and unlike `<oldest>^..HEAD` it is not a fatal error
     // when the commit is the root. `rev-list` exits 0 either way; what it
@@ -205,22 +254,13 @@ fn replay_refusal(repo_path: &str, oldest: &str) -> Result<Option<String>, Strin
             &format!("{oldest}^@"),
         ],
     )?;
-    if !merge.is_empty() {
-        return Ok(Some(format!(
+    Ok((!merge.is_empty()).then(|| {
+        format!(
             "A merge commit ({}) is among the commits this would replay. History with a \
              merge in it cannot be squashed or reordered.",
             short(&merge)
-        )));
-    }
-    if parent_of(repo_path, oldest)?.is_none() && records_a_parent(repo_path, oldest)? {
-        return Ok(Some(format!(
-            "This is a shallow clone, and its history ends at {}. Commits cannot be replayed \
-             from the commit a shallow clone ends on — fetch the history below it first \
-             (git fetch --unshallow).",
-            short(oldest)
-        )));
-    }
-    Ok(None)
+        )
+    }))
 }
 
 /// The commit `sha` sits on — what a replay from `sha` is rebased onto — or

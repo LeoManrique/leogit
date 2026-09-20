@@ -62,9 +62,10 @@ pub struct OperationOutcome {
     pub success: bool,
     pub conflicts: Vec<String>,
     pub error_message: Option<String>,
-    /// The stopped pick or revert was dropped rather than committed, because
-    /// its resolution left nothing to commit. Git says nothing when it skips,
-    /// so without this a commit that never landed reads as one that did.
+    /// The stopped commit was dropped rather than committed, because its
+    /// resolution left nothing to commit. Git says nothing when it skips — a
+    /// rebase does so by itself, without being asked — so without this a commit
+    /// that never landed reads as one that did.
     pub skipped: bool,
 }
 
@@ -134,10 +135,12 @@ const MARKER_CHECK_BATCH: usize = 500;
 ///
 /// A pick or revert whose resolution left nothing to commit is skipped rather
 /// than continued. `--continue` refuses there and asks for a decision; a rebase
-/// in the same position drops the commit without asking, and taking the target's
-/// side of every conflict is the user having already said the commit adds
-/// nothing. `--empty=keep` does not cover it — that is about commits that were
-/// empty to begin with.
+/// in the same position drops the commit without asking or saying so, and taking
+/// the target's side of every conflict is the user having already said the
+/// commit adds nothing. `--empty=keep` does not cover it — that is about commits
+/// that were empty to begin with, or that a new order made empty. Either way the
+/// outcome says `skipped`: after a reorder the commit that went may be the very
+/// one the user was moving.
 ///
 /// # Errors
 /// When nothing is in progress; when a conflicted file still holds conflict
@@ -157,7 +160,13 @@ pub fn continue_operation(repo_path: &str) -> Result<OperationOutcome, String> {
     git_add(repo_path, &unmerged)?;
 
     let skipped = resolved_to_nothing(repo_path, dir.as_deref(), operation);
-    let step = if skipped { "--skip" } else { "--continue" };
+    // A rebase drops the commit by itself on `--continue`.
+    let skips_itself = operation == OperationInProgress::Rebase;
+    let step = if skipped && !skips_itself {
+        "--skip"
+    } else {
+        "--continue"
+    };
     let subcommand = operation.subcommand();
     eprintln!(
         "[operation] git {subcommand} {step} ({} resolved)",
@@ -331,20 +340,41 @@ fn refuse_unstaged_changes(repo_path: &str, unmerged: &[String]) -> Result<(), S
     ))
 }
 
-/// Whether a pick or revert is stopped on a commit whose resolution left the
-/// index identical to `HEAD`. Asked of the index rather than read out of git's
+/// Whether the operation is stopped on a commit whose resolution left the index
+/// identical to `HEAD`. Asked of the index rather than read out of git's
 /// refusal, which would mean matching translated prose.
+///
+/// A merge concludes with a commit whatever it holds.
 fn resolved_to_nothing(
     repo_path: &str,
     git_dir: Option<&Path>,
     operation: OperationInProgress,
 ) -> bool {
-    let (Some(dir), Some(file)) = (git_dir, operation.stopped_commit_file()) else {
+    let Some(dir) = git_dir else {
         return false;
     };
-    dir.join(file).exists()
+    let a_commit_is_waiting = match operation.stopped_commit_file() {
+        Some(file) => dir.join(file).exists(),
+        None => operation == OperationInProgress::Rebase && rebase_stopped_on_a_pick(dir),
+    };
+    a_commit_is_waiting
         && run_git_combined(repo_path, &["diff", "--cached", "--quiet"])
             .is_ok_and(|(nothing_staged, _)| nothing_staged)
+}
+
+/// Whether a rebase is stopped on a `pick` that has yet to become a commit —
+/// the one stop where a resolution that comes to nothing makes git drop the
+/// commit. Two of the rebase's own files say so between them: `stopped-sha`
+/// names the commit a stop is about and is gone once that commit is made, which
+/// leaves out a `break` and a failed `exec`; `amend` is there when continuing
+/// would amend `HEAD`, which leaves out an `edit` stop and a conflicted `fixup`
+/// or `squash` — those fold into a commit that already exists, and lose
+/// nothing. Whether this continue staged the conflict is no guide: a resolution
+/// staged from a terminal leaves nothing unmerged, and the commit goes all the
+/// same.
+fn rebase_stopped_on_a_pick(git_dir: &Path) -> bool {
+    let rebase = git_dir.join("rebase-merge");
+    rebase.join("stopped-sha").exists() && !rebase.join("amend").exists()
 }
 
 #[cfg(test)]

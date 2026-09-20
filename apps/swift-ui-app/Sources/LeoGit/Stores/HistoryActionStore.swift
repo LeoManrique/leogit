@@ -30,6 +30,17 @@ enum SquashReadiness {
     case refused(String)
 }
 
+/// Whether a reorder may run, once its destination is known.
+enum ReorderReadiness {
+    /// It may. `rewritesPushed` says a commit it would replay is already on
+    /// the upstream — reorder has no sheet of its own to say so in, so that is
+    /// what makes it ask first.
+    case ready(rewritesPushed: Bool)
+
+    /// Core's reason it cannot start.
+    case refused(String)
+}
+
 /// The History actions that replay commits — what starts them, under the
 /// window's one write slot — and the one thing about them git keeps no record
 /// of: which branch a cherry-pick came from.
@@ -158,6 +169,52 @@ final class HistoryActionStore {
             return .stoppedOnConflict(result.errorMessage ?? "The squash stopped on a conflict.")
         } catch {
             print("[history] squash failed: \(error.displayMessage)")
+            return .failed(error.displayMessage)
+        }
+    }
+
+    /// Ask core whether `shas` can be moved to just under `beforeSha` (`nil`
+    /// is the tip). Not the shared preflight: what a reorder replays — and so
+    /// whether a merge or a pushed commit is in it — depends on the
+    /// destination.
+    func prepareReorder(
+        _ shas: [String],
+        under beforeSha: String?,
+        repoPath: String
+    ) async -> ReorderReadiness {
+        do {
+            let preflight = try await GitBridge.preflightReorder(
+                in: repoPath,
+                shas: shas,
+                under: beforeSha
+            )
+            if let blocked = preflight.blocked { return .refused(blocked) }
+            return .ready(rewritesPushed: preflight.rewritesPushed)
+        } catch {
+            return .refused(error.displayMessage)
+        }
+    }
+
+    /// Move `shas` as one block to just under `beforeSha`, or to the tip.
+    func reorder(
+        _ shas: [String],
+        under beforeSha: String?,
+        repoPath: String
+    ) async -> HistoryActionOutcome {
+        guard let claim = gate.claim() else { return .refusedBusy }
+        isRunning = true
+        defer {
+            isRunning = false
+            gate.release(claim)
+        }
+        do {
+            let result = try await GitBridge.reorder(in: repoPath, shas: shas, under: beforeSha)
+            if result.success {
+                return .landed(result.selection)
+            }
+            return .stoppedOnConflict(result.errorMessage ?? "The reorder stopped on a conflict.")
+        } catch {
+            print("[history] reorder failed: \(error.displayMessage)")
             return .failed(error.displayMessage)
         }
     }

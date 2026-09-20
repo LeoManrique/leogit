@@ -48,6 +48,7 @@
     type Exclusion,
     type FileEntry,
     type CommitInfo,
+    type RewriteResult,
     type SquashDraft,
     type Config,
     type DiffSizeGuard,
@@ -2199,7 +2200,13 @@
   async function runCherryPick(target: string): Promise<void> {
     const repoPath = $appState.repoPath
     const commits = cherryPickCommits
-    if (!repoPath || !commits || !beginRepoWrite('cherryPick')) return
+    if (!repoPath || !commits) return
+    if (!beginRepoWrite('cherryPick')) {
+      // Nothing was attempted; a click that does nothing would not say so.
+      showBranches = false
+      reportActionError(REPO_BUSY_MESSAGE)
+      return
+    }
     const source = $repoState.status.branch
     try {
       const result = await gitApi.cherryPickCommits(
@@ -2208,16 +2215,15 @@
         target,
       )
       showBranches = false
-      await reloadAfterBranchChange()
-      if (result.success) {
-        selectResultingCommits(result.selection)
-        return
-      }
-      cherryPickReturn = { source, target }
-      setActiveTab('changes')
-      reportActionError(
-        result.error_message || `The cherry-pick stopped on a conflict in ${target}.`,
+      await finishHistoryAction(
+        repoPath,
+        result,
+        reloadAfterBranchChange,
+        `The cherry-pick stopped on a conflict in ${target}.`,
       )
+      // After the reload: the rule that forgets this reads the status, and the
+      // one from before the pick shows no cherry-pick open.
+      if (!result.success) cherryPickReturn = { source, target }
     } catch (error) {
       showBranches = false
       // Core has put the repository back where it began, or said where it was
@@ -2310,14 +2316,12 @@
         message,
       )
       squashRequest = null
-      if ($appState.repoPath !== repoPath) return
-      await reloadAfterHeadMove({ silent: true })
-      if (result.success) {
-        selectResultingCommits(result.selection)
-        return
-      }
-      setActiveTab('changes')
-      reportActionError(result.error_message || 'The squash stopped on a conflict.')
+      await finishHistoryAction(
+        repoPath,
+        result,
+        reloadAfterRewrite,
+        'The squash stopped on a conflict.',
+      )
     } catch (error) {
       console.warn('[history] squash failed', error)
       if ($appState.repoPath !== repoPath) {
@@ -2325,11 +2329,121 @@
         return
       }
       // Core aborted the rebase, or said it could not; re-read either way.
-      await reloadAfterHeadMove({ silent: true })
+      await reloadAfterRewrite()
       squashError = String(error)
     } finally {
       endRepoWrite()
     }
+  }
+
+  /**
+   * The reorder waiting on its confirmation, which only a move that rewrites
+   * pushed commits asks for: the commits (newest first), the commit they land
+   * just under — null for the tip — and the upstream they are already on.
+   */
+  let reorderRequest = $state<{
+    /** The repository that was asked — never whichever one is open by now. */
+    repoPath: string
+    commits: CommitInfo[]
+    beforeSha: string | null
+    /** An empty name when the status has none yet. */
+    pushedTo: string
+  } | null>(null)
+
+  /**
+   * History ▸ Reorder…, once the list's insertion line has been given a place.
+   * The preflight comes now and not at the menu, because what a reorder replays
+   * — and so whether it rewrites pushed commits — depends on the destination.
+   * Reorder has no dialog of its own to say that in, so that one case asks
+   * first; every other move just runs.
+   */
+  async function requestReorder(commits: CommitInfo[], beforeSha: string | null): Promise<void> {
+    const repoPath = $appState.repoPath
+    if (!repoPath || commits.length === 0 || historyActionsBlocked || reorderRequest) return
+    const shas = commits.map((c) => c.sha)
+    try {
+      const preflight = await gitApi.reorderPreflight(repoPath, shas, beforeSha)
+      // The answer is about the repository that was asked.
+      if ($appState.repoPath !== repoPath) return
+      if (preflight.blocked) {
+        reportActionError(preflight.blocked)
+        return
+      }
+      const request = { repoPath, commits, beforeSha, pushedTo: $repoState.status.upstream }
+      if (preflight.rewrites_pushed) reorderRequest = request
+      else await runReorder(request)
+    } catch (error) {
+      if ($appState.repoPath === repoPath) reportActionError(error)
+    }
+  }
+
+  /**
+   * Move the commits. The three ways out every History action has — and a
+   * failure that undid itself takes the modal, there being no dialog for it to
+   * stay in.
+   */
+  async function runReorder(request: NonNullable<typeof reorderRequest>): Promise<void> {
+    const { repoPath, commits, beforeSha } = request
+    if (!beginRepoWrite('reorder')) {
+      reorderRequest = null
+      reportActionError(REPO_BUSY_MESSAGE)
+      return
+    }
+    try {
+      const result = await gitApi.reorderCommits(
+        repoPath,
+        commits.map((c) => c.sha),
+        beforeSha,
+      )
+      reorderRequest = null
+      await finishHistoryAction(
+        repoPath,
+        result,
+        reloadAfterRewrite,
+        'The reorder stopped on a conflict.',
+      )
+    } catch (error) {
+      console.warn('[history] reorder failed', error)
+      reorderRequest = null
+      if ($appState.repoPath !== repoPath) return
+      // Core aborted the rebase, or said it could not; re-read either way.
+      await reloadAfterRewrite()
+      reportActionError(error)
+    } finally {
+      endRepoWrite()
+    }
+  }
+
+  /** What a rewrite of the current branch is re-read with: HEAD moved, quietly. */
+  function reloadAfterRewrite(): Promise<void> {
+    return reloadAfterHeadMove({ silent: true })
+  }
+
+  /**
+   * Where every History action ends once core has answered with data. **Reload
+   * first, report second**: a run that stopped on a conflict has already moved
+   * the repository, and the conflicted files are waiting in Changes — so that
+   * is the tab its text is read over. A clean run selects what it produced.
+   *
+   * `repoPath` is the repository the action ran in. If the window has moved on
+   * to another — while git ran, or while the reload did — nothing here is said
+   * over it: its own load shows what is true of it.
+   */
+  async function finishHistoryAction(
+    repoPath: string,
+    result: RewriteResult,
+    reload: () => Promise<void>,
+    stoppedOnConflict: string,
+  ): Promise<void> {
+    if ($appState.repoPath !== repoPath) return
+    await reload()
+    if ($appState.repoPath !== repoPath) return
+    if (result.success) {
+      selectResultingCommits(result.selection)
+      return
+    }
+    setActiveTab('changes')
+    reportActionError(result.error_message || stoppedOnConflict)
   }
 
   /**
@@ -2753,6 +2867,7 @@
             onCheckoutCommit={handleCheckoutCommit}
             onCherryPick={(commits) => void requestCherryPick(commits)}
             onSquash={(commits) => void requestSquash(commits)}
+            onReorder={(commits, beforeSha) => void requestReorder(commits, beforeSha)}
             {historyActionsBlocked}
           />
         </div>
@@ -3218,6 +3333,36 @@
       onConfirm={confirmCheckout}
       onCancel={cancelCheckout}
     />
+  {/if}
+
+  {#if reorderRequest}
+    {@const request = reorderRequest}
+    {@const count = request.commits.length}
+    {@const what = count === 1 ? 'Commit' : `${count} Commits`}
+    <!-- Not `destructive`: like a squash, a reorder is a change with a way back
+         (Abort, the reflog), so it keeps the accent button. -->
+    <ConfirmDialog
+      title={`Reorder ${what}?`}
+      confirmLabel={`Reorder ${what}`}
+      busyLabel="Reordering…"
+      isBusy={$activeRepoWrite === 'reorder'}
+      blocked={blockedFor('reorder')}
+      onConfirm={() => void runReorder(request)}
+      onCancel={() => {
+        if ($activeRepoWrite !== 'reorder') reorderRequest = null
+      }}
+    >
+      {#snippet body()}
+        <p>
+          {#if request.pushedTo}
+            This rewrites commits that are already on <code>{request.pushedTo}</code>.
+          {:else}
+            This rewrites commits that are already pushed.
+          {/if}
+        </p>
+        <p class="muted">After reordering, the next push is a force push.</p>
+      {/snippet}
+    </ConfirmDialog>
   {/if}
 
   {#if squashRequest}

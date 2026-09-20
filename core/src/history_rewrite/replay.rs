@@ -17,11 +17,11 @@ use crate::operation::{self, OperationInProgress, without_progress};
 /// finishes or is aborted — from this app or from a terminal.
 pub(super) const MESSAGE_GIT_PATH: &str = "rebase-merge/leogit-message";
 
-/// Replaces git's todo with ours and drops the message beside it. git runs the
-/// editor through `sh` with the todo's path as `$1`, which sits in
-/// `rebase-merge/` — the directory the message belongs in.
-const SEQUENCE_EDITOR: &str =
-    r#"sh -c 'cp "$LEOGIT_TODO" "$1" && cp "$LEOGIT_MESSAGE" "$(dirname "$1")/leogit-message"' --"#;
+/// Replaces git's todo with ours and, for a replay that carries a message,
+/// drops it beside the todo. git runs the editor through `sh` with the todo's
+/// path as `$1`, which sits in `rebase-merge/` — the directory the message
+/// belongs in.
+const SEQUENCE_EDITOR: &str = r#"sh -c 'cp "$LEOGIT_TODO" "$1" && { [ -z "$LEOGIT_MESSAGE" ] || cp "$LEOGIT_MESSAGE" "$(dirname "$1")/leogit-message"; }' --"#;
 
 /// One replay of the current branch.
 pub(super) struct Replay<'a> {
@@ -29,11 +29,17 @@ pub(super) struct Replay<'a> {
     /// The commit the replayed range sits on — the parent of the oldest commit
     /// in the todo — or `None` when that commit is the root.
     pub onto: Option<&'a str>,
-    /// The todo: full object ids, no comment lines, so neither
-    /// `core.commentChar` nor `rebase.abbreviateCommands` has a say in it.
+    /// The todo: full object ids and no comment lines, so
+    /// `rebase.abbreviateCommands` has no say in it, and `core.commentChar`
+    /// only if it is the first letter of a command — `p` turns every `pick`
+    /// into a comment, and git refuses the lot with "nothing to do" before it
+    /// touches anything. Nobody's comment character is a letter, and forcing
+    /// `#` for this run alone would leave the rounds Continue runs reading the
+    /// rebase's files under a different one.
     pub todo: &'a str,
-    /// What [`MESSAGE_GIT_PATH`] will hold.
-    pub message: &'a str,
+    /// What [`MESSAGE_GIT_PATH`] will hold, for a todo with an `exec` line that
+    /// reads it. A reorder, all `pick`, has none.
+    pub message: Option<&'a str>,
 }
 
 /// How a replay ended when it did not fail.
@@ -76,12 +82,17 @@ impl Replay<'_> {
         let todo_path = scratch.path().join("todo");
         let message_path = scratch.path().join("message");
         fs::write(&todo_path, self.todo).map_err(|e| format!("write the rebase todo: {e}"))?;
-        fs::write(&message_path, self.message)
-            .map_err(|e| format!("write the commit message: {e}"))?;
+        if let Some(message) = self.message {
+            fs::write(&message_path, message)
+                .map_err(|e| format!("write the commit message: {e}"))?;
+        }
         let (Some(todo_path), Some(message_path)) = (todo_path.to_str(), message_path.to_str())
         else {
             return Err("The temporary directory's path is not UTF-8.".to_string());
         };
+        // Set either way, and empty for a replay without a message: a variable
+        // this process happened to inherit must not name a file to copy.
+        let message_path = self.message.map_or("", |_| message_path);
 
         let mut args = vec![
             "rebase",

@@ -324,6 +324,16 @@ struct ContentView: View {
                 ) { outcome in
                     await finishHistoryAction(outcome, in: request.repoPath)
                 }
+            case let .reorder(request):
+                ReorderSheet(
+                    commits: request.commits,
+                    beforeSha: request.beforeSha,
+                    pushedTo: request.pushedTo,
+                    store: historyActions,
+                    repoPath: request.repoPath
+                ) { outcome in
+                    await finishHistoryAction(outcome, in: request.repoPath)
+                }
             }
         }
     }
@@ -646,6 +656,7 @@ struct ContentView: View {
                     onCheckout: { await checkoutCommit($0, in: repoPath) },
                     onCherryPick: { requestCherryPick($0, in: repoPath) },
                     onSquash: { requestSquash($0, in: repoPath) },
+                    onReorder: { requestReorder($0, under: $1, in: repoPath) },
                     isWriteInFlight: writeGate.isHeld
                 )
             }
@@ -1111,6 +1122,59 @@ struct ContentView: View {
         }
     }
 
+    /// History ▸ Reorder…, once the list's insertion line has been given a
+    /// place. The preflight comes now and not at the menu, because what a
+    /// reorder replays — and so whether it rewrites pushed commits — depends on
+    /// the destination. Reorder has no sheet of its own to say that in, so that
+    /// one case asks first; every other move just runs, and with no sheet for a
+    /// failure to stay in, a failure takes the modal.
+    @MainActor
+    private func requestReorder(
+        _ commits: [CommitInfo],
+        under beforeSha: String?,
+        in repoPath: String
+    ) {
+        guard sheet == nil, !commits.isEmpty else { return }
+        let shas = commits.map(\.sha)
+        Task {
+            let readiness = await historyActions.prepareReorder(
+                shas,
+                under: beforeSha,
+                repoPath: repoPath
+            )
+            guard store.repoPath == repoPath, sheet == nil else { return }
+            switch readiness {
+            case let .refused(reason):
+                actionFailure = ActionFailure(reason)
+            case .ready(rewritesPushed: true):
+                sheet = .reorder(
+                    ReorderRequest(
+                        repoPath: repoPath,
+                        commits: commits,
+                        beforeSha: beforeSha,
+                        pushedTo: store.status?.upstream ?? ""
+                    )
+                )
+            case .ready(rewritesPushed: false):
+                let outcome = await historyActions.reorder(
+                    shas,
+                    under: beforeSha,
+                    repoPath: repoPath
+                )
+                await finishHistoryAction(outcome, in: repoPath)
+                guard store.repoPath == repoPath else { return }
+                switch outcome {
+                case let .failed(message):
+                    actionFailure = ActionFailure(message)
+                case .refusedBusy:
+                    actionFailure = ActionFailure(RepositoryWriteGate.busyMessage)
+                case .landed, .stoppedOnConflict:
+                    break
+                }
+            }
+        }
+    }
+
     /// What follows a History action git was actually asked for. **Reload
     /// first, report second**: an action that stopped on a conflict has already
     /// moved the repository, and one that failed was moved and put back. The
@@ -1122,9 +1186,13 @@ struct ContentView: View {
     /// them has landed: `maintainsSelection` prunes ids the list does not have,
     /// so assigned any earlier they would be dropped at once. A conflict goes
     /// to the Changes tab, where the conflicted files are waiting, and takes
-    /// the modal with git's own text. A failure is already stated in the sheet.
+    /// the modal with git's own text. A failure is already stated in the sheet
+    /// — or, for a reorder that ran without one, by `requestReorder`.
     @MainActor
     private func finishHistoryAction(_ outcome: HistoryActionOutcome, in repoPath: String) async {
+        // git was never asked, so there is nothing new to read — and somebody
+        // else's write is running.
+        if case .refusedBusy = outcome { return }
         await store.refresh()
         await branchStore.load(repoPath: repoPath)
         guard store.repoPath == repoPath else { return }
@@ -1311,6 +1379,10 @@ private enum RootSheet: Identifiable {
     /// reason: a conflict sends the window to Changes.
     case squash(SquashRequest)
 
+    /// The confirmation in front of a reorder that rewrites pushed commits,
+    /// here for the same reason.
+    case reorder(ReorderRequest)
+
     var id: String {
         switch self {
         case .clone: "clone"
@@ -1320,6 +1392,8 @@ private enum RootSheet: Identifiable {
             "cherry-pick:\(request.commits.map(\.sha).joined(separator: "\n"))"
         case let .squash(request):
             "squash:\(request.commits.map(\.sha).joined(separator: "\n"))"
+        case let .reorder(request):
+            "reorder:\(request.commits.map(\.sha).joined(separator: "\n"))"
         }
     }
 }
@@ -1347,6 +1421,19 @@ private struct SquashRequest {
     /// The upstream the commits are already on, or `nil` when none is pushed —
     /// empty when core says they are pushed before a status read has named it.
     let pushedTo: String?
+}
+
+/// Everything the reorder confirmation is about, snapshotted when the place was
+/// chosen.
+private struct ReorderRequest {
+    let repoPath: String
+    /// The commits to move, newest first.
+    let commits: [CommitInfo]
+    /// The commit they land just under; `nil` is the tip.
+    let beforeSha: String?
+    /// The upstream the commits are already on — empty when core says they are
+    /// pushed before a status read has named it.
+    let pushedTo: String
 }
 
 /// FRONTEND §6.13's second class: a failure that was never the user's task.

@@ -14,6 +14,7 @@ export type RepoWriteKind =
   | 'abort'
   | 'cherryPick'
   | 'squash'
+  | 'reorder'
   | 'checkout'
   | 'undoCommit'
   | 'discard'

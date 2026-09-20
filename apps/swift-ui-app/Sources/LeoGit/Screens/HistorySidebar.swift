@@ -50,6 +50,9 @@ struct HistorySidebar: View {
     let onCherryPick: ([CommitInfo]) -> Void
     /// Squash these commits into one — the menu's targets, newest first.
     let onSquash: ([CommitInfo]) -> Void
+    /// Move these commits — newest first — to just under the commit named, or
+    /// to the tip for `nil`. Called once a place has been chosen in the list.
+    let onReorder: ([CommitInfo], String?) -> Void
 
     /// A repository write is running, so the actions that replay commits
     /// cannot start. The operation in progress and a detached HEAD, which gate
@@ -58,6 +61,17 @@ struct HistorySidebar: View {
 
     /// The commit the checkout confirmation is about; `nil` when it's closed.
     @State private var commitToCheckout: CommitInfo?
+
+    /// The reorder choosing its place, or `nil` when the mode is not armed.
+    /// Here and not in a store: it is a keyboard mode of this one list, and a
+    /// tab switch — which rebuilds this view — is one of the things that end it.
+    @State private var reorder: ReorderMode?
+
+    /// Keeps the keys coming to the list while the mode is armed: the menu
+    /// that armed it may have taken focus with it.
+    @FocusState private var isListFocused: Bool
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// "Now", as the relative dates read it — bumped on a tick so the visible
     /// labels keep ageing. See `relativeDateClock`.
@@ -90,6 +104,22 @@ struct HistorySidebar: View {
         // Keep something selected: the newest commit on arrival, and again when
         // a refresh drops every selected sha — which is what an amend does.
         .maintainsSelection($selection, showing: $selectedSha, of: commits)
+        // The reorder mode's lifetime is watched from here and not from the
+        // list: the list leaves the hierarchy whenever `commits` empties — a
+        // repository switch publishes `[]` first — and a watcher that left with
+        // it would let the mode come back armed over another repository's rows.
+        //
+        // A click anywhere ends the mode. The press itself goes on to whatever
+        // it was aimed at — which, inside the list, is a row that cannot be
+        // selected yet.
+        .onMouseDown(while: reorder != nil) { _ = cancelReorder() }
+        // What else ends it: the branch was rewritten or committed to under it,
+        // a moved commit left the list, or the actions became blocked. A page
+        // landing below only adds slots.
+        .onChange(of: commits.first?.sha) { endReorderUnlessValid() }
+        .onChange(of: commits.count) { endReorderUnlessValid() }
+        .onChange(of: canStartHistoryAction) { endReorderUnlessValid() }
+        .task(id: reorder != nil) { await retireReorderHint() }
         .sheet(item: $commitToCheckout) { commit in
             CheckoutCommitSheet(commit: commit, isWriteInFlight: isWriteInFlight) {
                 await onCheckout(commit)
@@ -105,6 +135,12 @@ struct HistorySidebar: View {
         // answers that do not vary across the rows they are asked about.
         let unpushed = unpushedShas
         let prefetchTriggers = prefetchTriggerShas
+        // The insertion line belongs to the row under it — or, in the last
+        // slot of all, to the foot of the last row.
+        let lineAbove = reorder.flatMap { mode in
+            commits.indices.contains(mode.slot) ? commits[mode.slot].sha : nil
+        }
+        let lineBelow = reorder?.slot == commits.count ? commits.last?.sha : nil
 
         // Restores the reader's place after a tab round trip, which takes this
         // whole subtree out of the hierarchy and rebuilds it scrolled to the
@@ -121,6 +157,16 @@ struct HistorySidebar: View {
                     isUnpushed: unpushed.contains(commit.sha),
                     now: now
                 )
+                .overlay(alignment: .top) {
+                    if commit.sha == lineAbove { InsertionLine(edge: .top) }
+                }
+                .overlay(alignment: .bottom) {
+                    if commit.sha == lineBelow { InsertionLine(edge: .bottom) }
+                }
+                // The freeze: AppKit answers neither a click nor a key on a row
+                // that cannot be selected, and draws the selection it has
+                // exactly as before.
+                .selectionDisabled(reorder != nil)
                 .onAppear {
                     // Rows materialise lazily, so one of the last few
                     // appearing means the end of what we have is in sight.
@@ -129,6 +175,20 @@ struct HistorySidebar: View {
             }
             .listStyle(.inset)
             .alternatingRowBackgrounds()
+            .focused($isListFocused)
+            // Armed, these run before the table sees the key, and `.handled`
+            // keeps it from the table; unarmed they answer `.ignored` and the
+            // table's own navigation is untouched — the bargain the changed-file
+            // list strikes over Space.
+            .onKeyPress(.upArrow) { moveReorderLine(by: -1) }
+            .onKeyPress(.downArrow) { moveReorderLine(by: 1) }
+            // A chord is somebody else's — ⌘↩ is the composer's — so only the
+            // bare key moves commits.
+            .onKeyPress(.return, phases: .down) { press in
+                press.modifiers.isDisjoint(with: [.command, .control, .option])
+                    ? confirmReorder() : .ignored
+            }
+            .onKeyPress(.escape) { cancelReorder() }
             .contextMenu(forSelectionType: String.self) { shas in
                 // In list order, newest first — a set has no order, and every
                 // history action names a *range*. Read through `targets`, never
@@ -136,13 +196,17 @@ struct HistorySidebar: View {
                 // selection made in code, and `targets` drops what the list no
                 // longer holds.
                 let targets = ListSelection.targets(shas, in: commits)
-                if targets.count == 1, let commit = targets.first {
+                if reorder != nil {
+                    // No menu over an armed reorder: a builder that returns
+                    // nothing is how a menu is switched off.
+                } else if targets.count == 1, let commit = targets.first {
                     rowMenu(for: commit)
                 } else if targets.count > 1 {
                     // Only what acts on all of them: every single-commit item
                     // would have to pick one row to mean.
                     cherryPickItem(for: targets)
                     squashItem(for: targets)
+                    reorderItem(for: targets)
                 }
             }
             .onAppear {
@@ -158,6 +222,24 @@ struct HistorySidebar: View {
             .onChange(of: selectedSha) { _, sha in
                 if let sha { proxy.scrollTo(sha) }
             }
+            // The line arrives with a row on each side of it: the same
+            // least-scroll, asked for the row above and then the row below.
+            .onChange(of: reorder?.slot) { _, slot in
+                guard let slot else { return }
+                for row in [slot - 1, slot] where commits.indices.contains(row) {
+                    proxy.scrollTo(commits[row].sha)
+                }
+            }
+        }
+        .overlay(alignment: .bottom) {
+            // The fade is the caption's alone, whatever retires it — the
+            // clock, an arrow, the mode ending — and never the line's, which
+            // moves at once.
+            ZStack { reorderHint }
+                .animation(
+                    reduceMotion ? nil : .easeOut(duration: 0.16),
+                    value: reorder?.showsHint == true
+                )
         }
         .task(id: policy.canTickRelativeDates) { await relativeDateClock() }
     }
@@ -207,6 +289,7 @@ struct HistorySidebar: View {
             .disabled(isHead)
 
         cherryPickItem(for: [commit])
+        reorderItem(for: [commit])
 
         Divider()
 
@@ -235,10 +318,27 @@ struct HistorySidebar: View {
         Button("Squash \(targets.count) Commits…") {
             onSquash(targets)
         }
+        .disabled(!canReplay(targets))
+    }
+
+    /// Reorder has no sheet: its item arms the list's insertion mode. Off
+    /// under squash's gate, and when the commits have nowhere to go — the only
+    /// commit of the branch, or everything above a merge.
+    private func reorderItem(for targets: [CommitInfo]) -> some View {
+        Button(targets.count == 1 ? "Reorder Commit…" : "Reorder \(targets.count) Commits…") {
+            armReorder(targets)
+        }
         .disabled(
-            !canStartHistoryAction
-                || HistoryRange.replaysMergeCommit(in: commits, selected: Set(targets.map(\.sha)))
+            !canReplay(targets)
+                || !ReorderPlacement.canReorder(in: commits, moving: Set(targets.map(\.sha)))
         )
+    }
+
+    /// The gate on the actions that *replay* this branch: the shared one, and
+    /// no merge commit anywhere from HEAD down to the oldest target.
+    private func canReplay(_ targets: [CommitInfo]) -> Bool {
+        canStartHistoryAction
+            && !HistoryRange.replaysMergeCommit(in: commits, selected: Set(targets.map(\.sha)))
     }
 
     /// The menu-time gate on every action that replays commits: not while an
@@ -250,6 +350,82 @@ struct HistorySidebar: View {
         return status.operation == nil && !status.detached && !isWriteInFlight
     }
 
+    // MARK: Reorder — the insertion mode
+
+    private func armReorder(_ moving: [CommitInfo]) {
+        let slot = ReorderPlacement.homeSlot(in: commits, moving: Set(moving.map(\.sha)))
+        reorder = ReorderMode(moving: moving, slot: slot, tip: commits.first?.sha)
+        isListFocused = true
+    }
+
+    private func moveReorderLine(by step: Int) -> KeyPress.Result {
+        guard var mode = reorder else { return .ignored }
+        let slots = ReorderPlacement.slots(in: commits, moving: mode.movingShas)
+        mode.slot = ReorderPlacement.adjacentSlot(in: slots, to: mode.slot, step: step)
+        mode.showsHint = false
+        reorder = mode
+        return .handled
+    }
+
+    /// ⏎: the mode ends either way, and the move is asked for unless the line
+    /// is where the commits already are — which is the user deciding to leave
+    /// them.
+    private func confirmReorder() -> KeyPress.Result {
+        guard let mode = reorder else { return .ignored }
+        reorder = nil
+        let stays = ReorderPlacement.changesNothing(
+            in: commits,
+            moving: mode.movingShas,
+            slot: mode.slot
+        )
+        if !stays {
+            onReorder(mode.moving, ReorderPlacement.destination(in: commits, slot: mode.slot))
+        }
+        return .handled
+    }
+
+    private func cancelReorder() -> KeyPress.Result {
+        guard reorder != nil else { return .ignored }
+        reorder = nil
+        return .handled
+    }
+
+    private func endReorderUnlessValid() {
+        guard let mode = reorder else { return }
+        let slots = ReorderPlacement.slots(in: commits, moving: mode.movingShas)
+        let loaded = Set(commits.map(\.sha))
+        if !canStartHistoryAction || !slots.contains(mode.slot)
+            || !mode.movingShas.isSubset(of: loaded) || commits.first?.sha != mode.tip
+        {
+            reorder = nil
+        }
+    }
+
+    /// The keys, said once: up for a few seconds, or until the first arrow.
+    @ViewBuilder
+    private var reorderHint: some View {
+        if reorder?.showsHint == true {
+            Text("↑ ↓ choose a position · ⏎ move · esc cancel")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(.regularMaterial, in: .rect(cornerRadius: 6))
+                .overlay { RoundedRectangle(cornerRadius: 6).strokeBorder(.separator) }
+                .padding(.bottom, 10)
+                .allowsHitTesting(false)
+                .transition(reduceMotion ? .identity : .opacity)
+        }
+    }
+
+    private func retireReorderHint() async {
+        guard reorder != nil else { return }
+        try? await Task.sleep(for: .seconds(4))
+        guard !Task.isCancelled else { return }
+        reorder?.showsHint = false
+    }
+
     /// Undo is offered only while the commit is believed to be local: either
     /// it's provably unpushed, or no upstream resolved at all — in which case
     /// nothing can prove it *was* pushed either. Undoing a published commit
@@ -257,6 +433,45 @@ struct HistorySidebar: View {
     private func canUndo(_ commit: CommitInfo) -> Bool {
         let hasResolvedUpstream = !(status?.upstream ?? "").isEmpty
         return !hasResolvedUpstream || unpushedShas.contains(commit.sha)
+    }
+}
+
+/// A reorder choosing its place in the list.
+private struct ReorderMode {
+    /// The menu's targets, newest first — captured, since the live selection
+    /// can be re-seated underneath.
+    let moving: [CommitInfo]
+    let movingShas: Set<String>
+    /// The tip the mode was armed over. A different one means the rows under
+    /// the line are not the ones it was placed among.
+    let tip: String?
+    /// Where the line is — one of `ReorderPlacement.slots`.
+    var slot: Int
+    var showsHint = true
+
+    init(moving: [CommitInfo], slot: Int, tip: String?) {
+        self.moving = moving
+        movingShas = Set(moving.map(\.sha))
+        self.tip = tip
+        self.slot = slot
+    }
+}
+
+/// Where the moved commits will land: 2pt of accent against the join between
+/// two rows, from the side of the row that draws it. A `List` row clips what it
+/// draws at its own bounds, which lie 4pt outside the row's content — the inset
+/// style's row spacing — so the line is pushed out to that edge and no further.
+private struct InsertionLine: View {
+    let edge: VerticalEdge
+
+    private static let rowInset: CGFloat = 4
+
+    var body: some View {
+        Capsule()
+            .fill(.tint)
+            .frame(height: 2)
+            .offset(y: edge == .top ? -Self.rowInset : Self.rowInset)
+            .allowsHitTesting(false)
     }
 }
 

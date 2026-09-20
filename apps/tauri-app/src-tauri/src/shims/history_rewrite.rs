@@ -38,3 +38,21 @@ pub fn squash_commits(
 ) -> Result<RewriteResult, String> {
     history_rewrite::squash_commits(&repo_path, &shas, &message)
 }
+
+#[tauri::command(async)]
+pub fn reorder_preflight(
+    repo_path: String,
+    shas: Vec<String>,
+    before_sha: Option<String>,
+) -> Result<RewritePreflight, String> {
+    history_rewrite::reorder_preflight(&repo_path, &shas, before_sha.as_deref())
+}
+
+#[tauri::command(async)]
+pub fn reorder_commits(
+    repo_path: String,
+    shas: Vec<String>,
+    before_sha: Option<String>,
+) -> Result<RewriteResult, String> {
+    history_rewrite::reorder_commits(&repo_path, &shas, before_sha.as_deref())
+}

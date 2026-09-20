@@ -35,9 +35,9 @@ static-linking or a local daemon (that decision is open; see the plan).
   Frontends never re-derive git state the core already returns (e.g. file status
   categories, ahead/behind, merge conflicts).
 - Today's surface: **4 events, ~45 DTOs**, and a command catalogue (§3) each host exposes
-  **to the extent it consumes it**. The Tauri host registers **75** `#[tauri::command]`s,
+  **to the extent it consumes it**. The Tauri host registers **77** `#[tauri::command]`s,
   each with a wrapper in `apps/tauri-app/src/lib/api/commands.ts`; the UniFFI bridge
-  exports **75** functions. The two sets are deliberately not identical, and a command
+  exports **77** functions. The two sets are deliberately not identical, and a command
   reaching one host does not oblige the other — what is required is that the difference be
   recorded, here or in §8, never left silent.
   - No native export: `check_auth`, `generate_patch`, `generate_inverse_patch`,
@@ -86,12 +86,12 @@ static-linking or a local daemon (that decision is open; see the plan).
 - **State ownership** — durable state (config, repos MRU, terminal PTY sessions)
   lives in the core. Frontends hold only re-derivable view state.
 
-## 3. Command surface (75)
+## 3. Command surface (77)
 
 Grouped by namespace. `args` are the logical inputs (camelCase on the wire);
 `→` is the return DTO (§5). "async/net" marks network operations that may stream
 progress (§4.1) and can be slow. This is the catalogue of operations core offers a
-frontend — the Tauri host registers all 75; the native bridge exposes the subset it
+frontend — the Tauri host registers all 77; the native bridge exposes the subset it
 consumes, plus seven of its own (§1).
 
 ### 3.1 Config & state — 6
@@ -188,7 +188,7 @@ whole window, and that read is exactly the one that can land mid-rewrite.
 | `get_push_remote` | `repoPath, branch` | `string \| null` |
 | `get_repo_identifier` | `repoPath` | `RepoIdentifier \| null` |
 
-### 3.7 Git — merge — 4, the operation in progress — 2, and history actions — 4
+### 3.7 Git — merge — 4, the operation in progress — 2, and history actions — 6
 | Command | Args | Returns |
 |---|---|---|
 | `merge_branch` | `repoPath, branch` | `MergeResult` |
@@ -201,6 +201,8 @@ whole window, and that read is exactly the one that can land mid-rewrite.
 | `cherry_pick_commits` | `repoPath, shas, targetBranch` | `RewriteResult` |
 | `squash_draft` | `repoPath, shas` | `SquashDraft` |
 | `squash_commits` | `repoPath, shas, message` | `RewriteResult` |
+| `reorder_preflight` | `repoPath, shas, beforeSha \| null` | `RewritePreflight` |
+| `reorder_commits` | `repoPath, shas, beforeSha \| null` | `RewriteResult` |
 
 `RepoStatus.operation` answers "is a merge, rebase, cherry-pick or revert in
 progress" on every refresh, so there is no separate command for it — a second
@@ -214,7 +216,8 @@ marker, naming the files, and, for a rebase, while another tracked file has
 unstaged edits (git refuses that itself, by claiming there are conflicts).
 Stopping on the *next* conflict is data, as it is for a merge: `success` false,
 git's text, the conflicted paths. A pick or revert resolved to nothing is
-skipped, which is what a rebase does with one.
+skipped, which is what a rebase does with one by itself — and `skipped` is set
+for all three, so the commit that went is never left unsaid.
 
 `abort_operation` rewinds exactly as far as git does. Its string is git's own
 words when the abort worked but was not a full rewind — HEAD was moved by hand
@@ -292,6 +295,30 @@ first, blank line between, empty parts dropped, `Co-authored-by` lines removed;
 `co_authors` is every co-author any of them names, once per address. It refuses the
 selections `squash_commits` would (fewer than two commits, a commit that is not
 on the current branch) and changes nothing.
+
+`reorder_commits` moves `shas` — commits of the current branch, in any order and
+either hex case — **as one block, keeping their own order**, to just *under*
+`beforeSha` in a newest-first list (so just older than it); `null` is the tip.
+The selection need not be contiguous, and `beforeSha` may be one of the moved
+commits: the rule is *take the moved rows out, and put them back where the line
+is*. Every moved and replayed commit keeps its author and author date. It runs
+the preflight itself. The same three outcomes, with these differences:
+
+- **`success: true`** — `selection` is the moved commits, newest first, where
+  they landed. **A move that would change nothing is a success too**: git is not
+  run, `selection` is the commits as they stand, and `undo` is null — there is
+  no step to undo.
+- **`success: false`** — a conflict, `RepoStatus.operation = Rebase`, continued
+  and aborted as any rebase is. A moved commit whose conflict is resolved to
+  nothing is dropped by the rebase, and `continue_operation` says so (`skipped`).
+- **an error** — the rebase aborted and the branch back where it began.
+
+`reorder_preflight` is the preflight for a reorder **whose destination is
+known**: what a reorder replays starts at the first commit the move displaces —
+the older of the moved commits and the destination — so the merge, the shallow
+boundary and `rewrites_pushed` can only be judged with both in hand, which
+`rewrite_preflight`'s one commit cannot carry. A move that would change nothing
+is ready and rewrites nothing.
 
 ### 3.8 Git — discovery / init / clone — 7
 | Command | Args | Returns |
@@ -1042,7 +1069,7 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
 21. **History actions replay commits, and one repository write runs at a time.**
    *The write slot.* Each window holds **one slot** for everything that rewrites the
    repository: commit, continue, switch, create, delete, merge, abort, cherry-pick,
-   squash, checking a commit out, undoing a commit, and discard. A write that cannot claim it
+   squash, reorder, checking a commit out, undoing a commit, and discard. A write that cannot claim it
    does not start, and a refused start is **never reported as a success** (§6.14's
    trap). Controls whose write is a single click read the slot and disable — Commit,
    Continue, the branch menu's actions, the History actions — so a Continue that takes
@@ -1112,6 +1139,37 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
      outside the app (a hook, a signer), after which the same button is pressed again.
    - **The slot was taken** between the dialog opening and the button: the dialog stays
      and says so.
+
+   *Reorder.* **Reorder Commit…** on one row and **Reorder N Commits…** on several,
+   under squash's gate, and also disabled when the commits **have nowhere to go** (the
+   branch's only commit; everything above a merge). It opens no dialog: it **arms the
+   list**. While armed the selection is frozen, the row menu does not open, and a 2px
+   accent line sits in a *slot* — a gap between two rows, the top of the list, or under
+   the last loaded row. It starts in the **home** slot, above the topmost moved row,
+   where the commits already are. **↑/↓** move it one slot, skipping every slot that
+   would change nothing (the ones touching or inside a contiguous selection; a
+   selection with gaps has none) and never passing **under the newest merge commit**;
+   the list scrolls so the line keeps a row on each side. **⏎** ends the mode and
+   moves the commits to the slot — at home it only ends the mode. Only the bare keys
+   are the mode's: **⌘↩ stays the composer's**, and a chord is never a move. **Esc or any click**
+   ends it and does nothing else. So does the list being re-read from HEAD, a moved
+   commit leaving it, the actions becoming blocked, and the History pane going away;
+   a page of older commits arriving does not. A caption — *↑ ↓ choose a position · ⏎
+   move · esc cancel* — is up for four seconds or until the first arrow, and appears
+   and goes without a fade under Reduce Motion.
+   The slot goes to core as `beforeSha`: **the row above the line**, null at the top.
+   `reorder_preflight` runs on ⏎ — not at the menu, since its answer depends on the
+   destination — and a refusal is a §6.13 modal. When `rewrites_pushed` is set the
+   client **asks first**, in a confirmation that names `RepoStatus.upstream` as
+   squash's caption does (*This rewrites commits that are already on origin/main.
+   After reordering, the next push is a force push.*), with the accent button, not the
+   red one; otherwise the move runs at once.
+   - **It landed:** reload status and history, select the moved commits and bring them
+     into view.
+   - **It stopped on a conflict:** reload, move to **Changes**, raise the §6.13 modal.
+   - **It failed:** reload, then core's message — in the confirmation when one is open
+     (native), and otherwise in the §6.13 modal, there being no dialog for it to stay in.
+   - **The slot was taken:** said, in the same place a failure would be.
 
 ## 7. Diff rendering contract
 
@@ -1208,7 +1266,9 @@ every deliberate difference here.
 | Row context menus | a `<div>` menu the client draws and positions itself, restyled to AppKit's own measurements — 12px corners, 24px rows, a 7px accent highlight inset 5px, a label 16px in, an 11px separator row. It is drawn rather than taken because `tauri::menu`'s native menu is a classic win32 `HMENU` on Windows with no theming API anywhere in the stack, loses the destructive-red item, lands at screen centre on Wayland, and fires no dismissal event; `docs/plans/tauri-reskin.md` §6.2 tabulates every metric against the live `NSMenu` it was read from | the stock system menu, via `contextMenu(forSelectionType:)` on the list — plain `Button`s, `Divider()`, `role: .destructive` on the one item that destroys work, nothing re-themed. The reproduction is chasing exactly this |
 | Branch-menu shape (§6.14) | a popover: filter input, keyboard cursor over the rows, the four actions as a footer, and the two that need a branch narrowing the same list under a header that states the question | a stock `Menu`: an inline `Picker` for locals, a plain-button section for remotes, and the same four actions with `Merge into “…”` and `Delete Branch` as submenus. AppKit supplies the scrolling, type-select and cursor the popover hand-rolls |
 | Cherry-pick target picker (§6.21) | the branch popover itself, opened **already narrowed** to the local branches under the question "Cherry-pick N commits onto which branch?" — the list, filter and cursor merge and delete already use. Its back arrow closes the popover rather than returning to the full menu, which was never on screen. A popover has no place to hold an error, so it closes on any answer and a failure takes the §6.13 modal | a sheet of its own (`CherryPickSheet`): a History context menu is already one level deep in a selection, so a submenu of sixty branch names is not an option, and the stock `Menu` cannot be opened from outside. It stays up while the pick runs and keeps a failure **inside itself**, under the list, since choosing another branch is often the fix — the target is checked out in another worktree |
-| Why a History action is disabled (§6.21) | the menu item carries the reason as its hover `title` — *A merge is in progress*, *HEAD is detached*, *Another operation is still running*, and for Squash *A merge commit is among the commits this would replay* | none: an `NSMenu` item has no tooltip, and the branch chip already spells the first two out (§6.14) |
+| Reorder's insertion mode (§6.21) | the list's own state, with the keys taken by window-level listeners in the capture phase for as long as it is armed — the menu item that armed it took focus with it — and Escape through the overlay stack, which also keeps the app's chords quiet. A key with ⌘, Ctrl or Alt held, and one typed into the terminal or a text field, is left to its owner. What ends the mode is a **`click`** — press and release on one target — so dragging the scrollbar does not; one inside the list is swallowed, one outside goes on to what it was aimed at. The line is one absolutely-placed element in the virtualizer's spacer | the list's own `@State`, with `.onKeyPress` on the `List`, which runs before the table sees the key, and `selectionDisabled` on the rows as the freeze — AppKit then answers neither click nor key and draws the selection unchanged. What ends the mode is a **mouse-down**, observed by a local event monitor and never swallowed — a clear view over the list to catch it would also catch the scroll wheel — and the monitor is the app's, so a press in another of its windows ends the mode too. The line is an overlay of the row under it, pushed out to the row's own edge, which is as far as a `List` row draws |
+| A reorder that fails after its confirmation (§6.21) | the confirmation closes and the §6.13 modal carries core's message, as for a reorder that ran without one | the confirmation is a sheet (`ReorderSheet`) and keeps the failure inside itself, as the squash sheet does |
+| Why a History action is disabled (§6.21) | the menu item carries the reason as its hover `title` — *A merge is in progress*, *HEAD is detached*, *Another operation is still running*, for Squash and Reorder *A merge commit is among the commits this would replay*, and for Reorder *There is nowhere to move to* | none: an `NSMenu` item has no tooltip, and the branch chip already spells the first two out (§6.14) |
 
 Neither client offers a per-folder open action anywhere, deliberately: a repo
 list is exactly what `scan_paths` covers, so a local repository missing from it

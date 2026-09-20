@@ -20,6 +20,34 @@ pub(super) fn linear_repo() -> (TempDir, String) {
     (tmp, repo_path)
 }
 
+/// `main` with five commits, `one` … `five`, each adding its own file.
+pub(super) fn five_commits() -> (TempDir, String) {
+    let tmp = tempdir().expect("tempdir");
+    let dir = tmp.path();
+    init_test_repo(dir);
+    git(dir, &["checkout", "-q", "-b", "main"]);
+    for name in ["one", "two", "three", "four", "five"] {
+        commit_file(dir, &format!("{name}.txt"), &format!("{name}\n"), name);
+    }
+    let repo_path = dir.to_str().expect("utf-8 path").to_string();
+    (tmp, repo_path)
+}
+
+/// `main`: `base`, then `shared.txt` edited by `first edit`, an unrelated
+/// `between`, and `second edit` of the same line.
+pub(super) fn edits_of_one_line() -> (TempDir, String) {
+    let tmp = tempdir().expect("tempdir");
+    let dir = tmp.path();
+    init_test_repo(dir);
+    git(dir, &["checkout", "-q", "-b", "main"]);
+    commit_file(dir, "shared.txt", "base\n", "base");
+    commit_file(dir, "shared.txt", "first\n", "first edit");
+    commit_file(dir, "other.txt", "other\n", "between");
+    commit_file(dir, "shared.txt", "second\n", "second edit");
+    let repo_path = dir.to_str().expect("utf-8 path").to_string();
+    (tmp, repo_path)
+}
+
 pub(super) fn sha(dir: &Path, rev: &str) -> String {
     git_stdout(dir, &["rev-parse", rev])
 }

@@ -638,6 +638,21 @@ export const gitApi = {
   squashCommits: (repoPath: string, shas: string[], message: string) =>
     invoke<RewriteResult>('squash_commits', { repoPath, shas, message }),
   /**
+   * Whether `shas` may be moved to just under `beforeSha` in History's
+   * newest-first list — null is the tip — and whether that rewrites pushed
+   * commits. Asked once the destination is chosen: where a reorder starts
+   * replaying depends on it, which `rewritePreflight` cannot know.
+   */
+  reorderPreflight: (repoPath: string, shas: string[], beforeSha: string | null) =>
+    invoke<RewritePreflight>('reorder_preflight', { repoPath, shas, beforeSha }),
+  /**
+   * Move `shas` (any order; they keep their own) as one block to just under
+   * `beforeSha`, or to the tip. A move that would change nothing succeeds
+   * without running git, with no `undo`.
+   */
+  reorderCommits: (repoPath: string, shas: string[], beforeSha: string | null) =>
+    invoke<RewriteResult>('reorder_commits', { repoPath, shas, beforeSha }),
+  /**
    * The folders discovery would actually walk for this config — the
    * configured list, or the stock defaults when it's empty. Lets the picker's
    * empty state name where it searched instead of just saying "none found".
