@@ -1,6 +1,6 @@
 //! Cherry-picking commits onto another branch.
 
-use super::{RewriteResult, UndoPoint, rewrite_preflight, switch_to};
+use super::{RewriteResult, UndoStart, rewrite_preflight, switch_to};
 use crate::git::{
     current_branch, git_dir, is_object_id, ls_files_unmerged, run_git, run_git_combined,
     run_git_combined_with_env,
@@ -69,6 +69,11 @@ pub fn cherry_pick_commits(
         ],
     )
     .map_err(|_| format!("There is no local branch named “{target_branch}”."))?;
+    let start = UndoStart {
+        branch: target_branch.to_string(),
+        before_sha,
+        return_branch: Some(source.clone()),
+    };
 
     if let Err(said) = switch_to(repo_path, target_branch) {
         // Picking now would land the copies wherever HEAD is instead.
@@ -97,14 +102,12 @@ pub fn cherry_pick_commits(
 
     if picked {
         let landed = run_git(repo_path, &["rev-parse", "HEAD"]).and_then(|after_sha| {
-            let listed = run_git(repo_path, &["rev-list", &format!("{before_sha}..HEAD")])?;
-            let undo = UndoPoint {
-                branch: target_branch.to_string(),
-                before_sha,
-                after_sha,
-                return_branch: Some(source),
-            };
-            Ok((listed.lines().map(str::to_string).collect(), undo))
+            let range = format!("{}..HEAD", start.before_sha);
+            let listed = run_git(repo_path, &["rev-list", &range])?;
+            Ok((
+                listed.lines().map(str::to_string).collect(),
+                start.landed_on(after_sha),
+            ))
         });
         return Ok(RewriteResult::landed(landed));
     }
@@ -121,7 +124,7 @@ pub fn cherry_pick_commits(
     };
     if !conflicts.is_empty() {
         eprintln!("[history_rewrite] cherry-pick stopped on a conflict: {said}");
-        return Ok(RewriteResult::stopped(conflicts, said));
+        return Ok(RewriteResult::stopped(conflicts, said, start));
     }
 
     eprintln!("[history_rewrite] cherry-pick failed: {said}");
@@ -163,6 +166,7 @@ fn return_to(
 
 #[cfg(test)]
 mod tests {
+    use super::super::UndoPoint;
     #[cfg(unix)]
     use super::super::fixtures::failing_hook;
     use super::super::fixtures::{branch, linear_repo, sha};
@@ -238,6 +242,15 @@ mod tests {
         assert_eq!(result.conflicts, ["shared.txt"]);
         assert!(result.error_message.is_some_and(|said| !said.is_empty()));
         assert!(result.selection.is_empty() && result.undo.is_none());
+        assert_eq!(
+            result.start,
+            Some(UndoStart {
+                branch: "side".to_string(),
+                before_sha: side_tip.clone(),
+                return_branch: Some("main".to_string()),
+            }),
+            "where the pick began, for an undo once it has been continued"
+        );
         assert_eq!(branch(dir), "side", "left on the target, mid-operation");
         assert_eq!(
             get_status(repo.clone()).expect("status").operation,

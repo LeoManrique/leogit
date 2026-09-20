@@ -218,7 +218,14 @@ unstaged edits (git refuses that itself, by claiming there are conflicts).
 Stopping on the *next* conflict is data, as it is for a merge: `success` false,
 git's text, the conflicted paths. A pick or revert resolved to nothing is
 skipped, which is what a rebase does with one by itself — and `skipped` is set
-for all three, so the commit that went is never left unsaid.
+for all three, so the commit that went is never left unsaid. `started_at` is the
+commit the operation began on **as git's own state has it**, read before the
+step runs, since git deletes that state with the operation: a rebase's
+`orig-head`, a sequence's `sequencer/head`, and — for a merge, and a pick or
+revert of a single commit, which open no sequence and have committed nothing
+yet — `HEAD` itself. It is `null` only when that could not be read. It is what
+a client that remembers beginning the operation checks that memory against
+(§6.21, *Undo after a conflict*).
 
 `abort_operation` rewinds exactly as far as git does. Its string is git's own
 words when the abort worked but was not a full rewind — HEAD was moved by hand
@@ -249,7 +256,9 @@ must tell them apart:
 - **`success: false`** — the pick **stopped on a conflict**, and only that:
   `conflicts` is never empty. The user is on the target with
   `RepoStatus.operation = CherryPick`; from there it is `continue_operation`
-  and `abort_operation` that act.
+  and `abort_operation` that act. `start` is the half of `undo` that is known
+  already — the target, the commit it was on, the branch the commits came from
+  — and is set on a stop and on nothing else, for all three actions.
 - **an error** — refused, or failed for any reason that is not a conflict,
   including one that stops the sequence with nothing to resolve (a commit
   signer that cannot run, a failing `prepare-commit-msg` hook), which Continue
@@ -277,7 +286,8 @@ commit as `replayedFrom`. The same three outcomes, with these differences:
 - **`success: true`** — `selection` is the one squashed commit, which sits
   *under* whatever was replayed after it, and `undo.return_branch` is null: a
   squash never leaves the branch.
-- **`success: false`** — a conflict, `RepoStatus.operation = Rebase`. **The
+- **`success: false`** — a conflict, `RepoStatus.operation = Rebase`, `start`
+  set as for cherry-pick (its `return_branch` null). **The
   message is already inside the rebase** and lands whenever the rebase reaches
   the fold, through any number of `continue_operation` rounds or a terminal's
   `git rebase --continue`; no client holds it. (A `prepare-commit-msg` hook
@@ -309,8 +319,8 @@ the preflight itself. The same three outcomes, with these differences:
   they landed. **A move that would change nothing is a success too**: git is not
   run, `selection` is the commits as they stand, and `undo` is null — there is
   no step to undo.
-- **`success: false`** — a conflict, `RepoStatus.operation = Rebase`, continued
-  and aborted as any rebase is. A moved commit whose conflict is resolved to
+- **`success: false`** — a conflict, `RepoStatus.operation = Rebase`, `start`
+  set, continued and aborted as any rebase is. A moved commit whose conflict is resolved to
   nothing is dropped by the rebase, and `continue_operation` says so (`skipped`).
 - **an error** — the rebase aborted and the branch back where it began.
 
@@ -322,17 +332,28 @@ boundary and `rewrites_pushed` can only be judged with both in hand, which
 is ready and rewrites nothing.
 
 `undo_operation` takes a History action back: `point` is the `UndoPoint` the
-action answered with, returned as it came, and `point.branch` goes back on
-`before_sha`. The check is on the **branch, not on HEAD** — after a cherry-pick
+action answered with, returned as it came — or, for an action that stopped on a
+conflict and was continued to its end, the `start` it answered with, completed
+by the client with the branch's new tip as `after_sha` (§6.21, *Undo*) — and
+`point.branch` goes back on `before_sha`. The check is on the **branch, not on
+HEAD** — after a cherry-pick
 the user may already be back on the source branch, or anywhere else, and the
 undo is still good from there. Three outcomes again, and nothing has moved
 unless the first:
 
 - **`undone: true`** — the branch is on `before_sha`. Made from the branch
   itself, the working tree went with it, and for a cherry-pick (`return_branch`)
-  the source branch is checked out again; `message` is then set only when that
-  checkout was refused, and says so. Made from anywhere else, only the ref
-  moved and HEAD stays where the user put it.
+  the source branch is checked out again. `message` is what did not follow, as
+  paragraphs, and is shown as a notice: that checkout was refused; and **a
+  submodule was left on the commit it was on** — git moves a submodule's
+  pointer and not its files, so it reads as an uncommitted change, which every
+  History action's preflight and the next undo refuse over, until `git
+  submodule update` is run. Core names it and does not run that itself: it may
+  reach the network. It reads the working tree where the undo came to rest, so
+  there is no note where nothing was left behind — `submodule.recurse`, a
+  submodule never checked out, a cherry-pick's undo that returned to its source.
+  Made from anywhere else, only the ref moved and HEAD stays where the user put
+  it.
 - **`undone: false`** — the point has **expired**, and `message` says why: the
   branch is gone, its tip is no longer `after_sha` (a commit made since is never
   reset over), or `before_sha` has left the repository. It can never succeed
@@ -491,8 +512,8 @@ codegen decision is open (plan §10.7).
 |---|---|
 | Working tree / status | `FileEntry` (path, status, xy, display_name, display_dir, embedded, submodule_dirty, stat_stamp — an opaque mtime+size string so a status comparison sees content edits; compare, never parse); `RepoStatus` (branch, upstream, ahead, behind, files[], has_remote, unpushed_shas[], detached, head_sha, operation — the `OperationInProgress` the repository is stopped in, or null — and proposal — the sync ladder's answer, carried here for the same reason `operation` is: every refresh path renders it, and a second route to it is how the two clients' ladders drifted); `FileStatusStyle` (status, letter, label — the glyph table, fetched once; colour is per-platform); `DiscardPlan` (restore[], trash[]) |
 | History | `CommitInfo` (sha, short_sha, summary, body, author, committer, parents[], trailers[], co_authors[], body_without_coauthors, tags[]); `CommitStats` (additions, deletions); `CommitDetail` (files[], stats) |
-| Branches / remote | `BranchInfo` (name, is_remote, is_current); `AheadBehind`; `RepoSync` (ahead, behind, has_remote, fetched, dirty); `RepoIdentifier` (owner, name); `MergeResult` (success, fast_forward, conflicts[], error_message?); `OperationInProgress` (enum: `Merge`, `Rebase`, `CherryPick`, `Revert`); `OperationOutcome` (success, conflicts[], error_message?, skipped) |
-| History actions | `RewritePreflight` (blocked? — the refusal, in words for the user; rewrites_pushed); `RewriteResult` (success, conflicts[], error_message?, selection[] — the commits the action produced, newest first, which the client selects in History; undo?); `UndoPoint` (branch, before_sha, after_sha, return_branch? — the branch the user was on when the action moved them off it), which goes back to core as it came; `UndoResult` (undone, message? — a note when undone, the reason when the point has expired); `SquashDraft` (summary, description, co_authors[] — `Name <email>` values, as `format_commit_message` takes them) |
+| Branches / remote | `BranchInfo` (name, is_remote, is_current); `AheadBehind`; `RepoSync` (ahead, behind, has_remote, fetched, dirty); `RepoIdentifier` (owner, name); `MergeResult` (success, fast_forward, conflicts[], error_message?); `OperationInProgress` (enum: `Merge`, `Rebase`, `CherryPick`, `Revert`); `OperationOutcome` (success, conflicts[], error_message?, skipped, started_at? — where git's own state says the operation began, §3.7) |
+| History actions | `RewritePreflight` (blocked? — the refusal, in words for the user; rewrites_pushed); `RewriteResult` (success, conflicts[], error_message?, selection[] — the commits the action produced, newest first, which the client selects in History; undo? — set on a landing; start? — an `UndoStart`, set on a stop and on nothing else); `UndoStart` (branch, before_sha, return_branch? — an `UndoPoint` less the tip the action has not reached yet); `UndoPoint` (branch, before_sha, after_sha, return_branch? — the branch the user was on when the action moved them off it), which goes back to core as it came; `UndoResult` (undone, message? — a note when undone, the reason when the point has expired); `SquashDraft` (summary, description, co_authors[] — `Name <email>` values, as `format_commit_message` takes them) |
 | Diff | `DiffLine` (content, line_type, line numbers, `intra_line_diff: IntraLineRange`, and `text?` — the raw patch line, present only on `Hunk` and `NoNewline` rows, which are the only ones that read it); `IntraLineRange`, `HunkHeader`, `Hunk`, `FileDiff` (old_path, new_path, file_header, hunks[], is_binary); `SbsPair`; `DiffOptions` (html, side_by_side, show_anyway); `ParsedDiff` (file_diff, html[], sbs_pairs[], additions, deletions, empty_reason?, size_guard?); `EmptyDiffReason` (`NoChanges`/`WhitespaceOnly`/`NoTextualChanges`); `DiffSizeGuard` (reason, bytes, longest_line); `Token` (start, end, class: `TokenClass`) / `TokenLine` — the structured highlight layer under the HTML (§7); `DiffSelection` |
 | Commit composer | `CommitMessage` (title, description); `Exclusion` (path, absent_ms, absent_reads — how long and over how many consecutive status reads an opt-out's path has been missing from the file list; both zero while it is present, and §6.4's window needs both to expire) |
 | Config / persistence | `Config` (theme, fetch_interval_ms, ai_provider, auto_fetch, syntax_highlighting, scan_paths[], scan_depth, side_by_side_diff, hide_whitespace, tab_size, terminal_shell?, then the `claude` and `ollama` tables — **nothing scalar may follow them**, since a TOML table swallows every key after it); `ClaudeConfig` (model?, timeout_secs); `OllamaConfig` (model?, server_url, timeout_secs); `ConfigPatch` (every field optional — absent means "leave it alone", `""` means "clear it"); `Bounds`/`ConfigBounds`; `ReposState`; `ReposStatePatch` |
@@ -589,7 +610,9 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    three `index.lock` races in a row must not accuse a healthy repository of having
    vanished. The streak is also per repository: a switch resets it.
 2. **Network-op mutual exclusion** — fetch/push/pull/publish are mutually exclusive;
-   only one runs at a time, with a shared progress slot fed by `git-progress`. The
+   only one runs at a time, with a shared progress slot fed by `git-progress`. **Pull
+   also holds the window's write slot** (§6.21): it is the one transfer that rewrites
+   the repository. The
    *automatic* fetches (the timer, the resyncs, the badge sweeps) deliberately claim
    no slot: nobody is waiting on them, and taking it would disable the whole action
    cluster on a timer.
@@ -986,7 +1009,8 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    a resolved file stays unmerged until it is staged and staging it is what Continue
    does; core is what can tell a resolved file from one still holding markers, and
    refuses by name. Every answer other than a busy refusal reloads status and history,
-   then a refusal or a further conflict takes the §6.13 modal — git's text runs to
+   then a success that ends a History action offers its Undo (§6.21), and a refusal
+   or a further conflict takes the §6.13 modal — git's text runs to
    several lines, and the work it points at is in the file list. A refusal has staged
    nothing. An outcome with `skipped` set also raises a §6.13 notice, in these words:
    "The resolution left nothing to commit, so the *cherry-pick* skipped that commit." —
@@ -1113,7 +1137,17 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    moment the slot frees — never a button left enabled that does nothing, and never a
    busy label for work that is not its own. The branch control still opens under
    another write, so the branch can be read; its items are what refuse.
-   Network transfers keep their own slot (§6.2): a fetch does not wait on a commit.
+   Network transfers keep their own slot (§6.2), and **Pull holds both**: it fetches
+   and then merges, so it claims the write slot first and the network slot second,
+   and releases them in reverse. A pull therefore does not start under a commit, and
+   no write starts under a pull — a pull that ran beside one either fetched and then
+   failed at the merge, or took `HEAD`'s lock from a commit that was then lost. Under
+   someone else's write the sync button's **Pull** goes inert with the same reason on
+   hover (§8 for how each platform shows it), and the menu's Pull item disables.
+   Push, Force Push, Fetch, Publish and every automatic fetch stay outside the write
+   slot, deliberately: a fetch moves only remote-tracking refs and takes neither the
+   index's lock nor a branch's, so it does not wait on a commit, and a rebase does
+   not wait on it.
    Appending to `.gitignore` holds neither: it takes no git lock.
    *Cherry-pick.* History's row menu offers **Cherry-pick Commit…** on one row and
    **Cherry-pick N Commits…** on a multi-row selection, acting on the selection **in
@@ -1132,15 +1166,14 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
      ordinary re-seat rule (§6.4) applies.
    - **It stopped on a conflict:** reload the same three, move to the **Changes** tab,
      and raise the §6.13 modal naming the conflicted files. The composer is already
-     the Continue surface (§6.14). The client remembers **the branch the user came
-     from**, and *Abort Cherry-pick* checks it out again after the abort — its
-     confirmation says so — because aborting alone would leave the user on a branch
-     they only visited to receive commits. A switch back that fails is reported as its
-     own failure, naming the branch the user is on, **beside** whatever the abort
-     itself said (§6.14's notice) rather than in place of it. That memory is dropped by **one
-     rule on the status read**: a status that no longer shows a cherry-pick open on
-     the target branch. It is not persisted — an app restarted mid-conflict aborts in
-     place.
+     the Continue surface (§6.14). The client remembers the action it left open
+     (*Undo*, below), and with it **the branch the user came from**
+     (`start.return_branch`): *Abort Cherry-pick* checks it out again after the
+     abort — its confirmation says so — because aborting alone would leave the user
+     on a branch they only visited to receive commits. A switch back that fails is
+     reported as its own failure, naming the branch the user is on, **beside**
+     whatever the abort itself said (§6.14's notice) rather than in place of it. The
+     memory is not persisted — an app restarted mid-conflict aborts in place.
    - **It failed:** core has already put the repository back (§3.7), so the client
      reloads the same three — a failure is not proof nothing moved — and shows core's
      message, which is the whole of it. Where it is shown follows the picker's shape
@@ -1233,7 +1266,8 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    - **`undone`:** the offer goes, and History selects **the commits the action had
      been asked for**, which are back — ids the reloaded list does not hold are
      dropped, as for a landing. A `message` (the source branch could not be checked
-     out again) is a §6.14-style notice in the strip: the undo itself worked.
+     out again; a submodule was left on the commit it was on — §3.7) is a
+     §6.14-style notice in the strip, its paragraphs kept: the undo itself worked.
    - **Expired:** the offer goes, and core's reason takes the §6.13 modal — the user
      asked for this and it did not happen.
    - **An error:** the modal, and **the offer stands** — a dirty tree is fixed by
@@ -1241,8 +1275,38 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
      fix itself moved the branch, which the rule above then sees).
    - **The slot was taken:** the modal says so, and the offer stands.
 
-   An action that stopped on a conflict and was then continued offers no Undo:
-   `continue_operation` hands back no point (§3.7).
+   *Undo after a conflict.* An action that stopped on a conflict answers with
+   `start` instead of `undo` (§3.7), and the client keeps it as **the open action**:
+   the operation it left open, `start`, which action it was, and the commits it was
+   asked for. It is set **after the reload** that follows the stop, for the reason the
+   offer is, and it is not persisted. It is forgotten by **one rule on the status
+   read** — a status whose `operation` is no longer the one the action left open,
+   and, for a cherry-pick only, whose branch is no longer `start.branch`. A rebase
+   is not held to its branch: while one is stopped the status reports a detached
+   HEAD and no branch. It is also forgotten when the window moves to another
+   repository. **Any status read can be the one that forgets it, and the poll does
+   not wait for a write** (§6.1) — a read showing the operation over can land before
+   the Continue that ended it has answered. So whoever ends the operation takes what
+   it needs **before asking core**: an abort reads `return_branch` first, and a
+   Continue remembers the open action as it starts, not when it returns.
+   When that Continue succeeds the client reloads status, history and the branch
+   list, and then offers — from what it remembered — the Undo an
+   uninterrupted run would have offered — the same sentence, counting the commits the
+   action was asked for even when a round dropped one — with `start` completed by the
+   reloaded status's `head_sha` as `after_sha`. It offers nothing when any of these
+   holds, because the point could then name something the action did not do:
+   - the operation is still open (the Continue stopped on the next conflict — the
+     open action stays for the next round);
+   - the status is detached, or on a branch other than `start.branch`, or has no
+     `head_sha`;
+   - `OperationOutcome.started_at` is not `start.before_sha` — the operation git
+     just finished is not the one this action began (aborted in a terminal and
+     begun again, say) — or is null, which vouches for nothing;
+   - `head_sha` equals `before_sha` — every commit was dropped, and there is
+     nothing to undo.
+
+   A Continue made in a terminal finishes the operation where the client cannot
+   see `started_at`: the status rule forgets the open action and no Undo is offered.
 
 ## 7. Diff rendering contract
 
@@ -1341,6 +1405,7 @@ every deliberate difference here.
 | Cherry-pick target picker (§6.21) | the branch popover itself, opened **already narrowed** to the local branches under the question "Cherry-pick N commits onto which branch?" — the list, filter and cursor merge and delete already use. Its back arrow closes the popover rather than returning to the full menu, which was never on screen. A popover has no place to hold an error, so it closes on any answer and a failure takes the §6.13 modal | a sheet of its own (`CherryPickSheet`): a History context menu is already one level deep in a selection, so a submenu of sixty branch names is not an option, and the stock `Menu` cannot be opened from outside. It stays up while the pick runs and keeps a failure **inside itself**, under the list, since choosing another branch is often the fix — the target is checked out in another worktree |
 | Reorder's insertion mode (§6.21) | the list's own state, with the keys taken by window-level listeners in the capture phase for as long as it is armed — the menu item that armed it took focus with it — and Escape through the overlay stack, which also keeps the app's chords quiet. A key with ⌘, Ctrl or Alt held, and one typed into the terminal or a text field, is left to its owner. What ends the mode is a **`click`** — press and release on one target — so dragging the scrollbar does not; one inside the list is swallowed, one outside goes on to what it was aimed at. The line is one absolutely-placed element in the virtualizer's spacer | the list's own `@State`, with `.onKeyPress` on the `List`, which runs before the table sees the key, and `selectionDisabled` on the rows as the freeze — AppKit then answers neither click nor key and draws the selection unchanged. What ends the mode is a **mouse-down**, observed by a local event monitor and never swallowed — a clear view over the list to catch it would also catch the scroll wheel — and the monitor is the app's, so a press in another of its windows ends the mode too. The line is an overlay of the row under it, pushed out to the row's own edge, which is as far as a `List` row draws |
 | A reorder that fails after its confirmation (§6.21) | the confirmation closes and the §6.13 modal carries core's message, as for a reorder that ran without one | the confirmation is a sheet (`ReorderSheet`) and keeps the failure inside itself, as the squash sheet does |
+| Pull under another write (§6.21) | the sync button's face dims (`aria-disabled`, not `disabled`, which would take no pointer events and so show no tooltip), does nothing on a click, and carries *Another operation is still running* as its hover text; the menu's Pull item disables with the same `title` | the face **dims and refuses without being disabled**: the split button is a `Menu(primaryAction:)`, which can only be disabled whole — taking Push and Fetch in its menu with it — and a disabled control shows no `.help`. So the whole control drops to the opacity every inert-but-explaining control here has, chevron included though its menu still opens; its tooltip swaps to the same reason, the button's own Pull item is `.disabled`, and the Repository menu's ⌘P item disables while Pull is what it proposes |
 | Why a History action is disabled (§6.21) | the menu item carries the reason as its hover `title` — *A merge is in progress*, *HEAD is detached*, *Another operation is still running*, for Squash and Reorder *A merge commit is among the commits this would replay*, and for Reorder *There is nowhere to move to* | none: an `NSMenu` item has no tooltip, and the branch chip already spells the first two out (§6.14) |
 
 Neither client offers a per-folder open action anywhere, deliberately: a repo

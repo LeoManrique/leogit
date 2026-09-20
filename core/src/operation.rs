@@ -67,6 +67,15 @@ pub struct OperationOutcome {
     /// rebase does so by itself, without being asked — so without this a commit
     /// that never landed reads as one that did.
     pub skipped: bool,
+    /// The commit the branch was on when the operation began, **as git's own
+    /// state has it** — `orig-head` of `rebase-merge/` or `rebase-apply/`,
+    /// `sequencer/head`, or `HEAD` itself for an operation that opens no
+    /// sequence and so has committed nothing yet — read before the step runs,
+    /// since all of it is gone once the operation ends. What a client that
+    /// remembers starting this operation checks its memory against: a
+    /// different commit here means the open operation is not the one it began.
+    /// `None` only when that state could not be read.
+    pub started_at: Option<String>,
 }
 
 /// Which operation `git_dir` records as open, if any. `None` for the git dir
@@ -159,6 +168,8 @@ pub fn continue_operation(repo_path: &str) -> Result<OperationOutcome, String> {
     }
     git_add(repo_path, &unmerged)?;
 
+    // Before the step: git deletes its record with the operation.
+    let started_at = started_at(repo_path, dir.as_deref());
     let skipped = resolved_to_nothing(repo_path, dir.as_deref(), operation);
     // A rebase drops the commit by itself on `--continue`.
     let skips_itself = operation == OperationInProgress::Rebase;
@@ -182,6 +193,7 @@ pub fn continue_operation(repo_path: &str) -> Result<OperationOutcome, String> {
             conflicts: Vec::new(),
             error_message: None,
             skipped,
+            started_at,
         });
     }
     let said = without_progress(&said);
@@ -191,7 +203,32 @@ pub fn continue_operation(repo_path: &str) -> Result<OperationOutcome, String> {
         conflicts: ls_files_unmerged(repo_path),
         error_message: Some(said),
         skipped,
+        started_at,
     })
+}
+
+/// The commit the open operation began on, from git's own files: a rebase
+/// keeps it in `orig-head` — of `rebase-merge/`, or of `rebase-apply/` — and a
+/// sequence of picks or reverts in `sequencer/head`. `ORIG_HEAD` is no
+/// substitute: a cherry-pick never writes it, and anything may overwrite it.
+///
+/// A merge, and a pick or revert of **one** commit, open none of the three
+/// directories and keep no record — but they have committed nothing yet
+/// either, so `HEAD` is still where they began. Only with no such directory:
+/// inside a rebase or a sequence `HEAD` is wherever the replay has got to.
+fn started_at(repo_path: &str, git_dir: Option<&Path>) -> Option<String> {
+    const RECORDS: [(&str, &str); 3] = [
+        ("rebase-merge", "orig-head"),
+        ("rebase-apply", "orig-head"),
+        ("sequencer", "head"),
+    ];
+    let dir = git_dir?;
+    let open = RECORDS.iter().find(|(state, _)| dir.join(state).is_dir());
+    let began = match open {
+        Some((state, record)) => std::fs::read_to_string(dir.join(state).join(record)).ok()?,
+        None => run_git(repo_path, &["rev-parse", "--verify", "--quiet", "HEAD"]).ok()?,
+    };
+    Some(began.trim().to_string()).filter(|id| !id.is_empty())
 }
 
 /// What git said, without its progress meter. A rebase writes
@@ -682,6 +719,66 @@ mod tests {
             "side edits shared",
             "the first pick landed"
         );
+    }
+
+    #[test]
+    fn continue_reports_where_a_rebase_began() {
+        let (tmp, repo) = conflicting_repo();
+        let dir = tmp.path();
+        let began = git_stdout(dir, &["rev-parse", "main"]);
+        git_stopping(dir, &["rebase", "side"]);
+        fs::write(dir.join("shared.txt"), "both\n").expect("resolve");
+
+        let outcome = continue_operation(&repo).expect("continue");
+
+        assert!(outcome.success, "{:?}", outcome.error_message);
+        assert_eq!(outcome.started_at, Some(began));
+    }
+
+    #[test]
+    fn continue_reports_where_a_sequence_of_picks_began_in_every_round() {
+        let (tmp, repo) = conflicting_repo();
+        let dir = tmp.path();
+        git(dir, &["checkout", "-q", "side"]);
+        commit_file(dir, "shared.txt", "side again\n", "side edits shared again");
+        git(dir, &["checkout", "-q", "main"]);
+        let began = git_stdout(dir, &["rev-parse", "main"]);
+        git_stopping(dir, &["cherry-pick", "side~2", "side"]);
+
+        fs::write(dir.join("shared.txt"), "first resolution\n").expect("resolve");
+        let stopped_again = continue_operation(&repo).expect("continue");
+        fs::write(dir.join("shared.txt"), "second resolution\n").expect("resolve");
+        let done = continue_operation(&repo).expect("continue");
+
+        assert!(!stopped_again.success && done.success);
+        assert_eq!(stopped_again.started_at, Some(began.clone()));
+        assert_eq!(
+            done.started_at,
+            Some(began),
+            "not the first pick, which has landed since"
+        );
+    }
+
+    /// One commit opens no sequence, so git keeps no record of where the pick
+    /// began — but it has committed nothing either, so `HEAD` is the answer.
+    /// `ORIG_HEAD`, which a pick never writes, must not stand in: here it is
+    /// left over from a reset, and names another commit.
+    #[test]
+    fn continue_reports_head_as_where_a_single_pick_began() {
+        let (tmp, repo) = conflicting_repo();
+        let dir = tmp.path();
+        commit_file(dir, "later.txt", "later\n", "taken back below");
+        git(dir, &["reset", "-q", "--hard", "HEAD~1"]);
+        let began = git_stdout(dir, &["rev-parse", "main"]);
+        assert_ne!(git_stdout(dir, &["rev-parse", "ORIG_HEAD"]), began);
+        git_stopping(dir, &["cherry-pick", "side~1"]);
+        assert!(!dir.join(".git/sequencer").exists());
+        fs::write(dir.join("shared.txt"), "both\n").expect("resolve");
+
+        let outcome = continue_operation(&repo).expect("continue");
+
+        assert!(outcome.success, "{:?}", outcome.error_message);
+        assert_eq!(outcome.started_at, Some(began));
     }
 
     /// `cherry-pick --continue` refuses a pick that resolved to nothing and

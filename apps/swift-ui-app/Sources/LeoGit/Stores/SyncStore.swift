@@ -91,9 +91,18 @@ final class SyncStore {
     /// that disagree.
     private let fetchCooldown: FetchCooldown
 
-    init(schedulingPolicy: BackgroundSchedulingPolicy, fetchCooldown: FetchCooldown) {
+    /// The window's repository-write slot, which a pull holds beside its own:
+    /// it is the one transfer that writes the index and the working tree.
+    private let writeGate: RepositoryWriteGate
+
+    init(
+        schedulingPolicy: BackgroundSchedulingPolicy,
+        fetchCooldown: FetchCooldown,
+        writeGate: RepositoryWriteGate
+    ) {
         self.schedulingPolicy = schedulingPolicy
         self.fetchCooldown = fetchCooldown
+        self.writeGate = writeGate
     }
 
     /// Forget everything on repo switch.
@@ -169,7 +178,15 @@ final class SyncStore {
     ///
     /// Its fetch half opens a cooldown window exactly as a bare fetch does; a
     /// push opens none, having learned nothing new about the remote.
+    ///
+    /// It holds the repository-write slot as well as the network one, and no
+    /// other transfer does: a commit under a pull loses `HEAD`'s lock and is
+    /// thrown away, and a pull under a commit fetches and then fails to merge,
+    /// where a push or a fetch only reads commits and moves remote-tracking
+    /// refs. Refused while either slot is taken; the control says why first.
     func pull(repoPath: String) async -> OpOutcome {
+        guard activeOperation == nil, let claim = writeGate.claim() else { return .refusedBusy }
+        defer { writeGate.release(claim) }
         let outcome = await run(.pull) {
             guard let remote = try await GitBridge.trackingRemoteName(in: repoPath) else {
                 throw GitError.Failed(message: "This repository has no remote to pull from.")

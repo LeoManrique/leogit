@@ -11,8 +11,11 @@ import Foundation
 /// that starts a write goes inert on the same fact.
 ///
 /// Network transfers keep their own slot (`SyncStore.activeOperation`): they
-/// are waited on differently and carry progress. Appending to `.gitignore` is
-/// not a holder either — it is a file edit that takes no git lock.
+/// are waited on differently and carry progress. **A pull holds both** — it is
+/// the one transfer that writes the index and the working tree, where a push
+/// or a fetch only reads commits and moves remote-tracking refs, which git
+/// makes safe beside a write. Appending to `.gitignore` is not a holder
+/// either — it is a file edit that takes no git lock.
 @MainActor
 @Observable
 final class RepositoryWriteGate {
@@ -23,6 +26,10 @@ final class RepositoryWriteGate {
     /// What a surface says while it cannot start because of `isHeld` — one
     /// wording everywhere, and the Tauri client's.
     static let busyMessage = "Another operation is still running."
+
+    /// The same, as the hover text of a control that cannot start: a reason on
+    /// a control is a phrase, where the line in a sheet is a sentence.
+    static let busyReason = "Another operation is still running"
 
     /// Proof of having claimed the slot, handed back to release it.
     ///

@@ -19,6 +19,7 @@ export type RepoWriteKind =
   | 'checkout'
   | 'undoCommit'
   | 'discard'
+  | 'pull'
 
 /**
  * The repository write in flight, or null when idle.
@@ -32,9 +33,13 @@ export type RepoWriteKind =
  * open under a busy label) from someone else's (the button that goes inert).
  *
  * Network transfers keep their own slot (`activeNetworkOp`): they are waited
- * on differently, carry progress, and pause the poll. Appending to
- * `.gitignore` is not a holder either — it is a file edit that takes no git
- * lock.
+ * on differently, carry progress, and pause the poll. **A pull holds both**:
+ * it is the one transfer that writes the index and the working tree — a
+ * commit under it loses `HEAD`'s lock and is thrown away, and a pull under a
+ * commit fetches and then fails to merge — where a push or a fetch only reads
+ * commits and moves remote-tracking refs, which git makes safe beside a
+ * write. Appending to `.gitignore` is not a holder either — it is a file edit
+ * that takes no git lock.
  */
 export const activeRepoWrite = writable<RepoWriteKind | null>(null)
 
@@ -60,6 +65,10 @@ export function isHeldByAnother(active: RepoWriteKind | null, mine: RepoWriteKin
 
 /** What a surface says while `isHeldByAnother` — one wording, everywhere. */
 export const REPO_BUSY_MESSAGE = 'Another operation is still running.'
+
+/** The same, as the hover text of a control that cannot start: a reason on a
+ *  control is a phrase, where the line in a dialog is a sentence. */
+export const REPO_BUSY_REASON = 'Another operation is still running'
 
 /** Release the slot — from the `finally` of whoever claimed it. */
 export function endRepoWrite(): void {

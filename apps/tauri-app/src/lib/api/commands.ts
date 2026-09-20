@@ -158,12 +158,17 @@ export interface MergeResult {
  * for a merge: `success` false, git's own text, and the conflicted paths.
  * `skipped` says the stopped pick or revert was dropped rather than committed,
  * its resolution having left nothing to commit — git is silent about that.
+ * `started_at` is the commit the operation began on **as git's own state has
+ * it** — its record of a rebase or a sequence, or HEAD for an operation that
+ * has committed nothing yet — and null only when that could not be read: what
+ * a client that remembers starting the operation checks its memory against.
  */
 export interface OperationOutcome {
   success: boolean
   conflicts: string[]
   error_message?: string
   skipped: boolean
+  started_at: string | null
 }
 
 /**
@@ -196,11 +201,23 @@ export interface UndoPoint {
 }
 
 /**
+ * Where a History action began: an {@link UndoPoint} without the commit the
+ * branch ended on, which is not known until the operation the action left open
+ * has been continued to its end.
+ */
+export interface UndoStart {
+  branch: string
+  before_sha: string
+  /** The branch the action left to do its work — cherry-pick's source. */
+  return_branch: string | null
+}
+
+/**
  * What a History action came to. A conflict is data, as it is for a merge —
  * `success` false, git's own text, the conflicted paths — and it leaves the
- * operation open for Continue or Abort. A rejected promise means the
- * repository is back where it began. `selection` is the new ids of the commits
- * acted on, newest first.
+ * operation open for Continue or Abort, with `start` saying where the action
+ * began. A rejected promise means the repository is back where it began.
+ * `selection` is the new ids of the commits acted on, newest first.
  */
 export interface RewriteResult {
   success: boolean
@@ -208,6 +225,7 @@ export interface RewriteResult {
   error_message?: string
   selection: string[]
   undo: UndoPoint | null
+  start: UndoStart | null
 }
 
 /**

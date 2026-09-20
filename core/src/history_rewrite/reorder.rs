@@ -13,7 +13,7 @@ use std::fmt::Write as _;
 use super::lineage::Lineage;
 use super::replay::{Replay, Replayed};
 use super::{
-    RewritePreflight, RewriteResult, UndoPoint, branch_ready_for_an_action, parent_of,
+    RewritePreflight, RewriteResult, UndoStart, branch_ready_for_an_action, parent_of,
     replay_refusal,
 };
 use crate::git::run_git;
@@ -169,12 +169,13 @@ pub fn reorder_commits(
     if let Some(reason) = replay_refusal(repo_path, &planned.from)? {
         return Err(reason);
     }
-    let tip_before = run_git(repo_path, &["rev-parse", "HEAD"])?;
+    let start = UndoStart::on_the_current_branch(repo_path, branch)?;
     let onto = parent_of(repo_path, &planned.from)?;
 
     eprintln!(
-        "[history_rewrite] reorder {} commit(s) on {branch}, replaying {} from {}",
+        "[history_rewrite] reorder {} commit(s) on {}, replaying {} from {}",
         planned.moved,
+        start.branch,
         planned.order.len(),
         planned.from
     );
@@ -187,7 +188,7 @@ pub fn reorder_commits(
     .run()?;
 
     match replayed {
-        Replayed::Conflict(conflicts, said) => Ok(RewriteResult::stopped(conflicts, &said)),
+        Replayed::Conflict(conflicts, said) => Ok(RewriteResult::stopped(conflicts, &said, start)),
         Replayed::Done => {
             // `--empty=keep` replays every line of the todo into a commit, so
             // the block is where the todo put it, counted from the new tip.
@@ -198,13 +199,7 @@ pub fn reorder_commits(
                 else {
                     return Err("rev-list answered with fewer commits than were moved".to_string());
                 };
-                let undo = UndoPoint {
-                    branch,
-                    before_sha: tip_before,
-                    after_sha: after_sha.clone(),
-                    return_branch: None,
-                };
-                Ok((selection.to_vec(), undo))
+                Ok((selection.to_vec(), start.landed_on(after_sha.clone())))
             });
             Ok(RewriteResult::landed(landed))
         }
@@ -213,6 +208,7 @@ pub fn reorder_commits(
 
 #[cfg(test)]
 mod tests {
+    use super::super::UndoPoint;
     #[cfg(unix)]
     use super::super::fixtures::failing_hook;
     use super::super::fixtures::{branch, edits_of_one_line, five_commits, sha};
@@ -431,6 +427,7 @@ mod tests {
         // `second edit` to just under `first edit`: it lands on a file that
         // still reads `base`.
         let under = sha(dir, "HEAD~2");
+        let tip_before = sha(dir, "HEAD");
 
         let stopped =
             reorder_commits(&repo, &shas(dir, &["HEAD"]), Some(&under)).expect("data, not Err");
@@ -439,6 +436,14 @@ mod tests {
         assert_eq!(stopped.conflicts, ["shared.txt"]);
         assert!(stopped.error_message.is_some_and(|said| !said.is_empty()));
         assert!(stopped.selection.is_empty() && stopped.undo.is_none());
+        assert_eq!(
+            stopped.start,
+            Some(UndoStart {
+                branch: "main".to_string(),
+                before_sha: tip_before,
+                return_branch: None,
+            })
+        );
         assert_eq!(
             get_status(repo.clone()).expect("status").operation,
             Some(OperationInProgress::Rebase)

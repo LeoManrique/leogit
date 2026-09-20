@@ -202,16 +202,19 @@ struct ContentView: View {
         // handed over: the open repository's silent fetch and the tier sweeps
         // have to consult the same stamps, not two maps that disagree.
         let directory = RepoDirectoryStore(config: appConfig)
+        // One write slot for the window, shared by every store that writes to
+        // the repository — the sync store among them, for its pull.
+        let gate = RepositoryWriteGate()
         _schedulingPolicy = State(initialValue: policy)
         _syncStore = State(
             initialValue: SyncStore(
                 schedulingPolicy: policy,
-                fetchCooldown: directory.fetchCooldown
+                fetchCooldown: directory.fetchCooldown,
+                writeGate: gate
             )
         )
         _directoryStore = State(initialValue: directory)
         _cloneStore = State(initialValue: CloneStore(config: appConfig))
-        let gate = RepositoryWriteGate()
         _writeGate = State(initialValue: gate)
         _branchStore = State(initialValue: BranchStore(gate: gate))
         _historyActions = State(initialValue: HistoryActionStore(gate: gate))
@@ -481,16 +484,17 @@ struct ContentView: View {
             // longer where the action left it.
             historyActions.retireUndoUnlessStanding(in: store.status)
         }
-        // The same kind of rule for where a stopped cherry-pick came from: it
-        // is forgotten by the status that shows the pick is over, so finishing
-        // or aborting it — here or in a terminal — needs no clearing of its own.
-        // Keyed on the two facts the rule reads rather than on the whole status,
-        // which would compare the file list on every evaluation.
+        // The same kind of rule for the action behind an operation left open
+        // on a conflict: it is forgotten by the status that shows the operation
+        // is over, so finishing or aborting it — here or in a terminal — needs
+        // no clearing of its own. Keyed on the two facts the rule reads rather
+        // than on the whole status, which would compare the file list on every
+        // evaluation.
         .onChange(of: store.status?.operation) {
-            historyActions.forgetCherryPickUnlessOpen(in: store.status)
+            historyActions.forgetOpenActionUnlessOpen(in: store.status)
         }
         .onChange(of: store.status?.branch) {
-            historyActions.forgetCherryPickUnlessOpen(in: store.status)
+            historyActions.forgetOpenActionUnlessOpen(in: store.status)
             historyActions.retireUndoUnlessStanding(in: store.status)
         }
         .onReceive(NotificationCenter.default.publisher(for: .leogitRefreshRequested)) { _ in
@@ -539,7 +543,7 @@ struct ContentView: View {
                     repoPath: repoPath,
                     status: store.status,
                     shown: shownStatus,
-                    cherryPickSource: historyActions.cherryPickReturn?.source,
+                    cherryPickSource: historyActions.openAction?.start.returnBranch,
                     onWorkingTreeChanged: { await store.refresh() },
                     onNotice: { store.errorMessage = $0 },
                     onFailure: { actionFailure = $0 }
@@ -582,6 +586,7 @@ struct ContentView: View {
                     repoPath: repoPath,
                     status: store.status,
                     shown: shownStatus,
+                    pullBlocked: pullBlocked,
                     onWorkingTreeChanged: { await store.refresh() },
                     onFailure: { actionFailure = $0 }
                 )
@@ -638,6 +643,8 @@ struct ContentView: View {
                     selection: $changesSelection,
                     selectedPath: $selectedPath,
                     onCommitted: { await store.refresh() },
+                    onOperationContinuing: { historyActions.continueBegins() },
+                    onOperationContinued: { await finishContinue($0, in: repoPath) },
                     // Discard and ignore change the working tree and nothing
                     // else, so history is not re-read — a 500-commit `git log`
                     // and a progress-bar flash per row action.
@@ -730,12 +737,23 @@ struct ContentView: View {
     /// never become a ⌘P against the new path (F18).
     private var syncMenuCommand: SyncCommand {
         let live = store.status?.proposal ?? .loading
+        let isBlockedPull = live == .pull && pullBlocked != nil
         return SyncCommand(
             title: shownStatus.proposal.title,
-            isEnabled: live.isActionable && syncStore.activeOperation == nil
+            isEnabled: live.isActionable && syncStore.activeOperation == nil && !isBlockedPull
         ) {
             NotificationCenter.default.post(name: .leogitSyncActionRequested, object: nil)
         }
+    }
+
+    /// Why a pull cannot start, or `nil` when it can: a repository write is
+    /// running, and a pull is the one transfer that writes the index and the
+    /// working tree too. Push, Force Push and Fetch stay live beside a write.
+    /// A pull's own hold on the slot is not a reason — the control is already
+    /// busy with it.
+    private var pullBlocked: String? {
+        writeGate.isHeld && syncStore.activeOperation == nil
+            ? RepositoryWriteGate.busyReason : nil
     }
 
     /// The OS connectivity verdict, asked at the moment it matters rather
@@ -1217,12 +1235,30 @@ struct ContentView: View {
         case let .landed(shas, undo):
             selectInHistory(shas)
             historyActions.offer(undo)
-        case let .stoppedOnConflict(said):
+        case let .stoppedOnConflict(said, open):
+            historyActions.keepOpen(open)
             tab = .changes
             actionFailure = ActionFailure(said)
         case .failed, .refusedBusy:
             break
         }
+    }
+
+    /// Where a Continue ends, for the composer that ran it. The re-read comes
+    /// first, as for the actions — branches included, since a continued
+    /// cherry-pick or rebase moves one — and if the operation was one a History
+    /// action here left open, and this Continue carried it to its end, that
+    /// action's Undo goes on offer: its start was remembered when the Continue
+    /// began (`continueBegins()`), and the branch's new tip is in the status
+    /// just read.
+    @MainActor
+    private func finishContinue(_ outcome: OperationOutcome?, in repoPath: String) async {
+        await store.refresh()
+        await branchStore.load(repoPath: repoPath)
+        // Asked on every path, so what the Continue remembered never outlives it.
+        let undo = historyActions.wayBack(after: outcome, under: store.status)
+        guard store.repoPath == repoPath else { return }
+        historyActions.offer(undo)
     }
 
     /// Select the commits an action produced, or an undo brought back. Ids the
@@ -1241,7 +1277,7 @@ struct ContentView: View {
         if let operation = store.status?.operation {
             return "A \(operation.words.noun) is in progress"
         }
-        return writeGate.isHeld ? "Another operation is still running" : nil
+        return writeGate.isHeld ? RepositoryWriteGate.busyReason : nil
     }
 
     /// Take the last History action back. **Reload first, report second**, as

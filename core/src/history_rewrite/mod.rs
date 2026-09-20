@@ -96,6 +96,11 @@ pub struct RewriteResult {
     /// How to put the branch back. `None` unless `success` — and, with an empty
     /// `selection`, on a success whose new tip could not be read back.
     pub undo: Option<UndoPoint>,
+    /// Where the action began, when it stopped on a conflict: the half of an
+    /// [`UndoPoint`] that is known before the operation is carried to its end.
+    /// The client keeps it while the operation stays open, and completes it
+    /// with the branch's new tip once a Continue lands. `None` otherwise.
+    pub start: Option<UndoStart>,
 }
 
 impl RewriteResult {
@@ -117,6 +122,7 @@ impl RewriteResult {
             error_message: None,
             selection,
             undo,
+            start: None,
         }
     }
 
@@ -129,18 +135,55 @@ impl RewriteResult {
             error_message: None,
             selection,
             undo: None,
+            start: None,
         }
     }
 
-    /// Stopped on a conflict, with the operation left open: the unmerged paths
-    /// and what git said, verbatim.
-    fn stopped(conflicts: Vec<String>, said: &str) -> Self {
+    /// Stopped on a conflict, with the operation left open: the unmerged paths,
+    /// what git said, verbatim, and where the action began.
+    fn stopped(conflicts: Vec<String>, said: &str, start: UndoStart) -> Self {
         Self {
             success: false,
             conflicts,
             error_message: Some(said.to_string()),
             selection: Vec::new(),
             undo: None,
+            start: Some(start),
+        }
+    }
+}
+
+/// Where a History action began: the branch it moves and the commit that
+/// branch was on. Every action reads it before it runs anything, and it ends
+/// one of two ways — completed into an [`UndoPoint`] by the action that landed
+/// ([`landed_on`](Self::landed_on)), or handed to the client by the one that
+/// stopped on a conflict, which completes it itself once a Continue has
+/// carried the operation to its end.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UndoStart {
+    pub branch: String,
+    pub before_sha: String,
+    /// The branch the action left to do its work — cherry-pick's source.
+    pub return_branch: Option<String>,
+}
+
+impl UndoStart {
+    /// The start of an action that replays `branch`, which `HEAD` is on.
+    fn on_the_current_branch(repo_path: &str, branch: String) -> Result<Self, String> {
+        Ok(Self {
+            branch,
+            before_sha: run_git(repo_path, &["rev-parse", "HEAD"])?,
+            return_branch: None,
+        })
+    }
+
+    /// The whole point, now that the branch is on `after_sha`.
+    fn landed_on(self, after_sha: String) -> UndoPoint {
+        UndoPoint {
+            branch: self.branch,
+            before_sha: self.before_sha,
+            after_sha,
+            return_branch: self.return_branch,
         }
     }
 }

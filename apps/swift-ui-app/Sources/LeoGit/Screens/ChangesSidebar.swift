@@ -52,6 +52,18 @@ struct ChangesSidebar: View {
     /// Called after a commit: HEAD moved, so status *and* history are stale.
     let onCommitted: () async -> Void
 
+    /// Called as a Continue starts, before git is asked: whatever the window
+    /// knows about the open operation it has to take now, since a status read
+    /// that shows the operation over can land before the Continue's answer.
+    let onOperationContinuing: () -> Void
+
+    /// Called after a Continue, whatever it came to — `nil` when git refused
+    /// it. HEAD and the branch may both have moved, so the window re-reads
+    /// status, history and branches; and it is the window that knows whether
+    /// the operation was a History action's, with an Undo to offer now that it
+    /// has landed.
+    let onOperationContinued: (OperationOutcome?) async -> Void
+
     /// Called after a discard or an ignore: the working tree changed but
     /// history cannot have, so only the status is re-read.
     let onWorkingTreeChanged: () async -> Void
@@ -478,14 +490,15 @@ struct ChangesSidebar: View {
         // Read now: once the reload lands the operation may be over, and its
         // words gone with it.
         let words = continuingWords
+        onOperationContinuing()
         Task {
-            let (outcome, skipped) = await commitStore.continueOperation(repoPath: repoPath)
+            let (outcome, git) = await commitStore.continueOperation(repoPath: repoPath)
             // Nothing was attempted, so there is nothing to re-read or report.
             if case .refusedBusy = outcome { return }
             // Reload before reporting: a continue that stopped again has still
             // written commits and left new conflicted files behind.
-            await onCommitted()
-            if skipped, let words { onNotice(words.skippedNotice) }
+            await onOperationContinued(git)
+            if git?.skipped == true, let words { onNotice(words.skippedNotice) }
             if case let .failed(message) = outcome {
                 onFailure(ActionFailure(message))
             }

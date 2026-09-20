@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use super::lineage::Lineage;
 use super::replay::{MESSAGE_GIT_PATH, Replay, Replayed};
-use super::{RewriteResult, UndoPoint, branch_ready_for_an_action, parent_of, replay_refusal};
+use super::{RewriteResult, UndoStart, branch_ready_for_an_action, parent_of, replay_refusal};
 use crate::git::{CommitInfo, read_commits, run_git};
 
 /// The message a squash sheet opens with, in the composer's three parts.
@@ -169,13 +169,14 @@ pub fn squash_commits(
     if let Some(reason) = replay_refusal(repo_path, target(&lineage))? {
         return Err(reason);
     }
-    let before_sha = run_git(repo_path, &["rev-parse", "HEAD"])?;
+    let start = UndoStart::on_the_current_branch(repo_path, branch)?;
     let onto = parent_of(repo_path, target(&lineage))?;
 
     eprintln!(
-        "[history_rewrite] squash {} commit(s) into {} on {branch}, replaying {}",
+        "[history_rewrite] squash {} commit(s) into {} on {}, replaying {}",
         lineage.selected.len(),
         target(&lineage),
+        start.branch,
         lineage.range.len()
     );
     let replayed = Replay {
@@ -187,7 +188,7 @@ pub fn squash_commits(
     .run()?;
 
     match replayed {
-        Replayed::Conflict(conflicts, said) => Ok(RewriteResult::stopped(conflicts, &said)),
+        Replayed::Conflict(conflicts, said) => Ok(RewriteResult::stopped(conflicts, &said, start)),
         Replayed::Done => {
             // The squashed commit sits under the commits replayed after it.
             let above = lineage.range.len() - lineage.selected.len();
@@ -197,13 +198,7 @@ pub fn squash_commits(
                     let (Some(after_sha), Some(squashed)) = (tips.next(), tips.next()) else {
                         return Err("rev-parse answered with fewer than two ids".to_string());
                     };
-                    let undo = UndoPoint {
-                        branch,
-                        before_sha,
-                        after_sha,
-                        return_branch: None,
-                    };
-                    Ok((vec![squashed], undo))
+                    Ok((vec![squashed], start.landed_on(after_sha)))
                 });
             Ok(RewriteResult::landed(landed))
         }
@@ -215,7 +210,7 @@ mod tests {
     #[cfg(unix)]
     use super::super::fixtures::failing_hook;
     use super::super::fixtures::{branch, edits_of_one_line, five_commits, sha};
-    use super::super::rewrite_preflight;
+    use super::super::{UndoPoint, rewrite_preflight};
     use super::*;
     use crate::git::get_status;
     use crate::operation::{OperationInProgress, abort_operation, continue_operation};
@@ -301,6 +296,7 @@ mod tests {
         // that reads "base": the rebase stops on the `fixup`, **before** the
         // amend — where a message handed to the first command alone is lost.
         let picks = vec![sha(dir, "HEAD"), sha(dir, "HEAD~3")];
+        let tip_before = sha(dir, "HEAD");
 
         let stopped = squash_commits(&repo, &picks, "base, rewritten").expect("data, not Err");
 
@@ -308,6 +304,14 @@ mod tests {
         assert_eq!(stopped.conflicts, ["shared.txt"]);
         assert!(stopped.error_message.is_some_and(|said| !said.is_empty()));
         assert!(stopped.selection.is_empty() && stopped.undo.is_none());
+        assert_eq!(
+            stopped.start,
+            Some(UndoStart {
+                branch: "main".to_string(),
+                before_sha: tip_before,
+                return_branch: None,
+            })
+        );
         assert_eq!(
             get_status(repo.clone()).expect("status").operation,
             Some(OperationInProgress::Rebase)

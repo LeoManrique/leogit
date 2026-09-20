@@ -11,6 +11,13 @@
     type NetworkOpKind,
   } from '$lib/stores/networkOps'
   import {
+    activeRepoWrite,
+    beginRepoWrite,
+    endRepoWrite,
+    isHeldByAnother,
+    REPO_BUSY_REASON,
+  } from '$lib/stores/repoWrite'
+  import {
     gitApi,
     ghApi,
     osApi,
@@ -61,7 +68,7 @@
      * it is inside the `hasRepo` block, so the pre-main header never supplies
      * one.
      */
-    onTransferFinished?: () => Promise<void>
+    onTransferFinished?: () => Promise<unknown>
   }
 
   let {
@@ -145,6 +152,12 @@
   // $state — so the 2 s status poll and auto-fetch can pause while one runs. It
   // also makes the ops mutually exclusive: every handler guards on the store.
   const isTransferring = $derived($activeNetworkOp !== null)
+  /** Why a pull cannot start: a repository write is running, and a pull is the
+   *  one transfer that writes the index and the working tree too. Push, Force
+   *  Push and Fetch stay live beside a write. */
+  const pullBlocked = $derived(
+    isHeldByAnother($activeRepoWrite, 'pull') ? REPO_BUSY_REASON : undefined,
+  )
   // 0–1 fill for the in-button progress bar, GitHub-Desktop style.
   const transferFraction = $derived(($networkProgress?.percent ?? 0) / 100)
 
@@ -295,7 +308,11 @@
   }
 
   const actionLabel = $derived($activeNetworkOp ? OP_LABEL[$activeNetworkOp] : face.label)
-  const actionHelp = $derived(face.help(ahead, behind))
+  /** Why the face cannot run right now though its rung is actionable — only a
+   *  proposed Pull has such a reason. The chevron stays live beside it: Fetch
+   *  and the force push are not writes. */
+  const faceBlocked = $derived(proposal === 'Pull' ? pullBlocked : undefined)
+  const actionHelp = $derived(faceBlocked ?? face.help(ahead, behind))
 
   /** Where a force push would land. Named from git's own tracking configuration
    *  rather than composed from `{remote}/{branch}`, which is wrong whenever the
@@ -329,6 +346,12 @@
     if ($activeNetworkOp) return
     const repoPath = $appState.repoPath
     if (!repoPath) return
+    // The one transfer that also writes the index and the working tree, so it
+    // holds the write slot as well. That claim comes first because it is the
+    // one that can be refused: `beginNetworkOp` cannot, and would have to be
+    // unwound — after a frame of "Pulling…". Silent, as every refusal whose
+    // control is already disabled is (`pullBlocked`): this is the backstop.
+    if (!beginRepoWrite('pull')) return
     beginNetworkOp('pull')
     try {
       // `git pull <remote>` without a branch refuses any remote but the
@@ -342,9 +365,18 @@
       noteFetched(repoPath)
       await onTransferFinished?.()
     } catch (error) {
-      reportActionError(error, handlePull)
+      // Reload first, report second, as a History action does: a pull that
+      // stops on a conflict has left a merge open, and the modal must not sit
+      // over a window that still shows the repository as it was. The report
+      // is owed whatever the reload comes to.
+      try {
+        await onTransferFinished?.()
+      } finally {
+        reportActionError(error, handlePull)
+      }
     } finally {
       endNetworkOp()
+      endRepoWrite()
     }
   }
 
@@ -578,7 +610,7 @@
     const enabled = !isTransferring
     const items: Record<SyncMenuAction, ContextMenuItem> = {
       fetch: { label: 'Fetch', action: handleFetch, enabled },
-      pull: { label: 'Pull', action: handlePull, enabled },
+      pull: { label: 'Pull', action: handlePull, enabled: enabled && !pullBlocked, title: pullBlocked },
       forcePush: {
         label: 'Force Push (with Lease)…',
         action: askToForcePush,
@@ -698,6 +730,7 @@
         class:solo={!hasMenu}
         onclick={performProposal}
         disabled={!face.actionable || isTransferring}
+        aria-disabled={faceBlocked !== undefined}
         title={actionHelp}
       >
         {#if isTransferring}
@@ -990,6 +1023,16 @@
   .count-button:hover:not(:disabled) {
     background: var(--surface-hover);
     color: var(--text-primary);
+  }
+
+  /* A proposed Pull under another write: it reads as disabled and `handlePull`
+     refuses the click, but it is `aria-disabled` rather than `disabled` so the
+     `title` saying why still appears (STYLE.md, the picker's rule). */
+  .count-button[aria-disabled='true'],
+  .count-button[aria-disabled='true']:hover {
+    background: var(--bg-elevated);
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   /* Content paints above the fill — `.btn-progress` is absolutely positioned,

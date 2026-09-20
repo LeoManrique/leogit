@@ -430,12 +430,17 @@ final class CommitStore {
     /// re-reads the repository on anything but `.refusedBusy`, since a failed
     /// continue has usually still written commits.
     ///
-    /// `skipped` rides beside the outcome because it is true of a success and
-    /// of a further conflict alike: the stopped commit was dropped for having
-    /// nothing left to commit, which git does without a word.
-    func continueOperation(repoPath: String) async -> (outcome: OpOutcome, skipped: Bool) {
+    /// What git made of it rides beside the outcome — `nil` when git was never
+    /// asked, or refused — because two of its facts are true of a success and
+    /// of a further conflict alike, and neither is this store's to act on:
+    /// `skipped`, the stopped commit dropped for having nothing left to commit,
+    /// which git does without a word; and `startedAt`, which the window checks
+    /// before it offers to undo the History action the operation belonged to.
+    func continueOperation(
+        repoPath: String
+    ) async -> (outcome: OpOutcome, git: OperationOutcome?) {
         guard !isCommitting, !isGenerating, let claim = gate.claim() else {
-            return (.refusedBusy, false)
+            return (.refusedBusy, nil)
         }
         isCommitting = true
         errorMessage = nil
@@ -444,14 +449,14 @@ final class CommitStore {
             gate.release(claim)
         }
         do {
-            let outcome = try await GitBridge.continueStoppedOperation(in: repoPath)
-            guard outcome.success else {
-                let message = outcome.errorMessage ?? "The operation stopped on another conflict."
-                return (.failed(message), outcome.skipped)
+            let git = try await GitBridge.continueStoppedOperation(in: repoPath)
+            guard git.success else {
+                let message = git.errorMessage ?? "The operation stopped on another conflict."
+                return (.failed(message), git)
             }
-            return (.succeeded, outcome.skipped)
+            return (.succeeded, git)
         } catch {
-            return (.failed(error.displayMessage), false)
+            return (.failed(error.displayMessage), nil)
         }
     }
 

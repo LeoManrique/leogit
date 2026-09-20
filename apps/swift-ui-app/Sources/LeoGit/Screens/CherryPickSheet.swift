@@ -163,7 +163,6 @@ struct CherryPickSheet: View {
         Task {
             let outcome = await store.cherryPick(
                 commits.map(\.sha),
-                from: source,
                 onto: target,
                 repoPath: repoPath
             )

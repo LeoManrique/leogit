@@ -10,8 +10,10 @@ enum HistoryActionOutcome {
     /// back, `nil` for a run that changed nothing.
     case landed([String], undo: UndoOffer?)
 
-    /// Stopped on a conflict, with git's own text.
-    case stoppedOnConflict(String)
+    /// Stopped on a conflict, with git's own text, and the action to keep in
+    /// mind for as long as its operation stays open — `nil` when core could
+    /// not say where it began.
+    case stoppedOnConflict(String, open: OpenAction?)
 
     /// The write slot was held; nothing was attempted and nothing changed.
     case refusedBusy
@@ -63,26 +65,30 @@ enum ReorderReadiness {
 
 /// The History actions that replay commits — what starts them and what takes
 /// them back, under the window's one write slot — and the two things about
-/// them git keeps no record of: which branch a cherry-pick came from, and the
-/// way back from the last action.
+/// them git keeps no record of: the action behind an operation left open on a
+/// conflict, and the way back from the last action.
 ///
 /// Like `BranchStore`, an action returns its outcome instead of storing it,
 /// and re-reading the repository afterwards is the caller's job.
 @MainActor
 @Observable
 final class HistoryActionStore {
-    /// Where a cherry-pick begun here came from and went to.
-    struct CherryPickReturn: Equatable {
-        let source: String
-        let target: String
-    }
-
     private let gate: RepositoryWriteGate
 
-    /// Set while a cherry-pick begun here is stopped on a conflict, so that
-    /// aborting it can end on the branch the commits came from. Forgotten by
-    /// one data-driven rule — `forgetCherryPickUnlessOpen(in:)`.
-    private(set) var cherryPickReturn: CherryPickReturn?
+    /// Set while an action begun here is stopped on a conflict: where it began,
+    /// so a Continue that lands can still be taken back, and — for a
+    /// cherry-pick — the branch it came from, so aborting it can end there.
+    /// Kept by `keepOpen(_:)` once the repository has been re-read, and
+    /// forgotten by one data-driven rule — `forgetOpenActionUnlessOpen(in:)` —
+    /// which any status read can trigger: an abort reads this **before** it
+    /// aborts, and a Continue before it asks git (`continueBegins()`).
+    private(set) var openAction: OpenAction?
+
+    /// The open action as it stood when the Continue now running began. The
+    /// status poll does not wait for a write, so a read showing the operation
+    /// over can land — and forget `openAction` — before the Continue's own
+    /// answer has come back; the way back is made from this instead.
+    @ObservationIgnored private var resuming: OpenAction?
 
     /// The way back from the last action that moved a branch, while it is still
     /// good. Retired by its ✕, by an undo, and by one data-driven rule —
@@ -102,7 +108,8 @@ final class HistoryActionStore {
 
     /// Forget everything on repo switch.
     func reset() {
-        cherryPickReturn = nil
+        openAction = nil
+        resuming = nil
         undoOffer = nil
         isRunning = false
     }
@@ -121,11 +128,9 @@ final class HistoryActionStore {
         }
     }
 
-    /// Copy `shas` (newest first) from `source`, the checked-out branch, onto
-    /// `target`.
+    /// Copy `shas` (newest first) from the checked-out branch onto `target`.
     func cherryPick(
         _ shas: [String],
-        from source: String,
         onto target: String,
         repoPath: String
     ) async -> HistoryActionOutcome {
@@ -137,12 +142,12 @@ final class HistoryActionStore {
         }
         do {
             let result = try await GitBridge.cherryPick(in: repoPath, shas: shas, onto: target)
-            if result.success {
-                return .landing(result, after: .cherryPick(target: target), of: shas)
-            }
-            cherryPickReturn = CherryPickReturn(source: source, target: target)
-            return .stoppedOnConflict(
-                result.errorMessage ?? "The cherry-pick stopped on a conflict in “\(target)”."
+            return outcome(
+                of: result,
+                after: .cherryPick(target: target),
+                of: shas,
+                leaving: .cherryPick,
+                stoppedSaying: "The cherry-pick stopped on a conflict in “\(target)”."
             )
         } catch {
             return .failed(error.displayMessage)
@@ -190,10 +195,13 @@ final class HistoryActionStore {
                 coAuthors: coAuthors
             )
             let result = try await GitBridge.squash(in: repoPath, shas: shas, message: message)
-            if result.success {
-                return .landing(result, after: .squash, of: shas)
-            }
-            return .stoppedOnConflict(result.errorMessage ?? "The squash stopped on a conflict.")
+            return outcome(
+                of: result,
+                after: .squash,
+                of: shas,
+                leaving: .rebase,
+                stoppedSaying: "The squash stopped on a conflict."
+            )
         } catch {
             print("[history] squash failed: \(error.displayMessage)")
             return .failed(error.displayMessage)
@@ -236,17 +244,71 @@ final class HistoryActionStore {
         }
         do {
             let result = try await GitBridge.reorder(in: repoPath, shas: shas, under: beforeSha)
-            if result.success {
-                return .landing(result, after: .reorder, of: shas)
-            }
-            return .stoppedOnConflict(result.errorMessage ?? "The reorder stopped on a conflict.")
+            return outcome(
+                of: result,
+                after: .reorder,
+                of: shas,
+                leaving: .rebase,
+                stoppedSaying: "The reorder stopped on a conflict."
+            )
         } catch {
             print("[history] reorder failed: \(error.displayMessage)")
             return .failed(error.displayMessage)
         }
     }
 
+    /// What core's answer to `action` over `asked` (newest first) comes to: what
+    /// it produced and its way back, or — stopped on a conflict — git's text
+    /// and the action to keep while `operation`, which it left open, stays open.
+    private func outcome(
+        of result: RewriteResult,
+        after action: UndoOffer.Action,
+        of asked: [String],
+        leaving operation: OperationInProgress,
+        stoppedSaying fallback: String
+    ) -> HistoryActionOutcome {
+        if result.success {
+            return .landed(
+                result.selection,
+                undo: result.undo.map { UndoOffer(after: action, of: asked, point: $0) }
+            )
+        }
+        let open = result.start.map {
+            OpenAction(operation: operation, start: $0, action: action, asked: asked)
+        }
+        return .stoppedOnConflict(result.errorMessage ?? fallback, open: open)
+    }
+
     // MARK: Undo
+
+    /// Keep the action behind an operation a conflict left open. Called once
+    /// the repository has been re-read, as `offer(_:)` is and for its reason:
+    /// the rule that forgets it reads the status, and the one from before the
+    /// action shows no operation at all.
+    func keepOpen(_ action: OpenAction?) {
+        if let action { openAction = action }
+    }
+
+    /// A Continue is about to ask git: remember the action it may finish.
+    func continueBegins() {
+        resuming = openAction
+    }
+
+    /// The way back from the action that was open when the Continue began
+    /// (`continueBegins()`), now that the Continue has carried its operation
+    /// to the end and `status` is the repository re-read. `nil` when the
+    /// operation was not an action's, the Continue stopped again or was
+    /// refused, or no point can be vouched for (`OpenAction.undoPoint`).
+    func wayBack(after outcome: OperationOutcome?, under status: RepoStatus?) -> UndoOffer? {
+        let resumed = resuming
+        resuming = nil
+        guard let outcome, outcome.success, let resumed, let status else { return nil }
+        guard let point = resumed.undoPoint(startedAt: outcome.startedAt, under: status) else {
+            print("[undo] no offer after the continue: \(resumed.start), \(outcome.startedAt ?? "-")")
+            return nil
+        }
+        return UndoOffer(after: resumed.action, of: resumed.asked, point: point)
+    }
 
     /// Put an action's way back on offer. Called once the repository has been
     /// re-read: the rule that retires an offer reads the status, and the one
@@ -290,29 +352,11 @@ final class HistoryActionStore {
         }
     }
 
-    /// The rule that ends `cherryPickReturn`: a status that no longer shows a
-    /// cherry-pick open on the target. Finishing it, aborting it, doing either
+    /// The rule that ends `openAction`: a status that no longer shows the
+    /// operation the action left open. Finishing it, aborting it, doing either
     /// from the terminal and a status for another branch all arrive this way,
-    /// so nothing that ends a pick has to remember to clear it.
-    func forgetCherryPickUnlessOpen(in status: RepoStatus?) {
-        guard let pending = cherryPickReturn else { return }
-        if status?.operation != .cherryPick || status?.branch != pending.target {
-            cherryPickReturn = nil
-        }
-    }
-}
-
-extension HistoryActionOutcome {
-    /// A clean run of `action` over `asked` (newest first): what it produced,
-    /// and its way back when core handed one over.
-    fileprivate static func landing(
-        _ result: RewriteResult,
-        after action: UndoOffer.Action,
-        of asked: [String]
-    ) -> Self {
-        .landed(
-            result.selection,
-            undo: result.undo.map { UndoOffer(after: action, of: asked, point: $0) }
-        )
+    /// so nothing that ends an operation has to remember to clear it.
+    func forgetOpenActionUnlessOpen(in status: RepoStatus?) {
+        if let openAction, !openAction.stillStands(under: status) { self.openAction = nil }
     }
 }

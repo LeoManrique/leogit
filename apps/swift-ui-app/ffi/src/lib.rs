@@ -63,7 +63,7 @@ pub use leogit_core::git::{
 };
 pub use leogit_core::highlight::{BlobSource, Token, TokenClass};
 pub use leogit_core::history_rewrite::{
-    RewritePreflight, RewriteResult, SquashDraft, UndoPoint, UndoResult,
+    RewritePreflight, RewriteResult, SquashDraft, UndoPoint, UndoResult, UndoStart,
 };
 pub use leogit_core::launch::LaunchTarget;
 pub use leogit_core::operation::{OperationInProgress, OperationOutcome};
@@ -195,6 +195,7 @@ pub struct OperationOutcome {
     pub conflicts: Vec<String>,
     pub error_message: Option<String>,
     pub skipped: bool,
+    pub started_at: Option<String>,
 }
 
 /// Mirrors [`leogit_core::history_rewrite::RewritePreflight`].
@@ -213,6 +214,14 @@ pub struct UndoPoint {
     pub return_branch: Option<String>,
 }
 
+/// Mirrors [`leogit_core::history_rewrite::UndoStart`].
+#[uniffi::remote(Record)]
+pub struct UndoStart {
+    pub branch: String,
+    pub before_sha: String,
+    pub return_branch: Option<String>,
+}
+
 /// Mirrors [`leogit_core::history_rewrite::RewriteResult`].
 #[uniffi::remote(Record)]
 pub struct RewriteResult {
@@ -221,6 +230,7 @@ pub struct RewriteResult {
     pub error_message: Option<String>,
     pub selection: Vec<String>,
     pub undo: Option<UndoPoint>,
+    pub start: Option<UndoStart>,
 }
 
 /// Mirrors [`leogit_core::history_rewrite::UndoResult`].
@@ -2793,7 +2803,8 @@ mod tests {
         // Both branches now rewrite the same line from the same base.
         std::fs::write(dir.join("base.txt"), "target\n").expect("write");
         run_git(&dir, &["commit", "-am", "target edit"]);
-        switch_branch(repo.clone(), default).expect("switch back");
+        let target_tip = run_git_stdout(&dir, &["rev-parse", "HEAD"]);
+        switch_branch(repo.clone(), default.clone()).expect("switch back");
         std::fs::write(dir.join("base.txt"), "source\n").expect("write");
         run_git(&dir, &["commit", "-am", "source edit"]);
         let conflicting = run_git_stdout(&dir, &["rev-parse", "HEAD"]);
@@ -2802,6 +2813,17 @@ mod tests {
             .expect("a conflict is data");
         assert!(!stopped.success && stopped.undo.is_none());
         assert_eq!(stopped.conflicts, ["base.txt"]);
+        // Where it began crosses the bridge: what the client keeps for an Undo
+        // once a Continue lands, and for the branch an Abort returns to.
+        let start = stopped.start.expect("where the pick began");
+        assert_eq!(
+            (
+                start.branch.as_str(),
+                &start.before_sha,
+                start.return_branch
+            ),
+            ("target", &target_tip, Some(default))
+        );
         assert_eq!(
             get_status(repo.clone()).expect("status").operation,
             Some(OperationInProgress::CherryPick)

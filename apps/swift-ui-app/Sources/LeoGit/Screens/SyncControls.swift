@@ -33,6 +33,12 @@ struct SyncControls: View {
     /// the symbol, whether the button wears a chevron, and the tooltip's
     /// counts, none of which can act.
     let shown: ToolbarStatus
+
+    /// Why a pull cannot start right now — a repository write is running — or
+    /// `nil` when it can. Only Pull has such a reason: it is the one transfer
+    /// that holds the write slot beside its own.
+    let pullBlocked: String?
+
     /// Called after any network operation: pull moves HEAD and the working
     /// tree, push/fetch move the ahead/behind counts.
     let onWorkingTreeChanged: () async -> Void
@@ -76,6 +82,10 @@ struct SyncControls: View {
     /// holding the face above cannot loosen it.
     private var isEnabled: Bool { !isBusy && status != nil }
 
+    /// Why the face cannot run though its rung is actionable — only a proposed
+    /// Pull has such a reason.
+    private var faceBlocked: String? { face == .pull ? pullBlocked : nil }
+
     var body: some View {
         Group {
             if menuActions.isEmpty {
@@ -95,7 +105,17 @@ struct SyncControls: View {
         // The tooltip explains the face, so its counts come from the same held
         // read — a "Pull 0 commits" while the live status is still nil would
         // be the one place the bar contradicted itself.
-        .help(face.help(ahead: shown.ahead, behind: shown.behind))
+        //
+        // A proposed Pull under another write says that instead. Its face stays
+        // enabled and `pull()` refuses: the stock split button can only be
+        // disabled whole, which would take Fetch and the force push — neither a
+        // write — away with it, and a disabled control shows no tooltip. It is
+        // dimmed instead, as every inert control that still explains itself is
+        // (`StatusStrip`'s link, the picker's blocked rows): a button that
+        // looks ready and does nothing is the one state the write slot's
+        // contract rules out.
+        .help(faceBlocked ?? face.help(ahead: shown.ahead, behind: shown.behind))
+        .opacity(faceBlocked == nil ? 1 : 0.55)
         // Repository ▸ <action> (⌘P) lands here. The menu item can't call
         // `perform()` directly — its focused value is published by the
         // window content, which doesn't own this view's sheet and alert
@@ -154,7 +174,10 @@ struct SyncControls: View {
                 case .fetch:
                     Button("Fetch", action: fetch)
                 case .pull:
+                    // A system menu has no tooltip to give the reason in, and
+                    // the item keeps its place (STYLE.md, *Context menus*).
                     Button("Pull", action: pull)
+                        .disabled(pullBlocked != nil)
                 case .forcePush:
                     // Set apart from its neighbours — unless it has none
                     // above it, where a rule would open the menu.
@@ -211,6 +234,9 @@ struct SyncControls: View {
     }
 
     private func pull() {
+        // The face and ⌘P both land here while another write runs; the store
+        // would refuse as well, and this saves it the asking.
+        guard pullBlocked == nil else { return }
         Task { await settle(await store.pull(repoPath: repoPath)) }
     }
 

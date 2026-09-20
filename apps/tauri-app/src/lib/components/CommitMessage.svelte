@@ -9,7 +9,14 @@
     endRepoWrite,
     REPO_BUSY_MESSAGE,
   } from '$lib/stores/repoWrite'
-  import { gitApi, aiApi, configApi, type Config, type FileEntry } from '$lib/api/commands'
+  import {
+    gitApi,
+    aiApi,
+    configApi,
+    type Config,
+    type FileEntry,
+    type OperationOutcome,
+  } from '$lib/api/commands'
   import { config } from '$lib/stores/config'
   import { basename } from '$lib/utils/path'
   import {
@@ -22,11 +29,21 @@
   interface Props {
     onCommitted?: () => void
     /**
+     * A Continue is starting, and git has not been asked yet. Whatever the
+     * owner knows about the open operation it has to take now: the status poll
+     * does not wait for a write, so a read that shows the operation over can
+     * land before the Continue's own answer.
+     */
+    onOperationContinuing?: () => void
+    /**
      * A Continue ran, whatever it came to: the operation finished, stopped on
      * the next conflict, or was refused. HEAD and the branch may both have
-     * moved, so the owner reloads status, history and branches.
+     * moved, so the owner reloads status, history and branches — and is handed
+     * what the Continue came to, null when it was refused, because it is the
+     * owner that knows whether the operation was a History action's and has an
+     * Undo to offer now that it has landed.
      */
-    onOperationContinued?: () => void | Promise<void>
+    onOperationContinued?: (outcome: OperationOutcome | null) => void | Promise<void>
     onStopAmending?: () => void
     /**
      * Run a shell command in the app's own terminal. Supplied by the view that
@@ -36,7 +53,13 @@
     onRunInTerminal?: (command: string) => void
   }
 
-  let { onCommitted, onOperationContinued, onStopAmending, onRunInTerminal }: Props = $props()
+  let {
+    onCommitted,
+    onOperationContinuing,
+    onOperationContinued,
+    onStopAmending,
+    onRunInTerminal,
+  }: Props = $props()
 
   let summary = $state('')
   let description = $state('')
@@ -498,11 +521,12 @@
     if (!beginRepoWrite('continue')) return
 
     error = null
+    onOperationContinuing?.()
     try {
       const outcome = await gitApi.continueOperation(repoPath)
       // Reload before reporting: a continue that stopped again has still
       // written commits and left new conflicted files behind.
-      await onOperationContinued?.()
+      await onOperationContinued?.(outcome)
       if (outcome.skipped) reportNotice(skippedNotice(words))
       if (!outcome.success) {
         reportActionError(
@@ -510,7 +534,7 @@
         )
       }
     } catch (err) {
-      await onOperationContinued?.()
+      await onOperationContinued?.(null)
       reportActionError(err)
     } finally {
       endRepoWrite()

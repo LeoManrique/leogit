@@ -1,26 +1,25 @@
 # Plan — History multi-commit actions (cherry-pick, squash, reorder)
 
-> Status: **WS-A (a selection that is a set, `5ff2a4c`), WS-B (operations in
-> progress, `d0b68df`), WS-C (cherry-pick, the preflight and the window-wide
-> write gate, `ff0e195`), WS-D (force push recommended, `d979bf2`), WS-E (the
-> rewrite driver and squash, `bc8f3db`) and WS-F (reorder, `f5976a6`) are built,
-> confirmed and committed. WS-G (undo) is built in both clients and was
-> confirmed by the owner on 2026-09-20 (a squash in the native client, checked
-> against the repository: same tree, the message kept, the strip as designed);
-> it is not committed yet. WS-H is next and is the last: it builds nothing until
-> the owner has answered — it is the list of what this plan left undecided
-> (§6.1), each with its options and a recommendation.** The owner's decisions are marked **Decided**; the ones
-> this plan made on its own are marked **Proposed**, and every one of those is
-> now a WS-H item. §9 records the standing decision on where rewriting runs. §3
-> describes the code as it stands *after* WS-G, and §4.2 – §4.6, §5.1 – §5.4
-> record what a later rewrite (edit, drop, a drag — `ROADMAP.md`, *Rebase
-> (interactive UI)*) inherits.
+> Status: **every workstream is built. WS-A (a selection that is a set,
+> `5ff2a4c`), WS-B (operations in progress, `d0b68df`), WS-C (cherry-pick, the
+> preflight and the window-wide write gate, `ff0e195`), WS-D (force push
+> recommended, `d979bf2`), WS-E (the rewrite driver and squash, `bc8f3db`), WS-F
+> (reorder, `f5976a6`) and WS-G (undo, `19d066b`) are confirmed and committed.
+> WS-H — the owner's answers to what the plan had left open (§6.1), three of
+> which were code — was built on 2026-09-21 and is waiting for the owner's
+> check by hand; it is not committed.** Every decision in this document is the
+> owner's and is marked **Decided**; nothing is left *Proposed*. §9 records the
+> standing decision on where rewriting runs. The plan is kept as the record a
+> later rewrite (edit, drop, a drag — `ROADMAP.md`, *Rebase (interactive UI)*)
+> starts from: §3 is the code map as it stands *after* WS-H, §4.2 – §4.6 and
+> §5.1 – §5.4 are what such a rewrite inherits, §4.8 is every git fact that was
+> measured, and §7 is how the work was checked and what that taught.
 > Produced from a three-way read of the native client, the Tauri client, and
 > the GitHub Desktop source at
 > `/Users/leo/Dev/LeoManrique/Desktop/lms-github-desktop` — whose history and
-> multi-commit code is upstream's in every region §2 cites (the fork's changes
-> to `app-store.ts` and `dispatcher.ts` sit above them, so **line numbers are
-> this fork's**, not upstream's). The reference is used to judge *how*; the
+> multi-commit code is upstream's in every file §2 names (the fork's changes
+> to `app-store.ts` and `dispatcher.ts` sit above it, so **the few line numbers
+> this plan still cites are this fork's**, not upstream's). The reference is used to judge *how*; the
 > feature itself is LeoGit's own, promised by `ROADMAP.md`'s open items
 > *Rebase (interactive UI)* and *Revert, and cherry-pick into the current
 > branch* — the part of it this plan ships being cherry-pick onto *another*
@@ -45,77 +44,37 @@ The work is three layers, in this order: **a selection that is a set** (built,
 WS-A), **a core that can detect, continue and abort a multi-step git
 operation** (built, WS-B), **and then the three actions on top** — cherry-pick
 (WS-C), squash (WS-E) and reorder (WS-F) — **and the way back from each**
-(undo, WS-G). All of it is built; what is left is WS-H, the decisions this plan
-took on its own and the owner has not confirmed (§6.1).
+(undo, WS-G). WS-H closed what the plan had left open (§6.1). All of it is
+built.
 
 ## 2. What the reference does
 
-**Selection** is built (WS-A) to the reference's gestures. One thing differs
-and matters to the actions: the reference stores SHAs in click order and
-re-orders them by history only where it matters
-(`app/src/lib/stores/app-store.ts:7506-7544`), while both LeoGit clients hand
-an action its commits already in list order, newest first.
+GitHub Desktop was read for *how*, and every action here is built, so only what
+a later rewrite could still use is kept. Its code for this lives in
+`app/src/lib/git/{cherry-pick,squash,reorder,rebase}.ts`,
+`app/src/ui/history/commit-list.tsx` (the menus, the reorder hint) and
+`app/src/lib/stores/app-store.ts` (the dirty-tree dialog, the undo banner).
 
-**Menu** (`app/src/ui/history/commit-list.tsx:930-956`). With more than one
-commit selected the menu is exactly the three items and nothing else — every
-single-commit item disappears. The only menu-level gates are "an operation is
-already running" and "squash/reorder are off while comparing another branch"
-(`:871-891`, fed by `compare.tsx:281-282`). Everything else — merge commits in
-the range, a dirty tree — is handled *after* the click. The single-commit menu
-also carries *Reorder Commit* (`:795-801`) and *Cherry-pick Commit…*
-(`:845-850`), and no single-commit squash.
-
-**Cherry-pick** (`app/src/lib/git/cherry-pick.ts:174-179`). A choose-branch
-dialog (the current branch is not a valid target), then check out the target
-and run one `git cherry-pick <shas, oldest first> --empty=keep -m 1` — with
-`'-m 1'` passed as a single argument containing a space, which works by
-accident of git's option parser and is not copied. Undo is `reset --hard` of
-the target to its old tip, then a checkout back.
-
-**Squash** (`app/src/lib/git/squash.ts:33-171`, the todo at `:69-131`). A
-commit-message dialog pre-filled from the selected commits, then a generated
-todo file fed to `git rebase -i` through `sequence.editor`, with the message
-injected through
-`GIT_EDITOR='cat "<file>" >'`. The right-clicked commit is the target: the
-todo gathers every selected commit at the target's position, buffering the
-unselected commits in between so they replay after it. `--root` when the
-range reaches the first commit (`app/src/lib/git/rebase.ts:580-583`).
-
-**Reorder** (`app/src/lib/git/reorder.ts:28-152`). **No dialog.** The menu
-item (`commit-list.tsx:948-954`) arms an insertion mode in the list — ↑/↓ move
-an insertion point, ⏎ confirms, Esc cancels (`list.tsx:565-614`), with an
-on-screen hint (`commit-list.tsx:631-664`) — and lands in the same code path as
-drag-and-drop. Same todo shape (`reorder.ts:58-131`), all `pick`.
-
-**Shared.** A dirty tree stops the operation at a dialog
-(`app-store.ts:7580-7598`) that offers **Stash Changes and Continue**
-(`local-changes-overwritten-dialog.tsx:110-156`) — and the stash is never
-popped back afterwards. A merge commit anywhere in the replayed range refuses
-squash and reorder (`app/src/lib/git/rev-list.ts:190-201`). A warning before
-rewriting pushed commits (`dispatcher.ts:430-464`), the branch remembered as
-force-push-recommended afterwards (`:3733-3739`, cherry-pick excluded), and an
-Undo banner that does `reset --hard` to the pre-operation tip and refuses when
-the tree is dirty or the branch changed (`app-store.ts:7856-7978`).
-
-Four things the reference gets wrong or leaves fragile, which §4 does not
-copy:
-
-1. **A squash that conflicts before the squashed commit exists loses the
-   message the user typed.** Continue runs under `GIT_EDITOR=':'`
-   (`rebase.ts:437-443`, `dispatcher.ts:1369-1386`), so the custom message
-   only lands if the rebase reaches the squash without stopping. (A conflict
-   in the picks replayed *after* it is harmless.)
-2. **The pushed-commits warning fires on someone else's push.** It counts
-   `lastRetained..upstream`, which is non-empty whenever the upstream has
-   moved — even if none of *your* replayed commits were ever pushed.
-3. **Force-push-recommended is an in-memory `Map`**
-   (`repository-state-cache.ts:340`). A rewrite done in the terminal, or
-   before a restart, is invisible to it.
-4. **Paths are spliced into a shell string** (`sequence.editor=cat "<path>" >`).
-
-It also bundles its own git. **LeoGit runs the system git** (`README.md`
-Requirements) and supports recent versions of it only, so every flag below is
-git's current spelling, and §4.7 sets the floor.
+- **Same shape**: a multi-row menu of exactly the three actions; cherry-pick
+  onto another branch through a branch picker; squash and reorder as a generated
+  todo fed to `git rebase -i` through a sequence editor, `--root` when the range
+  reaches the first commit; reorder armed from the menu as an insertion mode
+  (↑/↓, ⏎, Esc) that lands on the same path as its drag-and-drop; a merge commit
+  in the replayed range refuses; an undo back to the pre-operation tip.
+- **Different on purpose**: it stores the selection in click order and re-sorts
+  where it matters, LeoGit hands every action its commits in list order; it
+  offers *Stash Changes and Continue* on a dirty tree and never pops the stash,
+  LeoGit blocks (§4.2); its undo is a bare `reset --hard` with a 15 s banner,
+  LeoGit's is §5.4; it bundles its own git, **LeoGit runs the system git**
+  (§4.7).
+- **Four things it gets wrong, none copied**: a squash that conflicts before the
+  squashed commit exists loses the typed message (its Continue runs under
+  `GIT_EDITOR=':'`; here the message is a todo line, §4.5); its pushed-commits
+  warning fires on somebody else's push (it counts `lastRetained..upstream`);
+  force-push-recommended is an in-memory map a terminal rewrite or a restart
+  never reaches (here it is the reflog, §4.6); and it splices paths into a shell
+  string (`sequence.editor=cat "<path>" >`; here they travel in the
+  environment).
 
 ## 3. What exists today
 
@@ -157,11 +116,14 @@ shared menu-time gate, worded in `MainLayout.svelte`; squash and reorder add
 also holds reorder's insertion mode (§5.3). `ContextMenu.svelte` items are
 `aria-disabled`, not `disabled`, so that `title` can show.
 
-**History actions** (WS-C, WS-E, WS-F, WS-G) — `core/src/history_rewrite/`: `mod.rs`
+**History actions** (WS-C, WS-E, WS-F, WS-G, WS-H) — `core/src/history_rewrite/`: `mod.rs`
 holds `rewrite_preflight(repo, replayed_from)` → `RewritePreflight { blocked,
 rewrites_pushed }` (constructors `ready`, `refused`, `for_a_replay`),
 `RewriteResult` with its three (`landed`, `unchanged`, `stopped`),
-`UndoPoint`, and the two helpers more than one action needs —
+`UndoStart` (the way back as known before the run: `on_the_current_branch`,
+`landed_on(after_sha)` → `UndoPoint`; a stop hands it back as
+`RewriteResult.start`, §4.3), `UndoPoint`, and the two helpers more than one
+action needs —
 `open_operation_refusal` (the "a rebase is in progress" sentence) and
 `switch_to`; `cherry_pick.rs` has `cherry_pick_commits` and the
 private `return_to`; **`undo.rs` has `undo_operation(repo, &UndoPoint)` →
@@ -173,20 +135,25 @@ places any shas on the branch (oldest, range, selected in history order)**;
 `squash_draft(repo, shas)` → `SquashDraft { summary, description, co_authors }`;
 `reorder.rs` has `reorder_commits(repo, shas, before_sha)` and
 `reorder_preflight(…)`; `fixtures.rs` is the tests' `linear_repo()`,
-`five_commits()`, `edits_of_one_line()`, `failing_hook()`, `sha`, `branch`. All
+`five_commits()`, `edits_of_one_line()`, `failing_hook()`,
+`repo_with_a_submodule()`, `sha`, `branch`. All
 seven commands are
 on both bridges (`ffi/src/lib.rs`, *history actions*;
 `src-tauri/src/shims/history_rewrite.rs`). Client side: `MainLayout.svelte`'s
 *History actions* section — a `request…` / `run…` pair per action,
 `SquashDialog.svelte`, **`finishHistoryAction({ repoPath, result, reload,
-stoppedOnConflict, landed, asked })`, every action's ending**, and `runUndo` —
+stoppedOnConflict, action, leavesOpen, asked })`, every action's ending**,
+`finishContinue` (a Continue's ending, §5.4) and `runUndo` —
 and natively `Stores/HistoryActionStore.swift`
 (`HistoryActionOutcome` — every action's answer, whose `.landed` carries the
 `UndoOffer` — `refusal`, `cherryPick`,
 `prepareSquash` → `SquashReadiness`, `squash`, `prepareReorder` →
-`ReorderReadiness`, `reorder`, `cherryPickReturn`, `undo` → `UndoOutcome`) with
+`ReorderReadiness`, `reorder`, the private `outcome(of:…)` all three end in,
+`openAction` with `keepOpen(_:)`, `continueBegins()` and `wayBack(after:under:)`,
+`undo` → `UndoOutcome`) with
 `ContentView.requestCherryPick` / `requestSquash` / `requestReorder` /
-**`finishHistoryAction`** (every action's ending) / `undoHistoryAction` and
+**`finishHistoryAction`** (every action's ending) / `finishContinue` /
+`undoHistoryAction` and
 `Screens/CherryPickSheet.swift`, `Screens/SquashSheet.swift`,
 `Screens/ReorderSheet.swift`. **A new action copies that shape: preflight on the
 menu click, then the dialog, then one core call, then reload → select
@@ -194,9 +161,11 @@ menu click, then the dialog, then one core call, then reload → select
 
 **The write gate** (WS-C) — one slot per window for every repository write:
 `stores/repoWrite.ts` (`beginRepoWrite(kind)` / `endRepoWrite()`,
-`isHeldByAnother`, `REPO_BUSY_MESSAGE`; add the new action's name to
+`isHeldByAnother`, `REPO_BUSY_MESSAGE` and its hover form `REPO_BUSY_REASON`;
+add the new action's name to
 `RepoWriteKind`, as `'squash'` was) and `Stores/RepositoryWriteGate.swift` (`claim()` →
-`Claim?`, `release(_:)`, `busyMessage`). **Every History action must claim
+`Claim?`, `release(_:)`, `busyMessage`, `busyReason`). **Pull holds it as well
+as the network slot** (WS-H, §5.2) — the one transfer that does. **Every History action must claim
 it**, report a refused claim as its own outcome (never success), and give any
 dialog that can sit open under another write the `blocked` prop /
 `WriteBlockedNote`. Stores keep *cannot start* (`isBlocked`, the gate) apart
@@ -206,7 +175,7 @@ from *I am working* (`isRunning`, their own).
 `OperationInProgress { Merge, Rebase, CherryPick, Revert }`, the filesystem
 probe `in_progress(git_dir)` that fills `RepoStatus.operation` on every status
 read, `continue_operation` → `OperationOutcome { success, conflicts,
-error_message }` and `abort_operation` → `Option<String>` (whatever git
+error_message, skipped, started_at }` and `abort_operation` → `Option<String>` (whatever git
 printed). Both are on both bridges (`ffi/src/lib.rs`, *the operation in
 progress*; `src-tauri/src/shims/operation.rs`). `core/src/git_version.rs`
 holds `FLOOR`, the `git --version` parser and `require_floor()`, whose one
@@ -238,9 +207,11 @@ asked*, so a poll that lands mid-dialog cannot reword it (`MainLayout.svelte`
 Continue lives in the composer and claims the window's write gate like every
 other write (`CommitMessage.svelte` `handleContinue`;
 `CommitStore.continueOperation` → `ChangesSidebar.continueOperation` →
-`CommitComposer`'s `continuing:` / `onContinue:`). Abort of a cherry-pick begun
-in History also switches back to the branch it came from
-(`cherryPickReturn`, client memory dropped by one rule on the status read). After a continue **both
+`CommitComposer`'s `continuing:` / `onContinue:`), and answers its owner through
+`onOperationContinued(outcome)` → `finishContinue` in both clients. Abort of a
+cherry-pick begun in History also switches back to the branch it came from
+(`openAction.start.return_branch`, client memory dropped by one rule on the
+status read, §5.4). After a continue **both
 clients re-read first and report second**, because a continue that stops again
 has still moved the repository.
 
@@ -275,9 +246,13 @@ native counterpart) and the undo offer.
 
 **The undo offer** (WS-G) — client memory, mirrored and pure:
 `utils/undoOffer.ts` (`UndoOffer { repoPath, sentence, point, restores }`,
-`landedSentence`, `undoStillStands`, tested in `tests/undoOffer.test.ts`) and
+`UndoableAction`, `landedSentence(action, count)`, `undoStillStands`, and for an
+action that stopped on a conflict `OpenAction { repoPath, operation, start,
+action, asked }`, `openActionStillStands`, `undoPointAfterContinue` — tested in
+`tests/undoOffer.test.ts`) and
 `Services/UndoOffer.swift` (the same, less `repoPath`: the store is per
-repository). One offer per window, set by `finishHistoryAction` **after** the
+repository). One offer per window, set by `finishHistoryAction` — or by
+`finishContinue` — **after** the
 reload, because the rule that retires it reads the status. The store's status
 says `headSha` on the Tauri side where core's `UndoPoint` says `after_sha` —
 the helper takes `{ branch, detached, headSha }`, not core's `RepoStatus`.
@@ -285,12 +260,11 @@ the helper takes `{ branch, detached, headSha }`, not core's `RepoStatus`.
 ## 4. Core design
 
 The core lives beside `git.rs`, which is already 4 000+ lines, in modules
-split by responsibility: `core/src/operation.rs` (built — detect, continue,
-abort), `core/src/git_version.rs` (built — the floor),
-`core/src/sync_ladder.rs` (built — the sync proposal and the reflog test), and
-`core/src/history_rewrite.rs` for everything that *starts* an operation — the
-preflight and cherry-pick are built; the rewrite driver, squash, reorder and
-undo go there too. It reuses the `pub(crate)` helpers §3 lists.
+split by responsibility: `core/src/operation.rs` (detect, continue, abort),
+`core/src/git_version.rs` (the floor), `core/src/sync_ladder.rs` (the sync
+proposal and the reflog test), and `core/src/history_rewrite/` for everything
+that *starts* an operation or takes one back — a module per action (§3). It
+reuses the `pub(crate)` helpers §3 lists.
 
 ### 4.1 Operation in progress (OP-1) — built (WS-B)
 
@@ -312,8 +286,12 @@ workstream has to know:
 - **A single-commit pick or revert has no `sequencer/` at all** — only its
   `*_HEAD` file. After a conflicted *multi*-pick is committed by hand the
   `*_HEAD` file is gone and `sequencer/todo` remains (§4.8-6).
-- **During a rebase `status.detached` is true**, so every gate written as "HEAD
-  is detached" also fires mid-rebase; ask about `operation` first when the
+- **During a rebase `status.detached` is true and `status.branch` is empty**
+  (`get_status` in `git.rs`), so every gate written as "HEAD
+  is detached" also fires mid-rebase, **and any client rule written as "still on
+  branch X" is false for the whole of a stopped rebase** — WS-H's first keep-rule
+  for `openAction` was "same operation and same branch", and would have forgotten
+  every squash and reorder on the first status read (§5.4). Ask about `operation` first when the
   wording matters (the branch menu's merge help does). The chip reads
   `Detached at <sha> · rebasing`; reading the branch from
   `rebase-merge/head-name` would be the improvement, and is not built.
@@ -351,7 +329,9 @@ workstream has to know:
   or `--skip` for a pick or revert whose resolution left nothing to commit —
   under `GIT_EDITOR=:`; a rebase in that position drops the commit by itself on
   `--continue`, and only the report changes (§4.5). It returns `OperationOutcome { success, conflicts,
-  error_message, skipped }`; a step that stops on the next conflict is
+  error_message, skipped, started_at }`; `started_at` is git's own record of
+  where the operation began, read **before** the step, since finishing deletes
+  it (§4.3). A step that stops on the next conflict is
   `success: false` with the conflicts, not an `Err`. An `Err` always means git
   was never asked to continue **and nothing was staged** — both refusals run
   before the first write. `skipped` exists because git drops the commit
@@ -399,22 +379,34 @@ workstream has to know:
 
 ### 4.3 Result and undo point (OP-5)
 
-**Built (WS-C)**, in `history_rewrite.rs` and on both bridges: `RewriteResult
-{ success, conflicts, error_message, selection, undo }` and `UndoPoint
-{ branch, before_sha, after_sha, return_branch }`, one DTO for all three
+**Built (WS-C, WS-H)**, in `history_rewrite/mod.rs` and on both bridges:
+`RewriteResult { success, conflicts, error_message, selection, undo, start }`,
+`UndoPoint { branch, before_sha, after_sha, return_branch }` and `UndoStart` —
+the same less `after_sha` — one set of DTOs for all three
 actions. **The three outcomes are a contract every action keeps**
 (`FRONTEND.md` §3.7): `Ok(success)` with `selection` newest first and `undo`
 set; `Ok(!success)` **only** for a conflict, `conflicts` never empty, the
-operation left open; `Err` with the repository back where it began, or a
+operation left open, **and `start` set — on a stop and on nothing else**; `Err`
+with the repository back where it began, or a
 second paragraph saying where the user was left. Once the commits have landed
 nothing may turn the answer into an `Err` — a tip that cannot be read back
 costs `selection` and `undo`, not the success.
 
-**Decided in WS-C: continue hands back no `UndoPoint`.** `OperationOutcome`
-(§4.2) stays as it is — an operation continued here may have been started in a
-terminal — so an action that stops on a conflict and is then continued offers
-no Undo. The reference does offer one there; whether leogit should, and how, is
-WS-H item 3 (§6.1).
+**Decided (WS-H, 2026-09-21): an action continued past a conflict offers its
+Undo, by client memory.** Every action reads its `UndoStart` before it runs
+anything; landing completes it (`landed_on`), a stop hands it to the client,
+and the client completes it after a Continue that succeeds with the reloaded
+status's `head_sha` (§5.4). **Continue itself still hands back no `UndoPoint`** —
+an operation continued here may have been started in a terminal, and core
+keeps nothing between two calls. What it does hand back is
+`OperationOutcome.started_at`, where git's own state says the operation began:
+the `orig-head` of `rebase-merge/` or `rebase-apply/`, `sequencer/head`, and —
+with none of those directories, which is a merge and a pick or revert of **one**
+sha (§4.8 items 31, 64) — `HEAD`, since such an operation has committed nothing
+yet. It is the guard, not the memory: it says nothing about which *branch* the
+user left or whether the app began the operation at all, and a client that finds
+it different from the kept `before_sha` — or missing — offers nothing.
+`undo_operation` needed no change: it judges any point by the branch's tip.
 
 `selection` is what both clients select, and scroll to, instead of jumping to
 the tip (the reference's own TODO, `dispatcher.ts:3626-3629`). For cherry-pick
@@ -457,9 +449,11 @@ git 2.54:
   different case continue skips (§4.2). `-m 1` is two arguments and a no-op on
   an ordinary commit (§4.8-5).
 - **The branch a conflicted pick came from is client memory**
-  (`cherryPickReturn`), set from the conflict result and dropped by one rule on
-  the status read. It is what makes Abort end on the source branch; it is not
-  persisted across a restart.
+  (`openAction.start.return_branch`, §5.4), set from the conflict result and
+  dropped by one rule on the status read. It is what makes Abort end on the
+  source branch; it is not persisted across a restart. **After a Continue
+  nothing switches back**: the user stays on the target, which is where the
+  post-Continue Undo expects them.
 
 **SHAs cross the bridge newest-first, as the list shows them**, for all three
 actions; the core reverses for cherry-pick and re-derives order from the range
@@ -965,6 +959,52 @@ agents and re-run by hand before they were built on:
     (`undo_puts_the_files_back_when_the_branch_cannot_be_moved`, seen to fail
     without the recovery)
 
+Added in WS-H (2026-09-21, same conditions). Items 64 and 67 – 69 are behind core
+tests, and so is 66 by the fixture's existence; 65 was measured by WS-H's
+research agent, and its fetch and its pull-under-a-lock re-run by hand (the lost
+commit is a race and was not):
+
+64. **Where an operation began, by what git keeps while it is open**: a rebase's
+    `rebase-merge/orig-head` is the pre-rebase tip through every round; a pick of
+    several shas keeps the pre-pick tip in `sequencer/head` through every round;
+    a pick of **one** sha has `CHERRY_PICK_HEAD` and nothing else — and has
+    committed nothing, so `HEAD` is still the pre-pick tip (`ORIG_HEAD` is not:
+    a pick never writes it, and a stale one names another commit). All of it is
+    gone the moment the operation finishes, so it is read before `--continue`.
+    ✅ (`continue_reports_where_a_rebase_began`,
+    `continue_reports_where_a_sequence_of_picks_began_in_every_round`,
+    `continue_reports_head_as_where_a_single_pick_began`)
+65. **A pull and a write do collide; a fetch and a write do not.** `pull` under a
+    held `index.lock` fetches and then fails its merge; a commit that is slow
+    under a pull loses `HEAD`'s lock and is lost without a word; `git fetch`
+    beside an `index.lock`, and beside a stopped rebase, succeeds — it moves
+    remote-tracking refs only. ✅
+66. `git submodule add` from a local path is refused in a test (`transport 'file'
+    not allowed`, git's default since 2.38.1). **A submodule fixture is an
+    embedded repository committed as a gitlink plus a hand-written
+    `.gitmodules`** (`fixtures::repo_with_a_submodule`); for
+    `submodule.recurse` to act, `submodule.<name>.url` and `.active` must be
+    registered in the superproject's config as well. ✅
+67. **A reset or checkout moves a submodule's gitlink and not its files**: the
+    status reads ` M sub`, `diff-index --raw HEAD` shows `160000 160000` with two
+    different ids, and `tracked_changes` — so every preflight, and the next undo
+    — refuses over it. `--ignore-submodules=dirty` keeps that row and drops a
+    submodule that is only dirty inside. ✅
+    (`undo_of_a_submodule_bump_names_the_submodule_git_left_behind`,
+    `a_submodule_left_behind_is_named_although_it_is_dirty_inside`)
+68. **"The two commits differ in a gitlink" is not "a submodule was left
+    behind"**: an undo that removes the submodule leaves `?? sub/`; one that
+    restores it leaves a clean empty directory; a submodule never checked out
+    reads clean; under `submodule.recurse=true` the reset updates it; and a
+    picked bump undone from the target reads clean once the source branch is
+    back. Hence a probe of the working tree after the undo, not a diff of the
+    point. ✅ (`undo_that_takes_a_submodule_away_says_nothing_about_it`,
+    `undo_says_nothing_when_git_updates_the_submodule_itself`,
+    `undo_of_a_picked_bump_says_nothing_once_the_source_branch_is_back`)
+69. `diff-index --raw -z` gives `:<modes and ids> <status>\0<path>\0`, the path
+    raw — a space and a non-ASCII letter survive. ✅
+    (`a_submodule_is_named_as_it_is_whatever_its_path`)
+
 **Not verified:** any git between the 2.45 floor and 2.54; and anything on
 Windows, in particular that Git for Windows' `sh` resolves `cp` for the
 sequence editor (§4.7, *Platforms*).
@@ -1070,14 +1110,35 @@ sequence editor (§4.7, *Platforms*).
     to clear amend mode itself.
   - **One write gate per window (built, WS-C)** — §3 has the API. It covers
     commit, continue, every branch action, every History action and its undo,
-    checkout-commit, undo-commit and discard; **network transfers still have
-    their own slot**, so a pull can start under a rewrite and the sync button
-    stays live during a merge, cherry-pick or revert — WS-H item 2. Until a rule
-    exists, git's own `index.lock` refusal is what the user would see, and it
-    arrives as the action's `Err`.
+    checkout-commit, undo-commit, discard — **and Pull, which holds it as well
+    as the network slot (Decided and built, WS-H)**: write slot first, network
+    slot second, released in reverse (`handlePull` in `Header.svelte`;
+    `SyncStore.pull`, built with the gate). Push, Force Push, Fetch, Publish and
+    the automatic fetches stay outside it, and the automatic fetches were
+    **deliberately not given a "no write in flight" rule**: a fetch beside a
+    write was measured safe (§4.8 item 65), so the rule would be state with no
+    evidence behind it. What is still open is the sync button staying live
+    during a merge, cherry-pick or revert (`ROADMAP.md`, *The sync button stays
+    live while…*) — a ladder question, not a slot one.
+    - **A control that cannot start and must say why is never `disabled`** — no
+      pointer events, no tooltip. Tauri's sync face is `aria-disabled` with a
+      guard in the handler. **The native split button is a `Menu(primaryAction:)`,
+      which disables only whole**, menu included, so it stays enabled, is
+      dimmed to the app's 0.55, `pull()` refuses, and `.help` swaps to the reason
+      (`FRONTEND.md` §8). The first build left it looking ready — "never a
+      button left enabled that does nothing" is the slot's own contract, and the
+      clients verifier held the code to it.
+    - **"Blocked" must not include one's own hold.** The pull sets the write
+      slot itself, so the first build dimmed the button for the whole of its own
+      pull: `isHeldByAnother($activeRepoWrite, 'pull')`, and natively
+      `writeGate.isHeld && syncStore.activeOperation == nil`.
+    - Tauri's slot has **no ownership token** (`endRepoWrite()` frees whoever
+      holds it), where the native `Claim` is generation-stamped. Harmless while
+      every holder frees in its own `finally`; a release from anywhere else
+      would need the token first.
   - **The status poll does not pause for a write**, so both clients now drop a
     status read that lands after a later-asked one (`FRONTEND.md` §6.1).
-    Anything a new action keys on the status — as `cherryPickReturn` is —
+    Anything a new action keys on the status — as `openAction` is —
     depends on that ordering; do not bypass `refreshStatus` / `RepoStore`'s
     three status writers.
   - **Cross-file comments name symbols, not line numbers.** WS-B shifted two
@@ -1090,9 +1151,10 @@ sequence editor (§4.7, *Platforms*).
   stays in the native sheet (choosing another branch may fix it) and takes the
   modal in the Tauri client, whose popover has nowhere to hold it
   (`FRONTEND.md` §8). Resolving is still the user's editor or the embedded
-  terminal (§10). **Not confirmed by eye yet** — WS-H item 6: natively the
-  conflict modal is a second `.sheet` on `ContentView`, presented while the
-  cherry-pick sheet is still dismissing.
+  terminal (§10). Natively the conflict modal is a second `.sheet` on
+  `ContentView`, presented while the cherry-pick sheet is still dismissing;
+  the owner has seen it and it looks fine (WS-H item 6). If it ever fails to
+  appear, present it from the first sheet's `onDisappear`.
 
 ### 5.3 The three actions
 
@@ -1122,10 +1184,12 @@ sequence editor (§4.7, *Platforms*).
     swallows it before a `.defaultAction` button could see it.
   - **Every action ends on one path in each client**:
     `ContentView.finishHistoryAction` over `HistoryActionOutcome` natively,
-    `finishHistoryAction({ repoPath, result, reload, stoppedOnConflict, landed,
-    asked })` in `MainLayout.svelte`. The undo offer is made in those two
-    functions and nowhere else, so a new action gets its Undo by passing its
-    sentence and the commits it was asked for.
+    `finishHistoryAction({ repoPath, result, reload, stoppedOnConflict, action,
+    leavesOpen, asked })` in `MainLayout.svelte`. The undo offer is made there
+    and in `finishContinue` (§5.4) and nowhere else, so a new action gets its
+    Undo — the one after a conflict included — by adding its case to
+    `UndoableAction` / `UndoOffer.Action`, naming the operation a stop leaves
+    open, and passing the commits it was asked for.
     `DescriptionEditor` and `RefusalText` (`Design/`) are shared views.
 - **RO-1 — Insertion mode. Built (WS-F)**, decided as "like the reference, plus
   a sober hint". The contract is `FRONTEND.md` §6.21 (*Reorder*), the metrics
@@ -1139,8 +1203,8 @@ sequence editor (§4.7, *Platforms*).
     topmost moved row, where the line starts), and ⏎ at home just ends the
     mode. The reference steps one row at a time and ignores ⏎ on a no-op; the
     two research agents disagreed on which to build, and this was chosen so
-    that every step is a different move. **Proposed — WS-H item 1.** Either way
-    the two clients must match: it is one helper.
+    that every step is a different move. **Decided (WS-H item 1): keep.** The
+    two clients must match: it is one helper.
   - **The slot under the last loaded row is real** even with more history to
     page in (core takes any commit of the branch), and paging only adds slots,
     so the mode survives a page load. It ends on a list reset, a moved commit
@@ -1164,14 +1228,15 @@ sequence editor (§4.7, *Platforms*).
 
 ### 5.4 Undo (UN)
 
-**Built (WS-G).** The contract is `FRONTEND.md` §3.7 and §6.21 (*Undo*), the
+**Built (WS-G, WS-H).** The contract is `FRONTEND.md` §3.7 and §6.21 (*Undo*), the
 mechanics `TECHNICAL.md` (*Undo*), the strip's metrics `STYLE.md`. What a later
 action inherits, and where the build left the draft:
 
 - **UN-1 — `undo_operation(repo, &UndoPoint)` → `UndoResult { undone,
   message }`, three outcomes the clients tell apart.** `undone` — the branch is
-  back on `before_sha`, and `message` is set only when a cherry-pick's source
-  branch could not be checked out again. `!undone` — **expired, for good**: the
+  back on `before_sha`, and `message` is what did not follow it, as paragraphs:
+  a cherry-pick's source branch that could not be checked out again, then the
+  submodules left behind (below). `!undone` — **expired, for good**: the
   branch is gone, its tip is not `after_sha`, or `before_sha` is no longer a
   commit here; the client drops the offer. `Err` — a refusal that may not hold
   next time (an operation open, tracked changes, an untracked file in the way,
@@ -1190,9 +1255,19 @@ action inherits, and where the build left the draft:
     worktree.
   - **A reset that fails half way is put back** (`after_a_failed_reset`, §4.8
     item 63), so "nothing has moved" holds for an `Err` too.
-  - **Known and not defended**: ignored files in the way (§4.8 item 61, WS-H
-    item 7); a submodule whose pointer the undo moves reads as modified
-    afterwards, which blocks the next action's preflight (WS-H item 8).
+  - **An undo names the submodules it left behind and updates none (Decided and
+    built, WS-H item 8).** `submodules_left_behind` is a probe of the working
+    tree **after the reset and after the switch back** — `diff-index --raw -z
+    --no-renames --ignore-submodules=dirty HEAD`, keeping the paths whose two
+    modes are both `160000` — and `submodules_not_updated` words it. The plan's
+    own suggestion, `diff --raw <after> <before>`, would have lied four ways
+    (§4.8 item 68); ask what is true *where the command came to rest*, not what
+    the two commits say. `git submodule update` is not run: it may reach the
+    network, and when the app updates submodules is one decision for every
+    checkout, pull and switch (`ROADMAP.md`, *Full submodule support*). The
+    `branch -f` path touches no tree and gives no note.
+  - **Known and not defended (Decided, WS-H item 7: leave it)**: ignored files
+    in the way (§4.8 item 61) — git's own stance, and what `.gitignore` means.
   - The `--keep` over `--merge` choice is **not pinned by a test** — the
     tracked-changes refusal above it masks the difference (a verifier's
     surviving mutant). Whoever loosens that refusal must pin it first.
@@ -1202,8 +1277,8 @@ action inherits, and where the build left the draft:
   one." · **Undo** · ✕, in the `done` tone. Its lifetime, one rule per client
   (`undoStillStands` / `UndoOffer.stillStands(under:)`):
   - **Made** by `finishHistoryAction`, after the reload, only when the result
-    carries an `undo`; a no-op reorder leaves the previous offer standing, and a
-    new landing replaces it.
+    carries an `undo` — or by `finishContinue` (UN-3) — a no-op reorder leaves
+    the previous offer standing, and a new landing replaces it.
   - **Retired** by the ✕, a repository switch, the undo itself (undone or
     expired), and **a status that shows `branch` checked out, not detached, at
     a HEAD other than `after_sha`**. On another branch or detached the status
@@ -1216,8 +1291,51 @@ action inherits, and where the build left the draft:
     `restores` — the commits the action was asked for — whichever tab is up.
   - The point lives in client memory; after a restart the reflog is the way
     back, and the expired message says so. It never times out (the reference's
-    banner leaves after 15 s) and asks for no confirmation — WS-H item 4.
-- **Not built: Undo after a conflict and a Continue** (§4.3) — WS-H item 3.
+    banner leaves after 15 s) and asks for no confirmation — **Decided (WS-H
+    item 4): keep as built.**
+- **UN-3 — Undo after a conflict and a Continue. Decided and built (WS-H item
+  3), by client memory.** The contract is `FRONTEND.md` §6.21 (*Undo after a
+  conflict*); core's half is §4.3. One `OpenAction` per window — the operation
+  the stop left open, core's `UndoStart`, which action, the commits asked for —
+  set by `finishHistoryAction` after the reload, and two pure, mirrored rules
+  beside `undoStillStands`:
+  - **`openActionStillStands` forgets it** on a status whose `operation` is not
+    the one left open; **only a cherry-pick is also held to its branch**, because
+    a stopped rebase reports no branch at all (§4.1). It is also the one memory
+    of a stopped action: the abort's return branch is `start.return_branch`.
+  - **`undoPointAfterContinue` vouches for the point or offers nothing**:
+    detached, another branch, no HEAD, a `started_at` that is not `before_sha`
+    (null included), or `head_sha == before_sha` all mean no offer — logged
+    (`[undo] no offer after the continue`), since from outside it looks like
+    nothing happened. The first build let a single-sha pick through on a null
+    `started_at`, git keeping no record for one; core's verifier showed the
+    hole (abort in a terminal, commit, pick again, Continue here → an Undo that
+    takes the hand-made commit too), and core now answers `HEAD` there (§4.3),
+    so one rule covers every action.
+  - **Take what you need off the open action before asking core, not before the
+    reload.** The status poll does not wait for a write, so a read showing the
+    operation over can land between git finishing and the Continue's answer
+    arriving, and forget `openAction` first — rarely, and without a trace. The
+    composer therefore calls
+    `onOperationContinuing` before core (`beginContinue`;
+    `HistoryActionStore.continueBegins()`), and `finishContinue` takes what was
+    remembered on every path, reloads status, log and branches (natively the
+    branch list on this path is new), and only then asks the rule. The abort
+    already read first.
+  - **Both clients set it after the reload** — natively the outcome carries it
+    (`.stoppedOnConflict(_, open:)` → `keepOpen`). Setting it inside the store as
+    the action returned happened to be safe (`RepoStore` drops out-of-order
+    reads, and `.onChange` does not fire on nil → nil), which is not the same
+    as the rule the contract states.
+  - The sentence counts **the commits asked for**, also when a round dropped one
+    (§4.8 item 54), and `restores` is those commits: the undo brings them all
+    back.
+  - **Not offered, knowingly**: a Continue run in a terminal (the client never
+    sees `started_at`; the status rule forgets the open action); an app restarted
+    mid-conflict. **Known and not defended**: a commit made by hand on the target
+    while a pick is stopped sits between `before_sha` and the new tip, so the
+    undo takes it too — it stays in the reflog (`ROADMAP.md`, *An undo after a
+    hand-made commit…*).
 
 ## 6. Workstreams
 
@@ -1244,84 +1362,48 @@ is tested by hand before the next starts.
    driver's optional message, a rebase's dropped commit reported as `skipped`,
    one ending for every action in `MainLayout.svelte`, and the frontend's test
    runner.
-7. **WS-G — Undo. Built and confirmed 2026-09-20**; not committed yet. UN
+7. **WS-G — Undo. Built 2026-09-20, confirmed and committed (`19d066b`).** UN
    for all three actions at once, `undo.rs`, `UndoResult`, one `StatusStrip`
    component per client in place of the inline banner markup and the native
    `ErrorBanner`, the mirrored `UndoOffer` model, `switch_to` and
    `open_operation_refusal` shared in `mod.rs`, and `finishHistoryAction` taking
    one object.
-8. **WS-H — The open decisions. Next, and the last.** §6.1. It starts with the
-   owner's answers, not with code: each item is small once decided, and none
-   blocks another, so they can be answered and built in any order — still one
-   at a time, both clients together, tested before the next.
+8. **WS-H — The open decisions. Answered and built 2026-09-21; waiting for the
+   owner's check, not committed.** §6.1. Three of the eight answers were code:
+   Pull holds the write slot (clients only), Undo after a conflict and a
+   Continue (`UndoStart`, `RewriteResult.start`, `OperationOutcome.started_at`,
+   the mirrored `OpenAction` model in place of `cherryPickReturn`), and the
+   undo's submodule note (`undo.rs`, `fixtures::repo_with_a_submodule`).
 
-### 6.1 WS-H — what the owner has not decided
+### 6.1 WS-H — what the owner decided
 
-Everything this plan chose on its own, or left open. Each item says what is
-built today, the options, and a recommendation. **Ask before building**: the
-global instructions' *Shared ownership* applies to every one of them.
+Eight things the plan had chosen on its own or left open, put to the owner with
+options and a recommendation each, and answered on 2026-09-21. All **Decided**;
+where the answer was code, the section named holds what was built.
 
-1. **Reorder's ↑/↓: skip the slots that change nothing, or step one row.**
-   *Today*: skips them, except home (§5.3, RO-1). *Options*: keep — every key
-   press is a different move, but the line jumps over rows, which can read as a
-   glitch next to a multi-commit selection; or the reference's — one row per
-   press, ⏎ ignored on a no-op slot, more presses. *Recommendation*: keep, unless
-   the jump felt wrong in use. One helper per client
-   (`utils/reorderPlacement.ts`, `Services/ReorderPlacement.swift`) and its
-   tests.
-2. **Whether network transfers and repository writes exclude each other.**
-   *Today*: they do not (§5.2). The three candidates are in `ROADMAP.md`,
-   *Network transfers and repository writes do not exclude each other*.
-   *Recommendation*: **only Pull claims the write slot as well as its own** — it
-   is the one transfer that writes the working tree and the index. The owner's
-   call because it decides what the composer does during a pull.
-3. **Undo after an action that stopped on a conflict and was continued.**
-   *Today*: no Undo — `continue_operation` hands back no `UndoPoint` (§4.3).
-   The reference offers one (it keeps the pre-operation tip in memory). *Options*:
-   (a) **client memory**: the conflict result carries `branch` and `before_sha`,
-   the client keeps them as it keeps `cherryPickReturn`, and after a Continue
-   that succeeds builds the point from the refreshed status (`after_sha` = the
-   new `head_sha`) — covers all three actions, dropped by the same one rule on
-   the status read when the operation ends any other way; (b) read it at
-   continue time from `rebase-merge/orig-head` / `sequencer/head` — no client
-   state, but a **single-commit pick has neither and cherry-pick never writes
-   `ORIG_HEAD`**, and it would also offer Undo for a rebase begun in a terminal,
-   which the app never promised; (c) leave it. *Recommendation*: (a). Note that
-   the sentence needs a count, and a Continue that skipped a commit (§4.8 item
-   54) changes what "restores" can select.
-4. **Where Undo lives, how long, and whether it asks.** *Today*: a third line of
-   the strip under the header, in a neutral `done` tone (`STYLE.md` was
-   rewritten from "exactly two conditions" to three — the owner's style call);
-   it never times out; no confirmation. *Options*: keep; a timeout like the
-   reference's 15 s (cheap: one timer beside the rule that retires it — but an
-   Undo that vanishes while the user reads the result is the reference's
-   weakness, not a feature); a menu item / ⌘Z as well or instead (⌘Z belongs to
-   the text fields, so it would need focus rules); a confirmation for an undo of
-   pushed commits. *Recommendation*: keep as built.
-5. **What ends reorder's mode: native mouse-down, Tauri `click`.** *Today*: they
-   differ (`FRONTEND.md` §8, *Reorder's insertion mode*), each for a reason its
-   platform gives. *Options*: leave it as a recorded difference; or make Tauri
-   end on `pointerdown` outside the scrollbar. *Recommendation*: leave it.
-6. **OP-8's native conflict modal as a second sheet** (§5.2) — never confirmed
-   by eye. Provoke a conflicting cherry-pick natively: the cherry-pick sheet
-   closes and the conflict modal must appear. AppKit queues sheets, so it
-   should; if it does not, present it from the first sheet's `onDisappear`.
-7. **Ignored files in the way of an undo** (§4.8 item 61). *Today*: overwritten,
-   as by every git command. *Options*: leave it — git's own stance, and what
-   `.gitignore` means; or list them first (`ls-files -i -o --exclude-standard`
-   against `diff --name-only after before`) and refuse. *Recommendation*: leave
-   it; a squash or a reorder keeps the tree, so it takes a picked commit that
-   *deleted* a file, and an ignored file made at that path since.
-8. **A submodule pointer moved by an undo.** *Today*: the undo succeeds, git
-   does not check the submodule out, the status reads ` M sub`, and every
-   History action's preflight then refuses over "uncommitted changes to: sub"
-   until the user runs `git submodule update`. The same is true after any
-   checkout or pull in this app that crosses a submodule bump — it is not the
-   undo's alone. *Options*: leave it; say so in `UndoResult.message` when
-   `diff --raw <after> <before>` shows a `160000` entry; or run `git submodule
-   update --recursive` after the reset (a network call, possibly, inside a
-   local action). *Recommendation*: the message, and decide submodules for the
-   whole app as its own roadmap item rather than here.
+1. **Reorder's ↑/↓ skip the slots that change nothing — keep** (§5.3, RO-1). The
+   reference steps one row at a time; the change, if the jump ever reads wrong
+   in use, is one helper per client and its tests.
+2. **Only Pull claims the write slot as well as its own — built** (§5.2). Not
+   one slot for everything, which would leave the composer inert for the whole
+   of a slow push.
+3. **Undo after a conflict and a Continue, by client memory — built** (§4.3,
+   §5.4 UN-3). Not from git's state at continue time, which a single-sha pick
+   does not have and which would also offer an Undo for a rebase begun in a
+   terminal; that state is used as a guard only.
+4. **Where Undo lives, how long, whether it asks — keep as built** (§5.4 UN-2):
+   its own line of the strip, no timeout, no confirmation, no ⌘Z (which belongs
+   to the text fields).
+5. **What ends reorder's mode, native mouse-down and Tauri `click` — leave it**,
+   a recorded difference (`FRONTEND.md` §8).
+6. **The native conflict modal as a second sheet — seen by the owner, fine**
+   (§5.2, OP-8).
+7. **Ignored files in the way of an undo — leave it** (§4.8 item 61). It takes a
+   picked commit that deleted a file and an ignored file made at that path
+   since; a refusal would be `ls-files -i -o --exclude-standard` against
+   `diff --name-only <after> <before>`.
+8. **A submodule pointer moved by an undo — say so, run nothing — built** (§5.4
+   UN-1). Submodule handling for the whole app is its own roadmap item.
 
 ## 7. Verification gates
 
@@ -1444,47 +1526,60 @@ Facts about running them on the owner's machine:
   that compares the two takes the three fields it needs, not `RepoStatus`.
 - **A Swift enum case and a static function may not share a name**
   (`.landed` the outcome, `landing(_:after:of:)` the helper that builds it).
+- **A research agent's *client* claim is checked against core, as its git claims
+  are against git** (WS-H). Its keep-rule for the open action — "same operation
+  and same branch" — read well and was wrong for two actions of three: core's
+  status has no branch during a rebase (§4.1). Five minutes in `get_status`
+  found it; both type checkers and the helper's own tests would have passed.
+- **A test of a rule about "what git left behind" needs the cases where git left
+  nothing, and each flag needs a test that fails without it** (WS-H's submodule
+  note). The four silent cases of §4.8 item 68 were tests from the start; core's
+  verifier still removed `--ignore-submodules=dirty`, the second mode check and
+  `-z` one at a time and all 30 tests passed. The fixture that "covered" a dirty
+  submodule moved its pointer *as well*; the odd path held nothing git quotes
+  under `core.quotepath=false`, which `git_cmd` always sets (a `"` does); and no
+  undo can produce a one-sided gitlink at all, so the parse is now a function of
+  its own (`gitlinks_on_both_sides`) tested on hand-made listings. The same
+  habit on the client side: every negative rule of `undoPointAfterContinue` was
+  pinned on the squash fixture alone, and two mutants that spared cherry-pick
+  survived (a third, dropping the `detached` test, is equivalent: core empties
+  `branch` whenever HEAD is detached).
+- **A verifier's repro can be its own artefact** (WS-H, core). "An undo that
+  restores a submodule whose directory was deleted leaves ` D sub` unsaid" was
+  built with `git rm --cached sub; rm .gitmodules; git add -A` — and `add -A`
+  put `sub/` straight back as a gitlink, so the "drop" commit never dropped it
+  and ` D sub` was there *before* the reset, where `tracked_changes` refuses the
+  undo. Re-run by hand with `git ls-tree` on each commit, `reset --keep`
+  recreates the empty directory and reads clean. Check what a repro's commits
+  actually contain before believing what follows them.
+- **An agent that mutates code needs a target directory of its own.** Core's
+  verifier ran mutants on a copy of the crate with `CARGO_TARGET_DIR` on the
+  repository's `target/`; cargo gave the copy the real crate's unit hash, the
+  next real `cargo test` failed eleven tests, and the cure was `cargo clean -p
+  leogit-core`. Tell a mutation agent to build somewhere else.
+- **A conflict fixture may conflict more often than its name says**:
+  `conflicting_repo()` stops a two-commit pick onto `side` **twice** (first on
+  `base`, then on `main edits shared`). A round-trip test that continues once
+  and asserts success fails there; pin the number of rounds.
 - **`#[tokio::test]` is available in core** for the async commands; an
   `EventSink` that drops everything is three lines (`NoProgress` in `git.rs`'s
   tests).
 
 Core tests live with their module and build repositories with
-`core/src/test_support.rs` (§3 lists it). Bridge tests copy
-`cherry_pick_flow_preflights_copies_and_stops_on_a_conflict` (`ffi/src/lib.rs`).
-WS-B's sixteen tests are in `operation.rs`, four more in `git_version.rs`,
-WS-C's fourteen in `history_rewrite/` (`cherry_pick.rs` and `mod.rs`), WS-D's in
-`sync_ladder.rs` (the ladder and seven runs of the probe) and `git.rs` (seven
-`force_push_*`, each asserting what the remote holds afterwards), and WS-E's
-thirteen in `history_rewrite/squash.rs` — a non-contiguous squash, `--root`, the
-message across two conflict rounds, a failed amend run again by the next
-continue, a fold that comes to nothing, an abort, a stop with nothing to
-resolve, the refusals, a shallow boundary, ids in either case, the settings
-that would bend the todo, an odd repository path, and the draft — with `squash_flow_drafts_the_message_and_folds_the_selection` through
-the bridge — and WS-F's in `history_rewrite/reorder.rs`: moves to the tip, the
-middle and under the first commit, a selection with gaps, a selected
-destination, a no-op that leaves the reflog alone, the trimmed replay, a kept
-empty commit, a conflict continued, a moved commit resolved to nothing, an
-abort, a stop with nothing to resolve, the refusals, a merge between the commits
-and the destination, a shallow boundary, `rewrites_pushed`, and the bending
-settings — with `reorder_flow_preflights_the_destination_and_moves_the_selection`
-through the bridge and the placement model's in `apps/tauri-app/tests/` — and
-WS-G's in `history_rewrite/undo.rs`: each action taken back, a cherry-pick's
-from the target, from the source and detached, the two expiries (checked out
-and not), tracked changes, an untracked file in the way, a stale index, an open
-operation, the branch in another worktree and under another worktree's rebase,
-a source branch that cannot be checked out again, a branch that cannot be
-locked, no switch to the branch it is already on, what is not an id and what is
-gone, and the sync proposal before and after a force push — with
-`undo_flow_takes_an_action_back_and_then_says_the_point_has_expired` through
-the bridge and the offer's rule in `apps/tauri-app/tests/undoOffer.test.ts`.
-Two probe claims in `operation.rs` rest on a scratch run rather than a test and
-are cheap to add: the `--rebase-merges` stop that leaves `MERGE_HEAD` beside
-`rebase-merge/`, and a real `git am` (the existing test fabricates the
-directory).
+`core/src/test_support.rs` and `history_rewrite/fixtures.rs` (§3 lists both);
+`TECHNICAL.md` names each module's tests where it describes the module
+(`operation.rs`, `git_version.rs`, `sync_ladder.rs`, the `force_push_*` in
+`git.rs`, and `history_rewrite/` per action). Bridge tests copy
+`cherry_pick_flow_preflights_copies_and_stops_on_a_conflict` (`ffi/src/lib.rs`),
+one flow per action. The frontend's pure models are in `apps/tauri-app/tests/`
+(`reorderPlacement`, `undoOffer`). Two probe claims in `operation.rs` rest on a
+scratch run rather than a test and are cheap to add: the `--rebase-merges` stop
+that leaves `MERGE_HEAD` beside `rebase-merge/`, and a real `git am` (the
+existing test fabricates the directory).
 
 ## 8. Documentation on completion
 
-Every workstream through WS-G has written its share, and nothing is owed. Where
+Every workstream through WS-H has written its share, and nothing is owed. Where
 the feature lives in the documents, for whoever changes it next:
 
 - **`FRONTEND.md`** — §1 and §3 (the command count, 78 per host); §3.7 (*history

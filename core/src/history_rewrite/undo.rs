@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{UndoPoint, open_operation_refusal, switch_to, tracked_changes};
-use crate::git::{current_branch, is_object_id, run_git_combined, run_git_optional};
+use crate::git::{current_branch, is_object_id, run_git, run_git_combined, run_git_optional};
 
 /// What an undo came to. Three answers, as for the actions themselves: the
 /// branch is back (`undone`); the point has **expired** (`undone` false) — the
@@ -15,7 +15,8 @@ use crate::git::{current_branch, is_object_id, run_git_combined, run_git_optiona
 pub struct UndoResult {
     pub undone: bool,
     /// When `undone`: what did not follow — the branch the action had left
-    /// could not be checked out again. Otherwise: why the point has expired.
+    /// could not be checked out again, a submodule was left on the commit it
+    /// was on — as paragraphs. Otherwise: why the point has expired.
     pub message: Option<String>,
 }
 
@@ -49,7 +50,8 @@ impl UndoResult {
 ///   an untracked file in its way — `--hard` deletes it, and `--merge` throws a
 ///   staged change away. (`switch -C` is as careful, but runs `post-checkout`,
 ///   and exits 1 on a hook's failure after it has moved everything.) Then, for
-///   a cherry-pick, the branch it had left is checked out again.
+///   a cherry-pick, the branch it had left is checked out again — and last, the
+///   submodules git left behind are named ([`submodules_left_behind`]).
 /// * **It is not.** `git branch -f`, because it is the one command that knows
 ///   every way another worktree can hold a branch — checked out there, or
 ///   detached in the middle of a rebase or a bisect of it — and refuses. A bare
@@ -144,7 +146,92 @@ pub fn undo_operation(repo_path: &str, point: &UndoPoint) -> Result<UndoResult, 
                 format!("Undone, but “{source}” could not be checked out again:\n{said}")
             })
         });
-    Ok(UndoResult::undone(stranded))
+    // After the switch: only where the tree has come to rest is true.
+    let left_behind = submodules_not_updated(&submodules_left_behind(repo_path));
+    // Being on another branch than expected is the bigger surprise, so first.
+    let notes: Vec<String> = stranded.into_iter().chain(left_behind).collect();
+    Ok(UndoResult::undone(
+        (!notes.is_empty()).then(|| notes.join("\n\n")),
+    ))
+}
+
+/// The submodules that read as an uncommitted change now that the undo has come
+/// to rest: git moved their pointer back and left their files where they were,
+/// so every History action's preflight — and the next undo — refuses over them
+/// until `git submodule update` is run. That is not run here: it may reach the
+/// network, from an action that is local.
+///
+/// Asked of the working tree, **not** worked out from what the two commits
+/// differ in, because only the outcome is true: `submodule.recurse` makes the
+/// reset check the submodule out itself; a cherry-pick's switch back to its
+/// source puts the tree where it began; an undo that removes a submodule leaves
+/// an untracked directory and one that brings one back leaves an empty one,
+/// neither of them a change; and a submodule that was never checked out has
+/// nothing to read as modified. The tree held no tracked changes a moment ago
+/// ([`tracked_changes`], which a moved pointer does not pass), so whatever reads
+/// so now is this undo's doing.
+///
+/// `diff-index` rather than `status`: plumbing, one line per path with both
+/// modes on it, and no walk for untracked files. `--ignore-submodules=dirty`
+/// is the preflight's own policy — a submodule that is only dirty inside blocks
+/// nothing. A gitlink on **both** sides leaves out a submodule replaced by a
+/// file, which `git submodule update` does not mend.
+///
+/// Best effort: a probe that fails costs the note, never the undo.
+fn submodules_left_behind(repo_path: &str) -> Vec<String> {
+    match run_git(
+        repo_path,
+        &[
+            "diff-index",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--ignore-submodules=dirty",
+            "HEAD",
+        ],
+    ) {
+        Ok(listing) => gitlinks_on_both_sides(&listing),
+        Err(said) => {
+            eprintln!("[history_rewrite] undone, but the submodules could not be read: {said}");
+            Vec::new()
+        }
+    }
+}
+
+/// The paths of a `diff-index --raw -z` listing that are a gitlink on both
+/// sides. Under `-z` an entry is `:<mode> <mode> <id> <id> <status>`, a NUL,
+/// the path as it is — whatever it holds, a line feed or a quote included,
+/// which the line format would quote — and a NUL.
+fn gitlinks_on_both_sides(listing: &str) -> Vec<String> {
+    const GITLINK: &str = "160000";
+    let mut paths = Vec::new();
+    let mut fields = listing.split('\0');
+    while let (Some(entry), Some(path)) = (fields.next(), fields.next()) {
+        let mut modes = entry.trim_start_matches(':').split(' ');
+        if modes.next() == Some(GITLINK) && modes.next() == Some(GITLINK) {
+            paths.push(path.to_string());
+        }
+    }
+    paths
+}
+
+/// The note for the submodules an undo left behind, or `None` for none.
+fn submodules_not_updated(paths: &[String]) -> Option<String> {
+    let names: Vec<String> = paths.iter().map(|path| format!("“{path}”")).collect();
+    let (last, rest) = names.split_last()?;
+    eprintln!("[history_rewrite] undone, but not checked out again: {paths:?}");
+    Some(if rest.is_empty() {
+        format!(
+            "The submodule {last} was not updated, so it reads as an uncommitted change until \
+             you run git submodule update."
+        )
+    } else {
+        format!(
+            "The submodules {} and {last} were not updated, so they read as uncommitted changes \
+             until you run git submodule update.",
+            rest.join(", ")
+        )
+    })
 }
 
 /// What to say once `reset --keep` has failed — after putting right what it may
@@ -212,12 +299,17 @@ fn move_a_branch_that_is_not_checked_out(
 
 #[cfg(test)]
 mod tests {
-    use super::super::fixtures::{branch, edits_of_one_line, five_commits, linear_repo, sha};
-    use super::super::{cherry_pick_commits, reorder_commits, squash_commits};
+    use super::super::fixtures::{
+        branch, edits_of_one_line, five_commits, linear_repo, repo_with_a_submodule, sha,
+    };
+    use super::super::{cherry_pick_commits, reorder_commits, rewrite_preflight, squash_commits};
     use super::*;
     use crate::git::get_status;
+    use crate::operation::continue_operation;
     use crate::sync_ladder::SyncProposal;
-    use crate::test_support::{commit_file, git, git_stdout, published_repo, subjects};
+    use crate::test_support::{
+        commit_file, conflicting_repo, git, git_stdout, published_repo, subjects,
+    };
     use std::fs;
     use std::path::Path;
 
@@ -280,6 +372,89 @@ mod tests {
         assert_eq!(branch(dir), "main", "where the commits came from");
         assert!(is_clean(dir));
         assert!(dir.join("c.txt").exists(), "main's own files are back");
+    }
+
+    /// What a client does after a conflict: it keeps the `start` the action
+    /// handed it, and once a Continue has landed completes it with the tip the
+    /// status then shows — having checked it against `started_at`.
+    #[test]
+    fn a_squash_continued_past_two_conflicts_can_be_undone_from_its_start() {
+        let (tmp, repo) = edits_of_one_line();
+        let dir = tmp.path();
+        let before = sha(dir, "HEAD");
+        let subjects_before = subjects(dir);
+        let picks = vec![sha(dir, "HEAD"), sha(dir, "HEAD~3")];
+        let stopped = squash_commits(&repo, &picks, "base, rewritten").expect("a conflict");
+        let start = stopped.start.expect("where the squash began");
+        fs::write(dir.join("shared.txt"), "resolved\n").expect("resolve");
+        let again = continue_operation(&repo).expect("continue");
+        fs::write(dir.join("shared.txt"), "resolved again\n").expect("resolve");
+        let done = continue_operation(&repo).expect("continue");
+        assert!(!again.success && done.success, "{:?}", done.error_message);
+        assert_eq!(done.started_at.as_deref(), Some(start.before_sha.as_str()));
+
+        let point = start.landed_on(sha(dir, "HEAD"));
+        let result = undo_operation(&repo, &point).expect("undo");
+
+        assert_eq!(result, UndoResult::undone(None));
+        assert_eq!(sha(dir, "HEAD"), before, "the very commits, not copies");
+        assert_eq!(subjects(dir), subjects_before);
+        assert_eq!(branch(dir), "main");
+        assert!(is_clean(dir));
+    }
+
+    #[test]
+    fn a_cherry_pick_continued_past_a_conflict_can_be_undone_from_its_start() {
+        let (tmp, repo) = conflicting_repo();
+        let dir = tmp.path();
+        let side_tip = sha(dir, "side");
+        let picks = vec![sha(dir, "main"), sha(dir, "main~1")];
+        let stopped = cherry_pick_commits(&repo, &picks, "side").expect("a conflict");
+        let start = stopped.start.expect("where the pick began");
+        // Both picks rewrite the line `side` rewrote, so each stops in turn.
+        fs::write(dir.join("shared.txt"), "both\n").expect("resolve");
+        let again = continue_operation(&repo).expect("continue");
+        fs::write(dir.join("shared.txt"), "all three\n").expect("resolve");
+        let done = continue_operation(&repo).expect("continue");
+        assert!(!again.success && done.success, "{:?}", done.error_message);
+        assert_eq!(done.started_at.as_deref(), Some(side_tip.as_str()));
+        assert_eq!(
+            branch(dir),
+            "side",
+            "a Continue leaves the user on the target"
+        );
+
+        let point = start.landed_on(sha(dir, "HEAD"));
+        let result = undo_operation(&repo, &point).expect("undo");
+
+        assert_eq!(result, UndoResult::undone(None));
+        assert_eq!(sha(dir, "side"), side_tip);
+        assert_eq!(branch(dir), "main", "where the commits came from");
+        assert!(is_clean(dir));
+    }
+
+    /// The commit that went is not part of what an undo restores: the branch
+    /// goes back to where it began whatever the Continue made of it.
+    #[test]
+    fn a_reorder_whose_continue_dropped_a_commit_can_still_be_undone() {
+        let (tmp, repo) = edits_of_one_line();
+        let dir = tmp.path();
+        let before = sha(dir, "HEAD");
+        let under = sha(dir, "HEAD~2");
+        let stopped = reorder_commits(&repo, &[sha(dir, "HEAD")], Some(&under)).expect("conflict");
+        let start = stopped.start.expect("where the reorder began");
+        // Taking the side already there leaves the moved commit with nothing.
+        fs::write(dir.join("shared.txt"), "base\n").expect("resolve");
+        let outcome = continue_operation(&repo).expect("continue");
+        assert!(outcome.success && outcome.skipped, "the moved commit went");
+        assert_eq!(subjects(dir), ["between", "first edit", "base"]);
+
+        let point = start.landed_on(sha(dir, "HEAD"));
+        let result = undo_operation(&repo, &point).expect("undo");
+
+        assert!(result.undone);
+        assert_eq!(sha(dir, "HEAD"), before);
+        assert!(is_clean(dir));
     }
 
     #[test]
@@ -678,5 +853,194 @@ mod tests {
         let status = get_status(repo).expect("status");
         assert_eq!((status.ahead, status.behind), (2, 1));
         assert_eq!(status.proposal, SyncProposal::ForcePush);
+    }
+
+    /// The undo of `main`'s last commit, as a point made by hand: no action
+    /// lands a submodule's bump on the branch it is on without a conflict, and
+    /// the one that does — continued past it — hands back no point of its own.
+    fn last_commit_of_main(dir: &Path) -> UndoPoint {
+        UndoPoint {
+            branch: "main".to_string(),
+            before_sha: sha(dir, "HEAD~1"),
+            after_sha: sha(dir, "HEAD"),
+            return_branch: None,
+        }
+    }
+
+    const SUB_NOT_UPDATED: &str = "The submodule “sub” was not updated, so it reads as an \
+                                   uncommitted change until you run git submodule update.";
+
+    #[test]
+    fn undo_of_a_submodule_bump_names_the_submodule_git_left_behind() {
+        let (tmp, repo) = repo_with_a_submodule("sub");
+        let dir = tmp.path();
+        assert!(is_clean(dir));
+
+        let result = undo_operation(&repo, &last_commit_of_main(dir)).expect("undo");
+
+        assert_eq!(
+            result,
+            UndoResult::undone(Some(SUB_NOT_UPDATED.to_string()))
+        );
+        assert_eq!(
+            git_stdout(dir, &["status", "--porcelain"]),
+            "M sub",
+            "which is what the next action's preflight would refuse over"
+        );
+        assert!(
+            rewrite_preflight(&repo, None)
+                .expect("preflight")
+                .blocked
+                .is_some_and(|reason| reason.contains("sub"))
+        );
+    }
+
+    /// A space and a letter outside ASCII, and a double quote — which git quotes
+    /// in its line format whatever `core.quotepath` says, so it is the one that
+    /// needs `-z`.
+    #[test]
+    fn a_submodule_is_named_as_it_is_whatever_its_path() {
+        let (tmp, repo) = repo_with_a_submodule("my \"libs\"/día");
+        let dir = tmp.path();
+
+        let result = undo_operation(&repo, &last_commit_of_main(dir)).expect("undo");
+
+        assert!(result.undone);
+        assert!(
+            result
+                .message
+                .is_some_and(|note| note.contains("“my \"libs\"/día”"))
+        );
+    }
+
+    /// The pointer did not move: only the submodule's own files are edited,
+    /// which blocks nothing and is nothing `git submodule update` is for.
+    #[test]
+    fn a_submodule_that_is_only_dirty_inside_is_not_named() {
+        let (tmp, repo) = repo_with_a_submodule("sub");
+        let dir = tmp.path();
+        commit_file(dir, "a.txt", "edited\n", "edit a file beside it");
+        fs::write(dir.join("sub/s.txt"), "edited\n").expect("edit inside");
+
+        let result = undo_operation(&repo, &last_commit_of_main(dir)).expect("not refused");
+
+        assert_eq!(result, UndoResult::undone(None));
+    }
+
+    #[test]
+    fn only_a_gitlink_on_both_sides_is_a_submodule_left_behind() {
+        let listing = [
+            ":160000 160000 aaaa bbbb M\0moved\0",
+            ":160000 000000 aaaa 0000 D\0gone\0",
+            ":160000 100644 aaaa cccc T\0now a file\0",
+            ":100644 160000 cccc aaaa T\0was a file\0",
+            ":100644 100644 cccc dddd M\0a file named 160000 160000\0",
+            ":160000 160000 aaaa bbbb M\0two\nlines \"quoted\"\0",
+        ]
+        .concat();
+
+        assert_eq!(
+            gitlinks_on_both_sides(&listing),
+            ["moved", "two\nlines \"quoted\""]
+        );
+        assert!(gitlinks_on_both_sides("").is_empty());
+    }
+
+    #[test]
+    fn a_submodule_left_behind_is_named_although_it_is_dirty_inside() {
+        let (tmp, repo) = repo_with_a_submodule("sub");
+        let dir = tmp.path();
+        fs::write(dir.join("sub/s.txt"), "edited\n").expect("edit inside");
+
+        let result = undo_operation(&repo, &last_commit_of_main(dir)).expect("not refused");
+
+        assert_eq!(
+            result,
+            UndoResult::undone(Some(SUB_NOT_UPDATED.to_string()))
+        );
+    }
+
+    /// What the two commits differ in would say "a submodule changed"; the
+    /// tree says an untracked directory was left, which blocks nothing.
+    #[test]
+    fn undo_that_takes_a_submodule_away_says_nothing_about_it() {
+        let (tmp, repo) = repo_with_a_submodule("sub");
+        let dir = tmp.path();
+        git(dir, &["reset", "-q", "--keep", "HEAD~1"]);
+        // The submodule's files are on its second commit; put them on the one
+        // `main` now names, so the tree is clean.
+        git(&dir.join("sub"), &["checkout", "-q", "HEAD~1"]);
+        assert!(is_clean(dir));
+
+        let result = undo_operation(&repo, &last_commit_of_main(dir)).expect("undo");
+
+        assert_eq!(result, UndoResult::undone(None));
+        assert_eq!(git_stdout(dir, &["status", "--porcelain"]), "?? sub/");
+    }
+
+    /// With `submodule.recurse`, the reset checks the submodule out itself —
+    /// and the user's configuration is read in production, where this one is
+    /// common. The note is about the outcome, so there is none.
+    #[test]
+    fn undo_says_nothing_when_git_updates_the_submodule_itself() {
+        let (tmp, repo) = repo_with_a_submodule("sub");
+        let dir = tmp.path();
+        // `recurse` only reaches a submodule that is registered and active.
+        let url = dir.join("sub").to_str().expect("utf-8").to_string();
+        git(dir, &["config", "submodule.sub.url", &url]);
+        git(dir, &["config", "submodule.sub.active", "true"]);
+        git(dir, &["config", "submodule.recurse", "true"]);
+
+        let result = undo_operation(&repo, &last_commit_of_main(dir)).expect("undo");
+
+        assert_eq!(result, UndoResult::undone(None));
+        assert!(is_clean(dir));
+    }
+
+    /// The reset on the target leaves the submodule behind; the switch back to
+    /// the source puts the tree where the pick found it.
+    #[test]
+    fn undo_of_a_picked_bump_says_nothing_once_the_source_branch_is_back() {
+        let (tmp, repo) = repo_with_a_submodule("sub");
+        let dir = tmp.path();
+        let picked = cherry_pick_commits(&repo, &[sha(dir, "HEAD")], "target").expect("pick");
+        let point = picked.undo.expect("undo point");
+        assert_eq!(branch(dir), "target");
+
+        let result = undo_operation(&repo, &point).expect("undo");
+
+        assert_eq!(result, UndoResult::undone(None));
+        assert_eq!(branch(dir), "main");
+        assert!(is_clean(dir));
+    }
+
+    #[test]
+    fn an_undo_stranded_on_the_target_names_the_branch_and_then_the_submodule() {
+        let (tmp, repo) = repo_with_a_submodule("sub");
+        let dir = tmp.path();
+        let picked = cherry_pick_commits(&repo, &[sha(dir, "HEAD")], "target").expect("pick");
+        let point = picked.undo.expect("undo point");
+        git(dir, &["branch", "-q", "-D", "main"]);
+
+        let result = undo_operation(&repo, &point).expect("undo");
+
+        assert!(result.undone);
+        let note = result.message.expect("both notes");
+        let (stranded, left_behind) = note.split_once("\n\n").expect("two paragraphs");
+        assert!(stranded.starts_with("Undone, but “main” could not be checked out again:"));
+        assert_eq!(left_behind, SUB_NOT_UPDATED);
+    }
+
+    #[test]
+    fn two_submodules_left_behind_are_named_in_one_sentence() {
+        let paths = ["sub".to_string(), "vendor/lib".to_string()];
+        assert_eq!(
+            submodules_not_updated(&paths).as_deref(),
+            Some(
+                "The submodules “sub” and “vendor/lib” were not updated, so they read as \
+                 uncommitted changes until you run git submodule update."
+            )
+        );
+        assert_eq!(submodules_not_updated(&[]), None);
     }
 }

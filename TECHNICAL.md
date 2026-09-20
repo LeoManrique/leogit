@@ -600,6 +600,26 @@ as the answer to a claim lost in the gap between that read and the click. Per-st
 cannot do any of this: an Abort confirmed during a minute-long Continue is two stores each
 believing itself idle, racing on `index.lock`.
 
+**A pull holds the gate as well as the network slot.** `SyncStore` is built with the gate and
+`pull` opens with `guard activeOperation == nil, let claim = writeGate.claim()` — write slot
+first, network slot second, released in reverse by a `defer` — answering `refusedBusy`
+otherwise. It is the one transfer that writes the index and the working tree: measured
+without the exclusion, a pull under a held `index.lock` fetches and then fails its merge, and
+a commit that is slow under a pull loses `HEAD`'s lock and is silently lost. `push`,
+`forcePush`, `fetch`, `publish` and every automatic fetch claim only the network slot — a
+`git fetch` beside an `index.lock` or a stopped rebase succeeds, and moves only
+remote-tracking refs — so **the automatic fetches deliberately have no "no write in flight"
+rule** in either client's background policy. `ContentView.pullBlocked` is the reason a pull
+cannot start — the gate held while `syncStore.activeOperation` is nil, since the pull's own
+hold is not a reason — in `RepositoryWriteGate.busyReason`, the hover form of `busyMessage`.
+`SyncControls` takes it: the split button stays enabled and `pull()` refuses, with the
+`.help` swapped to the reason and the control dimmed to the 0.55 every inert control that
+still explains itself has (`StatusStrip`'s link, the picker's blocked rows), because a
+`Menu(primaryAction:)` can only be disabled whole and a disabled control shows no tooltip —
+and a button that looks ready and does nothing is the one state the slot's contract rules
+out; the menu's own Pull item is `.disabled`, and
+`syncMenuCommand` disables ⌘P while Pull is the live proposal.
+
 **A refused claim is its own outcome, never success.** `BranchStore.run` answers a three-case
 `OpOutcome` — `succeeded` / `refusedBusy` / `failed(String)` — because a guard that returns the
 success value makes a refused start indistinguishable from a completed one, and the surface
@@ -1348,7 +1368,7 @@ The three core writable Svelte stores, all in [src/lib/stores](apps/tauri-app/sr
 
 Alongside these are smaller purpose-built stores: **`networkOps`** holds the user-initiated network op in flight (`activeNetworkOp` — the poll/auto-fetch/scheduler pause on it and the sync handlers use it for mutual exclusion) and its live transfer progress (`networkProgress`, fed from `git-progress` events), **`repoWrite`** holds the one repository write in flight (below), **`repoIdentifiers`** lazily caches each repo's GitHub identifier (a module-level map that re-publishes on each fetch, so reopening the repo picker is free), **`repoSync`** caches each repo's ahead/behind counts and working-tree `dirty` flag for the picker's pull/push badges and dirty dot (`setRepoSync` records values the active poll already computed; `syncRepo` fetches + recomputes one repo, with per-path in-flight de-duplication; its change-equality guard compares every field, so a new one must be added there too or its transitions get swallowed), and **`reposState`** mirrors the persisted `repos-state.json` document — the `repoSortMode` / `cloneSortMode` / `recentRepos` writables plus thin wrappers over the backend's atomic writers: `patchReposState` → the `patch_state` command (one field-wise read-modify-write under a process-wide lock, so a patch can never clobber another writer's field), `recordRecentRepo` → the `record_recent_repo` command (backend owns the MRU move-to-front/de-dupe/cap, records `last_opened_repo` in the same write, and returns the authoritative list, which reseeds the `recentRepos` store), and `hydrateReposState` (startup seed). Both wrappers log-and-swallow failures, so callers never need a rejection path for lost preferences.
 
-**One repository write at a time, window-wide** ([stores/repoWrite.ts](apps/tauri-app/src/lib/stores/repoWrite.ts)). `activeRepoWrite` is a `RepoWriteKind` or null — commit, continue, switch, create, delete, merge, abort, cherry-pick, checkout, undo-commit, discard. Every handler that writes opens with `beginRepoWrite(kind)` and returns without touching its surface when that answers `false` — a refused start is never a success — then `endRepoWrite()` in its `finally`. The **kind** is kept so a surface can tell its own work (`$activeRepoWrite === 'merge'` holds the merge dialog open under *Merging…*) from someone else's (`$activeRepoWrite !== null` greys the branch popover, the composer's buttons and the History actions). It is a store rather than layout state because `CommitMessage.svelte` claims it too and shares no prop with `MainLayout.svelte` for it, and a flag on each side would let an Abort be confirmed under a running Continue. A confirmation that can sit open under another write takes `blocked={blockedFor(kind)}` — `REPO_BUSY_MESSAGE` while `isHeldByAnother`, else undefined — and renders it as its last body line with the confirming button disabled; `ConfirmDialog`, `MergeBranchDialog`, `CheckoutCommitConfirm`, `DiscardConfirm` and `EmbeddedRepoConfirm` all carry the prop, so a claim refused on the click is a race's backstop rather than something a user can reach. The native counterpart is `RepositoryWriteGate` (see *Swift host*).
+**One repository write at a time, window-wide** ([stores/repoWrite.ts](apps/tauri-app/src/lib/stores/repoWrite.ts)). `activeRepoWrite` is a `RepoWriteKind` or null — commit, continue, switch, create, delete, merge, abort, cherry-pick, squash, reorder, undo-action, checkout, undo-commit, discard, pull. **Pull is the one network transfer among them**: `Header.svelte`'s `handlePull` claims this slot first and the network slot second and releases them in reverse, and the sync face reads `isHeldByAnother($activeRepoWrite, 'pull')` — its own hold is not a reason — to go `aria-disabled` with `REPO_BUSY_REASON` (the hover form of `REPO_BUSY_MESSAGE`) as its title; why only Pull, and why the automatic fetches claim nothing, is under *Swift host*'s gate. Every handler that writes opens with `beginRepoWrite(kind)` and returns without touching its surface when that answers `false` — a refused start is never a success — then `endRepoWrite()` in its `finally`. The **kind** is kept so a surface can tell its own work (`$activeRepoWrite === 'merge'` holds the merge dialog open under *Merging…*) from someone else's (`$activeRepoWrite !== null` greys the branch popover, the composer's buttons and the History actions). It is a store rather than layout state because `CommitMessage.svelte` claims it too and shares no prop with `MainLayout.svelte` for it, and a flag on each side would let an Abort be confirmed under a running Continue. A confirmation that can sit open under another write takes `blocked={blockedFor(kind)}` — `REPO_BUSY_MESSAGE` while `isHeldByAnother`, else undefined — and renders it as its last body line with the confirming button disabled; `ConfirmDialog`, `MergeBranchDialog`, `CheckoutCommitConfirm`, `DiscardConfirm` and `EmbeddedRepoConfirm` all carry the prop, so a claim refused on the click is a race's backstop rather than something a user can reach. The native counterpart is `RepositoryWriteGate` (see *Swift host*).
 
 **Status reads publish in the order they were asked.** `refreshStatus` numbers each read before its `await` (`statusReadsIssued`) and drops one that returns after a later-numbered read has landed (`newestStatusLanded`); natively `RepoStore.issueStatusRead()` / `landStatusRead(_:)` do the same for its three status writers, beside — not instead of — `openGeneration`, which tells *repositories* apart and cannot order two reads of one. The poll is not paused by a repository write, so without this a tick that left before a cherry-pick and came back after its reload repaints the source branch and, through the rules keyed on the status, ends amend mode or forgets the branch a conflicted pick came from.
 
@@ -1588,12 +1608,26 @@ conflict is data, and only a refusal before git was asked is an `Err`. Its
 the rebase itself — git drops it without a word, so both clients put
 "The resolution left nothing to commit, so the *cherry-pick* skipped that
 commit." in the notice banner, or a commit that never landed would read as one
-that did. `abort_operation` is `git <op> --abort` and returns
+that did. Its `started_at` is **where git's own state says the operation
+began**, read before `--continue` or `--skip` runs, since a finished operation
+deletes that state: the `orig-head` of whichever of `rebase-merge/` and
+`rebase-apply/` is there, else `sequencer/head` when `sequencer/` is. With none
+of the three directories — a merge, and a cherry-pick or revert of **one**
+commit, which records only its `*_HEAD` file — the operation has committed
+nothing yet, so **`HEAD` is still where it began** and is the answer; inside a
+rebase or a sequence `HEAD` is wherever the replay has got to, which is why the
+directory decides and not the file's absence. `ORIG_HEAD` is never read: no
+cherry-pick writes it, and anything may overwrite it. `None` means only that the
+state could not be read. It is what lets a client tell that the
+operation it just finished is the one its History action began (*Undo after a
+conflict*, below). `abort_operation` is `git <op> --abort` and returns
 whatever git printed on success — nothing for a full rewind, and
 `You seem to have moved HEAD. Not rewinding` when a multi-commit pick had a
 hand-made commit in the middle, in which case git clears the sequence and keeps
 HEAD. The core never resets over commits the user made themselves. Covered by
-the `continue_*`, `a_continue_that_conflicts_again_is_data`,
+the `continue_*` (the three `continue_reports_…` tests pin `started_at` for a
+rebase, a sequence of picks in every round, and a single pick under a stale
+`ORIG_HEAD`), `a_continue_that_conflicts_again_is_data`,
 `a_pick_resolved_to_nothing_is_skipped_and_the_sequence_goes_on`,
 `a_moved_commit_resolved_to_nothing_is_dropped_and_continue_says_so`,
 `a_resolution_staged_from_a_terminal_still_reports_the_dropped_commit`,
@@ -1665,7 +1699,7 @@ that can be refused is refused before anything moves: no shas, a sha that is not
 an object id (which is also what keeps a `-`-leading string out of git's
 arguments), a blocked preflight, a target equal to the current branch, a target
 that is not a local branch (`rev-parse --verify --quiet refs/heads/<t>^{commit}`,
-which also yields the `before_sha` the `UndoPoint` records). Then `git switch
+which also yields the `before_sha` the `UndoStart` records). Then `git switch
 --no-guess -- <target>` — `checkout refs/heads/x` would detach, and a bare
 `switch x` would *create* `x` from a same-named remote branch — **judged by
 where HEAD is afterwards, not by the exit status** (`switch_to`): git switches
@@ -1840,6 +1874,20 @@ succeed again; and an `Err` for a refusal that may not hold next time. Nothing
 has moved unless `undone`. Refused first: ids that are not object ids, and an
 operation in progress (`open_operation_refusal`, the preflight's sentence).
 
+**Every action reads its way back before it runs anything**: an `UndoStart` —
+`branch`, `before_sha`, `return_branch` — built by
+`UndoStart::on_the_current_branch` for squash and reorder and by hand in
+`cherry_pick.rs`, where the branch is the target. A run that lands completes it
+(`landed_on(after_sha)` → the `UndoPoint` in `RewriteResult.undo`); a run that
+stops on a conflict hands it back as it is (`RewriteResult::stopped(…, start)` →
+`RewriteResult.start`), for the client to complete once Continue has finished
+the operation. Core keeps nothing between the two calls: `undo_operation`
+judges any point by the branch's tip alone, so a completed `start` needs no
+second entry point, and the round trips are pinned by
+`a_squash_continued_past_two_conflicts_…`,
+`a_cherry_pick_continued_past_a_conflict_…` and
+`a_reorder_whose_continue_dropped_a_commit_can_still_be_undone`.
+
 - **The branch is checked out here**: `tracked_changes` — the preflight's
   refusal, naming the files — then `update-index -q --refresh`, then **`git
   reset --keep <before>`**, then `switch_to(return_branch)` for a cherry-pick
@@ -1882,23 +1930,56 @@ which moves no ref and so is not stopped by whatever stopped the reset; the
 failed too. `reset --keep <after>` does not do it: `HEAD` is on `after` already,
 so it resets the index and leaves the files where they are.
 
+**An undo names the submodules it left behind, and does not update them.** A
+reset moves a submodule's pointer and not its files, so the submodule then reads
+as an uncommitted change and the next action's preflight — and the next undo —
+refuses over it. `git submodule update` may reach the network and is the user's
+to run; how the app treats submodules at all is a roadmap item of its own. What
+core does is say so, in `UndoResult.message`: after the reset **and after the
+switch back**, `submodules_left_behind` runs `git diff-index --raw -z
+--no-renames --ignore-submodules=dirty HEAD` and keeps the paths whose two modes
+are both `160000` — a gitlink on both sides whose commit differs
+(`gitlinks_on_both_sides`, the parse on its own so it can be tested against
+listings no undo can produce). `-z` is what keeps a path holding a quote or a
+line feed raw: git quotes those in its line format whatever `core.quotepath`
+says.
+`submodules_not_updated` words them (*The submodule “sub” was not updated, so it
+reads as an uncommitted change until you run git submodule update.*, with a
+plural form), after the stranded-branch note when both apply, as separate
+paragraphs. It is a probe of **where the undo came to rest, not a diff of the
+point's two commits**, which would lie four ways: an undo that removes a
+submodule leaves an untracked directory and nothing to update; one that restores
+a submodule leaves a clean, empty directory; a submodule that was never checked
+out reads clean; and under `submodule.recurse=true` — the user's configuration
+is read in production — the reset updates the submodule itself. A cherry-picked
+bump undone from its target reads clean too, once the source branch is back.
+`--ignore-submodules=dirty` keeps a submodule that is only dirty *inside* out of
+the list and a moved pointer in it, whatever its inside looks like;
+`tracked_changes`, the refusal up front, passes the first and not the second, so
+an undo never starts over a pointer that has already moved. The `branch -f` path
+touches no tree and gives no note. A probe that fails is logged and says
+nothing: the undo worked.
+
 Known and not defended: git overwrites an **ignored** file in the way in every
-mode, `--keep` included; and a submodule whose pointer differs between the two
-commits reads as modified afterwards, as after any checkout, which then stops
-the next action's preflight until the submodule is updated. Covered by the
+mode, `--keep` included. Covered by the
 `undo_*` tests — both sides of a cherry-pick, a detached HEAD, the expiries, an
 untracked file in the way, the stale index, a branch that cannot be locked, both
 worktree holds, a source branch that is gone, and the sync ladder before and
-after a force push — and through the bridge by
+after a force push — by the submodule tests over `fixtures::repo_with_a_submodule`
+(a bump, a path with a space, a non-ASCII letter and a double quote, a moved
+pointer that is also dirty inside, **a submodule that is only dirty inside**, a
+submodule taken away, `submodule.recurse`, a picked bump, both notes at once,
+two submodules, and the parse alone), and through the bridge by
 `undo_flow_takes_an_action_back_and_then_says_the_point_has_expired`.
 
 **In the clients a History action ends on one path.** Natively
 `HistoryActionOutcome` (`landed` / `stoppedOnConflict` / `refusedBusy` /
 `failed`) is every action's answer and `ContentView.finishHistoryAction` is what
 follows it; in `MainLayout.svelte` every `run…` hands its `RewriteResult` to
-`finishHistoryAction({ repoPath, result, reload, stoppedOnConflict, landed, asked })` —
+`finishHistoryAction({ repoPath, result, reload, stoppedOnConflict, action, leavesOpen, asked })` —
 reload, then select the resulting commits and put the way back on offer, or go
-to Changes and say the action stopped — with
+to Changes, say the action stopped and keep it as the open action (below;
+`leavesOpen` is the operation a stop leaves open, `CherryPick` or `Rebase`) — with
 `reloadAfterBranchChange` for cherry-pick and `reloadAfterRewrite` for the two
 that rewrite the branch in place. `CommitList.svelte` brings a selection made in
 code into view with an effect on `activeSha` alone (`revealVirtualRow` in
@@ -1970,9 +2051,8 @@ old tip. That rule is pure and mirrored —
 `Services/UndoOffer.swift` `stillStands(under:)`, with the sentences beside it:
 the offer falls when a status shows the point's branch checked out, not
 detached, at a HEAD other than `after_sha`, and otherwise stands, core being
-the judge of what the status cannot see. It is fed like `cherryPickReturn`'s —
-an `$effect` on the status; natively the `.onChange`s of `headSha` and `branch`
-— and a second `$effect` / `HistoryActionStore.reset()` drops it with the
+the judge of what the status cannot see. It is fed by an `$effect` on the
+status — natively the `.onChange`s of `headSha` and `branch` — and a second `$effect` / `HistoryActionStore.reset()` drops it with the
 repository. `runUndo` / `ContentView.undoHistoryAction` claim the write slot
 (`'undoAction'`; `HistoryActionStore.undo` → `UndoOutcome`), reload with the
 branch list, then select `restores` or raise the modal, keeping the offer on an
@@ -1981,14 +2061,48 @@ branch list, then select `restores` or raise the modal, keeping the offer on an
 `Design/StatusStrip.swift` — with a `warning` and a `done` tone, an optional
 detail, link and ✕; the poll's line and the notice are the same component.
 
-**In the clients the branch a conflicted pick came from is client memory**
-(`cherryPickReturn` in `MainLayout.svelte`, `HistoryActionStore.cherryPickReturn`)
-— git records the pre-pick tip but not the branch the user left. It is set from
-a conflict result and dropped by one rule on the status read (no cherry-pick
-open on that target), which is how finishing it, aborting it, doing either in a
-terminal and switching repositories all clear it without a line each. Abort
-reads it *before* aborting and switches back afterwards in its own `try`, so a
-failed switch is reported as that and not as a failed abort.
+**An action that stopped on a conflict is client memory as well: the open
+action** (`openAction` in `MainLayout.svelte`, `HistoryActionStore.openAction`)
+— the operation it left open, core's `UndoStart`, which action it was, and the
+commits it was asked for. It is set from a result that carries `start`, **after
+the reload** in both clients (natively the outcome carries it —
+`.stoppedOnConflict(_, open:)` — and `ContentView.finishHistoryAction` hands it to
+`HistoryActionStore.keepOpen`), and serves two things. *Abort* reads
+`start.return_branch` off it — git records the pre-pick tip but not the branch the
+user left — **before** aborting, and switches back afterwards in its own `try`,
+so a failed switch is reported as that and not as a failed abort. *Continue*
+**remembers it as it starts, before core is asked** — the composer's
+`onOperationContinuing` → `beginContinue` / `HistoryActionStore.continueBegins()`
+— because the status poll does not wait for a write: a read that shows the
+operation over can land, and forget `openAction`, between git finishing and the
+Continue's own answer arriving, and the Undo would be lost without a trace.
+`finishContinue` (reached through `onOperationContinued`, which carries the
+`OperationOutcome`) takes what was remembered on every path, so it never outlives
+its Continue, reloads, and then asks the second of two pure, mirrored rules in
+`utils/undoOffer.ts` / `Services/UndoOffer.swift`:
+
+- `openActionStillStands` / `OpenAction.stillStands(under:)` — the one rule on
+  the status read that forgets it: the status's `operation` must be the one the
+  action left open, and **only a cherry-pick is held to its branch**. While a
+  rebase is stopped core's status is `detached: true, branch: ""`, so holding a
+  rebase to `start.branch` would forget every squash and reorder on the first
+  read. Finishing, aborting, doing either in a terminal and switching
+  repositories all clear it through this rule, without a line each.
+- `undoPointAfterContinue` / `OpenAction.undoPoint(startedAt:under:)` — the
+  `UndoPoint` a finished Continue leaves, or none: `start` completed with the
+  reloaded status's `head_sha` as `after_sha`, refused when the status is
+  detached, on another branch or without a HEAD, when `started_at` is not
+  `before_sha` — null included — and when `head_sha == before_sha`.
+  `started_at == before_sha` is what vouches that the operation just finished is
+  the one the action began, for every action: core answers for a single-commit
+  pick too. Nothing switches back after a Continue, so the user is on
+  `start.branch` when the rule reads the status.
+
+The offer then goes through the same `offerUndo` / `HistoryActionStore.offer`
+an uninterrupted landing uses, with the sentence counting the commits asked
+for. A refusal to offer is logged (`[undo] no offer after the continue`), since
+from the outside it looks like nothing. Both rules are covered by
+[tests/undoOffer.test.ts](apps/tauri-app/tests/undoOffer.test.ts).
 
 **Test fixtures shared across core's modules live in
 [core/src/test_support.rs](core/src/test_support.rs)** — `init_test_repo`,
@@ -2019,10 +2133,13 @@ the window's write slot as a commit does — `isContinuing` is
 `$activeRepoWrite === 'continue'` in `CommitMessage.svelte`, and
 `CommitStore.continueOperation` claims the `RepositoryWriteGate` natively — and
 answers through the owner:
-`onOperationContinued` → `reloadAfterBranchChange` (status, history and
-branches, since finishing a rebase re-attaches HEAD), and natively
-`ChangesSidebar.continueOperation` → `onCommitted` then `onFailure`. The native
-answer is an `OpOutcome`, so a busy refusal re-reads and reports nothing.
+`onOperationContinued(outcome)` → `finishContinue` → `reloadAfterBranchChange`
+(status, history and branches, since finishing a rebase re-attaches HEAD), and
+natively `ChangesSidebar.continueOperation` → `onOperationContinued` →
+`ContentView.finishContinue` (the same three reloads), then `onFailure`. The
+native answer is `CommitStore.continueOperation`'s pair of an `OpOutcome` and
+git's `OperationOutcome` — nil when git was never asked — so a busy refusal
+re-reads and reports nothing.
 `BranchMenu.menuLabel` appends the suffix to whatever `placeLabel` says —
 including `Detached at <sha7>`, since a rebase detaches HEAD for as long as it
 runs — and both clients ask about the operation before the detached HEAD when

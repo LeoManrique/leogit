@@ -30,6 +30,7 @@
     endRepoWrite,
     isHeldByAnother,
     REPO_BUSY_MESSAGE,
+    REPO_BUSY_REASON,
     type RepoWriteKind,
   } from '$lib/stores/repoWrite'
   import { repoSyncScheduler } from '$lib/services/repoSyncScheduler'
@@ -57,8 +58,10 @@
     type LaunchTarget,
     type MergeResult,
     type OperationInProgress,
+    type OperationOutcome,
     type ParsedDiff,
     type RepoStatus as GitStatus,
+    type UndoPoint,
   } from '$lib/api/commands'
   import * as fileActions from '$lib/services/fileActions'
   import type { FileContextActions } from '$lib/services/fileActions'
@@ -82,7 +85,15 @@
     type ListSelection,
   } from '$lib/utils/listSelection'
   import { operationWords } from '$lib/utils/operationWords'
-  import { landedSentence, undoStillStands, type UndoOffer } from '$lib/utils/undoOffer'
+  import {
+    landedSentence,
+    openActionStillStands,
+    undoPointAfterContinue,
+    undoStillStands,
+    type OpenAction,
+    type UndoableAction,
+    type UndoOffer,
+  } from '$lib/utils/undoOffer'
 
   import Header from '$lib/components/Header.svelte'
   import StatusStrip from '$lib/components/StatusStrip.svelte'
@@ -582,7 +593,7 @@
       // read that has already been published describes an older repository —
       // a poll tick that left before a cherry-pick and came back after its
       // reload would put the source branch back on screen, and with it undo
-      // everything keyed on the status (`cherryPickReturn`, amend mode).
+      // everything keyed on the status (`openAction`, amend mode).
       if (issued < newestStatusLanded) return null
       newestStatusLanded = issued
       // A read the user has moved on from is thrown away rather than published.
@@ -1507,10 +1518,15 @@
    * `silent` belongs to the caller: an operation that already reported its own
    * outcome (a commit) passes it, while one the user is still waiting to see
    * finish (a transfer, ⌘R) doesn't, so a failed read reaches them.
+   *
+   * Answers with the status it read — null when the read failed, or was thrown
+   * away for a newer one — for the caller that has to know where HEAD came to
+   * rest rather than what the store held a moment ago.
    */
-  async function reloadAfterHeadMove(opts: { silent?: boolean } = {}): Promise<void> {
+  async function reloadAfterHeadMove(opts: { silent?: boolean } = {}): Promise<GitStatus | null> {
     const [status] = await Promise.all([refreshStatus(opts), refreshLog()])
     if (status) lastHeadSha = status.head_sha
+    return status
   }
 
   /**
@@ -1921,8 +1937,9 @@
    * operation. Status, history and the branch list together, from one status
    * read; amend mode ends with it when HEAD really moved (see `refreshStatus`).
    */
-  async function reloadAfterBranchChange(): Promise<void> {
-    await Promise.all([reloadAfterHeadMove({ silent: true }), refreshBranches()])
+  async function reloadAfterBranchChange(): Promise<GitStatus | null> {
+    const [status] = await Promise.all([reloadAfterHeadMove({ silent: true }), refreshBranches()])
+    return status
   }
 
   async function handleSwitchBranch(branch: string): Promise<void> {
@@ -2078,9 +2095,9 @@
   async function abortOperation(): Promise<void> {
     const repoPath = $appState.repoPath
     if (!repoPath || !beginRepoWrite('abort')) return
-    // Read before the abort: the reload below ends the cherry-pick, and the
-    // effect that forgets where it came from runs on that same status.
-    const comeBack = cherryPickReturn
+    // Read before the abort: the reload below ends the operation, and the
+    // effect that forgets the action behind it runs on that same status.
+    const comeBack = openActionIn(repoPath)?.start.return_branch ?? null
     try {
       const said = await gitApi.abortOperation(repoPath)
       abortTarget = null
@@ -2093,9 +2110,9 @@
       let stranded: string | null = null
       if (comeBack) {
         try {
-          await gitApi.switchBranch(repoPath, comeBack.source)
+          await gitApi.switchBranch(repoPath, comeBack)
         } catch (error) {
-          stranded = `The cherry-pick was aborted, but “${comeBack.source}” could not be checked out again:\n${String(error)}`
+          stranded = `The cherry-pick was aborted, but “${comeBack}” could not be checked out again:\n${String(error)}`
         }
       }
       await reloadAfterBranchChange()
@@ -2133,20 +2150,43 @@
   let cherryPickCommits = $state<CommitInfo[] | null>(null)
 
   /**
-   * Where a cherry-pick begun here came from, while it is stopped on a
-   * conflict — so aborting it can end on that branch. Git keeps no record of
-   * it. Forgotten by one data-driven rule, below: a status that no longer shows
-   * a cherry-pick open on the target. Finishing it, aborting it, doing either
-   * from the terminal and switching repositories all arrive that way.
+   * The History action begun here that stopped on a conflict, while the
+   * operation it left open stays open: where it began, so a Continue that lands
+   * can still be taken back, and — for a cherry-pick — the branch it came from,
+   * so aborting it can end there. Git keeps no record of either. Forgotten by
+   * one data-driven rule, below: a status that no longer shows that operation.
+   * Finishing it, aborting it, doing either from the terminal and switching
+   * repositories all arrive that way — and any status read can be that one,
+   * which is why an abort reads this **before** it aborts, and a Continue
+   * before it asks git (`beginContinue`).
    */
-  let cherryPickReturn = $state<{ source: string; target: string } | null>(null)
+  let openAction = $state<OpenAction | null>(null)
+
+  /**
+   * The open action as it stood when the Continue now running began. The
+   * status poll does not wait for a write, so a read showing the operation
+   * over can land — and forget `openAction` — before the Continue's own answer
+   * has come back; the way back is made from this instead. Not state: nothing
+   * renders it.
+   */
+  let resuming: OpenAction | null = null
+
+  /** A Continue is about to ask git: remember the action it may finish. */
+  function beginContinue(): void {
+    const repoPath = $appState.repoPath
+    resuming = repoPath ? openActionIn(repoPath) : null
+  }
+
+  /** The action left open in `repoPath` — never another repository's. */
+  function openActionIn(repoPath: string): OpenAction | null {
+    return openAction?.repoPath === repoPath ? openAction : null
+  }
 
   $effect(() => {
     const { operation, branch } = $repoState.status
     untrack(() => {
-      if (!cherryPickReturn) return
-      if (operation !== 'CherryPick' || branch !== cherryPickReturn.target) {
-        cherryPickReturn = null
+      if (openAction && !openActionStillStands(openAction, { operation, branch })) {
+        openAction = null
       }
     })
   })
@@ -2159,7 +2199,7 @@
   const undoBlocked = $derived.by(() => {
     const { operation } = $repoState.status
     if (operation) return `A ${operationWords(operation).noun} is in progress`
-    if ($activeRepoWrite !== null) return 'Another operation is still running'
+    if ($activeRepoWrite !== null) return REPO_BUSY_REASON
     return null
   })
 
@@ -2220,7 +2260,6 @@
       reportActionError(REPO_BUSY_MESSAGE)
       return
     }
-    const source = $repoState.status.branch
     const asked = commits.map((c) => c.sha)
     try {
       const result = await gitApi.cherryPickCommits(repoPath, asked, target)
@@ -2230,12 +2269,10 @@
         result,
         reload: reloadAfterBranchChange,
         stoppedOnConflict: `The cherry-pick stopped on a conflict in ${target}.`,
-        landed: landedSentence('cherryPick', asked.length, target),
+        action: { kind: 'cherryPick', target },
+        leavesOpen: 'CherryPick',
         asked,
       })
-      // After the reload: the rule that forgets this reads the status, and the
-      // one from before the pick shows no cherry-pick open.
-      if (!result.success) cherryPickReturn = { source, target }
     } catch (error) {
       showBranches = false
       // Core has put the repository back where it began, or said where it was
@@ -2330,7 +2367,8 @@
         result,
         reload: reloadAfterRewrite,
         stoppedOnConflict: 'The squash stopped on a conflict.',
-        landed: landedSentence('squash', asked.length),
+        action: { kind: 'squash' },
+        leavesOpen: 'Rebase',
         asked,
       })
     } catch (error) {
@@ -2409,7 +2447,8 @@
         result,
         reload: reloadAfterRewrite,
         stoppedOnConflict: 'The reorder stopped on a conflict.',
-        landed: landedSentence('reorder', asked.length),
+        action: { kind: 'reorder' },
+        leavesOpen: 'Rebase',
         asked,
       })
     } catch (error) {
@@ -2425,7 +2464,7 @@
   }
 
   /** What a rewrite of the current branch is re-read with: HEAD moved, quietly. */
-  function reloadAfterRewrite(): Promise<void> {
+  function reloadAfterRewrite(): Promise<GitStatus | null> {
     return reloadAfterHeadMove({ silent: true })
   }
 
@@ -2439,22 +2478,25 @@
    * to another — while git ran, or while the reload did — nothing here is said
    * over it: its own load shows what is true of it.
    *
-   * A run that moved the branch also leaves its way back on offer — **after**
-   * the reload, because the rule that retires an offer reads the status, and
-   * the one from before the run still shows the old tip.
+   * A run that moved the branch also leaves its way back on offer, and one that
+   * stopped on a conflict is remembered as `openAction` — both **after** the
+   * reload, because the rules that retire them read the status, and the one
+   * from before the run shows the old tip and no operation open.
    */
   async function finishHistoryAction(ending: {
     repoPath: string
     result: RewriteResult
-    reload: () => Promise<void>
+    reload: () => Promise<unknown>
     /** What the modal says when git left no text of its own. */
     stoppedOnConflict: string
-    /** What the strip says the action did, beside its Undo. */
-    landed: string
+    /** The action, for the strip's sentence beside its Undo. */
+    action: UndoableAction
+    /** What the action leaves open when it stops on a conflict. */
+    leavesOpen: OperationInProgress
     /** The commits the action was asked for, newest first: what an Undo selects again. */
     asked: string[]
   }): Promise<void> {
-    const { repoPath, result } = ending
+    const { repoPath, result, action, asked } = ending
     if ($appState.repoPath !== repoPath) return
     await ending.reload()
     if ($appState.repoPath !== repoPath) return
@@ -2462,18 +2504,54 @@
       selectResultingCommits(result.selection)
       // A run that changed nothing has nothing to take back, and leaves the
       // previous offer as good as it was.
-      if (result.undo) {
-        undoOffer = {
-          repoPath,
-          sentence: ending.landed,
-          point: result.undo,
-          restores: ending.asked,
-        }
-      }
+      if (result.undo) offerUndo({ repoPath, action, asked }, result.undo)
       return
+    }
+    if (result.start) {
+      openAction = { repoPath, operation: ending.leavesOpen, start: result.start, action, asked }
     }
     setActiveTab('changes')
     reportActionError(result.error_message || ending.stoppedOnConflict)
+  }
+
+  /**
+   * Where a Continue ends, for the composer that ran it. The reload comes
+   * first, as for the actions — and if the operation was one a History action
+   * here left open, and this Continue carried it to its end, that action's
+   * Undo goes on offer: its start was remembered when the Continue began
+   * (`beginContinue`), and the branch's new tip is in the status the reload has
+   * just read.
+   *
+   * `outcome` is null for a Continue that was refused: nothing ran, and only
+   * the reload is owed.
+   */
+  async function finishContinue(outcome: OperationOutcome | null): Promise<void> {
+    // Taken on every path, so what the Continue remembered never outlives it.
+    const resumed = resuming
+    resuming = null
+    const status = await reloadAfterBranchChange()
+    if (!outcome?.success || !resumed || !status) return
+    if ($appState.repoPath !== resumed.repoPath) return
+    const point = undoPointAfterContinue(resumed, outcome.started_at, {
+      branch: status.branch,
+      detached: status.detached,
+      headSha: status.head_sha,
+    })
+    if (point) offerUndo(resumed, point)
+    else console.debug('[undo] no offer after the continue', { resumed, outcome, status })
+  }
+
+  /** Put the way back from `action` on offer. */
+  function offerUndo(
+    ran: { repoPath: string; action: UndoableAction; asked: string[] },
+    point: UndoPoint,
+  ): void {
+    undoOffer = {
+      repoPath: ran.repoPath,
+      sentence: landedSentence(ran.action, ran.asked.length),
+      point,
+      restores: ran.asked,
+    }
   }
 
   /**
@@ -2482,7 +2560,7 @@
    */
   let undoOffer = $state<UndoOffer | null>(null)
 
-  // An offer falls by one data-driven rule, as `cherryPickReturn` does: a
+  // An offer falls by one data-driven rule, as `openAction` does: a
   // status that shows its branch somewhere the action did not leave it. A
   // commit, an amend, a pull or a rebase — here or in a terminal — all arrive
   // that way, so nothing that moves a branch has to remember to clear it.
@@ -2493,11 +2571,15 @@
     })
   })
 
-  // And it is about one repository: another one's strip never carries it.
+  // And it is about one repository: another one's strip never carries it. The
+  // action left open goes the same way — the status rule would forget it on
+  // the other repository's first read, unless that one has the same operation
+  // open, and nothing vouches for it once the window has been elsewhere.
   $effect(() => {
     const repoPath = $appState.repoPath
     untrack(() => {
       if (undoOffer && undoOffer.repoPath !== repoPath) undoOffer = null
+      if (openAction && openAction.repoPath !== repoPath) openAction = null
     })
   })
 
@@ -2935,7 +3017,8 @@
           <CommitMessage
             bind:this={composer}
             onCommitted={handleCommitted}
-            onOperationContinued={reloadAfterBranchChange}
+            onOperationContinuing={beginContinue}
+            onOperationContinued={finishContinue}
             onStopAmending={handleStopAmending}
             onRunInTerminal={runInTerminal}
           />
@@ -3391,9 +3474,9 @@
           Conflict resolutions are discarded, and the branch and working tree return to where they
           were before the {words.noun}.
         </p>
-        {#if cherryPickReturn}
+        {#if openAction?.start.return_branch}
           <p class="muted">
-            You will be back on <code>{cherryPickReturn.source}</code>, where the commits came from.
+            You will be back on <code>{openAction.start.return_branch}</code>, where the commits came from.
           </p>
         {/if}
       {/snippet}

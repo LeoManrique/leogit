@@ -48,6 +48,53 @@ pub(super) fn edits_of_one_line() -> (TempDir, String) {
     (tmp, repo_path)
 }
 
+/// A superproject with a submodule at `path`. `main`: `base`, `add the
+/// submodule` and `bump the submodule`, with the submodule's own files on the
+/// commit the bump names, so the tree is clean; `target` is branched off the
+/// commit that adds it.
+///
+/// The submodule is a repository **embedded** in the working tree with a
+/// `.gitmodules` of our own, not one cloned by `git submodule add`: that
+/// needs the `file` transport, which git denies unless each command is told
+/// otherwise. The index, the status and a reset read the two alike.
+/// `.gitmodules` is written by `git config`, which escapes whatever `path`
+/// holds.
+pub(super) fn repo_with_a_submodule(path: &str) -> (TempDir, String) {
+    let tmp = tempdir().expect("tempdir");
+    let dir = tmp.path();
+    init_test_repo(dir);
+    git(dir, &["checkout", "-q", "-b", "main"]);
+    commit_file(dir, "a.txt", "a\n", "base");
+
+    let inside = dir.join(path);
+    fs::create_dir_all(&inside).expect("submodule dir");
+    init_test_repo(&inside);
+    commit_file(&inside, "s.txt", "one\n", "first");
+    for (key, value) in [("path", path.to_string()), ("url", format!("./{path}"))] {
+        let key = format!("submodule.{path}.{key}");
+        git(dir, &["config", "-f", ".gitmodules", &key, &value]);
+    }
+    // The one-line warning about an embedded repository still reaches stderr.
+    git(
+        dir,
+        &[
+            "-c",
+            "advice.addEmbeddedRepo=false",
+            "add",
+            ".gitmodules",
+            path,
+        ],
+    );
+    git(dir, &["commit", "-q", "-m", "add the submodule"]);
+    git(dir, &["branch", "target"]);
+
+    commit_file(&inside, "s.txt", "two\n", "second");
+    git(dir, &["add", path]);
+    git(dir, &["commit", "-q", "-m", "bump the submodule"]);
+    let repo_path = dir.to_str().expect("utf-8 path").to_string();
+    (tmp, repo_path)
+}
+
 pub(super) fn sha(dir: &Path, rev: &str) -> String {
     git_stdout(dir, &["rev-parse", rev])
 }
