@@ -55,22 +55,7 @@ struct ForcePushSheet: View {
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
 
-            if let errorMessage {
-                // The refusal as it was written — git's, or core's when it
-                // refused before asking git: monospaced so git's ref names
-                // line up, selectable so the ref that moved can be
-                // copied into a fetch, and scrollable so a long hint block
-                // cannot push the buttons off the sheet (STYLE.md).
-                ScrollView {
-                    Text(errorMessage)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.red)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .frame(maxHeight: 120)
-            }
+            if let errorMessage { RefusalText(message: errorMessage) }
 
             HStack {
                 Spacer()

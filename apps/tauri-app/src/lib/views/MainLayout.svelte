@@ -48,6 +48,7 @@
     type Exclusion,
     type FileEntry,
     type CommitInfo,
+    type SquashDraft,
     type Config,
     type DiffSizeGuard,
     type DiscardPlan,
@@ -88,6 +89,7 @@
   import FileList from '$lib/components/FileList.svelte'
   import DiscardConfirm from '$lib/components/DiscardConfirm.svelte'
   import CheckoutCommitConfirm from '$lib/components/CheckoutCommitConfirm.svelte'
+  import SquashDialog from '$lib/components/SquashDialog.svelte'
   import ConfirmDialog from '$lib/components/ConfirmDialog.svelte'
   import MergeBranchDialog from '$lib/components/MergeBranchDialog.svelte'
   import CommitMessage from '$lib/components/CommitMessage.svelte'
@@ -2208,7 +2210,7 @@
       showBranches = false
       await reloadAfterBranchChange()
       if (result.success) {
-        selectPickedCommits(result.selection)
+        selectResultingCommits(result.selection)
         return
       }
       cherryPickReturn = { source, target }
@@ -2228,11 +2230,114 @@
   }
 
   /**
+   * The squash whose message dialog is open: the commits (newest first), what
+   * core drafted from them, and the upstream they are already on, if any.
+   */
+  let squashRequest = $state<{
+    /** The repository that was asked — never whichever one is open by now. */
+    repoPath: string
+    commits: CommitInfo[]
+    draft: SquashDraft
+    /** Null when nothing is pushed; an empty name when the status has none yet. */
+    pushedTo: string | null
+  } | null>(null)
+  let squashError = $state<string | undefined>(undefined)
+
+  /**
+   * History ▸ Squash N Commits…: the preflight first — with the oldest selected
+   * commit, which is what makes core look for a merge in the replayed stretch
+   * and say whether pushed commits are rewritten — then the draft the dialog
+   * opens with. A refusal is a modal and no dialog.
+   */
+  async function requestSquash(commits: CommitInfo[]): Promise<void> {
+    const repoPath = $appState.repoPath
+    if (!repoPath || commits.length < 2 || historyActionsBlocked || squashRequest) return
+    const shas = commits.map((c) => c.sha)
+    try {
+      const preflight = await gitApi.rewritePreflight(repoPath, shas[shas.length - 1])
+      // The answer is about the repository that was asked.
+      if ($appState.repoPath !== repoPath) return
+      if (preflight.blocked) {
+        reportActionError(preflight.blocked)
+        return
+      }
+      const draft = await gitApi.squashDraft(repoPath, shas)
+      if ($appState.repoPath !== repoPath) return
+      squashError = undefined
+      squashRequest = {
+        repoPath,
+        commits,
+        draft,
+        pushedTo: preflight.rewrites_pushed ? $repoState.status.upstream : null,
+      }
+    } catch (error) {
+      if ($appState.repoPath === repoPath) reportActionError(error)
+    }
+  }
+
+  function cancelSquash(): void {
+    squashRequest = null
+    squashError = undefined
+  }
+
+  /**
+   * Fold the requested commits under the message the dialog holds. Three ways
+   * out, as for every History action: the squashed commit selected and in
+   * view; a conflict, read over the Changes tab with the rebase left open (the
+   * message is already inside it); or a failure that undid itself, which stays
+   * in the dialog so the typed message is not lost with it.
+   */
+  async function runSquash(summary: string, description: string): Promise<void> {
+    const request = squashRequest
+    if (!request) return
+    const { repoPath } = request
+    if (!beginRepoWrite('squash')) {
+      // Taken between the dialog's last render and this click: nothing was
+      // attempted, the dialog stays, and it says why.
+      squashError = REPO_BUSY_MESSAGE
+      return
+    }
+    squashError = undefined
+    try {
+      const message = await gitApi.formatCommitMessage(
+        summary,
+        description,
+        request.draft.co_authors,
+      )
+      const result = await gitApi.squashCommits(
+        repoPath,
+        request.commits.map((c) => c.sha),
+        message,
+      )
+      squashRequest = null
+      if ($appState.repoPath !== repoPath) return
+      await reloadAfterHeadMove({ silent: true })
+      if (result.success) {
+        selectResultingCommits(result.selection)
+        return
+      }
+      setActiveTab('changes')
+      reportActionError(result.error_message || 'The squash stopped on a conflict.')
+    } catch (error) {
+      console.warn('[history] squash failed', error)
+      if ($appState.repoPath !== repoPath) {
+        squashRequest = null
+        return
+      }
+      // Core aborted the rebase, or said it could not; re-read either way.
+      await reloadAfterHeadMove({ silent: true })
+      squashError = String(error)
+    } finally {
+      endRepoWrite()
+    }
+  }
+
+  /**
    * Select the commits an action produced, once the log that holds them has
    * landed — before that the History re-seat would prune every one of them.
    * Commits beyond the loaded window are simply not selected.
    */
-  function selectPickedCommits(shas: string[]): void {
+  function selectResultingCommits(shas: string[]): void {
     const commits = get(repoState).log.commits
     const present = shas.filter((sha) => commits.some((c) => c.sha === sha))
     if (present.length === 0) return
@@ -2647,6 +2752,7 @@
             onUndoCommit={handleUndoCommit}
             onCheckoutCommit={handleCheckoutCommit}
             onCherryPick={(commits) => void requestCherryPick(commits)}
+            onSquash={(commits) => void requestSquash(commits)}
             {historyActionsBlocked}
           />
         </div>
@@ -3111,6 +3217,19 @@
       blocked={blockedFor('checkout')}
       onConfirm={confirmCheckout}
       onCancel={cancelCheckout}
+    />
+  {/if}
+
+  {#if squashRequest}
+    <SquashDialog
+      count={squashRequest.commits.length}
+      draft={squashRequest.draft}
+      pushedTo={squashRequest.pushedTo}
+      isSquashing={$activeRepoWrite === 'squash'}
+      blocked={blockedFor('squash')}
+      error={squashError}
+      onSquash={(summary, description) => void runSquash(summary, description)}
+      onCancel={cancelSquash}
     />
   {/if}
 

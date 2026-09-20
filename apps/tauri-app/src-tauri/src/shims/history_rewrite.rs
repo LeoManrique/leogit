@@ -6,7 +6,7 @@
     clippy::must_use_candidate
 )]
 
-use leogit_core::history_rewrite::{self, RewritePreflight, RewriteResult};
+use leogit_core::history_rewrite::{self, RewritePreflight, RewriteResult, SquashDraft};
 
 #[tauri::command(async)]
 pub fn rewrite_preflight(
@@ -23,4 +23,18 @@ pub fn cherry_pick_commits(
     target_branch: String,
 ) -> Result<RewriteResult, String> {
     history_rewrite::cherry_pick_commits(&repo_path, &shas, &target_branch)
+}
+
+#[tauri::command(async)]
+pub fn squash_draft(repo_path: String, shas: Vec<String>) -> Result<SquashDraft, String> {
+    history_rewrite::squash_draft(&repo_path, &shas)
+}
+
+#[tauri::command(async)]
+pub fn squash_commits(
+    repo_path: String,
+    shas: Vec<String>,
+    message: String,
+) -> Result<RewriteResult, String> {
+    history_rewrite::squash_commits(&repo_path, &shas, &message)
 }

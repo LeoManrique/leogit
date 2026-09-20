@@ -35,9 +35,9 @@ static-linking or a local daemon (that decision is open; see the plan).
   Frontends never re-derive git state the core already returns (e.g. file status
   categories, ahead/behind, merge conflicts).
 - Today's surface: **4 events, ~45 DTOs**, and a command catalogue (§3) each host exposes
-  **to the extent it consumes it**. The Tauri host registers **73** `#[tauri::command]`s,
+  **to the extent it consumes it**. The Tauri host registers **75** `#[tauri::command]`s,
   each with a wrapper in `apps/tauri-app/src/lib/api/commands.ts`; the UniFFI bridge
-  exports **73** functions. The two sets are deliberately not identical, and a command
+  exports **75** functions. The two sets are deliberately not identical, and a command
   reaching one host does not oblige the other — what is required is that the difference be
   recorded, here or in §8, never left silent.
   - No native export: `check_auth`, `generate_patch`, `generate_inverse_patch`,
@@ -86,12 +86,12 @@ static-linking or a local daemon (that decision is open; see the plan).
 - **State ownership** — durable state (config, repos MRU, terminal PTY sessions)
   lives in the core. Frontends hold only re-derivable view state.
 
-## 3. Command surface (73)
+## 3. Command surface (75)
 
 Grouped by namespace. `args` are the logical inputs (camelCase on the wire);
 `→` is the return DTO (§5). "async/net" marks network operations that may stream
 progress (§4.1) and can be slow. This is the catalogue of operations core offers a
-frontend — the Tauri host registers all 73; the native bridge exposes the subset it
+frontend — the Tauri host registers all 75; the native bridge exposes the subset it
 consumes, plus seven of its own (§1).
 
 ### 3.1 Config & state — 6
@@ -188,7 +188,7 @@ whole window, and that read is exactly the one that can land mid-rewrite.
 | `get_push_remote` | `repoPath, branch` | `string \| null` |
 | `get_repo_identifier` | `repoPath` | `RepoIdentifier \| null` |
 
-### 3.7 Git — merge — 4, the operation in progress — 2, and history actions — 2
+### 3.7 Git — merge — 4, the operation in progress — 2, and history actions — 4
 | Command | Args | Returns |
 |---|---|---|
 | `merge_branch` | `repoPath, branch` | `MergeResult` |
@@ -199,6 +199,8 @@ whole window, and that read is exactly the one that can land mid-rewrite.
 | `abort_operation` | `repoPath` | `string \| null` |
 | `rewrite_preflight` | `repoPath, replayedFrom \| null` | `RewritePreflight` |
 | `cherry_pick_commits` | `repoPath, shas, targetBranch` | `RewriteResult` |
+| `squash_draft` | `repoPath, shas` | `SquashDraft` |
+| `squash_commits` | `repoPath, shas, message` | `RewriteResult` |
 
 `RepoStatus.operation` answers "is a merge, rebase, cherry-pick or revert in
 progress" on every refresh, so there is no separate command for it — a second
@@ -224,7 +226,9 @@ the current branch, and `null` for cherry-pick, which replays nothing there. A
 refusal is **data** (`blocked`, one message for the user), not an error: a git
 below the floor, an operation already in progress, a detached or unborn HEAD,
 tracked changes (untracked files pass), and — when `replayedFrom` is given — a
-merge commit among the replayed commits. `rewrites_pushed` says the oldest
+merge commit among the replayed commits, or a shallow clone whose history ends
+on `replayedFrom` itself (git hides that commit's parent, and replaying from it
+would cut the branch off from everything below). `rewrites_pushed` says the oldest
 replayed commit is already on the upstream, so the next push is a force push;
 someone else's push, which moves the upstream without containing it, does not
 count.
@@ -256,6 +260,38 @@ nothing in particular.
 A pick that turns out redundant is kept as an empty commit rather than stopping
 the sequence, and a merge commit in the selection lands as an ordinary
 single-parent commit.
+
+`squash_commits` folds `shas` — commits of the **current** branch, in any
+order and either hex case; core places them on the branch itself — into the **oldest** of them, under
+`message`, and replays the rest of the branch on top. The selection need not be
+contiguous: unselected commits between and above the selected ones are replayed
+after the squashed commit. `message` is one string, built by
+`format_commit_message` like the composer's. The squashed commit keeps the oldest
+commit's author and author date. It runs the preflight itself, with that oldest
+commit as `replayedFrom`. The same three outcomes, with these differences:
+
+- **`success: true`** — `selection` is the one squashed commit, which sits
+  *under* whatever was replayed after it, and `undo.return_branch` is null: a
+  squash never leaves the branch.
+- **`success: false`** — a conflict, `RepoStatus.operation = Rebase`. **The
+  message is already inside the rebase** and lands whenever the rebase reaches
+  the fold, through any number of `continue_operation` rounds or a terminal's
+  `git rebase --continue`; no client holds it. (A `prepare-commit-msg` hook
+  runs for that commit as for any other and may rewrite the message, as it may
+  the composer's.) While the rebase is stopped
+  HEAD's own message may read `# This is a combination of 2 commits…` — git's
+  working text, replaced at the end.
+- **an error** — as for cherry-pick, the rebase aborted and the branch back
+  where it began. A squash whose folded commits cancel each other out is one of
+  these: git will not fold a commit into nothing.
+
+`squash_draft` is what a squash's message fields open with, read by core so both
+clients open with the same words: `summary` is the oldest commit's;
+`description` is its body, then every other commit's summary and body, oldest
+first, blank line between, empty parts dropped, `Co-authored-by` lines removed;
+`co_authors` is every co-author any of them names, once per address. It refuses the
+selections `squash_commits` would (fewer than two commits, a commit that is not
+on the current branch) and changes nothing.
 
 ### 3.8 Git — discovery / init / clone — 7
 | Command | Args | Returns |
@@ -398,7 +434,7 @@ codegen decision is open (plan §10.7).
 | Working tree / status | `FileEntry` (path, status, xy, display_name, display_dir, embedded, submodule_dirty, stat_stamp — an opaque mtime+size string so a status comparison sees content edits; compare, never parse); `RepoStatus` (branch, upstream, ahead, behind, files[], has_remote, unpushed_shas[], detached, head_sha, operation — the `OperationInProgress` the repository is stopped in, or null — and proposal — the sync ladder's answer, carried here for the same reason `operation` is: every refresh path renders it, and a second route to it is how the two clients' ladders drifted); `FileStatusStyle` (status, letter, label — the glyph table, fetched once; colour is per-platform); `DiscardPlan` (restore[], trash[]) |
 | History | `CommitInfo` (sha, short_sha, summary, body, author, committer, parents[], trailers[], co_authors[], body_without_coauthors, tags[]); `CommitStats` (additions, deletions); `CommitDetail` (files[], stats) |
 | Branches / remote | `BranchInfo` (name, is_remote, is_current); `AheadBehind`; `RepoSync` (ahead, behind, has_remote, fetched, dirty); `RepoIdentifier` (owner, name); `MergeResult` (success, fast_forward, conflicts[], error_message?); `OperationInProgress` (enum: `Merge`, `Rebase`, `CherryPick`, `Revert`); `OperationOutcome` (success, conflicts[], error_message?, skipped) |
-| History actions | `RewritePreflight` (blocked? — the refusal, in words for the user; rewrites_pushed); `RewriteResult` (success, conflicts[], error_message?, selection[] — the commits the action produced, newest first, which the client selects in History; undo?); `UndoPoint` (branch, before_sha, after_sha, return_branch? — the branch the user was on when the action moved them off it) |
+| History actions | `RewritePreflight` (blocked? — the refusal, in words for the user; rewrites_pushed); `RewriteResult` (success, conflicts[], error_message?, selection[] — the commits the action produced, newest first, which the client selects in History; undo?); `UndoPoint` (branch, before_sha, after_sha, return_branch? — the branch the user was on when the action moved them off it); `SquashDraft` (summary, description, co_authors[] — `Name <email>` values, as `format_commit_message` takes them) |
 | Diff | `DiffLine` (content, line_type, line numbers, `intra_line_diff: IntraLineRange`, and `text?` — the raw patch line, present only on `Hunk` and `NoNewline` rows, which are the only ones that read it); `IntraLineRange`, `HunkHeader`, `Hunk`, `FileDiff` (old_path, new_path, file_header, hunks[], is_binary); `SbsPair`; `DiffOptions` (html, side_by_side, show_anyway); `ParsedDiff` (file_diff, html[], sbs_pairs[], additions, deletions, empty_reason?, size_guard?); `EmptyDiffReason` (`NoChanges`/`WhitespaceOnly`/`NoTextualChanges`); `DiffSizeGuard` (reason, bytes, longest_line); `Token` (start, end, class: `TokenClass`) / `TokenLine` — the structured highlight layer under the HTML (§7); `DiffSelection` |
 | Commit composer | `CommitMessage` (title, description); `Exclusion` (path, absent_ms, absent_reads — how long and over how many consecutive status reads an opt-out's path has been missing from the file list; both zero while it is present, and §6.4's window needs both to expire) |
 | Config / persistence | `Config` (theme, fetch_interval_ms, ai_provider, auto_fetch, syntax_highlighting, scan_paths[], scan_depth, side_by_side_diff, hide_whitespace, tab_size, terminal_shell?, then the `claude` and `ollama` tables — **nothing scalar may follow them**, since a TOML table swallows every key after it); `ClaudeConfig` (model?, timeout_secs); `OllamaConfig` (model?, server_url, timeout_secs); `ConfigPatch` (every field optional — absent means "leave it alone", `""` means "clear it"); `Bounds`/`ConfigBounds`; `ReposState`; `ReposStatePatch` |
@@ -1006,7 +1042,7 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
 21. **History actions replay commits, and one repository write runs at a time.**
    *The write slot.* Each window holds **one slot** for everything that rewrites the
    repository: commit, continue, switch, create, delete, merge, abort, cherry-pick,
-   checking a commit out, undoing a commit, and discard. A write that cannot claim it
+   squash, checking a commit out, undoing a commit, and discard. A write that cannot claim it
    does not start, and a refused start is **never reported as a success** (§6.14's
    trap). Controls whose write is a single click read the slot and disable — Commit,
    Continue, the branch menu's actions, the History actions — so a Continue that takes
@@ -1049,6 +1085,33 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
      reloads the same three — a failure is not proof nothing moved — and shows core's
      message, which is the whole of it. Where it is shown follows the picker's shape
      (§8).
+
+   *Squash.* A multi-row selection also offers **Squash N Commits…** — never a single
+   row. Beyond the three shared answers it is disabled while **a merge commit sits
+   anywhere from HEAD down to the oldest selected commit**, which the client reads off
+   its rows (`parents`): the list is append-only from HEAD, so every row above a
+   selected one is loaded. `rewrite_preflight` runs on the click with the **oldest
+   selected commit** as `replayedFrom`, then `squash_draft`; a refusal from either is a
+   §6.13 modal and no dialog opens. The dialog holds a summary (required), a
+   description, and — as text, there being no co-author field in this app — the
+   co-authors the draft gathered, which go to `format_commit_message` untouched. It
+   acts on **the commits the menu was opened on**, never on the live selection. When
+   `rewrites_pushed` is set it says so in a caption, naming `RepoStatus.upstream`:
+   *These commits are already on origin/main. After squashing, the next push is a force
+   push.* (*…are already pushed.* when the status has no upstream name yet — core's
+   answer is the authority, and the warning is never dropped for want of a name) — a caption, not a second confirmation, and a promise §6.2 keeps: the sync
+   button's face after the squash is Force Push. ⌘/Ctrl+↩ submits, as in the composer;
+   Return belongs to the description.
+   - **It landed:** reload status and history, select the squashed commit and bring it
+     into view — it is not the tip when commits were replayed over it.
+   - **It stopped on a conflict:** close the dialog, reload, move to **Changes**, raise
+     the §6.13 modal. The typed message needs no keeping: it is inside the rebase
+     (§3.7). Continue and Abort are §6.14's, unchanged.
+   - **It failed:** the branch is back where it began, and the message **stays in the
+     dialog, under the fields, with everything typed intact** — the cause is usually
+     outside the app (a hook, a signer), after which the same button is pressed again.
+   - **The slot was taken** between the dialog opening and the button: the dialog stays
+     and says so.
 
 ## 7. Diff rendering contract
 
@@ -1145,7 +1208,7 @@ every deliberate difference here.
 | Row context menus | a `<div>` menu the client draws and positions itself, restyled to AppKit's own measurements — 12px corners, 24px rows, a 7px accent highlight inset 5px, a label 16px in, an 11px separator row. It is drawn rather than taken because `tauri::menu`'s native menu is a classic win32 `HMENU` on Windows with no theming API anywhere in the stack, loses the destructive-red item, lands at screen centre on Wayland, and fires no dismissal event; `docs/plans/tauri-reskin.md` §6.2 tabulates every metric against the live `NSMenu` it was read from | the stock system menu, via `contextMenu(forSelectionType:)` on the list — plain `Button`s, `Divider()`, `role: .destructive` on the one item that destroys work, nothing re-themed. The reproduction is chasing exactly this |
 | Branch-menu shape (§6.14) | a popover: filter input, keyboard cursor over the rows, the four actions as a footer, and the two that need a branch narrowing the same list under a header that states the question | a stock `Menu`: an inline `Picker` for locals, a plain-button section for remotes, and the same four actions with `Merge into “…”` and `Delete Branch` as submenus. AppKit supplies the scrolling, type-select and cursor the popover hand-rolls |
 | Cherry-pick target picker (§6.21) | the branch popover itself, opened **already narrowed** to the local branches under the question "Cherry-pick N commits onto which branch?" — the list, filter and cursor merge and delete already use. Its back arrow closes the popover rather than returning to the full menu, which was never on screen. A popover has no place to hold an error, so it closes on any answer and a failure takes the §6.13 modal | a sheet of its own (`CherryPickSheet`): a History context menu is already one level deep in a selection, so a submenu of sixty branch names is not an option, and the stock `Menu` cannot be opened from outside. It stays up while the pick runs and keeps a failure **inside itself**, under the list, since choosing another branch is often the fix — the target is checked out in another worktree |
-| Why a History action is disabled (§6.21) | the menu item carries the reason as its hover `title` — *A merge is in progress*, *HEAD is detached*, *Another operation is still running* | none: an `NSMenu` item has no tooltip, and the branch chip already spells the first two out (§6.14) |
+| Why a History action is disabled (§6.21) | the menu item carries the reason as its hover `title` — *A merge is in progress*, *HEAD is detached*, *Another operation is still running*, and for Squash *A merge commit is among the commits this would replay* | none: an `NSMenu` item has no tooltip, and the branch chip already spells the first two out (§6.14) |
 
 Neither client offers a per-folder open action anywhere, deliberately: a repo
 list is exactly what `scan_paths` covers, so a local repository missing from it

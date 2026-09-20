@@ -102,7 +102,8 @@ struct CommitComposer: View {
                 summaryCounter
             }
 
-            descriptionEditor
+            DescriptionEditor(text: $store.details)
+                .disabled(isLocked)
 
             if store.errorMessage != nil || store.blockingProvider != nil {
                 statusStrip
@@ -300,35 +301,6 @@ struct CommitComposer: View {
     /// visually larger than the UI face at the same point size, so matching
     /// values would not match on screen. macOS `.caption` is 10 pt.
     private static let commandFont = Font.system(size: 9.5, design: .monospaced)
-
-    /// The native counterpart of the Tauri textarea: fills whatever height
-    /// the owner leaves after the fixed rows, scrolling with a scrollbar once
-    /// the text outgrows it. `TextEditor`
-    /// rather than a vertical-axis `TextField` because only the editor is a
-    /// real scroll view; it brings no bezel or placeholder of its own, so
-    /// both are drawn here to match the summary field above.
-    private var descriptionEditor: some View {
-        ZStack(alignment: .topLeading) {
-            TextEditor(text: $store.details)
-                .font(.body)
-                .scrollContentBackground(.hidden)
-                .contentMargins(4, for: .scrollContent)
-                .frame(maxHeight: .infinity)
-                .disabled(isLocked)
-
-            if store.details.isEmpty {
-                Text("Description")
-                    .foregroundStyle(Color(nsColor: .placeholderTextColor))
-                    .padding(.top, 4)
-                    // The editor's line fragment padding plus its content
-                    // margin — keeps the prompt on the first character's spot.
-                    .padding(.leading, 9)
-                    .allowsHitTesting(false)
-            }
-        }
-        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
-        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.separator))
-    }
 
     /// The picker writes through the store so a change persists to the
     /// shared config file (and reverts if that save fails).

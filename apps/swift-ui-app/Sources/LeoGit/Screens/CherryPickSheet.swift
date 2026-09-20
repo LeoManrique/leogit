@@ -32,7 +32,7 @@ struct CherryPickSheet: View {
 
     /// Called once git has been asked, whatever it answered — the owner
     /// re-reads the repository, and reports a conflict.
-    let onFinished: (CherryPickOutcome) async -> Void
+    let onFinished: (HistoryActionOutcome) async -> Void
 
     @Environment(\.dismiss) private var dismiss
 
@@ -168,7 +168,7 @@ struct CherryPickSheet: View {
                 repoPath: repoPath
             )
             switch outcome {
-            case .picked, .stoppedOnConflict:
+            case .landed, .stoppedOnConflict:
                 dismiss()
                 await onFinished(outcome)
             case let .failed(message):

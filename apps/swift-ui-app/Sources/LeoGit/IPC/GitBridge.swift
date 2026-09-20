@@ -369,6 +369,26 @@ enum GitBridge {
         try cherryPickCommits(repoPath: repoPath, shas: shas, targetBranch: target)
     }
 
+    /// What a squash of `shas` opens with: the oldest commit's summary, every
+    /// message as the description (oldest first), every co-author once.
+    @concurrent
+    static func draftSquash(in repoPath: String, shas: [String]) async throws -> SquashDraft {
+        try squashDraft(repoPath: repoPath, shas: shas)
+    }
+
+    /// Fold `shas` (any order) into the oldest of them under `message`,
+    /// replaying the rest of the branch on top. A conflict is data and leaves
+    /// the rebase open, with the message already inside it — it lands whenever
+    /// the rebase gets that far.
+    @concurrent
+    static func squash(
+        in repoPath: String,
+        shas: [String],
+        message: String
+    ) async throws -> RewriteResult {
+        try squashCommits(repoPath: repoPath, shas: shas, message: message)
+    }
+
     /// How many commits merging `branch` would bring in — the merge sheet's
     /// preview number.
     @concurrent

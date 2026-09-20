@@ -62,7 +62,7 @@ pub use leogit_core::git::{
     FileStatusStyle, LogOptions, MergeResult, RepoIdentifier, RepoStatus, RepoSync,
 };
 pub use leogit_core::highlight::{BlobSource, Token, TokenClass};
-pub use leogit_core::history_rewrite::{RewritePreflight, RewriteResult, UndoPoint};
+pub use leogit_core::history_rewrite::{RewritePreflight, RewriteResult, SquashDraft, UndoPoint};
 pub use leogit_core::launch::LaunchTarget;
 pub use leogit_core::operation::{OperationInProgress, OperationOutcome};
 pub use leogit_core::repos::{CloneTarget, RepoRow};
@@ -219,6 +219,14 @@ pub struct RewriteResult {
     pub error_message: Option<String>,
     pub selection: Vec<String>,
     pub undo: Option<UndoPoint>,
+}
+
+/// Mirrors [`leogit_core::history_rewrite::SquashDraft`].
+#[uniffi::remote(Record)]
+pub struct SquashDraft {
+    pub summary: String,
+    pub description: String,
+    pub co_authors: Vec<String>,
 }
 
 /// Mirrors [`leogit_core::git::CommitInfo`].
@@ -1098,6 +1106,37 @@ pub fn cherry_pick_commits(
     target_branch: String,
 ) -> Result<RewriteResult, GitError> {
     history_rewrite::cherry_pick_commits(&repo_path, &shas, &target_branch).map_err(GitError::from)
+}
+
+/// The message a squash of `shas` opens with: the oldest commit's summary,
+/// every message as the description (oldest first), every co-author once.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when fewer than two commits are named, or they are not
+/// all on the current branch.
+#[uniffi::export]
+pub fn squash_draft(repo_path: String, shas: Vec<String>) -> Result<SquashDraft, GitError> {
+    history_rewrite::squash_draft(&repo_path, &shas).map_err(GitError::from)
+}
+
+/// Fold `shas` (any order) into the oldest of them under `message`, replaying
+/// the rest of the branch on top. A conflict is `success == false` with the
+/// rebase left open — the message is already inside it, and lands whenever the
+/// rebase gets that far.
+///
+/// # Errors
+///
+/// Returns [`GitError`] when the action is refused or fails for any reason
+/// that is not a conflict — the branch is then back where it began, or the
+/// message says the rebase is still open.
+#[uniffi::export]
+pub fn squash_commits(
+    repo_path: String,
+    shas: Vec<String>,
+    message: String,
+) -> Result<RewriteResult, GitError> {
+    history_rewrite::squash_commits(&repo_path, &shas, &message).map_err(GitError::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -2704,6 +2743,45 @@ mod tests {
             Some(OperationInProgress::CherryPick)
         );
         abort_operation(repo.clone()).expect("abort");
+        assert_eq!(get_status(repo).expect("status").operation, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A squash as the Swift client drives it: preflight with the oldest
+    /// selected commit, the draft the sheet opens with, the composer's own
+    /// `format_commit_message`, then one call — and the squashed commit comes
+    /// back as the selection, under the commit replayed on top of it.
+    #[test]
+    fn squash_flow_drafts_the_message_and_folds_the_selection() {
+        let (dir, repo, _default) = seeded_repo("squash");
+        let mut shas = Vec::new();
+        for name in ["one", "two", "three"] {
+            std::fs::write(dir.join(format!("{name}.txt")), name).expect("write");
+            run_git(&dir, &["add", "."]);
+            run_git(&dir, &["commit", "-m", name]);
+            shas.insert(0, run_git_stdout(&dir, &["rev-parse", "HEAD"]));
+        }
+        // `three` and `one`, newest first; `two` between them is not selected.
+        let selected = vec![shas[0].clone(), shas[2].clone()];
+
+        let ready = rewrite_preflight(repo.clone(), selected.last().cloned()).expect("preflight");
+        assert_eq!(ready.blocked, None);
+        assert!(!ready.rewrites_pushed);
+        let draft = squash_draft(repo.clone(), selected.clone()).expect("draft");
+        assert_eq!(draft.summary, "one");
+        assert_eq!(draft.description, "three");
+
+        let message = format_commit_message(draft.summary, draft.description, draft.co_authors);
+        let result = squash_commits(repo.clone(), selected, message).expect("squash");
+
+        assert!(result.success);
+        let subjects = run_git_stdout(&dir, &["log", "--format=%s"]);
+        assert_eq!(subjects, "two\none\ninit");
+        assert_eq!(
+            result.selection,
+            [run_git_stdout(&dir, &["rev-parse", "HEAD~1"])]
+        );
         assert_eq!(get_status(repo).expect("status").operation, None);
 
         let _ = std::fs::remove_dir_all(&dir);

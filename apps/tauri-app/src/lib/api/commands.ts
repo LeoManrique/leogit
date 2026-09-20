@@ -176,6 +176,16 @@ export interface RewritePreflight {
   rewrites_pushed: boolean
 }
 
+/**
+ * The message a squash dialog opens with, in the composer's three parts.
+ * `co_authors` are `Name <email>` values, as `formatCommitMessage` takes them.
+ */
+export interface SquashDraft {
+  summary: string
+  description: string
+  co_authors: string[]
+}
+
 /** The one ref a History action moved, before and after. */
 export interface UndoPoint {
   branch: string
@@ -614,6 +624,19 @@ export const gitApi = {
   /** Copy `shas` (newest first, as History lists them) onto a local branch. */
   cherryPickCommits: (repoPath: string, shas: string[], targetBranch: string) =>
     invoke<RewriteResult>('cherry_pick_commits', { repoPath, shas, targetBranch }),
+  /**
+   * What a squash of `shas` opens with: the oldest commit's summary, every
+   * message as the description (oldest first), every co-author once.
+   */
+  squashDraft: (repoPath: string, shas: string[]) =>
+    invoke<SquashDraft>('squash_draft', { repoPath, shas }),
+  /**
+   * Fold `shas` (any order) into the oldest of them under `message`, replaying
+   * the rest of the branch on top. On a conflict the rebase is left open with
+   * the message already inside it — it lands whenever the rebase gets there.
+   */
+  squashCommits: (repoPath: string, shas: string[], message: string) =>
+    invoke<RewriteResult>('squash_commits', { repoPath, shas, message }),
   /**
    * The folders discovery would actually walk for this config — the
    * configured list, or the stock defaults when it's empty. Lets the picker's

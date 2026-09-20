@@ -92,6 +92,8 @@ fn main() {
             operation::abort_operation,
             history_rewrite::rewrite_preflight,
             history_rewrite::cherry_pick_commits,
+            history_rewrite::squash_draft,
+            history_rewrite::squash_commits,
             git::is_git_repo,
             git::init_repo,
             git::clone_repo,

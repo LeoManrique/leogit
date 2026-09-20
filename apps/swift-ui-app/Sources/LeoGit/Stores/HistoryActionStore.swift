@@ -1,12 +1,13 @@
 import Foundation
 
-/// How a cherry-pick ended. `OpOutcome`'s three answers plus the one that is
-/// neither a success nor a failure to retry: the pick stopped on a conflict,
-/// which has already moved the repository onto the target and left the
-/// operation open for Continue or Abort.
-enum CherryPickOutcome {
-    /// Every commit landed. The ids are the new commits, newest first.
-    case picked([String])
+/// How a History action ended. `OpOutcome`'s three answers plus the one that
+/// is neither a success nor a failure to retry: the action stopped on a
+/// conflict, which has already moved the repository and left git's operation
+/// open for Continue or Abort.
+enum HistoryActionOutcome {
+    /// Done. The ids are the commits the action produced, newest first — what
+    /// History selects instead of jumping to the tip.
+    case landed([String])
 
     /// Stopped on a conflict, with git's own text.
     case stoppedOnConflict(String)
@@ -17,6 +18,16 @@ enum CherryPickOutcome {
     /// Refused, or failed for a reason that is not a conflict. Core has put
     /// the repository back where it began, or the text says where it was left.
     case failed(String)
+}
+
+/// Whether a squash may open its sheet, and with what.
+enum SquashReadiness {
+    /// The message the sheet opens with, and whether any of the commits is
+    /// already on the upstream — so the next push would be a force push.
+    case ready(draft: SquashDraft, rewritesPushed: Bool)
+
+    /// Core's reason it cannot start.
+    case refused(String)
 }
 
 /// The History actions that replay commits — what starts them, under the
@@ -79,7 +90,7 @@ final class HistoryActionStore {
         from source: String,
         onto target: String,
         repoPath: String
-    ) async -> CherryPickOutcome {
+    ) async -> HistoryActionOutcome {
         guard let claim = gate.claim() else { return .refusedBusy }
         isRunning = true
         defer {
@@ -89,13 +100,64 @@ final class HistoryActionStore {
         do {
             let result = try await GitBridge.cherryPick(in: repoPath, shas: shas, onto: target)
             if result.success {
-                return .picked(result.selection)
+                return .landed(result.selection)
             }
             cherryPickReturn = CherryPickReturn(source: source, target: target)
             return .stoppedOnConflict(
                 result.errorMessage ?? "The cherry-pick stopped on a conflict in “\(target)”."
             )
         } catch {
+            return .failed(error.displayMessage)
+        }
+    }
+
+    /// Ask core whether `shas` can be squashed, and for the message the sheet
+    /// opens with. The preflight is given the oldest of them — the last, since
+    /// they arrive newest first — which is what makes core look for a merge in
+    /// the stretch a squash replays and say whether pushed commits are in it.
+    func prepareSquash(_ shas: [String], repoPath: String) async -> SquashReadiness {
+        do {
+            let preflight = try await GitBridge.historyActionPreflight(
+                in: repoPath,
+                replayedFrom: shas.last
+            )
+            if let blocked = preflight.blocked { return .refused(blocked) }
+            let draft = try await GitBridge.draftSquash(in: repoPath, shas: shas)
+            return .ready(draft: draft, rewritesPushed: preflight.rewritesPushed)
+        } catch {
+            return .refused(error.displayMessage)
+        }
+    }
+
+    /// Fold `shas` into the oldest of them under the message the sheet holds.
+    /// The three parts go through the composer's own formatter, so co-authors
+    /// take one path to a commit message.
+    func squash(
+        _ shas: [String],
+        summary: String,
+        description: String,
+        coAuthors: [String],
+        repoPath: String
+    ) async -> HistoryActionOutcome {
+        guard let claim = gate.claim() else { return .refusedBusy }
+        isRunning = true
+        defer {
+            isRunning = false
+            gate.release(claim)
+        }
+        do {
+            let message = await GitBridge.commitMessage(
+                summary: summary,
+                description: description,
+                coAuthors: coAuthors
+            )
+            let result = try await GitBridge.squash(in: repoPath, shas: shas, message: message)
+            if result.success {
+                return .landed(result.selection)
+            }
+            return .stoppedOnConflict(result.errorMessage ?? "The squash stopped on a conflict.")
+        } catch {
+            print("[history] squash failed: \(error.displayMessage)")
             return .failed(error.displayMessage)
         }
     }

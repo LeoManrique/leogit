@@ -6,15 +6,13 @@
 
 import { tick } from 'svelte'
 
-interface FocusVirtualRowOptions {
+interface RevealVirtualRowOptions {
   /** The scrolling element the rows are positioned inside. */
   container: HTMLElement | null | undefined
   /** The row's index in the model, not in the mounted slice. */
   index: number
   /** The list's fixed row pitch, in px. */
   rowHeight: number
-  /** Selector for the mounted row, e.g. `[data-file-row-index="12"]`. */
-  rowSelector: string
   /**
    * Told the new `scrollTop` the moment it is applied. The list must copy it
    * into the state its visible range derives from *synchronously*: the scroll
@@ -23,13 +21,19 @@ interface FocusVirtualRowOptions {
   onScroll: (scrollTop: number) => void
 }
 
+interface FocusVirtualRowOptions extends RevealVirtualRowOptions {
+  /** Selector for the mounted row, e.g. `[data-file-row-index="12"]`. */
+  rowSelector: string
+}
+
 /**
- * Bring a row into view, wait for it to be mounted, then focus it — so the next
- * arrow press continues from there. A row already in view does not move.
+ * Bring a row into view by the shortest scroll. A row already in view does not
+ * move, and keyboard focus stays where it is — what a selection made in code
+ * needs, where `focusVirtualRow` is for one made with the keyboard.
  */
-export async function focusVirtualRow(options: FocusVirtualRowOptions): Promise<void> {
-  const { container, index, rowHeight, rowSelector, onScroll } = options
-  if (!container) return
+export function revealVirtualRow(options: RevealVirtualRowOptions): void {
+  const { container, index, rowHeight, onScroll } = options
+  if (!container || index < 0) return
 
   const top = index * rowHeight
   const bottom = top + rowHeight
@@ -40,7 +44,16 @@ export async function focusVirtualRow(options: FocusVirtualRowOptions): Promise<
     container.scrollTop = scrollTop
     onScroll(scrollTop)
   }
+}
 
+/**
+ * Bring a row into view, wait for it to be mounted, then focus it — so the next
+ * arrow press continues from there. A row already in view does not move.
+ */
+export async function focusVirtualRow(options: FocusVirtualRowOptions): Promise<void> {
+  const { container, rowSelector } = options
+  if (!container) return
+  revealVirtualRow(options)
   await tick()
   container.querySelector<HTMLElement>(rowSelector)?.focus({ preventScroll: true })
 }

@@ -48,6 +48,8 @@ struct HistorySidebar: View {
     let onCheckout: (CommitInfo) async -> String?
     /// Cherry-pick these commits — the menu's targets, newest first.
     let onCherryPick: ([CommitInfo]) -> Void
+    /// Squash these commits into one — the menu's targets, newest first.
+    let onSquash: ([CommitInfo]) -> Void
 
     /// A repository write is running, so the actions that replay commits
     /// cannot start. The operation in progress and a detached HEAD, which gate
@@ -140,6 +142,7 @@ struct HistorySidebar: View {
                     // Only what acts on all of them: every single-commit item
                     // would have to pick one row to mean.
                     cherryPickItem(for: targets)
+                    squashItem(for: targets)
                 }
             }
             .onAppear {
@@ -221,6 +224,21 @@ struct HistorySidebar: View {
             onCherryPick(targets)
         }
         .disabled(!canStartHistoryAction)
+    }
+
+    /// Squash replays the branch from the oldest selected commit up, so beyond
+    /// the shared gate it is off when a merge commit sits in that stretch —
+    /// read off the rows, which are all loaded from HEAD down to any selected
+    /// one. Disabled rather than hidden; a native menu item has no hover text,
+    /// so the reason is core's to give to anyone who gets past this.
+    private func squashItem(for targets: [CommitInfo]) -> some View {
+        Button("Squash \(targets.count) Commits…") {
+            onSquash(targets)
+        }
+        .disabled(
+            !canStartHistoryAction
+                || HistoryRange.replaysMergeCommit(in: commits, selected: Set(targets.map(\.sha)))
+        )
     }
 
     /// The menu-time gate on every action that replays commits: not while an

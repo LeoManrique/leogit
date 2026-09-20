@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte'
   import type { CommitInfo } from '$lib/api/commands'
   import {
     activeKey,
@@ -12,7 +13,8 @@
     type ListSelection,
     type SelectionGesture,
   } from '$lib/utils/listSelection'
-  import { focusVirtualRow } from '$lib/utils/virtualList'
+  import { replaysMergeCommit } from '$lib/utils/historyRange'
+  import { focusVirtualRow, revealVirtualRow } from '$lib/utils/virtualList'
   import ContextMenu, { MENU_SEPARATOR, type ContextMenuItem } from './ContextMenu.svelte'
   import Icon from './Icon.svelte'
 
@@ -73,6 +75,8 @@
     onCheckoutCommit?: (commit: CommitInfo) => void
     /** Cherry-pick these commits — the menu's targets, newest first. */
     onCherryPick?: (commits: CommitInfo[]) => void
+    /** Squash these commits into one — the menu's targets, newest first. */
+    onSquash?: (commits: CommitInfo[]) => void
     /**
      * Why the actions that replay commits cannot start right now (an operation
      * in progress, a detached HEAD, another write running), or null when they
@@ -96,6 +100,7 @@
     onUndoCommit,
     onCheckoutCommit,
     onCherryPick,
+    onSquash,
     historyActionsBlocked = null,
   }: Props = $props()
 
@@ -189,6 +194,28 @@
     }
   })
 
+  /**
+   * Squash replays the branch from the oldest selected commit up, so beyond
+   * the shared gate it is off when a merge commit sits in that stretch — read
+   * off the rows, which are all loaded from HEAD down to any selected one.
+   */
+  const squashItem = $derived.by<ContextMenuItem>(() => {
+    const targets = contextMenu?.targets ?? []
+    const blocked =
+      historyActionsBlocked ??
+      (replaysMergeCommit(commits, new Set(targets.map((c) => c.sha)))
+        ? 'A merge commit is among the commits this would replay'
+        : null)
+    return {
+      label: `Squash ${targets.length} Commits…`,
+      enabled: onSquash !== undefined && blocked === null,
+      title: blocked ?? undefined,
+      action: () => {
+        if (contextMenu) onSquash?.(contextMenu.targets)
+      },
+    }
+  })
+
   const singleCommitItems = $derived<ContextMenuItem[]>(
     contextMenu === null
       ? []
@@ -251,7 +278,9 @@
   // A multi-row selection offers only what acts on all of it: every
   // single-commit item would have to pick one row to mean.
   const menuItems = $derived<ContextMenuItem[]>(
-    contextMenu !== null && contextMenu.targets.length > 1 ? [cherryPickItem] : singleCommitItems,
+    contextMenu !== null && contextMenu.targets.length > 1
+      ? [cherryPickItem, squashItem]
+      : singleCommitItems,
   )
 
   // Built from the native row rather than chosen, the same way `FileList`
@@ -456,6 +485,30 @@
     if (first || !scrollContainer) return
     scrollContainer.scrollTop = 0
     scrollTop = 0
+  })
+
+  /*
+    Bring the pane's commit into view whenever it changes. A click lands on a
+    row already in view and the keyboard scrolls for itself, so both are no-ops
+    here; this is for a selection made in code — the commits a History action
+    just produced, which can sit anywhere in the branch (FRONTEND §6.21).
+
+    Declared after the go-to-top effect on purpose: an action re-reads the list
+    and then selects, and when both land in one flush this one runs last. Only
+    `activeSha` is a dependency — paging and re-reads must not drag the
+    viewport back to a selection the user has scrolled away from.
+  */
+  $effect(() => {
+    const sha = activeSha
+    if (sha === null) return
+    untrack(() => {
+      revealVirtualRow({
+        container: scrollContainer,
+        index: shas.indexOf(sha),
+        rowHeight: ROW_HEIGHT,
+        onScroll: (top) => (scrollTop = top),
+      })
+    })
   })
 </script>
 

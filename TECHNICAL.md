@@ -46,7 +46,10 @@ leogit/
 │       ├── config.rs                # load/save Config + ReposState
 │       ├── git.rs                   # git operations (status, log, branch, discard, ignore, …)
 │       ├── operation.rs             # the merge/rebase/pick/revert in progress: probe, continue, abort
-│       ├── history_rewrite.rs       # History's multi-commit actions: preflight, cherry-pick
+│       ├── history_rewrite/         # History's multi-commit actions, behind one preflight (mod.rs)
+│       │   ├── cherry_pick.rs       #   copy commits onto another branch
+│       │   ├── replay.rs            #   the driver: replay the branch from a todo (git rebase -i)
+│       │   └── squash.rs            #   fold commits into the oldest; the message draft
 │       ├── sync_ladder.rs           # SyncProposal: the sync control's ladder + the reflog test for a rewrite
 │       ├── git_version.rs           # the installed git's version and the 2.45 floor
 │       ├── exclusions.rs            # the commit composer's opt-out grace window
@@ -600,7 +603,7 @@ success value makes a refused start indistinguishable from a completed one, and 
 that asked then acts on it: a create sheet dismissing over a branch that was never created, a
 delete clearing its confirmation while leaving the branch. `refusedBusy` is deliberately
 **not** an error to show: nothing went wrong and nothing changed, so the surface stays open
-for the user to ask again. `CherryPickOutcome` carries the same third case. The UI's
+for the user to ask again. `HistoryActionOutcome` carries the same third case. The UI's
 `.disabled` checks remain, but they are a `Bool` read before an `await` and therefore always
 a race — the claim is what makes the outcome correct rather than merely unlikely to be wrong.
 
@@ -1318,7 +1321,7 @@ The frontend never touches Tauri's raw `invoke` API directly; every backend call
 | `configApi` | `loadConfig`, `patchConfig`, `configBounds`, `loadState`, `patchState`, `recordRecentRepo` | `core/src/config.rs` |
 | `gitApi` | `getStatus`, `fileStatusStyles`, `getSelectedDiff`, `getLog`, `getCommitDetail`, `listBranches`, `createBranch`, `switchBranch`, `checkoutCommit`, `deleteBranch`, `commit`, `undoLastCommit`, `classifyDiscard`, `discardFiles`, `appendToGitignore`, `ignorePaths`, `formatCommitMessage`, `repoSyncStatus`, `fetch`, `fetchAll`, `pull`, `push`, `getTrackingRemote`, `getPushRemote`, `getRepoIdentifier`, `mergeBranch`, `mergeSquash`, `commitSquashMerge`, `countCommitsToMerge`, `effectiveScanPaths`, `isGitRepo`, `initRepo`, `cloneRepo` | `core/src/git.rs` |
 | `gitApi` (cont.) | `continueOperation`, `abortOperation` | `core/src/operation.rs` |
-| `gitApi` (cont.) | `rewritePreflight`, `cherryPickCommits` | `core/src/history_rewrite.rs` |
+| `gitApi` (cont.) | `rewritePreflight`, `cherryPickCommits`, `squashDraft`, `squashCommits` | `core/src/history_rewrite/` |
 | `reposApi` | `knownRepos`, `filterRepos`, `deriveCloneTarget`, `cloneTargetPath` | `core/src/repos.rs` |
 | `exclusionsApi` | `reconcile` | `core/src/exclusions.rs` |
 | `diffApi` | `getParsedDiff`, `getParsedCommitDiff`, `copyDiffText`, `generatePatch`, `generateInversePatch` | `core/src/diff.rs` |
@@ -1601,8 +1604,9 @@ degraded mode and no second spelling of any flag. Its caller is
 `abort` use no flag that young and do not ask.
 
 **History's multi-commit actions are
-[core/src/history_rewrite.rs](core/src/history_rewrite.rs), behind one
-preflight.** `rewrite_preflight(repo, replayed_from)` answers a
+[core/src/history_rewrite/](core/src/history_rewrite/mod.rs), behind one
+preflight** — `mod.rs` holds what they share (the preflight, `RewriteResult` and
+its two constructors, `landed` and `stopped`), and each action has a file. `rewrite_preflight(repo, replayed_from)` answers a
 `RewritePreflight` whose refusal is **data** (`blocked`), in this order: the git
 floor, an operation in progress, a detached HEAD, an unborn one, then tracked
 changes — `git status --porcelain=v1 -z --untracked-files=no
@@ -1621,6 +1625,16 @@ oldest), and `rewrites_pushed` — `merge-base --is-ancestor <oldest> <upstream>
 the upstream read with `for-each-ref --format=%(upstream)` so a branch with no
 upstream is a quiet *no* rather than an error. Someone else's push moves the
 upstream without containing the commit, and rightly answers *no*.
+The third is **a shallow clone that ends on `replayed_from`**: git's history
+walk hides the parents of the commit a shallow clone ends on, so `rev-list
+--parents -1` — which is how a replay finds what to rebase onto (`parent_of`) —
+reads it as a root, and `rebase --root` from there *succeeds*, leaving a branch
+with no connection to the history below it. `records_a_parent` reads the commit
+object itself (`cat-file commit`), and a commit that names a parent the walk
+does not show is refused, with `git fetch --unshallow` as the way out. The
+preflight is two functions — `branch_ready_for_an_action`, which every action
+asks before it reads anything else off the repository, and `replay_refusal` —
+so squash can place its commits between the two.
 
 `cherry_pick_commits(repo, shas, target)` takes the shas newest first — History's
 order — and **its three outcomes are a contract** (FRONTEND §3.7): `Ok(success)`
@@ -1666,6 +1680,95 @@ hook can refuse a continue that it let through as a pick. Covered by the
 tests, and through the bridge by
 `cherry_pick_flow_preflights_copies_and_stops_on_a_conflict`.
 
+**A rewrite of the current branch is a todo this app writes, replayed by
+`git rebase -i`** ([replay.rs](core/src/history_rewrite/replay.rs)). git asks a
+*sequence editor* to edit the todo it generated; ours replaces it:
+
+```
+LEOGIT_TODO=<tmp>/todo  LEOGIT_MESSAGE=<tmp>/message  GIT_EDITOR=:
+GIT_SEQUENCE_EDITOR='sh -c '\''cp "$LEOGIT_TODO" "$1" && cp "$LEOGIT_MESSAGE" "$(dirname "$1")/leogit-message"'\'' --'
+git rebase -i --no-autostash --no-update-refs --no-rebase-merges --no-autosquash \
+    --reschedule-failed-exec --empty=keep <parent of the oldest commit | --root>
+```
+
+Both paths travel in environment variables, so nothing is spliced into a shell
+string, and they sit in a `tempfile::tempdir()` — unique per run, so two windows
+on one repository cannot hand each other's todo to git. The todo names full
+object ids and holds no comment lines, which puts it beyond `core.commentChar`,
+`rebase.abbreviateCommands` and `rebase.instructionFormat`; the four `--no-…`
+flags pin the settings that would change what it *means*, and
+`GIT_SEQUENCE_EDITOR` outranks a configured `sequence.editor`. `--empty=keep`
+because `rebase -i` otherwise halts on a commit the new order made empty.
+`commit.gpgsign` is left alone — a user who signs wants the replayed commits
+signed, the amended one included. **The message lives at
+`rebase-merge/leogit-message`**, the directory git passes the editor as
+`$(dirname "$1")`: it shares the rebase's lifetime exactly, surviving every
+conflict round and being deleted by git itself when the rebase finishes or is
+aborted, from this app or from a terminal — there is no leftover for anyone to
+clean up. `git rev-parse --git-path` resolves it from a linked worktree and from
+a subdirectory alike (an `exec` runs from the worktree root).
+
+The driver's answer is `Done`, `Conflict(paths, text)` or an `Err`, by the rule
+cherry-pick established: **a stop is a conflict only if the index holds unmerged
+paths.** A signer that cannot run, a failing `prepare-commit-msg` hook (it runs
+on every pick, every fixup and the amend, `--no-verify` notwithstanding), an
+untracked file in the way and a failing `exec` all stop with nothing to resolve;
+the driver runs `rebase --abort` and answers `Err`. A refusal that never opened
+a rebase (a `pre-rebase` hook, a bad sequence editor) leaves no `rebase-merge/`,
+and is an `Err` with no abort. `--reschedule-failed-exec` is for the rounds that
+follow a conflict, which are Continue's: a failed `exec` is otherwise crossed
+off the todo as it fails, and the next `--continue` finishes the rebase without
+it. git stores the setting with the rebase, so it holds from a terminal too.
+git's text is passed through `operation::without_progress` — a rebase writes
+`Rebasing (2/5)` over itself with carriage returns even into a pipe —
+as `continue_operation`'s is.
+
+**Squash** ([squash.rs](core/src/history_rewrite/squash.rs)) folds the selected
+commits into the **oldest** of them. `Lineage::of` places the shas on the branch
+without trusting their order: the oldest is `merge-base --octopus <shas>` — on
+one line of history, the commit all the others descend from — the replayed range
+is `rev-list --reverse HEAD --not <oldest>^@`, and a selection is refused unless
+every sha is in that range and the range starts at the oldest. The todo is
+
+```
+pick  <oldest selected>
+fixup <every other selected commit, oldest first>
+exec  git commit --amend --no-verify --cleanup=whitespace -q -F "$(git rev-parse --git-path rebase-merge/leogit-message)"
+pick  <every unselected commit of the range, oldest first>
+```
+
+**The amend sits straight after the last `fixup`**, which is the whole safety
+of it — at the end of the todo it would reword the branch's last commit — and
+because it is a *line of the todo* it runs whenever the rebase reaches it: the
+message survives a conflict in the fold itself, where a message handed to the
+first command alone is lost. `--amend -F` keeps the oldest commit's author and
+author date. `--cleanup=whitespace`, which `commit()` names as well, because a
+message typed into a field holds no comment lines, and `commit.cleanup=strip`
+would silently delete a line beginning with `#`. The squashed commit is
+`HEAD~<unselected commits in the range>`, which is the `selection`; the
+`UndoPoint` has no `return_branch`. A selection whose commits cancel out is an
+`Err`: git will not fold a commit into nothing, and stops with nothing to
+resolve. `squash_draft` reads the selected commits with `read_commits`
+(`git log --no-walk=unsorted`, through the record parser `get_log` uses, now
+under `--encoding=UTF-8`) and builds the three parts FRONTEND §3.7 describes.
+Covered by the `squash_*`, `a_failed_amend_*`, `a_squash_that_*`,
+`an_aborted_squash_*`, `a_repository_path_*` and `draft_*` tests, and through
+the bridge by `squash_flow_drafts_the_message_and_folds_the_selection`.
+
+**In the clients a History action ends on one path.** Natively
+`HistoryActionOutcome` (`landed` / `stoppedOnConflict` / `refusedBusy` /
+`failed`) is every action's answer and `ContentView.finishHistoryAction` is what
+follows it; the Tauri side has `selectResultingCommits` and each action's `run…`,
+and `CommitList.svelte` brings a selection made in code into view with an effect
+on `activeSha` alone (`revealVirtualRow` in `utils/virtualList.ts`, the scroll
+half of `focusVirtualRow`) — a squashed commit is rarely the tip.
+The merge gate on Squash is a pure helper mirrored in each client —
+[utils/historyRange.ts](apps/tauri-app/src/lib/utils/historyRange.ts) and
+`Services/HistoryRange.swift`, `replaysMergeCommit` — read off the rows'
+`parents`. The native description field and git's-refusal block are shared views
+(`Design/DescriptionEditor.swift`, used by the composer and the squash sheet;
+`Design/RefusalText.swift`, used by the force-push and squash sheets).
+
 **In the clients the branch a conflicted pick came from is client memory**
 (`cherryPickReturn` in `MainLayout.svelte`, `HistoryActionStore.cherryPickReturn`)
 — git records the pre-pick tip but not the branch the user left. It is set from
@@ -1680,8 +1783,14 @@ failed switch is reported as that and not as a failed abort.
 `commit_file`, `subjects`, `git_stopping` (run a git command that is expected to
 stop), `conflicting_repo()`, and for anything that needs a remote `published_repo()`
 (a bare `origin.git` beside a clone whose `main` is pushed and tracking) with
-`clone_of()` for somebody else's clone — so `operation.rs`, `history_rewrite.rs`,
-`sync_ladder.rs` and `git.rs` build their repositories the same way.
+`clone_of()` for somebody else's clone — so `operation.rs`, `history_rewrite/`,
+`sync_ladder.rs` and `git.rs` build their repositories the same way, **isolated
+from the developer's own git configuration**: `isolate_from_user_config`
+(`GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` at `/dev/null`, `LC_ALL=C`) is
+applied by the helpers and, under `#[cfg(test)]`, by `git_cmd` itself — a global
+`core.hooksPath` would otherwise disarm every hook a test installs. It does not
+reach the bridge crate's tests, which run core as a dependency. The History
+actions' own (`linear_repo()`, `failing_hook()`) are `history_rewrite/fixtures.rs`.
 
 **In the clients the operation is one table of words and one swapped button.**
 [utils/operationWords.ts](apps/tauri-app/src/lib/utils/operationWords.ts) and

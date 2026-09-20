@@ -292,6 +292,11 @@ pub(crate) fn git_cmd(repo_path: &str, args: &[&str]) -> Command {
         .arg("-c")
         .arg("core.quotepath=false")
         .args(args);
+    // A test asserts what git does under *this* code's flags, not under the
+    // developer's `~/.gitconfig`: a global `core.hooksPath` would disarm every
+    // hook a test installs, and a global `remote.pushDefault` bend a push.
+    #[cfg(test)]
+    crate::test_support::isolate_from_user_config(&mut cmd);
     super::process::prepare_child(&mut cmd);
     cmd
 }
@@ -2111,21 +2116,44 @@ pub fn get_log(repo_path: String, opts: LogOptions) -> Result<Vec<CommitInfo>, S
     };
     let max_arg = format!("--max-count={}", max_count);
     let skip_arg = format!("--skip={}", opts.skip);
-    let format_arg = format!("--format={}", LOG_FORMAT);
+    log_records(&repo_path, &[&max_arg, &skip_arg, "--"])
+}
 
-    let bytes = run_git_raw(
-        &repo_path,
-        &[
-            "log",
-            "--date=raw",
-            &max_arg,
-            &skip_arg,
-            &format_arg,
-            "--no-show-signature",
-            "--no-color",
-            "--",
-        ],
-    )?;
+/// The commits named by `shas`, in the order given — for a caller that holds
+/// ids rather than a page of history. `--no-walk=unsorted` is what keeps git
+/// from following parents or re-sorting by date.
+///
+/// # Errors
+/// When a sha is not an object id, or `git log` fails — an id that names no
+/// commit here is a failure, not a shorter answer.
+pub(crate) fn read_commits(repo_path: &str, shas: &[String]) -> Result<Vec<CommitInfo>, String> {
+    if let Some(odd) = shas.iter().find(|sha| !is_object_id(sha)) {
+        return Err(format!("Not a commit id: {odd}"));
+    }
+    if shas.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut args = vec!["--no-walk=unsorted"];
+    args.extend(shas.iter().map(String::as_str));
+    args.push("--");
+    log_records(repo_path, &args)
+}
+
+/// Run `git log` with [`LOG_FORMAT`] over whatever `selection` names — a page
+/// of history or a list of ids — and parse its records.
+fn log_records(repo_path: &str, selection: &[&str]) -> Result<Vec<CommitInfo>, String> {
+    let format_arg = format!("--format={LOG_FORMAT}");
+    let mut args = vec![
+        "log",
+        "--date=raw",
+        // Whatever `i18n.logOutputEncoding` says: the records are read as UTF-8.
+        "--encoding=UTF-8",
+        &format_arg,
+        "--no-show-signature",
+        "--no-color",
+    ];
+    args.extend(selection);
+    let bytes = run_git_raw(repo_path, &args)?;
 
     if bytes.is_empty() {
         return Ok(Vec::new());
@@ -2835,7 +2863,10 @@ pub fn commit(
     }
 
     // Pipe the message via stdin to avoid arg-length and shell-quoting issues.
-    let mut args: Vec<&str> = vec!["commit", "-F", "-"];
+    // `--cleanup=whitespace` is git's own default for a message nobody edits;
+    // naming it keeps a `commit.cleanup=strip` from silently deleting a line of
+    // the message that begins with `#` — typed into a field, it is no comment.
+    let mut args: Vec<&str> = vec!["commit", "--cleanup=whitespace", "-F", "-"];
     if amend {
         args.push("--amend");
     }

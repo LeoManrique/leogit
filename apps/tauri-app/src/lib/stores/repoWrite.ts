@@ -13,6 +13,7 @@ export type RepoWriteKind =
   | 'merge'
   | 'abort'
   | 'cherryPick'
+  | 'squash'
   | 'checkout'
   | 'undoCommit'
   | 'discard'

@@ -175,16 +175,27 @@ pub fn continue_operation(repo_path: &str) -> Result<OperationOutcome, String> {
             skipped,
         });
     }
-    eprintln!(
-        "[operation] git {subcommand} {step} stopped: {}",
-        said.trim()
-    );
+    let said = without_progress(&said);
+    eprintln!("[operation] git {subcommand} {step} stopped: {said}");
     Ok(OperationOutcome {
         success: false,
         conflicts: ls_files_unmerged(repo_path),
-        error_message: Some(said.trim().to_string()),
+        error_message: Some(said),
         skipped,
     })
+}
+
+/// What git said, without its progress meter. A rebase writes
+/// `Rebasing (2/5)` over itself with carriage returns even when nothing is
+/// watching, so a line of its output arrives with every step it took glued to
+/// the front; what follows the last carriage return is the line as a terminal
+/// would have left it.
+pub(crate) fn without_progress(said: &str) -> String {
+    said.trim()
+        .lines()
+        .map(|line| line.rsplit('\r').next().unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Abort the operation in progress.

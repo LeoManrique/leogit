@@ -312,7 +312,17 @@ struct ContentView: View {
                     store: historyActions,
                     repoPath: request.repoPath
                 ) { outcome in
-                    await finishCherryPick(outcome, in: request.repoPath)
+                    await finishHistoryAction(outcome, in: request.repoPath)
+                }
+            case let .squash(request):
+                SquashSheet(
+                    commits: request.commits,
+                    draft: request.draft,
+                    pushedTo: request.pushedTo,
+                    store: historyActions,
+                    repoPath: request.repoPath
+                ) { outcome in
+                    await finishHistoryAction(outcome, in: request.repoPath)
                 }
             }
         }
@@ -635,6 +645,7 @@ struct ContentView: View {
                     onUndo: { undoCommit($0, in: repoPath) },
                     onCheckout: { await checkoutCommit($0, in: repoPath) },
                     onCherryPick: { requestCherryPick($0, in: repoPath) },
+                    onSquash: { requestSquash($0, in: repoPath) },
                     isWriteInFlight: writeGate.isHeld
                 )
             }
@@ -1071,23 +1082,54 @@ struct ContentView: View {
         }
     }
 
-    /// What follows a cherry-pick git was actually asked for. **Reload first,
-    /// report second**: a pick that stopped on a conflict has already moved the
-    /// repository onto the target, and one that failed was moved there and
-    /// back. The branch list is re-read with it — the checkmark moved.
-    ///
-    /// A clean pick selects the new commits, *after* the log that holds them
-    /// has landed: `maintainsSelection` prunes ids the list does not have, so
-    /// assigned any earlier they would be dropped at once. A conflict goes to
-    /// the Changes tab, where the conflicted files are waiting, and takes the
-    /// modal with git's own text. A failure is already stated in the sheet.
+    /// History ▸ Squash N Commits…: core's preflight and the message the sheet
+    /// opens with, then the sheet. A refusal takes the modal, there being no
+    /// sheet yet for it to stay in. The upstream is named from the status, as
+    /// the force-push confirmation names it.
     @MainActor
-    private func finishCherryPick(_ outcome: CherryPickOutcome, in repoPath: String) async {
+    private func requestSquash(_ commits: [CommitInfo], in repoPath: String) {
+        guard sheet == nil, commits.count > 1 else { return }
+        Task {
+            let readiness = await historyActions.prepareSquash(
+                commits.map(\.sha),
+                repoPath: repoPath
+            )
+            guard store.repoPath == repoPath, sheet == nil else { return }
+            switch readiness {
+            case let .refused(reason):
+                actionFailure = ActionFailure(reason)
+            case let .ready(draft, rewritesPushed):
+                sheet = .squash(
+                    SquashRequest(
+                        repoPath: repoPath,
+                        commits: commits,
+                        draft: draft,
+                        pushedTo: rewritesPushed ? store.status?.upstream ?? "" : nil
+                    )
+                )
+            }
+        }
+    }
+
+    /// What follows a History action git was actually asked for. **Reload
+    /// first, report second**: an action that stopped on a conflict has already
+    /// moved the repository, and one that failed was moved and put back. The
+    /// branch list is re-read with it: a cherry-pick moved the checkmark, and
+    /// for a squash it is one cheap call that keeps this the single path every
+    /// action ends on.
+    ///
+    /// A clean run selects the commits it produced, *after* the log that holds
+    /// them has landed: `maintainsSelection` prunes ids the list does not have,
+    /// so assigned any earlier they would be dropped at once. A conflict goes
+    /// to the Changes tab, where the conflicted files are waiting, and takes
+    /// the modal with git's own text. A failure is already stated in the sheet.
+    @MainActor
+    private func finishHistoryAction(_ outcome: HistoryActionOutcome, in repoPath: String) async {
         await store.refresh()
         await branchStore.load(repoPath: repoPath)
         guard store.repoPath == repoPath else { return }
         switch outcome {
-        case let .picked(shas):
+        case let .landed(shas):
             let landed = Set(shas).intersection(store.commits.map(\.sha))
             if !landed.isEmpty { historySelection = landed }
         case let .stoppedOnConflict(said):
@@ -1265,6 +1307,10 @@ private enum RootSheet: Identifiable {
     /// outcome it is reporting.
     case cherryPick(CherryPickRequest)
 
+    /// The message sheet for History ▸ Squash N Commits…, here for the same
+    /// reason: a conflict sends the window to Changes.
+    case squash(SquashRequest)
+
     var id: String {
         switch self {
         case .clone: "clone"
@@ -1272,6 +1318,8 @@ private enum RootSheet: Identifiable {
         case let .discard(files): "discard:\(files.map(\.path).joined(separator: "\n"))"
         case let .cherryPick(request):
             "cherry-pick:\(request.commits.map(\.sha).joined(separator: "\n"))"
+        case let .squash(request):
+            "squash:\(request.commits.map(\.sha).joined(separator: "\n"))"
         }
     }
 }
@@ -1287,6 +1335,18 @@ private struct CherryPickRequest {
     let source: String
     /// Every other local branch.
     let candidates: [String]
+}
+
+/// Everything the squash sheet is about, snapshotted when it was asked for.
+private struct SquashRequest {
+    let repoPath: String
+    /// The menu's targets, newest first.
+    let commits: [CommitInfo]
+    /// The message the sheet opens with.
+    let draft: SquashDraft
+    /// The upstream the commits are already on, or `nil` when none is pushed —
+    /// empty when core says they are pushed before a status read has named it.
+    let pushedTo: String?
 }
 
 /// FRONTEND §6.13's second class: a failure that was never the user's task.

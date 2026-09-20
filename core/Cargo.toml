@@ -25,6 +25,9 @@ trash = "5"
 # (`\\?\C:\…`) that neither a UI nor PowerShell renders sensibly. See
 # `paths`. A no-op re-export of `std::fs` on macOS and Linux.
 dunce = "1.0.5"
+# The rewrite driver's scratch directory: the rebase todo and the commit
+# message git's sequence editor copies into place, unique per run.
+tempfile = "3"
 
 # Signalling a whole process group: `process::run_timed`'s timeout has to reach
 # the grandchildren `git fetch` starts (`ssh`, `git-remote-https`), and std can
@@ -49,9 +52,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_JobObjects",
     "Win32_System_Threading",
 ] }
-
-[dev-dependencies]
-tempfile = "3"
 
 [lib]
 name = "leogit_core"
