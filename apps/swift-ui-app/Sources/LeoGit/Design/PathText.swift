@@ -99,7 +99,8 @@ enum PathTruncation {
 ///
 /// The view is greedy horizontally (the Svelte component's `flex: 1 1 0`), so
 /// its width never depends on its own text and the measurement can't feed back
-/// into layout.
+/// into layout. With `hugsPath` it is greedy only up to the whole path's width,
+/// which is still a number the fit never moves, so the same holds.
 struct PathText: View {
     let path: String
 
@@ -115,6 +116,14 @@ struct PathText: View {
     /// points *away* from, and a dirty submodule, which the parent repository
     /// cannot stage.
     var isMuted = false
+
+    /// Take no more width than the whole path needs, rather than all the row
+    /// offers. A lone path fills its row either way; a rename's two sides both
+    /// hug, so they sit together as `old → new`, and a stack that is short of
+    /// room lets the side that fits in its half keep its full width and gives
+    /// the rest to the other — two greedy sides split the row down the middle
+    /// and left a gap between them.
+    var hugsPath = false
 
     /// Width of the space the row gave us; zero until the first layout pass.
     @State private var availableWidth: CGFloat = 0
@@ -144,7 +153,7 @@ struct PathText: View {
             // fires on appear is applied *outside* it, where that rebuild
             // cannot reach and re-run the search with nothing changed.
             .modifier(TruncationTooltip(path: isTruncated ? path : nil))
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: hugsPath ? naturalWidth : .infinity, alignment: .leading)
             .onGeometryChange(for: CGFloat.self) { proxy in
                 proxy.size.width
             } action: { width in
@@ -174,6 +183,17 @@ struct PathText: View {
     private var nameFont: NSFont {
         guard let nameWeight else { return font }
         return .systemFont(ofSize: font.pointSize, weight: nameWeight)
+    }
+
+    /// What a hugging label asks for: the whole path in the faces it is drawn
+    /// with, plus the trailing pad `fit()` keeps clear. Rounded up to a whole
+    /// point, so the width the label is given back can never come out a hair
+    /// short of the path in floating point and cost it a character it had room
+    /// for. Two measurements per body evaluation, and only on a rename's rows,
+    /// against the search's ~log₂(path) that `fitted` exists to avoid.
+    private var naturalWidth: CGFloat {
+        let whole = PathTruncation.truncate(path, budget: path.count)
+        return ceil(width(of: whole)) + Self.trailingPad
     }
 
     /// Whether the fit had to drop characters. False until measured, so a row

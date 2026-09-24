@@ -449,10 +449,8 @@
           <div
             class="file-row virtual-row"
             class:active={isActive}
-            class:included={isSelected}
             class:row-selected={isRowSelected}
             class:striped={fileIndex % 2 === 1}
-            class:submodule-dirty={file.submodule_dirty}
             data-file-row-index={fileIndex}
             style="top: {fileIndex * ROW_HEIGHT}px;"
             onclick={(e) => selectRow(file, clickGesture(e))}
@@ -506,12 +504,17 @@
 
             {#if file.orig_path}
               <div class="file-info">
-                <PathText path={file.orig_path} dim />
+                <PathText path={file.orig_path} muted hug />
                 <span class="arrow">→</span>
-                <PathText path={file.path} />
+                <PathText
+                  path={file.path}
+                  emphasized={isSelected}
+                  muted={file.submodule_dirty}
+                  hug
+                />
               </div>
             {:else}
-              <PathText path={file.path} />
+              <PathText path={file.path} emphasized={isSelected} muted={file.submodule_dirty} />
             {/if}
           </div>
         {/each}
@@ -667,8 +670,8 @@
   /*
     Visual multi-row highlight — every row in the selection, however it got
     there (a shift range, a ⌘/Ctrl-click, ⌘A).
-    Independent of commit inclusion (.included) and the diff-displayed
-    row (.active). Subtle so a sole selection still reads as "marked"
+    Independent of commit inclusion (the filename's weight) and the
+    diff-displayed row (.active). Subtle so a sole selection still reads as "marked"
     without competing with the active row's heavier backplate.
   */
   .file-row.row-selected {
@@ -756,9 +759,16 @@
     A rename's two sides and the arrow between them — `ChangedFileList.swift`'s
     `pathLabel`, which is an `HStack(spacing: 4)`. Centre-aligned, not
     baseline-aligned, because that HStack takes SwiftUI's default `.center`;
-    the two sides are the same face at the same size, so the two agree today
-    and would diverge the moment one side's weight moved (an included row
-    raises its filename to medium).
+    the two sides are the same size, so the two agree, and would diverge only
+    if one side's size moved.
+
+    Both sides hug their path (`PathText`'s `hug`): each grows from nothing,
+    evenly, up to its whole path's width. Flexbox freezes a side at that cap
+    and hands what it did not take to the other, so a rename that fits packs
+    at the leading edge, a side that fits in half the row keeps its full
+    width, and two long sides get half each — the same split the native
+    HStack makes, where the side with the smaller cap is offered its share
+    first.
   */
   .file-info {
     display: flex;
@@ -772,22 +782,9 @@
   }
 
   /* `.foregroundStyle(.secondary)` on the native arrow, and `.fixedSize()` so
-     it never gives up width to the two greedy paths it separates. */
+     it never gives up width to the two paths it separates. */
   .arrow {
     color: var(--text-secondary);
     flex-shrink: 0;
-  }
-
-  .file-row.included :global(.filename) {
-    font-weight: 500;
-  }
-
-  /* Dirty submodule: can't be staged from the parent, so the row reads as
-     inactive while still being clickable to view its diff. Native passes
-     `isMuted: file.submoduleDirty` into `PathText`, which resolves the
-     filename to `.secondary` — the same treatment a rename's "from" side
-     gets, and the same level as the directory already beside it. */
-  .file-row.submodule-dirty :global(.filename) {
-    color: var(--text-secondary);
   }
 </style>

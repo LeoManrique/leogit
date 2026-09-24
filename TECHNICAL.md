@@ -844,7 +844,16 @@ of a path carries the file's identity — so the view binary-searches the larges
 rendered width fits, measuring with the very `NSFont` it draws with, mirroring the hidden
 measuring span the Svelte component uses. It is greedy horizontally (the component's
 `flex: 1 1 0`), so its width never depends on its own text and the measurement cannot feed
-back into layout. **The fit is held in `@State` and re-derived only when one of its inputs
+back into layout. A rename's two sides **hug** their path instead (`hugsPath`; `hug` in
+Svelte): greedy only up to the whole path's width, rounded up to a whole point so floating
+point can never cost a path that fits a character. That cap is the one number no fit moves, so
+the rule still holds. Both layout engines then split a row that is short of room the same way,
+measured in each: SwiftUI's `HStack` offers the side with the smaller cap its even share first,
+and flexbox grows both sides evenly from a `0` basis and freezes each at its `max-width`, so a
+side that fits in half the row keeps its whole width and the other takes the rest. The
+filename's face is a parameter in both clients (`nameWeight`; `emphasized`), never a class a
+row sets from outside: ticking a checkbox changes the face without moving the row's width, so
+only an input the fit watches can tell it to run again. **The fit is held in `@State` and re-derived only when one of its inputs
 moves** — the path, the measured width, or either face — through a single
 `.onChange(of:initial:)` over all three. Deriving it in `body` instead cost ~log₂(path) text
 measurements per visible row on every repaint, including the ones a hover or a checkbox click

@@ -127,25 +127,31 @@ struct ChangedFileList<Leading: View, Menu: View>: View {
     /// letter would leave — makes a rename indistinguishable from an add, and
     /// loses the one fact that matters about it.
     ///
-    /// Both sides are greedy, so they split the row's slack evenly and each
-    /// shortens under its own rule; a deep `from` path cannot crowd the `to`
-    /// out of view.
+    /// Both sides hug their own path (`PathText.hugsPath`), so a rename that
+    /// fits reads `old → new` with nothing between them. Short of room, a side
+    /// that fits in half the row keeps its full width and the other side takes
+    /// the rest; two long sides get half each and shorten under their own rule,
+    /// so a deep `from` path cannot crowd the `to` out of view.
     @ViewBuilder
     private func pathLabel(for file: FileEntry) -> some View {
         if let origPath = file.origPath {
             HStack(spacing: 4) {
-                PathText(path: origPath, isMuted: true)
+                PathText(path: origPath, isMuted: true, hugsPath: true)
                 Text("→")
                     .foregroundStyle(.secondary)
                     .fixedSize()
-                currentPath(of: file)
+                currentPath(of: file, hugsPath: true)
             }
+            // Two hugging sides leave the stack narrower than the row. A List
+            // cell already lays its content from the leading edge, but that is
+            // the container's habit, not a promise; this frame makes it one.
+            .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             currentPath(of: file)
         }
     }
 
-    private func currentPath(of file: FileEntry) -> PathText {
+    private func currentPath(of file: FileEntry, hugsPath: Bool = false) -> PathText {
         PathText(
             path: file.path,
             nameWeight: isIncluded?(file) == true ? .medium : nil,
@@ -153,7 +159,8 @@ struct ChangedFileList<Leading: View, Menu: View>: View {
             // muted badge, disabled checkbox — because the parent repository
             // can do nothing with it, while the row stays selectable so its
             // state can still be looked at.
-            isMuted: file.submoduleDirty
+            isMuted: file.submoduleDirty,
+            hugsPath: hugsPath
         )
     }
 }

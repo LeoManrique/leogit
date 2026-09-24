@@ -1,13 +1,12 @@
 # Plan — History multi-commit actions (cherry-pick, squash, reorder)
 
-> Status: **every workstream is built. WS-A (a selection that is a set,
-> `5ff2a4c`), WS-B (operations in progress, `d0b68df`), WS-C (cherry-pick, the
-> preflight and the window-wide write gate, `ff0e195`), WS-D (force push
-> recommended, `d979bf2`), WS-E (the rewrite driver and squash, `bc8f3db`), WS-F
-> (reorder, `f5976a6`) and WS-G (undo, `19d066b`) are confirmed and committed.
-> WS-H — the owner's answers to what the plan had left open (§6.1), three of
-> which were code — was built on 2026-09-21 and is waiting for the owner's
-> check by hand; it is not committed.** Every decision in this document is the
+> Status: **complete. Every workstream is confirmed and committed: WS-A (a
+> selection that is a set, `5ff2a4c`), WS-B (operations in progress,
+> `d0b68df`), WS-C (cherry-pick, the preflight and the window-wide write gate,
+> `ff0e195`), WS-D (force push recommended, `d979bf2`), WS-E (the rewrite
+> driver and squash, `bc8f3db`), WS-F (reorder, `f5976a6`), WS-G (undo,
+> `19d066b`) and WS-H (the owner's answers to what the plan had left open,
+> §6.1, `497f4a3`).** Every decision in this document is the
 > owner's and is marked **Decided**; nothing is left *Proposed*. §9 records the
 > standing decision on where rewriting runs. The plan is kept as the record a
 > later rewrite (edit, drop, a drag — `ROADMAP.md`, *Rebase (interactive UI)*)
@@ -1368,8 +1367,7 @@ is tested by hand before the next starts.
    `ErrorBanner`, the mirrored `UndoOffer` model, `switch_to` and
    `open_operation_refusal` shared in `mod.rs`, and `finishHistoryAction` taking
    one object.
-8. **WS-H — The open decisions. Answered and built 2026-09-21; waiting for the
-   owner's check, not committed.** §6.1. Three of the eight answers were code:
+8. **WS-H — The open decisions. Done, `497f4a3`.** §6.1. Three of the eight answers were code:
    Pull holds the write slot (clients only), Undo after a conflict and a
    Continue (`UndoStart`, `RewriteResult.start`, `OperationOutcome.started_at`,
    the mirrored `OpenAction` model in place of `cherryPickReturn`), and the
