@@ -867,7 +867,7 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
      core** (`filter_repos`), because two hand-written ones had already drifted on the
      very set of labels they searched. A frontend supplies the rows and every label it
      displays for each, and gets them back narrowed.
-10. **Row context actions** — right-clicking a changed file offers discard (always
+10. **Row and chip context actions** — right-clicking a changed file offers discard (always
    confirmed), ignore-this-file / ignore-this-extension, copy absolute + relative
    path, and reveal / open-with-default (both disabled when the file is deleted, since
    nothing is left on disk). Right-clicking a commit offers amend and undo — enabled
@@ -880,6 +880,14 @@ define LeoGit's behavior and must match on both platforms. (Today they live in
    returns the same plan the discard runs on. A status letter cannot answer it: a
    staged re-add of a path that exists in `HEAD` is restorable, a rename whose original
    is *not* in `HEAD` is not, and under an unborn `HEAD` nothing is.
+   The toolbar's two chips carry context actions too, on the thing they name rather
+   than the alternatives their left-click browses: the repository chip offers *Copy
+   Repo Name* — the label the chip shows — and *Copy Repo Path*; the branch chip offers
+   *Copy Branch Name*, read from the live status and disabled while it is empty (a
+   detached `HEAD`, or before the first read lands). **Nothing else in the toolbar has a
+   context menu**, including the native toolbar's stock display-mode menu, which is
+   switched off: the toolbar is fixed, and *Icon Only* would strip the chips of the names
+   that stand in for the removed title.
 11. **Embedded-terminal key ownership** — while the terminal holds keyboard focus the shell
    owns every key, with exactly one exception: the chord that toggles the panel, which stays
    reachable from *inside* the panel. Nothing else the app binds may fire from there —

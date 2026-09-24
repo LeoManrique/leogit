@@ -553,6 +553,62 @@
     ]
   })
 
+  // The two chips' right-click menus, the native chips' `toolbarContextMenu`:
+  // right-click acts on the repository and branch you are on, left-click
+  // browses the others.
+  type ChipMenuKind = 'repo' | 'branch'
+  let chipMenu = $state<{ kind: ChipMenuKind; x: number; y: number } | null>(null)
+
+  // Every other right-click in the bar is swallowed, as the native bar shows
+  // nothing there either, so the webview's own menu never offers to reload the
+  // page from the toolbar. A listener rather than an `oncontextmenu` attribute:
+  // it takes a gesture away instead of handling one, so it is not an
+  // interaction the header would need a role for.
+  let header: HTMLElement
+  $effect(() => {
+    const suppress = (e: MouseEvent) => e.preventDefault()
+    header.addEventListener('contextmenu', suppress)
+    return () => header.removeEventListener('contextmenu', suppress)
+  })
+
+  function openChipMenu(e: MouseEvent, kind: ChipMenuKind) {
+    e.preventDefault()
+    hideChipTooltip()
+    chipMenu = { kind, x: e.clientX, y: e.clientY }
+  }
+
+  function copyToClipboard(text: string) {
+    navigator.clipboard.writeText(text).catch((error) => {
+      console.error('[header] clipboard write failed:', error)
+      reportNotice(error)
+    })
+  }
+
+  const chipMenuItems = $derived.by<ContextMenuItem[]>(() => {
+    const path = $appState.repoPath
+    if (!chipMenu || !path) return []
+    if (chipMenu.kind === 'repo') {
+      return [
+        // The name the chip shows, so the item copies the words under the
+        // pointer rather than a second name that could disagree with them.
+        { label: 'Copy Repo Name', action: () => copyToClipboard(repoName) },
+        { label: 'Copy Repo Path', action: () => copyToClipboard(path) },
+      ]
+    }
+    // Empty while detached or before the first status lands; the item stays in
+    // place greyed out rather than copying a label that is not a branch name,
+    // and names the state that disabled it, as STYLE.md asks of a drawn menu.
+    const branch = $repoState.status.branch
+    return [
+      {
+        label: 'Copy Branch Name',
+        action: () => copyToClipboard(branch),
+        enabled: branch !== '',
+        title: detached ? 'HEAD is detached' : undefined,
+      },
+    ]
+  })
+
   // A repo switch mid-transfer must not carry the old repo's progress into the
   // new repo's header — the listener already drops foreign-path events, so
   // without this the last line/fill would just freeze there until the op ends.
@@ -634,7 +690,7 @@
   const hasMenu = $derived(actionMenuItems.length > 0)
 </script>
 
-<header class="header">
+<header class="header" bind:this={header}>
   <div class="left">
     {#if hasRepo}
     <!-- Opens the list even mid-transfer. Switching itself is what a transfer
@@ -646,6 +702,7 @@
       class="chip-button"
       bind:this={repoChip}
       onclick={() => { hideChipTooltip(); onOpenRepos?.() }}
+      oncontextmenu={(e) => openChipMenu(e, 'repo')}
       onmouseenter={showChipTooltip}
       onmouseleave={hideChipTooltip}
       onfocus={showChipTooltip}
@@ -659,6 +716,7 @@
       class="chip-button"
       bind:this={branchChip}
       onclick={onOpenBranches}
+      oncontextmenu={(e) => openChipMenu(e, 'branch')}
       title={detached ? 'Detached HEAD — pick a branch to return to' : 'Switch branch (Ctrl+B)'}
     >
       <!--
@@ -809,6 +867,15 @@
   />
 {/if}
 
+{#if chipMenu !== null && chipMenuItems.length > 0}
+  <ContextMenu
+    x={chipMenu.x}
+    y={chipMenu.y}
+    items={chipMenuItems}
+    onClose={() => (chipMenu = null)}
+  />
+{/if}
+
 {#if updateMenu !== null}
   <ContextMenu
     x={updateMenu.x}
@@ -857,6 +924,13 @@
     border-bottom: 1px solid var(--border-inactive);
     background: var(--bg-secondary);
     gap: 12px;
+
+    /*
+      Nothing in a toolbar is text to select, as in the native client's. WebKit
+      selects the word under the pointer on a right-click, so without this,
+      opening a chip's menu leaves its label highlighted.
+    */
+    user-select: none;
 
     /*
       The toolbar's controls are capsules, and only the toolbar's: macOS 26

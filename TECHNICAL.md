@@ -680,6 +680,41 @@ the toolbar title became duplication, so `.toolbar(removing: .title)` hides it
 `BranchMenu.menuLabel` ("Detached at <sha7>", "<branch> · merging", "Detached at <sha7> · rebasing"): repo name, branch,
 and counts each appear exactly once in the toolbar.
 
+**A toolbar chip's right-click menu is `.toolbarContextMenu`, never `.contextMenu`**
+(`Design/ToolbarContextMenu.swift`). AppKit's `NSToolbarView` answers every context click
+inside its bounds itself: it hit-tests the click and, unless the view under it is one of
+its few recognised menu owners, shows its display-mode menu. SwiftUI hosts each
+`ToolbarItem` in a real `ToolbarItemHostingView`, but neither a `.contextMenu` inside it
+nor an `NSView` with a `menu` (or an overridden `menu(for:)`) is ever asked — a
+`.contextMenu` on a toolbar item is silently discarded. No `ButtonStyle`, `.toolbar(id:)`,
+placement or item group changes that. The click is therefore claimed where every click
+passes before a window dispatches it: one local `NSEvent` monitor for right-clicks and
+control-clicks, owned by a private `ToolbarContextMenuRouter` and installed with the first
+chip that asks. Each chip carries a zero-hit anchor view as its `.background`, which SwiftUI
+sizes to the whole toolbar item — exactly the glass capsule — and the router opens the menu
+of the anchor whose rectangle holds the click, through
+`NSMenu.popUpContextMenu(_:with:for:)`, and ends the event there. A click on no anchor goes
+on to AppKit unchanged, and so does every click while the window has a sheet attached or
+the app is running a modal: the monitor sees the event before the window can refuse it,
+so the refusing is its own job. A hidden anchor never matches. The menu is built at click
+time from the chip's SwiftUI `@ViewBuilder` content through `NSHostingMenu`, so a list row
+naming the same repository will be able to share the chip's menu view
+(`RepoContextMenu`); it is hosted outside the window's hierarchy, so its items
+take what they need from captured values, never `@Environment`. The same anchor sets
+`NSToolbar.allowsDisplayModeCustomization = false`, which is what leaves the sync
+button and the bar around the chips with no menu. It has to be the anchor: SwiftUI installs a
+**new** `NSToolbar`, with the flag back on, every time the repository screen replaces
+Welcome, and a window hook on the screen fires before that toolbar exists, so it sets
+the flag on nothing — while an anchor lives inside a toolbar item and so only ever reaches
+a window that has its toolbar. Content changes (a longer branch name, the update chip
+appearing, the sync button switching between plain and split) keep the same instance. The
+code is public API only; what it depends on without a promise is SwiftUI hosting toolbar
+items as real views, and a future SDK breaking that would leave the chips with no menu
+rather than a wrong one. It was proven in a scratchpad replica of this toolbar, with
+synthetic clicks and `NSMenu.didBeginTrackingNotification`, before it reached the app —
+the harness's own lesson worth keeping: capture Swift `print` under a pty, since C `stdout`
+is fully buffered off a TTY and a `SIGTERM` discards it.
+
 The ladder also reaches the menu bar. Its states live in `SyncProposal`, core's answer
 with its presentation in `SyncFace.swift`, which two views read: `SyncControls` renders it
 and runs every state through one `perform()` — the button face and the split button's
@@ -1386,6 +1421,8 @@ Alongside these are smaller purpose-built stores: **`networkOps`** holds the use
 **Which surface owns `Escape` is a registration, not a list** ([actions/overlayStack.ts](apps/tauri-app/src/lib/actions/overlayStack.ts)). Every dismissable surface carries `use:dismissOnEscape={…}` on its root, which pushes its dismissal onto a module-level LIFO for the element's lifetime; the two window key handlers (`App.svelte` pre-main, `MainLayout.svelte` in `main`) call `dismissTopOverlay()` and do nothing else with the key. Registration order *is* stacking order, because a dialog opened from a popover mounts after it. What it replaced was two hand-written lists of overlay flags — one per host, already drifted — that closed **every** overlay at once, so dismissing a confirmation took the popover that raised it as well; the surfaces that worked around this by answering `Escape` on their own element and calling `stopPropagation()` no longer need to, and the context menu, which did neither, used to close itself *and* the popover underneath. A surface mid-operation registers a dismissal that declines, so `Escape` is consumed rather than falling through to something that would close. The same stack publishes `overlayDepth`, which is what the app's chords read before firing: the old hand-kept `modalOpen` had never been told about four of the dialogs, so ⌘↩ fired a commit straight through the embedded-repo confirmation asking about that commit.
 
 **The two pickers hang from the chips that open them, and the geometry lives in one place.** `Header.svelte` binds its repo and branch chip elements out through two `$bindable` props, and `MainLayout.svelte` measures them *when a picker opens* — `placeUnder` reads the chip's rect and returns a `Placement` (`left`, `top`, the arrow's x for the repo popover, and the room left under the chip as a `maxHeight`) — rather than being handed a rect by the click, because ⌘B opens the branch menu with no click to measure from and one anchoring path is better than two. The repo popover takes `NSPopover`'s geometry (centred on the chip, an arrow that stays on the chip's centre when the viewport clamps the box) and the branch popover a pull-down menu's (leading edges aligned, no arrow), each hosted in a `.popover-frame` that owns the width and hands the dropdown `--popover-max-height`; the arrow is a `::before` on that frame, since the dropdowns clip their own overflow. The layer under them is a transparent click-catcher, not `--overlay-backdrop`: a popover is not modal. A `resize` bumps a version the two placements derive from, so an open picker follows its chip. A frame with no chip to measure — none today, since both are reachable only from a chip — falls back to the layer's centring.
+
+**The chips' right-click menus are the header's, and the header swallows every other one.** Each chip's `oncontextmenu` cancels the event and opens the shared `ContextMenu` at the pointer with `chipMenuItems`, derived for the chip that was clicked from the same values the chips draw — `repoName` for *Copy Repo Name*, so the item copies the words under the pointer, and the live `status.branch` for *Copy Branch Name*, which core leaves empty on a detached `HEAD`; the item is then disabled, with *HEAD is detached* as its hover reason. A copy that fails is logged and reported through `reportNotice`, like the header's other hand-offs. The `<header>` itself cancels every other `contextmenu` event through a listener attached in an `$effect` — not an `oncontextmenu` attribute, which Svelte's a11y check reads as an interaction wanting a role, when all it does is take the webview's own menu (*Reload*) away from the bar. The header is also `user-select: none`: WebKit selects the word under the pointer on a right-click, which would leave a chip's label highlighted behind its menu, and nothing in a toolbar is text to select.
 
 Both diff panes — the Changes tab's and the commit detail's — render through **`SeamlessDiffPane`**, a wrapper whose only job is the loading treatment: it dims its children and lays a spinner over them once the load outlives the slow threshold, and never unmounts them. The panes are the same pane twice and the rule had been written twice; the old shape swapped the whole thing for a "Loading diff…" line, discarding the rendered rows, their syntax tokens and the scroll position on every slow load, including the ones that came back identical. The loader stopped nulling the payload at the threshold to match.
 

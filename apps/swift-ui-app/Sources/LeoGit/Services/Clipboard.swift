@@ -6,7 +6,8 @@ import AppKit
 /// new value is added to whatever the previous owner declared, and readers can
 /// pick up the stale flavour. Wrapping it here keeps that pairing from being
 /// re-derived at each call site (the copy items in the file and commit row
-/// menus, and the commit header's copy-SHA button).
+/// menus and the toolbar chips' menus, and the commit header's copy-SHA
+/// button).
 enum Clipboard {
     static func copy(_ text: String) {
         NSPasteboard.general.clearContents()

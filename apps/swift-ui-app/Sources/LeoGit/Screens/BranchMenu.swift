@@ -113,6 +113,14 @@ struct BranchMenu: View {
         // it is the items inside that refuse to start (`BranchCommand.isBlocked`).
         .disabled(store.isRunning)
         .help(isDetached ? "Detached HEAD — pick a branch to return to" : "Switch branch")
+        // Right-click acts on the branch you are on; left-click browses the
+        // others. The live name, like every item here that acts on something:
+        // empty while detached or before the first read, and the item stays
+        // in place greyed out rather than copying a label that is not a name.
+        .toolbarContextMenu {
+            Button("Copy Branch Name") { Clipboard.copy(currentBranch) }
+                .disabled(currentBranch.isEmpty)
+        }
         .sheet(isPresented: $isCreating) {
             CreateBranchSheet(store: store, repoPath: repoPath) {
                 await onWorkingTreeChanged()

@@ -54,6 +54,11 @@ struct RepoSwitcher: View {
         // first, then the detail.
         .font(.body.weight(.semibold))
         .help("Switch repository")
+        // Right-click acts on the open repository; left-click browses the
+        // others.
+        .toolbarContextMenu {
+            RepoContextMenu(repoPath: activePath, displayName: identifiers.label(of: activePath))
+        }
         // `label` prefers the remote's repository name and falls back to the
         // folder's, and the remote half is a `git config` read. Nothing else
         // asks for the *open* repository's — `RepoPickerList` primes the rows
