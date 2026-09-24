@@ -3596,6 +3596,7 @@
     width: 1px;
     background: var(--border-inactive);
     cursor: col-resize;
+    -webkit-user-select: none;
     user-select: none;
     transition: background 120ms ease;
   }
@@ -3627,6 +3628,7 @@
     height: 4px;
     background: transparent;
     cursor: row-resize;
+    -webkit-user-select: none;
     user-select: none;
     flex-shrink: 0;
     /* The rule above the composer belongs to the handle, not to the composer:

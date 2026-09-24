@@ -553,6 +553,7 @@
      like the rest of the diff. */
   .hunk-header.interactive {
     cursor: pointer;
+    -webkit-user-select: none;
     user-select: none;
   }
 
@@ -605,6 +606,7 @@
     padding: 0 4px 0 0;
     color: var(--text-muted);
     font-size: 11px;
+    -webkit-user-select: none;
     user-select: none;
     flex-shrink: 0;
   }
@@ -622,6 +624,7 @@
     justify-content: center;
     width: 16px;
     flex-shrink: 0;
+    -webkit-user-select: none;
     user-select: none;
   }
 

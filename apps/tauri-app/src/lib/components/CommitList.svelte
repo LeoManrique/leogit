@@ -910,6 +910,7 @@
     background: transparent;
     cursor: pointer;
     transition: background 100ms ease;
+    -webkit-user-select: none;
     user-select: none;
     overflow: hidden;
   }

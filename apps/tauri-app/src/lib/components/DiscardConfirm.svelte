@@ -174,6 +174,7 @@
     color: var(--status-red);
     white-space: pre-wrap;
     word-break: break-word;
+    -webkit-user-select: text;
     user-select: text;
     max-height: 120px;
     overflow-y: auto;

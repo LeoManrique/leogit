@@ -113,6 +113,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     min-width: 0;
+    -webkit-user-select: text;
     user-select: text;
   }
 
@@ -130,6 +131,7 @@
     color: var(--text-muted);
     font-family: var(--font-mono);
     font-size: 11px;
+    -webkit-user-select: text;
     user-select: text;
   }
 

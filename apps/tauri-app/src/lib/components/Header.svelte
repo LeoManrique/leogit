@@ -928,8 +928,10 @@
     /*
       Nothing in a toolbar is text to select, as in the native client's. WebKit
       selects the word under the pointer on a right-click, so without this,
-      opening a chip's menu leaves its label highlighted.
+      opening a chip's menu leaves its label highlighted. Shipping WebKit reads
+      only the prefixed property; the unprefixed one is for WebView2.
     */
+    -webkit-user-select: none;
     user-select: none;
 
     /*
