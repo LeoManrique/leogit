@@ -2398,7 +2398,7 @@ On a **non-zero exit** the CLI is inconsistent about where the failure lands: AP
 
 Two robustness measures around the spawn: the prompt is streamed on a separate task (so a large diff can't deadlock against the child filling its stdout pipe before we drain it), and the child is `kill_on_drop` so a slow CLI doesn't outlive a timeout as an orphan. The spawn also sets `CLAUDE_CODE_MAX_RETRIES = 2`: by default the CLI retries a transient overload with backoff for *minutes*, far past our timeout, so the user only ever saw "timed out"; the cap makes it fail in seconds with the real error while still riding out a single blip.
 
-**Ollama** posts to `<base_url>/api/generate` with `{model, prompt, stream: false, format: "json"}`. A 404 is translated to a friendly `ollama pull <model>` hint.
+**Ollama** posts to `<base_url>/api/generate` with `{model, prompt, stream: false, format: "json", options: {num_ctx}}`. `num_ctx` is sized to the prompt by `ollama_num_ctx` — about 2.5 bytes per token plus 4096 for the reply, rounded up to a power of two between 4096 and 32768 — because a prompt longer than Ollama's 4096-token default is cut from the front without an error, leaving a message about only the last files of the diff. A 404 is translated to a friendly `ollama pull <model>` hint.
 
 **Provider resolution.** `ai::provider_config` maps the user's `Config` onto the
 `AiProviderConfig` a request needs, and `load_ai_config` is what each client

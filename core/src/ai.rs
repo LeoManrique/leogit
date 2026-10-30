@@ -76,6 +76,28 @@ fn build_prompt(diff: &str) -> String {
     COMMIT_PROMPT_TEMPLATE.replace(DIFF_PLACEHOLDER, diff)
 }
 
+// Ollama's default context window is 4096 tokens, and a longer prompt is cut
+// from the front without any error: the model then describes only the last few
+// files of the diff. So each request sizes the window to its prompt. Measured
+// on gemma4, qwen2.5-coder and qwen3.5, the prompt runs 2.7–3.7 bytes per
+// token; counting 2.5 errs on the large side, since too small a window is the
+// failure. The reply gets its own room, enough for a thinking model's reasoning
+// as well as the JSON. Sizes are rounded to a power of two because Ollama
+// reloads the model whenever `num_ctx` changes, and the cap keeps a huge diff
+// from asking for more memory than a local GPU has.
+const OLLAMA_DEFAULT_CTX: u32 = 4096;
+const OLLAMA_MAX_CTX: u32 = 32_768;
+const OLLAMA_REPLY_TOKENS: u32 = 4096;
+
+fn ollama_num_ctx(prompt: &str) -> u32 {
+    let prompt_tokens = u32::try_from(prompt.len() * 2 / 5).unwrap_or(u32::MAX);
+    prompt_tokens
+        .saturating_add(OLLAMA_REPLY_TOKENS)
+        .checked_next_power_of_two()
+        .unwrap_or(OLLAMA_MAX_CTX)
+        .clamp(OLLAMA_DEFAULT_CTX, OLLAMA_MAX_CTX)
+}
+
 /// # Errors
 /// Returns a human-readable message when the diff is empty or oversized, the
 /// provider is unknown or unreachable, or the provider's response can't be
@@ -474,12 +496,14 @@ async fn generate_ollama(diff: &str, config: &AiProviderConfig) -> Result<Commit
         .as_deref()
         .unwrap_or("tavernari/git-commit-message:latest");
     let prompt = build_prompt(diff);
+    let num_ctx = ollama_num_ctx(&prompt);
 
     let body = serde_json::json!({
         "model": model,
         "prompt": prompt,
         "stream": false,
         "format": "json",
+        "options": { "num_ctx": num_ctx },
     });
 
     let client = reqwest::Client::builder()
@@ -596,6 +620,19 @@ mod tests {
         let prompt = build_prompt("+added line {diff}");
         // A placeholder inside the diff itself is left alone, not expanded again.
         assert!(prompt.contains("```diff\n+added line {diff}\n```"));
+    }
+
+    // A window smaller than the prompt is the silent failure: Ollama drops the
+    // start of the diff and the message covers only its tail.
+    #[test]
+    fn ollama_window_fits_the_prompt_and_the_reply() {
+        // A small diff still leaves room for a thinking model's reasoning.
+        assert_eq!(ollama_num_ctx(&build_prompt("+one line")), 8192);
+        // ~20 KB of diff, measured at up to 5,947 prompt tokens, fits whole.
+        let prompt = build_prompt(&"+".repeat(19_000));
+        assert_eq!(ollama_num_ctx(&prompt), 16_384);
+        // Never more than the cap, however large the diff.
+        assert_eq!(ollama_num_ctx(&"x".repeat(OLLAMA_MAX_DIFF)), OLLAMA_MAX_CTX);
     }
 
     // The whole point of reading the payload rather than the exit code: the
