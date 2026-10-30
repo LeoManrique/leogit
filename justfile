@@ -104,7 +104,7 @@ bundle *flags:
 release *version:
     python3 scripts/deploy_release.py {{version}}
 
-# Install a locally built Release build (macOS: /Applications, Linux: ~/.local/bin)
+# Install a locally built Release build (macOS: /Applications, Linux: ~/.local/bin, Windows: runs the NSIS installer)
 install-local *flags:
     python3 scripts/install_local.py {{flags}}
 

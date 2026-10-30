@@ -66,24 +66,14 @@ const OLLAMA_MAX_DIFF: usize = 52_428_800; // 50MB
 // the real error while still riding out a single blip.
 const CLAUDE_MAX_RETRIES: u32 = 2;
 
+// The prompt lives in its own file so tools outside the app (the
+// commit-message-tester) can send the exact text the app sends. `{diff}` marks
+// where the diff goes.
+const COMMIT_PROMPT_TEMPLATE: &str = include_str!("commit_prompt.txt");
+const DIFF_PLACEHOLDER: &str = "{diff}";
+
 fn build_prompt(diff: &str) -> String {
-    format!(
-        "You are a Git commit message generator. Analyze the provided git diff and generate a commit message.\n\n\
-         Return ONLY valid JSON in this exact format:\n\
-         {{\n\
-           \"title\": \"A 50 character or less summary in imperative mood\",\n\
-           \"description\": \"A detailed description of what changed and why\"\n\
-         }}\n\n\
-         Rules:\n\
-         - The title MUST be 50 characters or less and use the imperative mood (e.g. \"Add\", \"Fix\", \"Update\")\n\
-         - The description should explain what changed and why, but keep it concise, high level, and not so technical; avoid over-explaining\n\
-         - If multiple totally unrelated things have changed, divide them with bulletpoints\n\
-         - Write the description in third person and omit articles (\"a\", \"an\", \"the\")\n\
-         - Return ONLY the JSON object, no markdown fences, no extra text\n\n\
-         Git diff:\n\
-         ```diff\n{diff}\n```\n\n\
-         Generate the commit message as JSON:"
-    )
+    COMMIT_PROMPT_TEMPLATE.replace(DIFF_PLACEHOLDER, diff)
 }
 
 /// # Errors
@@ -596,6 +586,17 @@ fn parse_commit_message_text(text: &str) -> Result<CommitMessage, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The template is a plain file other tools also read, so an edit that drops
+    // or duplicates the placeholder would otherwise only show up as a model
+    // writing a message for no diff.
+    #[test]
+    fn prompt_template_holds_the_diff_exactly_once() {
+        assert_eq!(COMMIT_PROMPT_TEMPLATE.matches(DIFF_PLACEHOLDER).count(), 1);
+        let prompt = build_prompt("+added line {diff}");
+        // A placeholder inside the diff itself is left alone, not expanded again.
+        assert!(prompt.contains("```diff\n+added line {diff}\n```"));
+    }
 
     // The whole point of reading the payload rather than the exit code: the
     // signed-out answer is a successful run that says `loggedIn: false`.

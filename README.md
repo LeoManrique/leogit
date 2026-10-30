@@ -47,7 +47,7 @@ just bench <repo> # time the core git operations against a real repo, with spawn
 just mac-run     # build and launch the native macOS app (needs Xcode + xcodegen)
                  # add --no-build to relaunch the last build without rebuilding
 just bundle      # build this platform's release bundle
-just install-local # install a Release build from this tree (macOS + Linux)
+just install-local # install a Release build from this tree
 just release     # build and publish a GitHub release; pass x.y.z to bump first
 ```
 

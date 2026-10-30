@@ -2383,7 +2383,7 @@ A root that doesn't resolve is skipped rather than failing the scan, so every ru
 
 ## AI layer
 
-Both providers share `build_prompt` — a strict JSON-only instruction with rules for imperative-mood, 50-char-or-less titles. Responses are parsed by `parse_commit_message_text` which:
+Both providers share `build_prompt` — a strict JSON-only instruction with rules for imperative-mood, 50-char-or-less titles. Its text is `core/src/commit_prompt.txt`, compiled in with `include_str!`, with `{diff}` marking where the diff goes; it is a plain file so tools outside the app (the separate commit-message-tester, which compares Ollama models on this prompt) send exactly what the app sends. Responses are parsed by `parse_commit_message_text` which:
 
 1. Strips markdown code fences (```json … ```).
 2. Tries `serde_json::from_str` and accepts any of `title`/`summary`/`subject`/`message` and `description`/`body`/`details`.
@@ -2640,7 +2640,7 @@ Every subprocess those modules spawn goes through `_common.py`'s `run`, `capture
 |---|---|
 | `build.py` | Builds this platform's release bundle. `--client tauri` forces the Tauri build, which on macOS is a supported client that no release publishes — the flag is how that path stays exercised. |
 | `deploy_release.py` | The full release: validate → resolve/bump version → tag → build → package → upload. |
-| `install_local.py` | Installs this tree's Release build where the platform's users launch it from: `/Applications` on macOS, `~/.local/bin` plus icon and desktop entry on Linux. macOS and Linux only — a Windows install is an NSIS installer to run, not files to place. |
+| `install_local.py` | Installs this tree's Release build where the platform's users launch it from: `/Applications` on macOS, `~/.local/bin` plus icon and desktop entry on Linux. On Windows it runs the release's NSIS installer with `/S`, so the result is the downloaded install — same folder (read back from the HKCU uninstall entry, since NSIS reuses an earlier install's choice), Start-menu entry and uninstall record. A running copy is stopped first, on Windows matched by the installed executable's path so a `tauri dev` build is left alone. |
 | `cleanup_releases.py` | Deletes every release older than the latest, and their tags. |
 
 `just bundle`, `just release`, `just install-local` and `just cleanup-releases` are thin wrappers.

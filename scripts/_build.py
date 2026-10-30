@@ -29,6 +29,7 @@ from _common import (
     MAC_DIR,
     TARGET_DIR,
     TAURI_DIR,
+    WINDOWS_EXE_NAME,
     Client,
     artifact_name,
     capture,
@@ -40,6 +41,7 @@ from _common import (
     run,
     success,
     warn,
+    windows_install_dir,
 )
 from _version import read_version
 
@@ -338,7 +340,8 @@ def built_version(built: Path) -> str:
     """
     if host_os() == "macOS":
         return bundle_version(built)
-    # Tauri names the AppImage `<productName>_<version>_<arch>.AppImage`.
+    # Tauri names the AppImage `<productName>_<version>_<arch>.AppImage` and the
+    # NSIS installer `<productName>_<version>_<arch>-setup.exe`.
     parts = built.stem.split("_")
     if len(parts) < 3 or not parts[1][:1].isdigit():
         error(f"Could not read the version from {built.name}")
@@ -380,12 +383,33 @@ def install_build(built: Path) -> Path:
     """Install `built` where this platform's users launch LeoGit from.
 
     "Install" means a different thing on each: a bundle in `/Applications` on
-    macOS, and on Linux an AppImage plus the three files that make it reachable
-    — a `PATH` wrapper, an icon and a desktop entry.
+    macOS; on Linux an AppImage plus the three files that make it reachable —
+    a `PATH` wrapper, an icon and a desktop entry; and on Windows, running the
+    NSIS installer, which is the only thing that knows how to place itself.
     """
-    if host_os() == "macOS":
+    target_os = host_os()
+    if target_os == "macOS":
         return _install_macos_bundle(built)
+    if target_os == "windows":
+        return _install_nsis(built)
     return _install_appimage(built)
+
+
+def _install_nsis(installer: Path) -> Path:
+    """Run the NSIS installer silently and return the executable it installed.
+
+    The same installer a user downloads, run with `/S` rather than clicked
+    through, so a local install is the release install: same folder, same
+    Start-menu entry, same uninstall record. It reuses whichever folder an
+    earlier install chose, which is why the result is read back from the
+    uninstall entry afterwards instead of assumed.
+    """
+    run([str(installer), "/S"], what="NSIS installer")
+    exe = windows_install_dir() / WINDOWS_EXE_NAME
+    if not exe.is_file():
+        error(f"The installer finished but {exe} does not exist")
+    success(f"Installed: {exe}")
+    return exe
 
 
 def _install_macos_bundle(source: Path) -> Path:

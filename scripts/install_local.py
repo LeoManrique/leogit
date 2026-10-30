@@ -13,10 +13,9 @@ is released.
 one the platform does: the bundle goes to /Applications on macOS; on Linux the
 AppImage goes to ~/.local/bin beside the `leogit` wrapper that launches it, with
 an icon and a desktop entry so the app menu lists it. Both land exactly where
-install.sh puts them, so whichever installer ran last is the copy you have.
-
-Windows is not covered: its install is an NSIS installer, which is a program to
-run rather than files to place.
+install.sh puts them, so whichever installer ran last is the copy you have. On
+Windows the NSIS installer the release ships is run silently, so it installs
+over the downloaded copy the same way.
 """
 
 from __future__ import annotations
@@ -43,9 +42,10 @@ from _common import (
     Steps,
     error,
     finish,
-    require_os,
+    host_os,
     stop_running_app,
     success,
+    windows_install_dir,
 )
 from _version import read_version, report
 
@@ -60,13 +60,16 @@ def existing_build(client: Client, target_os: str) -> Path:
         return TAURI_BUNDLE_DIR / "macos" / BUNDLE_NAME[Client.TAURI]
     # Named by Tauri after the version it built, so it cannot be spelled out
     # here the way the macOS bundles can.
-    images = sorted((TAURI_BUNDLE_DIR / "appimage").glob("*.AppImage"))
-    if len(images) != 1:
+    folder, pattern = (
+        ("nsis", "*-setup.exe") if target_os == "windows" else ("appimage", "*.AppImage")
+    )
+    found = sorted((TAURI_BUNDLE_DIR / folder).glob(pattern))
+    if len(found) != 1:
         error(
-            f"Expected exactly one *.AppImage in {TAURI_BUNDLE_DIR / 'appimage'}, "
-            f"found {len(images)}. Re-run without --no-build."
+            f"Expected exactly one {pattern} in {TAURI_BUNDLE_DIR / folder}, "
+            f"found {len(found)}. Re-run without --no-build."
         )
-    return images[0]
+    return found[0]
 
 
 # What each client's build compiles, for the freshness check in step 2. Scoped
@@ -122,7 +125,11 @@ def newer_source(built_at: float, client: Client) -> Path | None:
 
 def destination(target_os: str) -> str:
     """Where step 4 is about to write, for its own heading."""
-    return str(APPLICATIONS) if target_os == "macOS" else str(APPIMAGE_DEST.parent)
+    if target_os == "macOS":
+        return str(APPLICATIONS)
+    if target_os == "windows":
+        return str(windows_install_dir())
+    return str(APPIMAGE_DEST.parent)
 
 
 def main() -> None:
@@ -138,11 +145,11 @@ def main() -> None:
         "--client",
         choices=[Client.TAURI],
         type=Client,
-        help="build the Tauri client explicitly (already the only client on Linux)",
+        help="build the Tauri client explicitly (already the only client on Linux and Windows)",
     )
     args = parser.parse_args()
 
-    target_os = require_os("macOS", "linux")
+    target_os = host_os()
     client = args.client or RELEASE_CLIENT[target_os]
 
     # ── Step 1: Determine version ──
@@ -188,6 +195,11 @@ def main() -> None:
             f"LeoGit {version} installed",
             f'Open it from /Applications, or with: open "{installed}"',
             "Terminal command: leogit [dir] — install.sh is what writes it",
+        )
+    elif target_os == "windows":
+        finish(
+            f"LeoGit {version} installed",
+            f'Open it from the Start menu, or run: "{installed}"',
         )
     else:
         finish(

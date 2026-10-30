@@ -32,10 +32,15 @@ from typing import NoReturn
 # stream. Python block-buffers its own output as soon as that stream is a pipe,
 # so without this a redirected run comes back with every step header collected
 # at the end, after the build log they were meant to introduce.
-try:
-    sys.stdout.reconfigure(line_buffering=True)
-except (AttributeError, OSError):
-    pass
+#
+# UTF-8 on both streams for the same reason: on Windows a redirected stream
+# falls back to the ANSI code page (cp1252), which has no ✓/✗/⚠, so the first
+# status line raised UnicodeEncodeError. A no-op where UTF-8 is already used.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(line_buffering=True, encoding="utf-8")
+    except (AttributeError, OSError):
+        pass
 
 # Windows terminals need ANSI enabling; macOS and Linux interpret the escapes
 # natively. `colorama`-free: `os.system("")` is enough to flip the console mode
@@ -117,6 +122,29 @@ APPIMAGE_DEST = LOCAL_BIN / "leogit.AppImage"
 LAUNCHER_DEST = LOCAL_BIN / "leogit"
 ICON_DEST = Path.home() / ".local" / "share" / "icons" / "leogit.png"
 DESKTOP_DEST = Path.home() / ".local" / "share" / "applications" / "leogit.desktop"
+
+# The uninstall entry Tauri's NSIS installer writes, keyed by `productName`.
+# A per-user install, so it lives under HKCU and needs no elevation to read.
+WINDOWS_UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\leogit"
+WINDOWS_EXE_NAME = "leogit.exe"
+
+
+def windows_install_dir() -> Path:
+    """Where LeoGit is installed on this Windows machine.
+
+    Read from the installer's own uninstall entry rather than assumed: NSIS
+    reuses the folder a previous install chose, so the per-user default
+    (`%LOCALAPPDATA%\\leogit`) is only the answer when nothing is installed yet.
+    """
+    import winreg  # noqa: PLC0415 — Windows-only module
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, WINDOWS_UNINSTALL_KEY) as key:
+            location, _ = winreg.QueryValueEx(key, "InstallLocation")
+        # Stored quoted, the way an uninstall entry's paths conventionally are.
+        return Path(str(location).strip('"'))
+    except OSError:
+        return Path(os.environ["LOCALAPPDATA"]) / "leogit"
 
 
 class Client(StrEnum):
@@ -276,18 +304,6 @@ def require_gh_auth() -> None:
     success("gh authenticated")
 
 
-def require_os(*supported: str) -> str:
-    """Stop unless this machine is one of `supported`; returns [`host_os`].
-
-    Named platforms rather than a boolean so the refusal can say which ones
-    would have worked.
-    """
-    current = host_os()
-    if current not in supported:
-        error(f"This script runs on {' and '.join(supported)}, not {current}")
-    return current
-
-
 # ── Git ──
 def git(*args: str, what: str) -> None:
     run(["git", *args], cwd=REPO_ROOT, what=what)
@@ -326,38 +342,67 @@ def _running_app_patterns() -> list[str]:
     return [f"^{re.escape(str(APPIMAGE_DEST))}", r"^/tmp/\.mount_leogit"]
 
 
+def _running_instances() -> list[str]:
+    """What is running now, in the form [`_stop_instances`] takes.
+
+    `pgrep -f` patterns that still match on macOS and Linux. On Windows, the
+    PIDs of the *installed* executable — matched by path, not image name, so a
+    `tauri dev` build (also `leogit.exe`) is left alone.
+    """
+    if host_os() == "windows":
+        exe = str(windows_install_dir() / WINDOWS_EXE_NAME).replace("'", "''")
+        _, pids = capture(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                f"Get-Process -Name leogit -ErrorAction SilentlyContinue"
+                f" | Where-Object {{ $_.Path -eq '{exe}' }}"
+                f" | ForEach-Object {{ $_.Id }}",
+            ]
+        )
+        return pids.split()
+    return [
+        pattern
+        for pattern in _running_app_patterns()
+        if subprocess.run(["pgrep", "-f", pattern], capture_output=True, check=False).returncode
+        == 0
+    ]
+
+
+def _stop_instances(instances: list[str], *, force: bool) -> None:
+    """Ask each instance to quit, or with `force`, kill it outright.
+
+    `taskkill` without `/F` posts WM_CLOSE to the app's windows, the same as
+    clicking the close button — Windows' counterpart to SIGTERM.
+    """
+    for instance in instances:
+        if host_os() == "windows":
+            quietly(["taskkill", *(["/F"] if force else []), "/PID", instance])
+        else:
+            quietly(["pkill", "-KILL" if force else "-TERM", "-f", instance])
+
+
 def stop_running_app() -> None:
     """Stop any running copy before an install overwrites what it is running.
 
     A running app holds its executable open. On macOS, overwriting the bundle
     around it leaves a half-old install until the next launch; on Linux it is
     worse, because the AppImage file *is* the mounted filesystem the running app
-    is still reading pages from.
+    is still reading pages from; on Windows the installer cannot replace an
+    executable that is running at all.
     """
-    patterns = _running_app_patterns()
-
-    def running() -> list[str]:
-        return [
-            pattern
-            for pattern in patterns
-            if subprocess.run(
-                ["pgrep", "-f", pattern], capture_output=True, check=False
-            ).returncode
-            == 0
-        ]
-
-    if not running():
+    if not _running_instances():
         success("No running instances")
         return
 
-    for pattern in running():
-        quietly(["pkill", "-TERM", "-f", pattern])
+    _stop_instances(_running_instances(), force=False)
     for _ in range(16):
-        if not running():
+        if not _running_instances():
             break
         time.sleep(0.5)
-    if stubborn := running():
-        warn(f"Force-killing {len(stubborn)} stubborn process group(s) (graceful stop timed out)")
-        for pattern in stubborn:
-            quietly(["pkill", "-KILL", "-f", pattern])
+    if stubborn := _running_instances():
+        warn(f"Force-killing {len(stubborn)} stubborn instance(s) (graceful stop timed out)")
+        _stop_instances(stubborn, force=True)
     success("Stopped the running app")
