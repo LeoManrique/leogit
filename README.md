@@ -1,110 +1,45 @@
 # leogit
 
-A calm desktop Git client over one Rust core: native SwiftUI on macOS, Tauri 2 and Svelte 5 on Windows and Linux. Designed to get Git things done quickly.
+A calm Git app for Mac, Windows and Linux. It's for people who already know Git and want the everyday stuff to be quick.
 
-## What it does
+## What you can do
 
-- **Stage and commit** via a checkbox file list with live diffs — unified or side by side, switched from the diff's own header and remembered (native syntect syntax highlighting, optional whitespace-hidden). Shift-click or shift-arrow to select several rows, Space to include or exclude the lot, and a tri-state header checkbox that says how many of them are going in. Right-click a file to discard it — one row or a whole selection, and never-committed files go to the Trash, not oblivion — add it or its extension to `.gitignore`, copy its path, or hand it to Finder.
-- **AI commit messages** generated from the selected diff via the local `claude` CLI or a self-hosted Ollama instance. Each provider keeps its own model, so switching between them never needs a Settings trip.
-- **Browse history** with a virtualized commit list — keyboard-navigable, the newest commit selected for you — plus per-commit file diffs, SHA and tag copy, and checkout of any past commit (detached HEAD). Right-click the last commit to amend it (its message and co-authors reload into the composer) or undo it, keeping its changes. Select one commit or several — shift-click, ⌘-click, not necessarily adjacent — and **cherry-pick** them onto another branch: they land oldest first, you end up on that branch with the new commits selected, and a pick that conflicts is continued or aborted like any other stopped operation. Select two or more and **squash** them into the oldest under a message you edit, pre-filled from theirs — the commits between are replayed on top, a conflict is continued or aborted the same way, and the sync button offers the force push if they were already pushed. **Reorder** one commit or several from the same menu: an insertion line appears in the list, ↑ and ↓ choose where the commits go, ⏎ moves them there as one block and Esc backs out. Each of the three leaves an **Undo** under the header when it lands — straight away, or after a conflict you resolved and continued — good until the branch moves on: it puts the branch back on the very commits it had, and refuses rather than touch uncommitted work.
-- **Manage branches** from one menu in both clients — switch, create, delete, and **merge** (regular or squash, with a commit-count preview, conflicts reported as git wrote them). A merge, rebase, cherry-pick or revert that stops on a conflict — started here or in a terminal — is named in the header, continued from the composer once the files are resolved, and aborted from the branch menu. The list is re-read whenever the menu opens, so a branch made outside the app is there.
-- **Sync from one adaptive button** whose face is whatever the repository needs next — Publish, Publish Branch, Force Push, Pull, Push, Fetch — with both ahead-behind counts on it, live transfer progress (an in-button fill plus git's own `Writing objects… MiB/s` line in the header), and the same ladder on ⌘P. It proposes **Force Push instead of Pull after you amend or rebase pushed commits** — read from the branch's reflog, so a rewrite done in a terminal counts too — and a force push never removes a commit your branch did not once contain. Or **publish a remote-less repo to GitHub** in one click via the GitHub CLI.
-- **Embedded terminal** docked under the diff pane (⌃`), running the user's `$SHELL` in the repo directory — links open on ⌘/Ctrl-click, `vim` and `tmux` can set the system clipboard through OSC 52 (never read it), and nothing the shell prints is lost, including a shell that dies on its own startup file.
-- **Auto-fetch** + a status poll that keeps the UI in sync with anything the user does in another terminal, on a cadence that follows the window: 2 s while you are in it, slower while you are not, and nothing at all published when nothing changed.
-- **Light / dark themes**, a layout and window frame that reopen where you left them, and a TOML config in the platform config dir (`~/Library/Application Support/leogit/` on macOS, `~/.config/leogit/` on Linux) — edited from a Settings window in either client that applies each change as you make it, with no Save button and nothing to lose by closing.
+- See your changes, pick what goes in, and commit
+- Let AI write the commit message, using Claude or your own Ollama
+- Browse history, then cherry-pick, squash or reorder commits, with an undo if you change your mind
+- Switch, create, merge and delete branches
+- Push, pull and publish to GitHub from one button that figures out what's needed next
+- Use a terminal built right into the window
 
-## Requirements
-
-- `git` 2.45 or newer and (optionally) `gh` in `$PATH`.
-- macOS 26+, Ubuntu 20.04+, or Windows 10+.
-- Node.js 18+ and `pnpm` for development.
-- Rust 1.85+ for building from source (the workspace is on the 2024 edition).
+It runs real Git under the hood, so you can jump between the app and your own terminal whenever you like.
 
 ## Install
+
+On Mac or Linux, paste this in a terminal:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/LeoManrique/leogit/main/scripts/install.sh | bash
 ```
 
-Auto-detects your platform: installs `LeoGit.app` into `/Applications` on macOS, or the AppImage into `~/.local/bin` with an app-menu launcher on Linux (arm64 or amd64; needs FUSE 2 — on Arch, `sudo pacman -S fuse2`). Or grab a `.zip` / `.AppImage` from the [latest release](https://github.com/LeoManrique/leogit/releases/latest).
+Run it again whenever you want to upgrade. It also adds a `leogit` command, so you can open a project straight from your terminal.
 
-A release holds one artifact per platform, each built from whichever client covers it: **macOS runs the native SwiftUI app, Linux and Windows run the Tauri one.** Same version, same features — see [FRONTEND.md](FRONTEND.md) §8 for the handful of places they present the same behaviour differently.
+On Windows, or if you'd rather install by hand, grab a download from the [latest release](https://github.com/LeoManrique/leogit/releases/latest).
 
-Re-run the same command to upgrade. leogit checks GitHub Releases at launch and, when a newer version exists, shows an **Update** chip in the header that hands you that command (or the installer download on Windows) — nothing downloads or restarts itself.
+## What you need
 
-The installer also adds a `leogit [dir]` shell command to your shell config (zsh / bash / fish auto-detected). Run `leogit` to open the current repo or `leogit <path>` for another — it focuses the running window and switches repos instead of opening a duplicate, and running it from a subfolder opens the repo that contains it. Point it at a folder that isn't under version control yet and it offers to `git init` there and open the result. Open a new terminal (or `source` your shell rc) after installing to pick it up.
+- macOS 26+, Ubuntu 20.04+, or Windows 10+
+- Git 2.45 or newer
+- FUSE 2 on Linux, which some distros don't include (on Arch: `sudo pacman -S fuse2`)
+- Optional: the [GitHub CLI](https://cli.github.com), to clone your repos and publish to GitHub from the app
 
-## Quick start
+## Learn more
 
-```bash
-just install     # pnpm install in apps/tauri-app
-just dev         # launch dev build with hot reload
-just build       # produce a debug bundle
-just check       # type-check (svelte-check + cargo check --workspace)
-just test        # cargo test --workspace
-just lint        # cargo clippy --workspace --all-targets (pedantic)
-just bench <repo> # time the core git operations against a real repo, with spawns per call
-just mac-run     # build and launch the native macOS app (needs Xcode + xcodegen)
-                 # add --no-build to relaunch the last build without rebuilding
-just bundle      # build this platform's release bundle
-just install-local # install a Release build from this tree
-just release     # build and publish a GitHub release; pass x.y.z to bump first
-```
-
-(Or run the underlying `pnpm tauri …` commands directly — see `justfile`.)
-
-> **Windows:** `just` runs every recipe through `sh`, which ships with [Git for Windows](https://git-scm.com/download/win). Add `C:\Program Files\Git\usr\bin` to your `PATH` (then open a new terminal) so `sh` — and the `rm`/`[`/inline-env bits the recipes use — resolve. Avoid the `bash` at `C:\Windows\System32\bash.exe`; that's the WSL launcher, not Git Bash.
-
-On first run the app scans the configured paths (default: `~/Dev`, `~/dev`, `~/code`, `~/Code`, `~/Projects`, `~/src`) for git repos, then either opens the previously used one or shows a picker.
-
-## Repository layout
-
-A Cargo workspace: all logic lives once in `core/`, and each client is a thin shell over it.
-
-```
-core/                    # leogit-core — Tauri-free Rust logic (git, diff, highlight,
-                         #   terminal, config, gh, ai, …). The one host seam is
-                         #   events::EventSink (streaming git progress + PTY output).
-apps/
-├── tauri-app/
-│   ├── src/             # Svelte 5 frontend (TypeScript, runes)
-│   └── src-tauri/       # Tauri host: one #[tauri::command] shim per core fn
-└── swift-ui-app/        # Native macOS client (SwiftUI, Swift 6)
-    ├── ffi/             # leogit-ffi: UniFFI bridge over the same core/
-    └── Sources/LeoGit/  # App, Screens, Stores, IPC, Design
-scripts/                 # release pipeline: build, deploy_release, install_local,
-                         #   cleanup_releases (Python, sharing _common/_version/_build)
-                         #   + install.sh, the curlable installer
-Cargo.toml               # workspace root (target/ and Cargo.lock live here)
-```
-
-The SwiftUI macOS client links the same `core/` via UniFFI, so both clients run identical
-logic — only the marshaling differs. It needs Xcode and `brew install xcodegen`; build it with
-`just mac-run`. It currently covers open a repo → changes with per-file syntax-highlighted
-diffs → commit (multi-select checkbox file list + message composer, AI-generated messages via the claude
-CLI or Ollama sharing the Tauri client's config) → branches (switch / create / delete
-and merge or squash-merge, plus continue / abort for any stopped operation) → sync (pull / push / fetch with
-live transfer progress, publish-branch first push, force-push-with-lease, and one-click
-publish of a remote-less repo to GitHub, plus auto-fetch, status polling, and resync
-on app re-activation) → history → an embedded terminal (SwiftTerm, ⌃` to toggle, fed by
-the same core PTY as the Tauri client, staying open with the exit code when the shell
-dies) → cloning (your GitHub repos via `gh` or any URL, with live progress) —
-with a repo picker — the same searchable list in the toolbar switcher and on the screen
-shown before a repository opens, rows named by their remote with dirty / pull / push
-indicators — that restores the last opened repo at launch, or opens a folder handed to it
-from outside (`open -a LeoGit <dir>`, the installed `leogit` command, a drop on the Dock
-icon, Finder's Open With — one that isn't a repository yet is offered one), a menu bar
-carrying the app's shortcuts, a release check with the same quiet
-update chip, and a native Settings window
-(⌘,) editing the same shared config. Every Tauri flow is ported, and it is what macOS
-releases ship. Building it also needs Xcode's Metal Toolchain component
-(`xcodebuild -downloadComponent MetalToolchain`, once) for SwiftTerm's shaders.
-
-The pre-monorepo design is preserved on the `legacy/classic-design` branch (== tag `v0.1.32`);
-recall it with `git worktree add ../leogit-classic legacy/classic-design`.
-
-See [DESIGN.md](DESIGN.md) for user-facing features and flows, [TECHNICAL.md](TECHNICAL.md) for architecture, [STYLE.md](STYLE.md) for the visual design language, [FRONTEND.md](FRONTEND.md) for the frontend contract shared by the Tauri and SwiftUI clients, and [ROADMAP.md](ROADMAP.md) for what's next.
+- [DESIGN.md](DESIGN.md): what the app does
+- [STYLE.md](STYLE.md): how it looks
+- [TECHNICAL.md](TECHNICAL.md): how it's built, and how to build it yourself
+- [FRONTEND.md](FRONTEND.md): what the Mac and Windows/Linux apps have to agree on
+- [ROADMAP.md](ROADMAP.md): what's next
 
 ## License
 
-MIT (see LICENSE if present).
+MIT

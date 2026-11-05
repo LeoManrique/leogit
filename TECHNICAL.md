@@ -1,2758 +1,484 @@
-# leogit — Technical Architecture
+# leogit: technical architecture
 
-Functional behavior lives in [DESIGN.md](DESIGN.md). Visual design language lives in [STYLE.md](STYLE.md); the frontend contract shared by the Tauri and SwiftUI clients lives in [FRONTEND.md](FRONTEND.md). This document covers **how the code is organized** and the decisions that pin it together.
+How the code is organized and the rules that hold it together. Behavior lives in [DESIGN.md](DESIGN.md), looks in [STYLE.md](STYLE.md), the cross-client contract in [FRONTEND.md](FRONTEND.md).
+
+The pre-monorepo design is at tag `v0.1.32`. Recall it with `git worktree add ../leogit-classic v0.1.32`.
 
 ## Stack
 
-| Layer | Choice | Notes |
+| Layer | Choice | Note |
 |---|---|---|
-| Shell | Tauri 2.11 | Native window, IPC, no Node runtime in production |
-| Native dialogs | `tauri-plugin-dialog` 2.7 + `@tauri-apps/plugin-dialog` | Folder picker for the Clone dialog's destination (`dialog:allow-open` capability) |
-| Single instance | `tauri-plugin-single-instance` 2.4 | Forwards a second `leogit <dir>` launch to the running window instead of duplicating it (see *Command-line repo opening*) |
-| Window frame | `tauri-plugin-window-state` 2.4 | Saves size and position on exit, restores them at launch; `tauri.conf.json`'s 1280×800 is the first-run default only. No frontend surface — the plugin is registered and never invoked |
-| Scrollbars | `tauri.conf.json` → `scrollBarStyle: "fluentOverlay"` | Overlay scrollbars are an engine property, not a CSS one, so the window asks for them rather than the stylesheet. Windows-only and inert elsewhere; it needs WebView2 Runtime ≥ 125.0.2535.41 and is silently ignored below that. Linux gets overlay from WebKitGTK by default. The CSS half is one `*` rule in `app.css` — see [STYLE.md](STYLE.md) *Spacing, radii, focus* |
-| Clipboard | `tauri-plugin-clipboard-manager` 2.3 + `@tauri-apps/plugin-clipboard-manager` | The terminal's OSC 52 writes only (`clipboard-manager:allow-write-text`). The app's own Copy actions stay on `navigator.clipboard`, which is fine for them: they are all raised by a click, and WebKit gates a programmatic write on exactly that — a shell asking for the clipboard has no click behind it |
-| Backend language | Rust 2024 | Async via tokio (`features = ["full"]`); logic in the framework-free `leogit-core` crate |
-| Frontend framework | Svelte 5 (runes) | `$state`, `$derived`, `$effect`, `$props` |
-| Frontend bundler | Vite 8 (rolldown) | `terser` for minified release builds; `@xterm/*` split into its own chunk (rolldown `codeSplitting` group) to keep every chunk under the 500 kB warning |
-| Type system | TypeScript 7 strict (native `tsc`) | `typescript` is npm-aliased to `@typescript/typescript6` — svelte-check/editors need the JS API until TS 7.1 ships the programmatic API. `$lib/*` alias points at `src/lib/*` |
-| Diff syntax | syntect 5.3 + two-face 0.5 (Rust) | Class-based output; theme colours live in `--syn-*` CSS variables |
-| Terminal UI (Tauri) | xterm.js 6 + FitAddon + WebLinksAddon | Black background, 12 px monospace; OSC 52 is hand-registered on `parser` (xterm ships no clipboard support) |
-| Terminal UI (native) | SwiftTerm 1.18 (SPM) | Same black 12 px monospace; fed by the core PTY over a UniFFI callback |
-| PTY | `portable-pty` 0.9 | Spawns user `$SHELL`, falls back to `/bin/zsh` / `cmd.exe` |
-| HTTP | `reqwest` 0.13 | Used only for Ollama |
-| Config | `toml` 1.1 + `directories` 6 + `serde_json` | the per-user config dir (`~/Library/Application Support/leogit` on macOS, `~/.config/leogit` on Linux, `%APPDATA%\leogit` on Windows): `config.toml`, `repos-state.json`, `shell-path-cache.json` |
-| Recoverable delete | `trash` 5 | "Discard" sends never-committed files to the OS trash instead of unlinking |
-| Native macOS client | SwiftUI, Swift 6 language mode | `apps/swift-ui-app`; macOS 26 deployment target, built with Xcode 26 |
-| Swift ↔ Rust bridge | UniFFI 0.32 | Static lib linked into the app bundle; core's types cross via `#[uniffi::remote]` |
-| macOS project generation | XcodeGen 2.46 | `project.yml` is the source of truth; the `.xcodeproj` is generated and gitignored |
-| Build tool | `just` | Wraps `pnpm tauri …` and the macOS `xcodegen`/`xcodebuild` recipes |
+| Core | Rust 2024, tokio | Framework-free `leogit-core` |
+| Windows, Linux shell | Tauri 2.11 | No Node at runtime |
+| Web frontend | Svelte 5, Vite 8, TypeScript 7 | `typescript` aliases TS 6 for svelte-check |
+| macOS client | SwiftUI, Swift 6 mode | macOS 26 target, Xcode 26 |
+| Bridge | UniFFI 0.32 | Static lib |
+| Xcode project | XcodeGen | `project.yml` is the truth |
+| Highlighting | syntect 5.3, two-face 0.5 | Colors live in `--syn-*` |
+| Terminal | portable-pty 0.9, xterm.js 6, SwiftTerm 1.20 | Core owns the PTY |
+| HTTP | reqwest 0.13 | Ollama, update check |
+| Discard | trash 5 | Recoverable |
 
 ## Repository layout
 
-A **Cargo workspace**: all logic lives once in `core/` (the `leogit-core` crate), and each
-client is a thin shell over it. The Tauri host embeds it directly; the SwiftUI client links the
-same crate through UniFFI. The only place a UI framework leaks into the core is
-`events::EventSink` (see *Core / host split* below).
-
 ```
 leogit/
-├── Cargo.toml                       # Workspace root — target/ and Cargo.lock live here
-├── core/                            # leogit-core (lib leogit_core) — Tauri-free logic
-│   ├── Cargo.toml
+├── justfile, Cargo.toml      # workspace; clippy pedantic lints
+├── core/
+│   ├── examples/bench.rs
 │   └── src/
-│       ├── lib.rs                   # Module map; the crate every client embeds
-│       ├── events.rs                # EventSink seam: CoreEvent + trait (git progress, PTY out)
-│       ├── config.rs                # load/save Config + ReposState
-│       ├── git.rs                   # git operations (status, log, branch, discard, ignore, …)
-│       ├── operation.rs             # the merge/rebase/pick/revert in progress: probe, continue, abort
-│       ├── history_rewrite/         # History's multi-commit actions, behind one preflight (mod.rs)
-│       │   ├── cherry_pick.rs       #   copy commits onto another branch
-│       │   ├── replay.rs            #   the driver: replay the branch from a todo (git rebase -i)
-│       │   ├── lineage.rs           #   place selected commits on the branch: the range a rewrite replays
-│       │   ├── squash.rs            #   fold commits into the oldest; the message draft
-│       │   ├── reorder.rs           #   move commits as one block to another place on the branch
-│       │   └── undo.rs              #   take any of the three back: the branch onto its earlier tip
-│       ├── sync_ladder.rs           # SyncProposal: the sync control's ladder + the reflog test for a rewrite
-│       ├── git_version.rs           # the installed git's version and the 2.45 floor
-│       ├── exclusions.rs            # the commit composer's opt-out grace window
-│       ├── launch.rs                # `leogit <dir>` resolution + pending-target state
-│       ├── diff.rs                  # parse_diff + build/apply patches (structured FileDiff)
-│       ├── render.rs                # structured diff → pre-escaped HTML (the web-host renderer)
-│       ├── highlight.rs             # syntect diff tokenizer (Token / TokenClass)
-│       ├── gh.rs                    # GitHub CLI bridge (auth check, repo list, clone)
-│       ├── ai.rs                    # Claude CLI + Ollama HTTP
-│       ├── terminal.rs              # portable-pty session pool
-│       ├── shell.rs                 # shell discovery for the terminal
-│       ├── os.rs                    # reveal-in-file-manager + open-with-default-app
-│       ├── paths.rs                 # the app's canonicalizer (never verbatim)
-│       ├── process.rs               # child-process prep hook + run_timed / run_blocking
-│       ├── appimage.rs              # strips the AppImage environment from children
-│       ├── progress.rs              # git --progress step/weight parser
-│       └── update.rs                # GitHub-release update check
+│       ├── git.rs            # status, log, branches, commit, sync, discard
+│       ├── operation.rs      # merge/rebase/pick/revert in progress
+│       ├── history_rewrite/  # preflight, cherry_pick, replay, lineage, squash, reorder, undo
+│       ├── sync_ladder.rs, git_version.rs, exclusions.rs, repos.rs
+│       ├── diff.rs, highlight.rs, render.rs
+│       ├── config.rs, launch.rs, update.rs, progress.rs, events.rs
+│       ├── ai.rs, commit_prompt.txt, gh.rs, os.rs
+│       ├── terminal.rs, shell.rs
+│       ├── process.rs, path_cache.rs, paths.rs, appimage.rs
+│       └── test_support.rs
 ├── apps/
 │   ├── tauri-app/
-│   │   ├── src/                     # Svelte 5 frontend (untouched by the core extraction)
-│   │   │   ├── App.svelte           # Startup phases (loading → picker / main / error)
-│   │   │   ├── main.ts              # Mounts App
-│   │   │   ├── app.css              # Theme tokens + base element styles
-│   │   │   └── lib/
-│   │   │       ├── api/commands.ts  # Typed wrappers over every Tauri command
-│   │   │       ├── actions/         # Svelte use: actions (autofocus, listNavigation, overlayStack)
-│   │   │       ├── services/        # backgroundPolicy, pacedLoop, repoSyncScheduler, connectivity, …
-│   │   │       ├── utils/           # path (basename), keyboard (event origin), focus, platform
-│   │   │       ├── stores/          # appState, repoState, config (Svelte writables)
-│   │   │       ├── components/      # Header, TabBar, FileList, CommitList, DiffViewer, Icon, PaneEmptyState, …
-│   │   │       └── views/           # MainLayout, RepoPicker, CloneOverlay, BranchDropdown, …
-│   │   ├── src-tauri/
-│   │   │   ├── src/
-│   │   │   │   ├── main.rs          # PATH fix + plugins + invoke_handler registry
-│   │   │   │   ├── lib.rs           # Declares shims / event_sink / launch_glue
-│   │   │   │   ├── event_sink.rs    # ProgressSink (→ window emit) + TerminalChannelSink
-│   │   │   │   ├── launch_glue.rs   # Window-focusing half of `leogit <dir>`
-│   │   │   │   └── shims/           # One #[tauri::command] per core fn (config.rs, git.rs, …)
-│   │   │   ├── capabilities/default.json
-│   │   │   ├── tauri.conf.json
-│   │   │   └── Cargo.toml           # tauri + plugins + leogit-core (path dep)
-│   │   ├── package.json             # pnpm scripts (dev, build, check, lint)
-│   │   ├── vite.config.ts           # $lib alias, port 5173
-│   │   └── tsconfig.json
-│   └── swift-ui-app/                # Native macOS client (SwiftUI)
-│       ├── project.yml              # XcodeGen spec — the .xcodeproj is generated, gitignored
-│       ├── Resources/AppIcon.icon   # Icon Composer document (see *App icon*)
-│       ├── scripts/build-rust.sh    # cargo build + uniffi-bindgen (Xcode pre-build phase)
-│       ├── ffi/                     # leogit-ffi: UniFFI bridge crate over leogit-core
-│       │   ├── Cargo.toml           # crate-type lib + staticlib; `bindgen` feature for the CLI
-│       │   ├── uniffi.toml          # Swift module name + immutable records
-│       │   ├── src/lib.rs           # #[uniffi::export] fns + #[uniffi::remote] type mirrors
-│       │   ├── src/bin/…            # uniffi-bindgen-swift entry point
-│       │   └── generated/           # GENERATED: LeoGitCore.swift + header + modulemap
-│       └── Sources/LeoGit/
-│           ├── App/                 # @main App + scene setup
-│           ├── IPC/GitBridge.swift  # The only place Swift calls Rust (@concurrent wrappers)
-│           ├── Stores/RepoStore.swift  # @MainActor @Observable state for the open repo
-│           ├── Screens/             # ContentView, WelcomeView, the tab panes (Changes/History × Sidebar/DetailPane)
-│           ├── Services/            # Host-free rules: list navigation, selection, collation, connectivity
-│           └── Design/              # Date formatting, FileStatus, path + shared file list, diff rows, failure alert
-├── justfile                         # install / dev / build / check / format / mac-*
-└── DESIGN.md / TECHNICAL.md / STYLE.md / FRONTEND.md / ROADMAP.md / README.md
+│   │   ├── src/              # App.svelte, app.css, lib/{api,actions,services,stores,utils,components,views}
+│   │   ├── tests/            # pure helpers, node --test
+│   │   └── src-tauri/src/    # main.rs, shims/, event_sink.rs, launch_glue.rs
+│   └── swift-ui-app/
+│       ├── project.yml, Resources/AppIcon.icon, scripts/build-rust.sh
+│       ├── ffi/              # leogit-ffi; generated/ is gitignored
+│       └── Sources/LeoGit/   # App, IPC/GitBridge, Stores, Screens, Services, Design
+├── scripts/                  # install.sh, Python release tools
+└── docs/plans/               # historical
 ```
 
 ### Core / host split
 
-`leogit-core` compiles without `tauri` — it is plain `Result<T, String>` functions plus the
-data types the UI serializes. The Tauri host (`apps/tauri-app/src-tauri`) adds only glue:
+Core compiles without Tauri or UniFFI: plain `Result<T, String>` functions plus serializable types.
 
-- **`shims/<module>.rs`** — one `#[tauri::command]` per core function, a 1:1 delegation
-  (`leogit_core::git::get_status(repo_path)`). The command macro has to annotate the definition
-  site because `generate_handler!` wires up what it generates, so the wrappers live on the host
-  rather than the core function being registered directly. **Adding a command is four edits:**
-  implement it in `core/src/<module>.rs`, add the shim in `shims/<module>.rs`, register it in
-  `main.rs`, wrap it in `api/commands.ts`.
-- **`event_sink.rs`** — the streaming seam. Core can't reach for an `AppHandle`, so the four
-  event-emitting operations (`git::{pull,push,clone_repo}`, `terminal::start_terminal`) take an
-  `Arc<dyn leogit_core::events::EventSink>` and hand it `CoreEvent`s. There are **two** sinks
-  here, and each ignores the variants its operation cannot emit — the same split the UniFFI
-  bridge makes, for the same reason: `ProgressSink` broadcasts `git-progress` on the app-wide
-  event bus, while `TerminalChannelSink` writes one session's output and close into the
-  `tauri::ipc::Channel` the frontend handed to `start_terminal` (see *Terminal transport*).
-- **`launch_glue.rs`** — the window-focusing half of `leogit <dir>`; the pure argv→target
-  resolution stays in `core/src/launch.rs`.
-
-`render.rs` (structured diff → HTML) stays in core because the Svelte host is its only
-consumer and the payload must stay byte-identical; the SwiftUI client consumes the structured
-layer directly — `highlight::tokenize_diff` (public precisely for this) hands it the same
-`Token` / `TokenClass` runs that `render.rs` collapses into `<span>`s, and
-`Design/DiffLineText.swift` maps them onto `AttributedString`. `IntraLineRange` uses `u32`
-indices to match `Token` and stay UniFFI-representable.
+- A new Tauri command is four edits: `core/src/<module>.rs`, `shims/<module>.rs`, `main.rs`, `api/commands.ts`.
+- Streaming goes through `events::EventSink`, taken by `pull`, `push`, `clone_repo`, `gh_clone` and `start_terminal`. Each host has a progress sink and a terminal sink.
+- `render.rs` is web-only; native maps `highlight::tokenize_diff` tokens onto `AttributedString`.
 
 ### Swift host (UniFFI)
 
-`apps/swift-ui-app/ffi` (`leogit-ffi`) is the macOS equivalent of the Tauri shim layer: glue
-only, one `#[uniffi::export]` per core function. Two decisions shape it:
+#### Bridge
 
-- **Core stays UniFFI-free.** Types cross via `#[uniffi::remote(Record)]` / `(Enum)`
-  declarations that restate core's structs in the bridge crate, so `leogit-core` gains no
-  `uniffi` dependency — exactly as it gained no `tauri` one. A remote declaration must mirror
-  the real type field-for-field, so drift in core surfaces as a **compile error in the bridge**
-  rather than a silent wire mismatch. The cost is restating a struct when you expose it.
-- **Blocking calls must leave the main actor.** Every core function shells out to `git` and
-  waits. `GitBridge` marks each wrapper `@concurrent` (SE-0461); without it a `nonisolated
-  async` function would inherit the caller's executor and freeze the UI.
-- **A blocking call cannot be cancelled, so the stores guard the write, not the task.**
-  Tearing down a `.task(id: repoPath)` does not stop the `git` it started, so repository A's
-  answer can land after B has opened. Every `RepoStore` writer after an `await` therefore
-  compares the `openGeneration` it captured *before* its first await — `loadRepoData` takes
-  that generation from its caller rather than reading it when called, because a caller that
-  awaited once already may be calling on behalf of a repository the app has left.
-  `BranchStore` keeps two guards for two races: which repository it serves (`reset(for:)`,
-  refused before a listing is even asked for, so a merge finishing after a switch neither
-  publishes A's branches under B nor blanks B's) and a generation for same-repository
-  listings landing out of order. `DiffStore`, `CommitDetailStore`, `SyncStore` and
-  `AppConfigStore` carry the same device.
+- `leogit-ffi` is one `#[uniffi::export]` per core function. `#[uniffi::remote]` mirrors restate structs, so drift in core is a compile error in the bridge.
+- No dead surface: `rename_branch`, `delete_remote_branch` and `get_ahead_behind` reach neither client; `check_auth` and `terminal_pty_info` stay Tauri-side.
+- One non-mirror: `DiffPayload` has no HTML and carries `SbsPair` with `u32` indices.
+- Every core call blocks. `GitBridge` wrappers are `@concurrent` (SE-0461), or a `nonisolated async` inherits the caller's executor and freezes the UI. Copy uses pure helpers, since it must answer inside its event.
+- Network exports use `async_runtime = "tokio"`, because core's `spawn_blocking` panics without a runtime. `repo_sync_status`, `known_repos` and `gh_repo_list` hop to `spawn_blocking` to keep Swift's cooperative pool free.
+- Progress ticks arrive on core's reader thread, so Swift hops to the main actor and drops stragglers by generation. A transfer ends when its `await` returns.
+- `build-rust.sh` runs as a pre-build phase and asserts:
+  - `module_name`, `--module-name` and `SWIFT_INCLUDE_PATHS` agree, or symbols just fail to resolve.
+  - `--link-frameworks SystemConfiguration`, because reqwest reads proxy settings.
+  - `SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated`, because a main-actor default breaks generated bindings.
 
-The exported surface tracks the ported flows and stays 1:1 with core, with one deliberate
-exception: the parsed diff crosses as a purpose-built `DiffPayload` record rather than
-mirroring core's `ParsedDiff`, whose HTML array is `WebView` presentation the native
-client should not even be able to read — it never asks for it (`DiffOptions.html:
-false`), so core never builds it. The side-by-side pairing does cross, as a `SbsPair`
-record with `u32` indices (core's are `usize`, a width the bridge does not carry), and
-only while the split layout is on screen. The diff view
-keeps the two-phase shape, now over one call: `get_parsed_diff` reads and parses in a single
-crossing and paints the structure immediately; `tokenize_diff`, blob-backed so multi-line
-constructs highlight correctly, recolours in place.
-Reloads are seamless: `DiffStore` never clears what's on screen when a load starts — it
-tracks a `phase` (`idle` / `loading(slow:)` / `failed`) beside the published
-`payload`/`rows`/`tokens`, escalates to a spinner only when the load outlives
-`slowLoadThreshold` (150 ms, Tauri's `SLOW_DIFF_THRESHOLD_MS`, via an unstructured timer task
-racing the load under the same `generation` guard — `.task(id:)` cancelling the load must not
-cancel the escalation for a blocking FFI call still running), and publishes nothing when the
-fresh parse equals what's shown (`DiffPayload: Equatable`), so rows, scroll position, and
-tokens survive a re-read untouched; tokens still refresh in the background on an equal
-payload — context lines can recolour when blob content changed without the diff text changing
-— and swap in only when different. `DiffView`'s content rule mirrors it: last-shown state
-stays during a reload, and a fast first load stays blank rather than flashing a
-sub-threshold spinner. Crossing the threshold is a **modifier on that content, not a
-branch beside it** — `.opacity(0.45)` plus a top-aligned `ProgressView` overlay — because a
-branch swaps the view SwiftUI builds and so destroys the `ScrollView`'s identity: the store
-kept the payload, the view threw the scroll position away anyway, and the equality skip
-above was preserving something nothing could see. `content`'s first branch is the dirty
-submodule, decided before the read: `git diff` answers a submodule that changed inside with
-a bare `Subproject commit <sha>-dirty` line, so the pane explains and the subprocess is
-never spawned (the `.task` guards on the same flag).
-**Phase two is debounced 80 ms** (`highlightDebounce`, the Tauri `HIGHLIGHT_DEBOUNCE_MS`),
-so arrowing down a file list tokenizes only the file the reader stopped on while phase one
-still paints on the frame its rows land. A cancelled sleep resumes rather than throwing, so
-the guard after it is what stops the work: `generation` catches the reader moving on, and
-`Task.isCancelled` catches the pane going away entirely — a tab change moves no generation.
-**Scroll resets on a different diff and holds on the same one.** `DiffStore` publishes
-`rendered`, the `DiffIdentity` (source + path) of the payload on screen, which the view
-watches with a bound `ScrollPosition` and answers with `scrollTo(edge: .top)`; every
-re-read of the same diff — a layout toggle, a whitespace change, an edit landing, a `HEAD`
-move — leaves the offset alone, which is FRONTEND §6.3's contract. It is set outside the
-equality skip, because two *different* files can parse to an equal payload. The watcher
-sits outside `content`, not inside it: a binary file or an empty state takes the scroller
-out of the hierarchy, and a modifier that is not there cannot notice the diff that replaces
-it. `rendered` is also what the header's own chrome asks: a reload is seamless, so between
-the click and the answer the payload still describes the file that was open *before* while
-the name beside it does not, and the `+N −N` totals and the rename arrow are shown only when
-the payload is a diff of the file being named. The layout control deliberately does not ask
-— it arranges what is on screen, which during a switch is still the previous diff and is
-still arrangeable.
-Token `start`/`end` and `IntraLineRange` are code-point indices, which in Swift is the
-`AttributedString.unicodeScalars` view — never `characters`, whose grapheme clusters can span
-several code points.
-The diff settings feed this path from `AppConfigStore` (below): `DiffStore.load` takes
-`hideWhitespace` — working-tree targets pick the newly exported
-`get_diff_whitespace_ignored` (`git diff -w`); commit diffs have no such variant in either
-client — and `highlight`, whose off state skips the tokenize phase and drops any tokens on
-screen (the Tauri `if (!sh) return` after the plain render). Both flags live in `DiffView`'s
-`LoadKey`, so a Settings toggle re-keys the open diff through the seamless path above, where
-the equality skip keeps scroll when nothing textual changed. `side_by_side` is the third:
-core builds the pairing only for the layout that asked, so a layout change is a re-read too.
+#### Stores and races
 
-**`LoadKey` is everything the diff on screen is a function of, and nothing else** — it is
-what makes the read happen exactly when it has to. Three groups: *which* diff (the path and
-the `DiffTarget`), *whether that diff is still what was read* — the file's own
-`stat_stamp`, its `xy`, and the `head_sha` carried in `.workingTree(head:)` — and *how* it
-is read (the three settings above). Tab size stays out: it re-renders without reloading.
-The freshness half is per-file, the Tauri client's DF-1 shape: a whole-status signal made an
-unrelated edit anywhere in the tree re-read and re-tokenize whatever was open, for an answer
-that could not have changed. `head_sha` covers the half `stat_stamp` cannot see — the
-working-tree diff is HEAD against disk, so a `--mixed` reset changes it while leaving both
-the bytes and the status letters exactly as they were.
+- A blocking call can't be cancelled, so stores guard the write, not the task: writers compare the `openGeneration` captured before their first await. `loadRepoData` takes it from its caller.
+- A superseded open returns `OpenOutcome.superseded`, not a failure, and callers don't read `repoPath` afterwards.
+- `isBusy` is a depth count because `refresh()` nests inside `open()`. Anything gated on status awaits `awaitLoadSettled()` rather than reading nil.
+- `refreshWorkingTree()` must not consume the `head_sha` edge: a moved sha hands over to the full reload, or History goes stale. It claims the load lock with no bar (`beginLoad(showsProgress:)`), or a poll tick lands a pre-action snapshot.
+- `historyLoaded` is separate from `commits`, since empty means both "none" and "not read". `open()` clears commits as it publishes the path, so no stale sha reaches the new repo.
+- One `RepositoryWriteGate` per window. `isBlocked` (anyone's write) disables controls; `isRunning` (this store's) drives spinners. Keep them apart.
+- A refused claim is `OpOutcome.refusedBusy`: neither success nor error, so deliberately not a `Result`. `.disabled` is only a pre-await read; the claim is what's correct.
+- Pull holds both slots, because a pull under `index.lock` fails its merge, and a slow commit under a pull loses `HEAD`'s lock. Automatic fetches deliberately have no "no write in flight" rule, since they only move remote-tracking refs.
+- `AppConfigStore` is the one writer. It registers each patch synchronously, before any await, so order isn't the scheduler's. `generate` awaits `settle()` so it can't resolve the previous provider. Stores get it at construction, never assigned later.
+- Settings controls patch only their own field. `seed` records through `patch(for:)`, so normalized values don't read as dirty. `flush()` on close writes every dirty field. An unreadable config shows the failure and no controls.
+- Git's text goes in a sheet, because `.alert` reflows it into one unselectable block. `pollFailure` and `errorMessage` are two fields, so a dismissable notice can't hide a dead repo.
+- `CommitStore` and `CloneStore` live on `ContentView`: tabs rebuild panes, and a sheet-owned store re-runs the 20 s `gh` query.
+- `RepoIdentifierStore` stores `nil` with `updateValue`; subscript assignment removes the key and re-queues the lookup forever.
 
-**The split layout is an arrangement of one row model, not a second renderer.**
-`DiffStore` holds `rows` (the flat line list, keyed by the flat index every parallel array
-in core shares) and, when the split layout asked for it, `pairs` — core's `SbsPair`s with a
-row identity. A pair carries *indices*, so both columns read the same `rows` and each side
-looks its own tokens up by its own flat index with no bookkeeping; `DiffLineCell` draws a
-cell for either arrangement, taking both line numbers in the unified layout and one in a
-split column, so the glyphs, the row tints, the tab expansion and the token styling are
-written once. The publish step compares the line model and the pairing **separately**
-(`modelMoved` / `pairingMoved`): a layout change returns an identical `file_diff` with a
-pairing that appeared or vanished, and comparing the payload as a whole would rebuild the
-rows and drop the syntax colour every time the reader switched arrangement. The two
-arrangements are branches *inside* one `ScrollView`, never two scroll views, for the same
-identity reason the slow-load dim is a modifier — and the branch reads the loaded pairing
-rather than the setting, so the pane changes on the frame its data arrives instead of
-blanking for the length of a re-read. **The Svelte viewer follows both rules too**: one
-`.diff-body` wrapping an `{#if}` rather than one per branch (swapping the branch destroys
-the element `scrollTop` lives on), and a `showSplit` derived off `diff.sbs_pairs.length`
-rather than off the `sideBySide` prop — the prop is what the *control* shows as pressed,
-which answers on the click, a re-read ahead of the rows it asked for. `tab_size` is presentation:
-SwiftUI `Text` honours no paragraph-style attributes, so `DiffLineText` expands tabs to
-spaces with CSS `tab-size` stop math (next multiple of N columns) and remaps every token and
-intra-line range through the expansion — a no-tab line pays one `contains` scan and nothing
-else. Long lines always wrap, in both clients — the GitHub Desktop model.
+#### Scheduling
 
-**Copying is a range over the row model, not a scrape of the view** — and that expansion is
-one of the four reasons why (the others: the gutter, the `+`/`−` column, and the split
-layout's filler cells). `copy_text` drops `\ No newline at end of file` for a fifth: the
-pairing gives that marker no row, so a side-by-side selection would carry a line the reader
-was never shown. A `@@` header is kept, being a row they can see in both arrangements. `DiffLineSelection` is an anchor and a focus over flat row indices,
-which is exactly `copy_diff_text`'s `[start, end)`; `GitBridge.diffText(of:in:)` joins the
-bridge's pure helpers rather than its `@concurrent` reads, because a Copy has to answer
-inside the event that asked for it — the cost is one lower-and-lift of the model UniFFI
-takes by value, bounded by the diff already on screen and paid once per Copy.
-`DiffStore` owns the selection rather than the view, for the reason it owns `rows`: the
-selection *is* a range into them, so clearing it lives in the one place the row model is
-rebuilt — deliberately not on a layout change, which moves no line, so the reader keeps
-their run across it as they keep their scroll. The gutter is the handle (a tap gesture and
-a `.modifiers(.shift)` high-priority one on the number column, plus its own context menu),
-and they sit on an invisible `Color.clear` pad overlaid on the number rather than on the
-number itself, so the interactive layer and the drawn text stay independent.
-`.textSelection(.enabled)` is granted to the row stack and the numbers and `+`/`−` glyph opt
-back out, which keeps a drag begun on them off the clipboard. What that grant does **not**
-buy is a multi-line drag: a SwiftUI text selection cannot leave the `Text` it began in, and
-this pane draws one `Text` per line, so the reader's drag is confined to a single line
-whatever the grant is attached to (**D-22**, deferred — it takes an `NSTextView`-backed pane
-or a selection this client owns outright). That is the whole reason the line run exists:
-selecting several lines has to be *asked for* here, so the gutter is where it is asked, and
-the copy comes from the model instead of from what was drawn. The pane is `.focusable()` because Copy is a responder-chain command, and `onCopyCommand` returns
-**nil** when no run is selected, so with no run the character selection answers ⌘C exactly
-as it always did. Where both could exist the precedence is stated rather than guessed: the
-run wins — it is drawn as a full-row wash, and a visible selection that Copy ignored would
-be the worse surprise — and Escape is what gives it up.
+- Loops are `.task(id: repoPath)`, so a switch cancels them.
+- `BackgroundSchedulingPolicy` exposes `canPollStatus`, `canAutoFetch`, `canRunRepoSweeps` and `canTickRelativeDates`. Sweeps re-ask before every repo. Wake-up runs on any rise in `wakefulness`.
+- Occlusion comes from a zero-size window accessor, not `NSApp.keyWindow`, which is nil while inactive.
+- `AppNapSuppressor` holds `beginActivity(.background)` while a repo is open, or App Nap coalesces `Task.sleep` and the ladder never fires.
+- `silentFetch` returns `Bool?`; `nil` means no fetch ran, so only real attempts feed the breaker. A remote-less warm-up fetch would close the breaker for every other repo.
 
-Committing crosses as the same two calls the Svelte client makes — `format_commit_message`,
-then `commit` — and needed no new type mirrors: core's `commit` owns the whole staging story
-(it resets the index and re-stages exactly the files it was handed), so there is no separate
-stage step to expose. Neither client uses `diff::generate_patch`/`DiffSelection` yet;
-per-hunk staging is future work for both. Its Svelte scaffolding stays in place but stops
-costing anything while unwired: `DiffViewer` renders the hunk header as a control only when
-`showSelection` is set, so today's band is plain text — selectable like the rest of the diff,
-and no longer one focusable no-op button per hunk on an unvirtualized list.
+#### Diff pane
 
-Branches and merge cross 1:1 as well (`list_branches`, `create_branch`, `switch_branch`,
-`delete_branch`; `merge_branch`, `merge_squash`, `commit_squash_merge`,
-`count_commits_to_merge`; `continue_operation`, `abort_operation`), with flat mirrors
-(`BranchInfo`, `MergeResult`, `OperationInProgress`, `OperationOutcome`)
-and none of the `EventSink` machinery — every branch/merge function in core is a plain
-synchronous `Result<T, String>`. The multi-call sequences belong to the clients:
-"New Branch" is `create_branch` then `switch_branch`, squash is `merge_squash` then
-`commit_squash_merge` on success, and a *failed merge is data, not an error* —
-`MergeResult { success: false }` with git's text and the conflicted paths, never a thrown
-`GitError`, which is why each client decides for itself whether a refusal is a modal or a
-line under a field. `rename_branch` and `delete_remote_branch` exist in core and are reachable from
-neither client — no UI has been built for them yet, and neither the bridge nor
-the Tauri host carries dead surface. ROADMAP has them as one feature built on
-both clients at once.
+- `get_parsed_diff` paints first; `tokenize_diff` recolors after the debounce.
+- Reloads never clear. Slow loads dim through a modifier, because a branch destroys `ScrollView` identity. Split and unified are branches inside one `ScrollView`, chosen by the loaded pairing, not the setting. Svelte follows both rules.
+- `LoadKey` is path, target, `stat_stamp`, `xy`, `head_sha` and three read settings, not tab size. `head_sha` catches a `--mixed` reset, which leaves bytes and letters alone.
+- `modelMoved` and `pairingMoved` compare separately, or a layout change drops color.
+- Token indices are code points: use `unicodeScalars`, never `characters`.
+- Scroll resets on a new `DiffIdentity`, set outside the equality skip because two files can parse equal.
+- Copy is a range over the row model. A SwiftUI selection can't leave its `Text`, so multi-line copy goes through the gutter.
 
-Sync (`get_tracking_remote`, `get_push_remote`, `fetch`, `fetch_all`, `pull`, `push`) is the first flow to cross **async** and the
-first to cross the **callback seam**. The network functions are exported with
-`async_runtime = "tokio"` — core runs them through `tokio::spawn_blocking`, which panics
-without a live runtime context; the attribute wraps the future in `async_compat` so
-UniFFI-driven polls enter one (this is why the `uniffi` dependency gains its `tokio`
-feature) — and they surface in Swift as native `async throws` functions. Progress streams
-back through core's `EventSink` seam: the bridge declares `SyncProgressListener` with
-`#[uniffi::export(foreign)]` (a Swift-implemented protocol, the UniFFI analogue of
-`TauriEventSink`), and a private `ProgressSink` adapter implements `EventSink`, translating
-core's `GitProgress` — whose `op` label is a `&'static str` that cannot cross the FFI — into
-a flat `SyncProgress` record: the core-computed aggregate percent (0–100, weighted per step
-in `core/src/progress.rs`) plus git's raw progress line. Ticks are invoked on core's
-stderr-reader thread, so the Swift side hops to the main actor itself and drops stragglers
-by generation; there is no completion event — an operation is over when its `await` returns.
-Core's `get_ahead_behind` reaches neither client: both read ahead/behind from
-`get_status`, which computes them from porcelain v2's branch headers at no extra
-cost (`repo_sync_status` joined the surface with the repo switcher — see below,
-as did `clone_repo` and the gh clone surface with the Clone sheet).
+#### AppKit traps
 
-AI commit-message generation crosses as the Tauri composer's own two-step pipeline —
-`get_selected_diff` (the checked files' combined diff) feeding `generate_commit_message`,
-which is async for a different reason than sync: no `spawn_blocking`, but core drives the
-`claude` CLI through `tokio::process` and Ollama through async `reqwest`, so it carries the
-same `async_runtime = "tokio"`. No `EventSink`, no streaming, no cancel — plain
-request/response returning a pre-split `CommitMessage { title, description }` (mirrored 1:1,
-as is `AiProviderConfig`). Assembling `AiProviderConfig` from the shared `config.toml` is
-core's job (`ai::provider_config`), exported as `load_ai_config` and called by both clients
-before every generate — the mapping used to exist twice, in Rust and in TypeScript, pinned
-against each other by a test that could only assert one side. The composer's provider picker
-persists through `patch_config { ai_provider }`, a patch that cannot touch any other
-setting. Core's `check_provider_status` is what both composers probe, returning
-`ProviderStatus { ready, reason, fix_command }` rather than a boolean: "installed" and "will
-answer" are different questions, and asking only the first let an installed Claude CLI with an
-dead session pass every check and fail every generate. The Claude probe therefore runs
-`claude --version` *and* `claude auth status` — reading `loggedIn` out of the latter's JSON
-payload, since a field that explicit would be pointless if the exit code carried the answer —
-and the Ollama probe offers `ollama serve` as its fix only when the configured address is
-loopback, because against a server the fix is on that server. **The probe alone is not
-enough**, which is the mistake this replaced: signing out deletes the credentials, so a probe
-sees it, but a session that *expires* leaves them on disk, so `claude auth status` still
-reports a signed-in CLI and only a real request discovers the refresh failed. So
-`provider_status_from_failure` reads a failed request for the same states and returns the
-same shape, matching the CLI's wording in the one place that already interprets this CLI's
-output — the two real messages (`Not logged in · Please run /login`, `Failed to authenticate:
-OAuth session expired…`) are pinned by tests. It may only ever *raise* a block, never clear
-one, since an unrecognized failure says nothing about the provider. Every probe failure is an
-answer, not an error: only an unknown provider name is `Err`, and an answer core cannot parse
-counts as ready, so a CLI changing its output format cannot lock a user out of Generate.
+- `NSToolbarView` eats right-clicks before `.contextMenu`. Use `.toolbarContextMenu`: one `NSEvent` monitor plus an anchor per chip, skipping sheets and modals itself. The anchor also sets `allowsDisplayModeCustomization = false`, because SwiftUI installs a new `NSToolbar` when Welcome is replaced.
+- `focusedSceneValue` from a toolbar-hosted view never reaches the scene. Publish from window content.
+- Menu key equivalents match before the responder chain, so ⌃\` lives on a menu item or SwiftTerm swallows it. Declare each chord in the menu-bar copy only.
+- Toolbar items render only text and icon, so `↑N ↓N` is its own item.
+- `Toggle(sources:isOn:)` is the only mixed checkbox.
+- `ListSelection.activeID` derives the shown row in list order, never `Set.first`. Keeping a selection is an `onChange` write-back, since AppKit has already drawn the deselection.
+- `RowResizeHandle` is `.focusable(interactions: .activate)`; plain `.focusable()` takes initial focus on a clean tree.
+- `onKeyPress` beating `List` in reorder mode is measured, not documented. Re-check on OS bumps.
 
-Both clients hold the result the same way: **only the blocked case is stored, tagged with the
-provider it describes**, so `null` covers "ready" and "not asked yet" alike — the same thing to
-a gate that refuses to lock anyone out on "not known" — and switching provider drops its
-predecessor's block through a comparison rather than a clearing step someone can forget. The
-answer is assigned only once it is in hand, never cleared on the way *into* a probe: since the
-re-ask fires on regaining focus and asking Claude costs two process spawns, clearing first made
-the remedy visibly blink out and back every time. A probe that *throws* changes nothing and is
-logged — it is a wiring failure, not an answer, and must not clear a block a real failed
-request proved; the log is what keeps a host predating the command ("no such command") from
-reading as a probe that found nothing wrong. Both re-ask on provider change and on regaining
-focus while blocked, since every remedy leaves the app: the native client runs that ahead of
-the guards in `resyncOnActivate`, which exist to protect a running network operation and have
-nothing to say about a probe. Because core spawns `claude` from `PATH`, the
-Finder-launch environment matters for the first time: the Tauri host's hand-rolled PATH
-repair moved into core as `process::fix_path_env` (spawn the login shell once, replace
-`PATH`; the edition-2024 `unsafe set_var` contract — call before any other thread exists —
-travels with it), the Tauri `main` now calls it from there, and the bridge exports it for
-`LeoGitApp.init` to run as the process's first Rust call.
+#### Native terminal
 
-The repo switcher and background refresh cross as the picker/scheduler surface the Tauri
-client already had: `load_config` / `patch_config` / `config_bounds` (full `Config`,
-`ConfigPatch` and `ConfigBounds` mirrors — `theme` is the recorded native exemption
-(FRONTEND.md §8) and `side_by_side_diff` belongs to the diff header rather than to the
-Settings window, so both go unpatched by that window, which is what a patch makes
-expressible), `load_state`/`patch_state`/`record_recent_repo` over
-`ReposState`/`ReposStatePatch` mirrors — the shared `repos-state.json`, where
-`last_opened_repo` is patched on every switch and restored at launch by *either* client,
-and the MRU list feeds the tiered badge scheduler — `known_repos`/`effective_scan_paths`
-(pure filesystem walk, no git subprocesses), and `repo_sync_status` returning a `RepoSync`
-mirror, the per-repo dirty/behind/ahead badge summary. The last two are async-over-sync
-exports: core's functions are synchronous, but `repo_sync_status`'s opted-in fetch can hold
-its thread for the full 12 s background timeout and `known_repos` stats whole directory
-trees, so both are wrapped in `tokio::task::spawn_blocking` under `async_runtime = "tokio"`
-— the same worker-thread hop `#[tauri::command(async)]` performs implicitly — keeping
-Swift's cooperative pool (one thread per core) unparked. On the Swift side, all refresh
-timing is structured concurrency instead
-of timers: `ContentView` owns `.task(id: repoPath)` loops — the status poll, the
-config-driven auto-fetch, and `RepoDirectoryStore`'s tier scheduler (Tauri's cadence
-number-for-number: 2/5/10 min over the MRU with 1.5/4/8 s launch kicks, sequential, active
-repo excluded) — so a repo switch or close cancels and restarts them structurally, the
-teardown the Tauri client does with `clearInterval` bookkeeping. Those loops start when
-`repoPath` is *published*, which `open()` does before it has a status — so anything whose
-decision depends on the repository's status (the warm-up fetch's no-remote gate) first
-awaits `RepoStore.awaitLoadSettled()`, a main-actor continuation list released when the
-last explicit load exits, success or failure. The claim is a *depth count*, not the
-`isLoading` Bool the progress bar reads: `refresh()` can nest inside `open()` (a branch
-action's `onWorkingTreeChanged`, a clone handing its path straight to `open`), and a Bool
-would let the inner one's exit release everyone while the outer load still has no status.
-Reading a `nil` status and guessing is how a gate silently stops applying whenever the
-load happens to be slower than its caller.
-
-**Which repository the app is trying to be on is a separate question from how many reads
-are running, and `open(at:)` needs the second one.** Two overlapping opens interleave:
-each publishes `repoPath` after its own `await`, so the winner was whichever `git log`
-finished first rather than whichever repository the user asked for last, and one
-repository's history could land beside another's path. `RepoStore.openGeneration` is
-claimed synchronously on entry to `open` and re-checked before every publish — including
-inside `loadRepoData`, whose two concurrent reads are the long window — so a superseded
-open stands down having written nothing. It reports that as `OpenOutcome.superseded`
-rather than an early `return`, the same three-state shape as `OpOutcome` one question
-along: a caller cannot ask `repoPath` afterwards, because the answer it would read may
-belong to the open that beat it, and reporting a supersession as a failure raises a banner
-about a repository the user has already left.
-
-Between the two sits
-`RepoStore.refreshWorkingTree()`, for an action that changed the working tree but cannot
-have moved `HEAD` — a discard, an ignore. It re-reads only the status: `refresh()` would
-re-run `git log` at up to 500 commits and flash the progress bar for an answer already on
-screen, which is what a whole-list discard used to cost per row. It is not the poll's path
-either — this *is* the user's action completing, so a failed read is theirs to see rather
-than one tick of a streak. The file a discard rewrote may be the one on screen and its
-status *letters* read the same before and after; what tells the pane to look again is the
-`stat_stamp` the rewrite moved. The Tauri client has always done a silent status refresh
-here.
-
-Two things about it are load-bearing and neither is obvious. **`head_sha` is an edge, and
-this method must not consume it.** The action cannot have moved `HEAD`, but a commit made in
-a terminal since the last tick can have — and both the poll's history refetch and the branch
-reload beside it are edge-triggered off that field. Writing the new status without doing
-their work would leave History and the branch menu stale until `HEAD` happened to move
-again, indefinitely. So a moved `head_sha` hands over to the full reload and the method
-*returns* that it did, because the branch list lives in another store and the caller owns
-it. And **it claims the load lock even though it shows no progress**: `isLoading` was doing
-double duty as the poll's mutual exclusion, so a read that skipped `beginLoad` to avoid the
-bar also stopped blocking the poll — and a tick that starts before the action's re-read and
-resolves after it lands a pre-action snapshot on top, putting discarded files back in the
-list. `beginLoad(showsProgress:)` separates the two, and `isBusy` (the depth count) is what
-the poll and ⌘R now guard on. The poll's
-`RepoStore.refreshQuietly` never touches either, refetches history only when
-`head_sha` moved, and publishes the status only when it changed — so an idle tick repaints
-nothing. Undo is the one rewrite that deliberately refreshes *less*: it is a
-`--mixed` reset, so it moves `HEAD` within the branch it is on without creating, deleting or
-switching one, and reloading `list_branches` after it would re-ask a question whose answer is
-already in the menu. Checkout keeps its branch reload, because detaching `HEAD` is exactly
-what does change that answer.
-
-**`historyLoaded` is the log's counterpart to the Tauri client's `statusLoaded`.** An empty
-`commits` array is equally true of a repository with no commits and one whose first `git log`
-is still in flight, and the History pane asserts one of those out loud in two places — the
-sidebar placeholder and the detail pane's `ContentUnavailableView`. Both read the flag instead
-of the array, so *No commits yet* is only ever said once it has been established. `open()`
-resets it, and clears `commits` in the same breath, at the moment it publishes the new
-`repoPath` rather than when the new log lands: the sidebar re-seeds its selection from
-`commits`, so leaving the previous repository's rows in place handed the detail pane a sha
-from one repository to load against another's path, and a new repository whose log then failed
-kept showing the old one's history indefinitely. `refresh()` deliberately does not reset it —
-the question has been answered for this repository, and blanking it per ⌘R would put the flash
-back. It is also the app-re-activation path
-(`NSApplication.didBecomeActiveNotification`, the native `resyncOnActive`) and needs no
-forcing flag there: content edits count as a status change on their own. Porcelain v2
-carries no worktree hash, so a same-row edit (modified → still modified) would be invisible
-to the comparison and leave the open diff stale until reselect — core's
-`FileEntry.stat_stamp` (an opaque mtime+size string, `get_status`-only, `None` off-disk;
-pinned by `stat_stamp_sees_content_edits_and_absence`) is what makes the comparison see
-them, whether the edit happened while the app was frontmost or while it was away. A `ConnectivityBreaker` (Tauri's
-numbers: 2 failures → 30 s backoff doubling to a 5 min cap) composes with
-`Services/NetworkPathObserver.swift` — one `NWPathMonitor` publishing `isOnline`, the
-analogue of the Tauri `navigator.onLine` half the breaker originally shipped without — as
-`RepoDirectoryStore.shouldAttemptBackground` (`isOnline && breaker.shouldAttempt`, the
-`connectivity.ts` `shouldAttemptBackground()` shape): every background fetch gates on it,
-fed only by real attempts against real remotes, and while offline badge syncs degrade to
-fetch-less local recomputes without burning failures into the breaker first. "Every"
-includes the warm-up fetch on repo open, which is the same automatic fetch as any other:
-gated on the breaker *and* on `status.hasRemote`, and reporting its outcome back — an
-ungated one runs up to 15 s of a blocking-pool thread per repo open, and against a
-remote-less repo it can only fail, which would then hold every *other* repo's background
-sync closed. "Real attempts" is enforced by
-`SyncStore.silentFetch` returning `Bool?`: `nil` when no fetch ran at all — the transfer
-slot was taken, or resolving the branch's remote (`get_tracking_remote`) failed locally — so its four callers report only the two
-outcomes that describe the network. A local failure counted as an unreachable remote is
-the same poisoning, one layer up. The
-offline→online edge runs every handler registered through the observer's
-`onRecover(_:perform:)` — keyed, so a registration from a `.task` that runs again replaces
-rather than stacks, and so the two things that want that edge (the repository catch-up and
-the release check's retry) sit beside each other instead of one of them needing a second
-`NWPathMonitor`. The repository one is `ContentView.resyncOnReconnect`,
-Tauri's `initConnectivity` recovery: `breaker.reset()` — a named method, because
-`record(success: true)` where nothing was fetched would fabricate a success report — then a
-silent fetch + quiet refresh of the active repo under `canAutoFetch` and the throttled
-tier-0 sweep under `canRunRepoSweeps`, so recovery obeys the same predicates as the loops
-it shortcuts. Whether each loop may run *right now* is
-one type's answer: `Services/BackgroundSchedulingPolicy.swift` (@MainActor @Observable)
-owns the inputs — the network-op slot (mirrored in by `SyncStore` from a `didSet` on
-`activeOperation`), app activation (`NSApplication.didBecomeActive/didResignActive`), and
-the repo window's occlusion (`NSWindow.didChangeOcclusionStateNotification` on the window a
-zero-sized `NSViewRepresentable` accessor reports from `viewDidMoveToWindow` — deliberately
-not `NSApp.keyWindow`, which is nil exactly while the app is inactive) — and exposes named
-predicates each guard cites: `canPollStatus`/`canAutoFetch` (block only on the network op)
-and `canRunRepoSweeps` (also requires active + visible; the deferrable multi-repo fan-out,
-caught up by the wake-up resync, and re-asked before *every* repository of a sweep rather
-than once at entry, so a transfer claiming the slot abandons the rest of a fan-out nobody
-is looking at). The wake-up itself is read off the same type: `wakefulness` ranks the two
-inputs as `hidden < inactive < active` — the Tauri `ActivityState` ladder — and
-`ContentView` runs its resync on any *rise*, so a window un-occluded without the app ever
-leaving the front catches up like an activation does. Observing the rank rather than
-taking the `didBecomeActive` notification a second time also orders the two: a second
-observer of one notification has no guarantee the policy has taken it in first, and the
-sweep the resync ends with is gated on inputs that notification sets. A fourth, `canTickRelativeDates`, gates the History
-list's 10 s clock on visibility alone: it reads no git state and spawns nothing, so unlike
-the three above it ignores the network op and stays out of the App Nap assertion — a repaint
-of rows already on screen is not worth keeping a sleeping Mac awake for. `HistorySidebar`
-takes it as a `.task(id:)` key rather than a flag tested inside a loop, so a hidden window has
-no timer left running at all, and coming back rebuilds the task, which re-reads the clock
-immediately: a window away for an hour is current the moment it returns instead of up to 10 s
-later. The third gate the Tauri client needs — *is the History pane even showing?* — costs
-nothing here, because a tab change removes the pane from the hierarchy and cancels the task
-with it. That same removal is why the list restores its place through a `ScrollViewReader`
-scrolled to the hoisted `selectedSha`: a rebuilt `List` starts at the top, and a row id
-survives a log refresh where a pixel offset would not. The active repo's work never stops: the status poll runs
-a cadence ladder (2 s frontmost / 10 s visible-unfocused / 30 s hidden,
-`statusPollInterval`, re-read per tick) and auto-fetch stretches its configured interval ×3
-while the window is hidden (`autoFetchInterval(configured:)`) — fresher than pausing,
-cheaper than GH Desktop's flat always-on interval. The Tauri client runs the same table
-from `backgroundPolicy.ts` (see *Background cadence*), and both carry a once-per-session
-0–30 s skew on the first automatic fetch so two windows over the same repositories don't
-contend for `index.lock` on the same beat forever. The platform constraint that makes any
-of this real: `Services/AppNapSuppressor.swift` holds a
-`ProcessInfo.beginActivity(.background)` assertion exactly while (a repo is open) ∧ (some
-background work is allowed), driven from the policy's input transitions — without it App
-Nap coalesces an unfocused app's `Task.sleep` timers and the ladder silently never fires
-(`.background` doesn't block idle system sleep, so the Mac still sleeps normally). Both
-observer registrations use the classic block API with `MainActor.assumeIsolated` (the typed
-`NotificationCenter` message types are macOS 27-beta; the app targets 26) and are removed
-in `isolated deinit`s — a plain deinit is nonisolated under Swift 6 and cannot touch the
-non-Sendable tokens.
-
-The sync toolbar consuming all of this is one adaptive control (`SyncControls`), GitHub
-Desktop's model: the precedence ladder — loading → detached → publish repository → publish
-branch → force push → pull → push → fetch — arrives as `RepoStatus.proposal` from core's
-`sync_ladder::propose`, and this view renders a plain button for the rungs whose menu is
-empty and a split button for the rest. Only the words and the shapes are Swift's, and
-they are in one file: `Services/SyncFace.swift` extends `SyncProposal` with `title`,
-`symbol`, `isActionable`, `help(ahead:behind:)` and `menu` — a list of `SyncMenuAction`
-(fetch, pull, force push) holding only what the face does not offer — each an exhaustive
-`switch`, so a rung core adds stops the build there. It mirrors the Tauri client's
-`SYNC_FACES` record in `Header.svelte`, where the same guarantee comes from
-`Record<SyncProposal, SyncFace>` plus `assertNever` (`utils/assertNever.ts`) closing the
-`switch` that runs the proposal. A diverged branch keeps both ways out in reach: Pull
-under the force-push face, *Force Push (with Lease)…* under the pull face, dropped again
-by the view for a branch with nothing to push. The view derives nothing else —
-`status?.proposal ?? .loading` is the whole derivation, with the `nil` case the
-one thing the view still decides, because "no status yet" is a fact about its own load
-rather than about the repository. The toolbar has no
-Refresh button; that job is split between View ▸ Refresh (⌘R), which posts
-`leogitRefreshRequested` for `ContentView` to perform the visible reload — a
-scene-to-window notification, because commands live on the scene while the stores live
-in the window — and the automatics: `refreshQuietly` now counts consecutive status failures and surfaces
-the error banner after three, with a flag marking the message poll-owned so only the
-poll's own recovery clears it (an explicit action's failure text is never swept away by a
-background tick), and the branch list stays fresh because `BranchMenu`'s content reloads
-on open (menu content is built when the menu opens) while the status poll reloads it whenever
-`head_sha` moved — both through `BranchStore.load`, which never touches `isRunning`, so an
-open menu doesn't flicker.
-
-**One `RepositoryWriteGate` per window serializes every repository write.**
-[Stores/RepositoryWriteGate.swift](apps/swift-ui-app/Sources/LeoGit/Stores/RepositoryWriteGate.swift)
-is an `@Observable` slot built once in `ContentView.init` and handed to every store and sheet
-that writes — `BranchStore`, `CommitStore`, `HistoryActionStore`, `DiscardSheet`, and
-`ContentView`'s own undo-commit and checkout-commit. `claim()` answers a `Claim?`; `release(_:)`
-takes it back; `reset()` on a repository switch bumps a generation, so a write that outlives
-its repository releases a claim the new repository never sees as held. **"Cannot start" and
-"I am working" are two facts and every store keeps them apart**: `isBlocked` is `gate.isHeld`
-— anyone's write — and is what items and buttons disable on, while `isRunning` is the store's
-own write and is the only thing a spinner, a *Merging…* label or the dimmed branch chip may
-read. One flag for both is how a merge sheet comes to show a spinner for someone's commit, and
-how the branch chip stops opening while one runs. A sheet that can sit open under another
-write shows `WriteBlockedNote` beside its disabled button (`RepositoryWriteGate.busyMessage`,
-the Tauri client's wording) — live, so it goes when the slot does — and keeps the same words
-as the answer to a claim lost in the gap between that read and the click. Per-store flags
-cannot do any of this: an Abort confirmed during a minute-long Continue is two stores each
-believing itself idle, racing on `index.lock`.
-
-**A pull holds the gate as well as the network slot.** `SyncStore` is built with the gate and
-`pull` opens with `guard activeOperation == nil, let claim = writeGate.claim()` — write slot
-first, network slot second, released in reverse by a `defer` — answering `refusedBusy`
-otherwise. It is the one transfer that writes the index and the working tree: measured
-without the exclusion, a pull under a held `index.lock` fetches and then fails its merge, and
-a commit that is slow under a pull loses `HEAD`'s lock and is silently lost. `push`,
-`forcePush`, `fetch`, `publish` and every automatic fetch claim only the network slot — a
-`git fetch` beside an `index.lock` or a stopped rebase succeeds, and moves only
-remote-tracking refs — so **the automatic fetches deliberately have no "no write in flight"
-rule** in either client's background policy. `ContentView.pullBlocked` is the reason a pull
-cannot start — the gate held while `syncStore.activeOperation` is nil, since the pull's own
-hold is not a reason — in `RepositoryWriteGate.busyReason`, the hover form of `busyMessage`.
-`SyncControls` takes it: the split button stays enabled and `pull()` refuses, with the
-`.help` swapped to the reason and the control dimmed to the 0.55 every inert control that
-still explains itself has (`StatusStrip`'s link, the picker's blocked rows), because a
-`Menu(primaryAction:)` can only be disabled whole and a disabled control shows no tooltip —
-and a button that looks ready and does nothing is the one state the slot's contract rules
-out; the menu's own Pull item is `.disabled`, and
-`syncMenuCommand` disables ⌘P while Pull is the live proposal.
-
-**A refused claim is its own outcome, never success.** `BranchStore.run` answers a three-case
-`OpOutcome` — `succeeded` / `refusedBusy` / `failed(String)` — because a guard that returns the
-success value makes a refused start indistinguishable from a completed one, and the surface
-that asked then acts on it: a create sheet dismissing over a branch that was never created, a
-delete clearing its confirmation while leaving the branch. `refusedBusy` is deliberately
-**not** an error to show: nothing went wrong and nothing changed, so the surface stays open
-for the user to ask again. `HistoryActionOutcome` carries the same third case. The UI's
-`.disabled` checks remain, but they are a `Bool` read before an `await` and therefore always
-a race — the claim is what makes the outcome correct rather than merely unlikely to be wrong.
-
-`SyncStore.run` shares the type, guarding the single network slot the same way. It had the
-same collapse and no symptom, because every caller only refreshed afterwards — until the
-force-push confirmation became a sheet that *waits* for the answer, at which point a
-background auto-fetch claiming the slot mid-dialog would have closed it reporting a push that
-never ran. `PublishSheet` was one step behind the same edge. Hence one `OpOutcome` in
-[Stores/OpOutcome.swift](apps/swift-ui-app/Sources/LeoGit/Stores/OpOutcome.swift) rather than
-one enum per store: the third serializer should inherit the vocabulary instead of re-deciding
-it. It is deliberately not a `Result` — the third state is neither success nor failure, and
-rendering it as either is exactly the bug. The split button is the stock `Menu`+`primaryAction` control
-with `.labelStyle(.titleAndIcon)` (macOS toolbars render labels icon-only by default), and
-it deliberately carries **no count pill**: macOS bridges a toolbar menu's or button's
-label to a system control that renders only its text and icon, silently dropping any other
-view, no system API badges a macOS toolbar item (the 26 SDKs' toolbar `.badge` is
-iOS-only), and a hand-built imitation of the control never matches the real one's chrome
-or hover behavior — that route was tried and reverted. The pending counts render instead
-as standalone `↑N ↓N` text in their own toolbar item declared just before (so rendered
-just left of) the sync button, with `sharedBackgroundVisibility(.hidden)` removing the
-item's glass capsule so it reads as status rather than a control; the spelled-out counts
-ride its tooltip. Toolbar layout follows the macOS 26 grouping model: capsule sharing is
-decided by `ToolbarSpacer` boundaries — adjacent items with no spacer between them form
-one logical grouping drawn with a shared glass background — so the repo switcher and
-branch menu are two plain adjacent `ToolbarItem`s at the leading edge, and a
-`ToolbarSpacer(.flexible)` after them pushes the counts + sync cluster to the trailing
-edge (necessary once the title is removed: no title area separates leading from trailing
-otherwise). Neither `ControlGroup` in one item nor `ToolbarItemGroup` merges backgrounds
-here, and the `.navigation` placement isolates each item in its own capsule — all three
-were tried and rendered separate chips. Both controls carry `.labelStyle(.titleAndIcon)`
-so repo name and branch name sit on their faces (toolbar labels render icon-only by
-default), and the branch menu hides its indicator (`.menuIndicator(.hidden)`) so the
-pair reads consistently — the repo chip's popover has no chevron either. The repo
-chip alone takes `.font(.body.weight(.semibold))`: with the title removed it is the only
-place the window says which repository is open, so it leads the bar and the branch chip
-beside it stays regular — identity, then detail. Its face is `RepoIdentifierStore.label`,
-the same name the rows show, and it stays a single unstyled run: an owner prefix would
-need a second colour, and macOS draws a toolbar label in one tone (the HIG asks for the
-"default monochromatic appearance" and warns against colouring toolbar item labels), so
-the prefix could not recede the way `RepoListRow.owner` does in the list. `RepoSwitcher`
-primes its own label (`identifiers.ensure([activePath])`, on appear and on every switch)
-because `RepoPickerList` primes only the rows it draws, and those sit behind this button;
-without it the chip would sit on the folder-name fallback until the picker was first
-opened, disagreeing with the row that names the same repository. The
-sync control carries `.fontWeight(.regular)`: the trailing action region would otherwise
-emphasize its label (bold text, heavier symbol), and the bar leads with where you are
-rather than with what to do next. With the repo name on the chip
-the toolbar title became duplication, so `.toolbar(removing: .title)` hides it
-(`navigationTitle` still names the window for Mission Control and the Window menu), the
-`navigationSubtitle` is gone entirely, and its exceptional states moved into
-`BranchMenu.menuLabel` ("Detached at <sha7>", "<branch> · merging", "Detached at <sha7> · rebasing"): repo name, branch,
-and counts each appear exactly once in the toolbar.
-
-**A toolbar chip's right-click menu is `.toolbarContextMenu`, never `.contextMenu`**
-(`Design/ToolbarContextMenu.swift`). AppKit's `NSToolbarView` answers every context click
-inside its bounds itself: it hit-tests the click and, unless the view under it is one of
-its few recognised menu owners, shows its display-mode menu. SwiftUI hosts each
-`ToolbarItem` in a real `ToolbarItemHostingView`, but neither a `.contextMenu` inside it
-nor an `NSView` with a `menu` (or an overridden `menu(for:)`) is ever asked — a
-`.contextMenu` on a toolbar item is silently discarded. No `ButtonStyle`, `.toolbar(id:)`,
-placement or item group changes that. The click is therefore claimed where every click
-passes before a window dispatches it: one local `NSEvent` monitor for right-clicks and
-control-clicks, owned by a private `ToolbarContextMenuRouter` and installed with the first
-chip that asks. Each chip carries a zero-hit anchor view as its `.background`, which SwiftUI
-sizes to the whole toolbar item — exactly the glass capsule — and the router opens the menu
-of the anchor whose rectangle holds the click, through
-`NSMenu.popUpContextMenu(_:with:for:)`, and ends the event there. A click on no anchor goes
-on to AppKit unchanged, and so does every click while the window has a sheet attached or
-the app is running a modal: the monitor sees the event before the window can refuse it,
-so the refusing is its own job. A hidden anchor never matches. The menu is built at click
-time from the chip's SwiftUI `@ViewBuilder` content through `NSHostingMenu`, so a list row
-naming the same repository will be able to share the chip's menu view
-(`RepoContextMenu`); it is hosted outside the window's hierarchy, so its items
-take what they need from captured values, never `@Environment`. The same anchor sets
-`NSToolbar.allowsDisplayModeCustomization = false`, which is what leaves the sync
-button and the bar around the chips with no menu. It has to be the anchor: SwiftUI installs a
-**new** `NSToolbar`, with the flag back on, every time the repository screen replaces
-Welcome, and a window hook on the screen fires before that toolbar exists, so it sets
-the flag on nothing — while an anchor lives inside a toolbar item and so only ever reaches
-a window that has its toolbar. Content changes (a longer branch name, the update chip
-appearing, the sync button switching between plain and split) keep the same instance. The
-code is public API only; what it depends on without a promise is SwiftUI hosting toolbar
-items as real views, and a future SDK breaking that would leave the chips with no menu
-rather than a wrong one. It was proven in a scratchpad replica of this toolbar, with
-synthetic clicks and `NSMenu.didBeginTrackingNotification`, before it reached the app —
-the harness's own lesson worth keeping: capture Swift `print` under a pty, since C `stdout`
-is fully buffered off a TTY and a `SIGTERM` discards it.
-
-The ladder also reaches the menu bar. Its states live in `SyncProposal`, core's answer
-with its presentation in `SyncFace.swift`, which two views read: `SyncControls` renders it
-and runs every state through one `perform()` — the button face and the split button's
-primary action both call it, so no state is reachable by one and not the others — and the
-repository screen republishes it as a `SyncCommand` (title, enabled, closure) through
-`focusedSceneValue(\.syncCommand)`. Publishing from the window content is load-bearing: a
-focused scene value set on a toolbar-hosted view never propagates to the scene (toolbar
-items render in their own hosting hierarchy — tried first, and the menu item sat
-permanently disabled with a nil value). `RepositoryCommands` reads it back with
-`@FocusedValue` and renders Repository ▸ *action* under **⌘P**, renaming and disabling the
-item with the button (Publish, Publish Branch, Pull, Push, Fetch); its closure posts
-`leogitSyncActionRequested` back to `SyncControls`, whose sheet, alert, and busy guard
-live with the button, so ⌘P runs the exact click path. The title is why this is a focused
-value and not just a notification like ⌘R: a notification can fire an action but cannot
-label it, and the menu item's title has to track repository state or it lies about what
-⌘P does.
-
-**The rest of the menu bar follows that split** (`App/AppMenus.swift`). A chord whose item
-needs neither a state-dependent title nor enablement posts a notification the root view
-answers — File ▸ Clone Repository… (⇧⌘O), View ▸ Refresh (⌘R); everything else arrives as
-a focused scene value published from the window content, for the reason above: `TabCommand`
-(⌘1/⌘2, absolute rather than a toggle, so the chord doesn't depend on the tab you are on),
-`TerminalCommand` (⌃`), and `BranchCommand`. Two of those are also *structural*: a menu key
-equivalent is matched before the responder chain is consulted, while a key equivalent on a
-button is matched through it — so ⌃` on the panel's own toggle could be swallowed by
-SwiftTerm, which is the one place the chord matters most, and it now lives on View ▸
-Show/Hide Terminal instead. The File menu has no *Open Repository…*: RM-2's rule (FRONTEND
-§8) is that a repository list is what the scan paths cover.
-The Branch menu is the toolbar control's items a second time, and the two render one
-`BranchMenuContent` so they cannot drift into offering different actions. Only where a
-closure lands differs: the toolbar copy flips its own state, the menu-bar copy posts
-`leogitBranchActionRequested` carrying a `BranchAction`, which `BranchMenu` performs — its
-sheets and confirmations belong to the toolbar control, so a menu-bar Merge takes the exact
-path a click takes. Key equivalents are declared by the menu-bar copy alone (a
-`bindsShortcuts` flag), since the same chord declared twice is resolved arbitrarily.
-The one thing the menu bar cannot have is **⌘B**: AppKit matches a key equivalent by
-walking *into* submenus, so no chord opens a menu, and binding ⌘B to one of the Branch
-menu's items would make the same chord mean different things in the two clients
-(FRONTEND §8). The Branch menu itself is the discoverability this was for.
-Because a menu-bar menu also has no "about to open" hook — the toolbar `Menu`'s `onAppear`
-is what re-reads `list_branches` at the moment of intent (§6.14) — `resyncOnActivate`
-reloads the branch list too: a branch created or deleted in a terminal moves no HEAD, so
-the poll never notices it, and returning to the app is when that has most likely just
-happened.
-
-`RepoDirectoryStore.refreshDirectory` owns the row list both native pickers render, and is
-deliberately not lazy: a `.task` on the repository screen primes it when that screen
-appears, so the walk overlaps opening the repo instead of starting when the popover first
-opens (which left the first open showing only the active repo until the scan landed, and
-looking correct only on a second open). It is unkeyed — the walk spans every repo, so it
-belongs to the screen's lifetime rather than a repo's, and the popover still re-runs it on
-open so freshly cloned repos appear. One pass publishes twice: the shared MRU first (a
-small JSON read, and the repos the user actually cycles between), then the walk's result,
-with the previous walk's output retained so republishing can't momentarily drop discovered
-rows. Concurrent callers (prime and popover, or the tier scheduler bootstrapping an empty
-MRU) await the single in-flight `Task` rather than walking the tree twice, and the
-persisted MRU is unioned with the local one on adoption, so a refresh racing `noteOpened`'s
-not-yet-landed write cannot drop the repo that was just opened. `isRefreshing` and
-`hasSearched` together decide what an empty list means: "no repositories found" is news
-only once a pass has actually finished, and before the first one is even *started* —
-which includes the whole of launch resolution, while the picker is already on screen —
-the honest answer is that nothing has looked yet. (`isRefreshing` alone is false then,
-so the screen greeted every launch by telling the user their scan paths were wrong.)
-A walk that *fails*
-sets `discoveryError`, which the list renders as one inline row with a Retry above whatever
-the last successful pass found — the rows are still openable, so an error screen in their
-place would take the repositories away along with the bad news. The same pass hydrates the
-persisted sort mode, once per launch: the toggle's write is a background task, so
-re-reading the file on a later walk could put the old value back over a choice the user had
-just made.
-
-**Discovery re-runs where the setting changes, not where a window closes.** A Settings
-save whose patch moves `scan_paths` or `scan_depth` posts `leogitScanPathsChanged`, which
-the root view answers with a walk — a notification because Settings is its own scene and
-cannot reach `RepoDirectoryStore` directly, and on the *root* rather than the repository
-screen because the picker is the surface that sends the user to that setting and must not
-still be saying "No repositories found" when they come back from changing it. The
-switcher's own re-walk on open covers the repository screen; the picker has no switcher to
-re-open, which is exactly why the hook cannot hang off a dialog dismissal.
-
-**The two native pickers are one view.** `RepoPickerList` is the Welcome screen's body and
-the toolbar popover's content, parameterized only by what genuinely differs — how the rows are sized, whether a repository is already open, and whether a transfer is holding switching back. Sizing is a RepoPickerHeight, and the popover passes .fill because it declares a size of its own. A popover that fits its content measures that content once, and what this list holds during its first layout pass is the placeholder: rows is state seeded by an onChange(initial:) that runs after the pass, and on a cold open discovery has published nothing yet either. Fitted, the popover freezes at placeholder height and the rows arrive into a three-row window; a declared size makes the geometry a decision rather than a race. Row *labels* come from `RepoIdentifierStore`, a process-lifetime cache of
-each repository's `owner`/`name` parsed from its remote. The cache is three-valued on
-purpose: a missing key is "not looked up", a stored `nil` is "looked up, no parseable
-remote" (the row keeps its folder name and is never asked again), and collapsing those two
-would re-spawn a `git config` per remote-less repository on every rebuild. Lookups drain
-four at a time; the list asks for every row rather than the visible ones because the labels
-are *searchable*, so a query has to reach a repository the user has never scrolled to, and
-the pool is what keeps that affordable. `nil` stored through `updateValue`, not a subscript
-assignment — assigning `nil` through the subscript of an optional-valued dictionary removes
-the key, which would turn every "no remote" answer back into "not looked up" and re-queue
-it forever.
-
-The keyboard cursor is an index the *filter field* moves, via `onKeyPress` on the field
-itself, rather than a `List(selection:)`: a list only moves a cursor when it is first
-responder, and taking focus from the field would end the typing that produced the rows.
-`ListNavigation.nextIndex` is the index arithmetic (wrapping, with a negative index meaning
-"before the first row"), matching the Tauri client's `nextActiveIndex` so an arrow key
-answers identically in both. Scrolling uses `ScrollViewProxy.scrollTo(_:anchor: nil)`, which
-moves the least amount that reveals the row — the native form of `block: 'nearest'`, so an
-already-visible cursor never jumps the list under a mouse user.
-
-A transfer disables the *rows*, not the control that opens them: switching is what would
-reset the sync UI out from under a running operation, while browsing and cloning claim no
-network slot. In both clients the blocked rows are dimmed and inert rather than `disabled`,
-because a disabled control takes no pointer events — the tooltip explaining why the row
-can't be picked is the only reason it is still on screen rather than hidden.
-
-**Launch resolution** (`ContentView.resolveLaunchRepo`, once per launch) takes
-`last_opened_repo` first and does *not* wait on discovery: the two clients hand the working
-repository to each other through the shared state file and `open` validates the path
-itself, so queueing the common launch behind a filesystem crawl would only delay it. Only
-when there is nothing to restore does the walk run — for the list Welcome shows, and for
-the count behind the auto-open rule: exactly one discovered repository opens itself, since
-there is no choice to present. That rule is confined to launch, so a later scan-path edit
-that happens to narrow the list to one cannot pull the user out of the picker they are
-standing in.
-
-**Repo search** is one rule in one place: `core::repos::match_repo`, with the batch
-`filter_repos` both hosts actually call. It replaces two hand-written implementations that
-had drifted — on the set of labels they searched (one matched a single basename while the
-rows it drew were owner-qualified, so typing what was on screen found nothing), on whether
-the path prefix comparison was case- and separator-normalized (it wasn't natively, which
-silently made the whole absolute path searchable), and on which roots counted. The batch
-form is deliberate: one crossing per keystroke rather than one per row is what makes a
-shared rule affordable for a list that re-filters as the user types. The rule replaces the
-original one — the query as a subsequence of the name, the `owner/name` label, **or the
-full path** — whose last clause is fatal once every row shares an ancestry: under
-`/Users/leo/Dev/LeoManrique/Desktop`, `llm` matched all fourteen repositories, satisfied by
-the `l` of `leo`, the `l` of `LeoManrique`, and that word's `m` before any repo name was
-consulted, so the field appeared not to filter at all. The fix separates the two halves of a
-path by how much signal each carries: a name keeps the scattered-subsequence match a fuzzy
-finder is expected to have, while the path must contain the query *contiguously* and is
-first trimmed to what lies below the deepest root containing it — a scan folder, or the home
-directory — since everything above that is common to every row. `match_repo` returns the strongest of six ordered cases rather
-than a `Bool` — exact name, name prefix, name substring, name initials (`gpm` →
-`git-projects-manager`), name subsequence, path substring — and every caller sorts on that
-before anything else, falling back to its own order (active/MRU/alphabetical natively, the
-persisted recent/name sort in Tauri, discovery order in the picker) only within a tier. The
-ranking is load-bearing rather than polish: both clients act on the first row — Return
-natively, the keyboard cursor in Tauri — and the old orders put the already-open repository
-there, so Enter re-opened what was already on screen instead of the match. The two
-implementations were diffed against each other over the real repo list before shipping,
-identical across twenty queries including case, whitespace, and the ancestry queries
-(`users`, `desktop`) that must now match nothing; `llm` went 15 → 1 and `leo` 15 → 5 with
-the three `leo*` repos leading. They differ in exactly one documented place: when a repo
-lies outside every scan folder the Swift side falls back to trimming the home directory,
-which the frontend can't resolve, so it searches the whole path.
-
-Feeding the Tauri half needed the expanded scan folders in the frontend, which only
-`App.svelte` had — fetched twice, and only on the paths that reach the picker.
-`stores/config.ts` now owns them: `refreshConfig` resolves `effective_scan_paths` alongside
-the config it derives from, so both pickers and the picker's "Searched these folders" empty
-state read one store that re-resolves whenever settings change.
-
-`Design/PathText.swift` is a straight port of the Tauri client's `PathText.svelte`, algorithm
-included: `PathTruncation` restates the rule (the directory collapses to a trailing `…/`
-bridge, never below a first-letter hint, and the filename middle-truncates only when even that
-won't fit), and its output was diffed against the original's across every path/budget pair
-before shipping. SwiftUI's own `.truncationMode` can't express it — it has no idea which half
-of a path carries the file's identity — so the view binary-searches the largest budget whose
-rendered width fits, measuring with the very `NSFont` it draws with, mirroring the hidden
-measuring span the Svelte component uses. It is greedy horizontally (the component's
-`flex: 1 1 0`), so its width never depends on its own text and the measurement cannot feed
-back into layout. A rename's two sides **hug** their path instead (`hugsPath`; `hug` in
-Svelte): greedy only up to the whole path's width, rounded up to a whole point so floating
-point can never cost a path that fits a character. That cap is the one number no fit moves, so
-the rule still holds. Both layout engines then split a row that is short of room the same way,
-measured in each: SwiftUI's `HStack` offers the side with the smaller cap its even share first,
-and flexbox grows both sides evenly from a `0` basis and freezes each at its `max-width`, so a
-side that fits in half the row keeps its whole width and the other takes the rest. The
-filename's face is a parameter in both clients (`nameWeight`; `emphasized`), never a class a
-row sets from outside: ticking a checkbox changes the face without moving the row's width, so
-only an input the fit watches can tell it to run again. **The fit is held in `@State` and re-derived only when one of its inputs
-moves** — the path, the measured width, or either face — through a single
-`.onChange(of:initial:)` over all three. Deriving it in `body` instead cost ~log₂(path) text
-measurements per visible row on every repaint, including the ones a hover or a checkbox click
-causes, for an answer that could not have changed. Both faces are measured, not only drawn:
-the filename takes a medium weight on a row included in the next commit, and a fit measured in
-the lighter face would overflow the row it had just promised to fit. The view also owns its own
-tooltip, and only when it actually shortened something — a tooltip repeating what is already on
-screen teaches people to ignore the ones that say something.
-
-The repository screen is one `HSplitView` hosted by `ContentView` *above* the tabs — the
-Tauri two-column grid: the sidebar column (`RepoTabBar`, then `ChangesSidebar` or
-`HistorySidebar`, framed 280/320/640 like the Tauri sidebar) beside the main-content column
-(`ChangesDetailPane` or `HistoryDetailPane` over `TerminalDock`, min 380). Each column is a
-stable `VStack` whose *content* switches on the tab, so the split — and its divider position
-— is never rebuilt by a tab change or an empty list. The previous shape, a per-tab
-`HSplitView` swapped out wholesale and replaced by a full-width empty state on a clean tree,
-is what made the composer vanish and the terminal span the window. Each tab's selection
-(`changesSelection` + the `selectedPath` derived from it, and `historySelection` + the
-`selectedSha` derived from it) is `@State` in
-`ContentView` because the list and its detail now sit on opposite sides of the split — and
-because a tab switch rebuilds the pane, which would otherwise drop the highlight every time
-someone looked at History. The sidebars re-seed it on list change and the detail panes only
-read it. The composer's height is `@AppStorage("commitComposerHeight")` in
-`ChangesSidebar` (220 pt default, 180–600 — Tauri's `commitHeight` bounds), applied as a
-fixed `.frame(height:)` with the description `TextEditor` on `maxHeight: .infinity`, so extra
-height becomes description; `Design/RowResizeHandle.swift` turns a drag on the padded
-divider above it into that value (start − translation, clamped, `.pointerStyle(.rowResize)`).
-Both the drag range and the rendered height are capped at the pane's measured height minus an
-80 pt list floor (`onGeometryChange`), so a tall stored height can't overflow a short window
-and grows back when the window does — and capping the *drag* keeps the stored value within
-reach, so a drag back down moves at once instead of first spending an invisible surplus.
-`Design/EmptyListPlaceholder.swift` is the sidebars' faint centred line; the pane-sized
-`ContentUnavailableView`s live in the detail panes, each claiming its slot so the dock stays
-pinned.
-
-The commit composer's two fields carry the Tauri pair's behaviors.
-`Design/WheelScrollableTextField.swift` is the summary input: SwiftUI's `TextField` (an
-`NSTextField` underneath) moves overflowing text only with the caret, so — as the Tauri
-client maps wheel deltas onto the input's `scrollLeft` — the wrapped field forwards
-`scrollWheel` to the field editor's clip view (dominant axis; the event passes to ancestors
-when nothing overflows) and overrides `intrinsicContentSize` so a long summary cannot demand
-width from the split. The description is a `TextEditor` — the only text control that is a
-real scroll view, so it grows a scrollbar once the text outgrows whatever height the
-sidebar's resize handle leaves it — wearing a
-hand-drawn bezel and prompt, which it lacks natively. The single-file auto-summary lives in
-`CommitStore.autoSummary(for:)` and is used twice: as the summary field's prompt, and as
-`commit`'s fallback message when nothing was typed — recomputed from the embedded-repo
-confirmation's file snapshot, not the live list, so the message describes what the commit
-actually contains.
-
-The History detail crosses as two reads: `get_commit_detail` on selecting a commit —
-metadata never loads, it rides in the `CommitInfo` the list already holds — and per selected
-file `get_parsed_commit_diff`, which feeds the *same* pipeline as the working tree. That reuse is structural on the Swift side: `DiffStore`/`DiffView` take a
-`DiffTarget` (`.workingTree(head:)` or `.commit(sha:)`) that picks both the raw-diff read and
-the tokenizer's `BlobSource` in one value, so the two can never disagree, and the commit case
-reads blobs at the commit's own trees — a file later rewritten still colours as it was then.
-`CommitDetailStore` gets the file list and the +/− totals from that one read, so the header
-and the list can never describe different commits, guarded by the same generation counter as
-`DiffStore` against superseded loads. The changed-file
-rows themselves are `Design/ChangedFileList.swift`, extracted from the Changes tab so both tabs
-share one row implementation (the Tauri `FileList.svelte` arrangement) — the Changes tab injects
-its checkbox through a `@ViewBuilder` leading slot, History injects nothing. All three core
-functions use `--first-parent`, so a merge commit shows its first-parent changes instead of
-`diff-tree`'s empty output, and `--root` (without it, a `log.showRoot=false` user got a
-populated file list whose every diff was empty on the repository's first commit — pinned by
-`commit_diff_covers_the_root_commit_regardless_of_show_root`).
-The history list itself pages: `get_log`'s `skip` appends a page whenever the last row
-materialises, and quiet refreshes re-fetch at the scrolled depth capped at 500 (both clients'
-`MAX_COMMITS` / `historyRefreshCap`), with appends de-duplicated by sha against a poll's
-concurrent reload. Both clients now run that same append-only model — see the Tauri section
-below for what it replaced and why.
-
-**Row context menus** are the per-item actions both lists hang off a right-click. Their seven
-core functions had shipped in the Tauri host for months without a bridge export — `discard_files`,
-`ignore_paths`, `append_to_gitignore`, `reveal_path`, `open_path`, `checkout_commit`,
-`undo_last_commit` — and now cross as plain sync exports; none needs a new type mirror, and none
-belongs in the `spawn_blocking` category (`repo_sync_status`, `known_repos`), since each is a
-short local operation and the Swift wrapper's `@concurrent` hop already keeps it off the main
-actor. The menus themselves use `contextMenu(forSelectionType:)` on the *list* rather than one
-`.contextMenu` per row: it makes the right-clicked row the selection before building the menu, so
-the menu and the diff pane always describe the same item — the re-select the Tauri `FileList`
-performs by hand — and returning nothing from its builder deactivates it, which is how the History
-detail's file list keeps its rows menu-less while sharing `ChangedFileList` with the Changes tab.
-Whether a menu exists at all is a stored flag rather than an empty builder, so the modifier is
-never attached where there is nothing to show. That modifier is also what makes multi-row
-actions work for free: it hands the builder the **whole selection** when the right-click starts
-inside one and just the clicked row otherwise, which is the Tauri rule without the Tauri
-bookkeeping.
-
-**Selection is a `Set`, and the shown row is derived from it** — in the file lists and the
-commit list alike. `List(selection: Set<String>)`
-brings shift-click, ⌘-click, shift-arrow and ⌘A from AppKit, so no anchors are tracked by hand;
-what a `Set` cannot carry is *which* row a gesture landed on, so `Services/ListSelection.swift`
-— generic over any `Identifiable` row — answers the questions a set leaves open. `activeID` is
-the one the detail pane has: a single-row selection is the choice and the pane
-follows it, a multi-row one leaves the pane on the row it was showing, and a fallback picks the
-first selected row in **list** order rather than `Set.first`, which is a hash order and would
-land differently from one launch to the next. `reseated` prunes ids that left the list and
-re-seats on the first row only when none survive, and `targets` puts a context menu's ids back
-into list order. All three lists — the two sidebars and the commit detail's file list — apply
-them through one modifier,
-`maintainsSelection(_:showing:of:)` (`Design/ListSelectionMaintenance.swift`), at the two moments
-the rules can stop holding: the list's *ids* changing, and the selection changing. The second is
-also where **a list with rows keeps a selection** — AppKit lets ⌘-click take the last row out
-and a click below the rows clear them all, and the modifier writes the previous selection back.
-It is a write-back from `onChange` rather than a binding whose setter refuses the empty set,
-deliberately: the table has already drawn the deselection by then, and only a state change makes
-it draw the selection again. The write-back cannot tell a user's click from an owner clearing the
-set, so a clear only sticks when the rows empty with it — which is what a repository switch does.
-`CommitDetailStore.load` additionally seeds its selection and shown file in the step that
-publishes the files, so the commit detail never draws a frame with a list and nothing open. Space is an
-`.onKeyPress` on the list rather than on a row, since the selection — not a focus ring — is what
-it acts on; a focused row checkbox still gets its own Space first, because AppKit gives a focused
-control the key before the view behind it.
-
-The select-all checkbox is `Toggle(sources:isOn:)`, the multi-source initializer, which is the
-only route to a **mixed** checkbox in SwiftUI: it takes a `Binding<[RowInclusion]>` built from
-the committable rows and projects `\.isIncluded` out of each element. A plain `Toggle(isOn:)`
-has two states, and a two-state select-all reads *off* over a list that is mostly on.
-
-**Where a row action's failure goes is a choice of function, not a shape copied from the site
-next door** — the native counterpart of the Tauri store's `reportActionError` / `reportNotice`
-pair, and for the same reason (that is how *couldn't reveal the file in Finder* came to seize
-the Tauri window). `Design/ActionFailureSheet.swift` holds one `ActionFailure` value and one
-`.actionFailureSheet(_:)` modifier; `ChangesSidebar` exposes `write` and `handOff`, and every
-call site picks one. `write` — both ignore actions — takes the window and carries a retry
-closure, because these fail on a write race far more often than on anything the user would
-have to change first. `handOff` — reveal, open-with — goes to the strip
-(`Design/StatusStrip.swift`), whose ✕ exists for exactly this class: nothing else can ever retire it, where the poll's own banner is
-retired by its own recovery. That split is two fields rather than one slot with a flag —
-`RepoStore.pollFailure` (`private(set)`, so nothing outside can fake a dismissal) beside
-the writable `errorMessage`, both rendered as their own `StatusStrip` row with the poll's
-on top. One slot let whichever arrived first silence the other, and the poll only ever
-wrote into a *free* one, so a dismissable hand-off notice suppressed *this repository has
-stopped being readable* for as long as it stood — the more urgent of the two, and the one
-the user cannot make go away by fixing anything.
-
-**It is a sheet and not an `.alert`, because what it carries is git's own text.** Git refuses
-in paragraphs — a `! [rejected]` line, the ref, then `hint:` lines naming the fix — and
-`NSAlert` reflows its informative text into one unselectable block, which destroyed the shape
-of the message and made the ref names uncopyable on the one class of failure whose text exists
-to be acted on. Nothing reaches that label: a SwiftUI `.alert`'s `message:` is bridged to it,
-so neither `.font` nor `.textSelection` applies. The sheet renders the message monospaced and
-selectable inside a height-capped `ScrollView`, which is what STYLE.md had always specified for
-this class and what the Tauri `ErrorModal`'s `<pre>` had always done.
-
-**A view raises its failure; `ContentView` presents it.** The sidebar does, and `SyncControls`
-and `BranchMenu` now do too, through an `onFailure` closure rather than each mounting the
-modifier itself. The window's modal surfaces are decided in one place, and a view already
-behind a sheet is not trying to put another in front of it — sharpest for those two, which are
-**toolbar items** that own the publish, force-push, create-branch and merge sheets. That is
-also where the retry closure is retired: a repo switch clears it, before the `repoPath` it
-captured at menu-build time names the wrong repository. The confirmations that
-front a slow write are sheets for the same reason and keep their own refusals, which §6.13's
-refinement puts inside the dialog that raised them rather than in a second window over it:
-`DiscardSheet` (*Discarding…*), `CheckoutCommitSheet` (*Checking out…*, which is also what
-stops a second checkout racing the first on `index.lock`) and `ForcePushSheet`
-(*Force-pushing…*, where a refused lease is answered by fetching and pressing the same button
-again). A `confirmationDialog` can host none of them: it dismisses on the click, so it can
-neither say it is still working nor hold what came back.
-
-Amend mode lives in `CommitStore` (`amendTarget` plus the commit's `co_authors`, which the
-composer has no field for and simply re-attaches to the next message). Two behaviours are
-load-bearing: re-entering amend on the same sha is a no-op, so right-clicking Amend twice can't
-wipe edits in progress, and leaving it clears the seeded draft so an amended message can't be
-re-submitted as a new commit. The mode ends by itself when HEAD stops being `amendTarget`:
-`ContentView` hands every landed `status.headSha` to `CommitStore.endAmendingUnlessHead(is:)`,
-and the Tauri client applies the same test inside `refreshStatus`'s one `repoState.update`, so no
-action that moves HEAD has to remember to clear it. `commit` then relaxes its empty-file guard, because
-`git commit --amend` with nothing staged *is* the message-only edit. This forced one structural
-fix: `CommitStore` moved from the Changes pane (now `ChangesSidebar`) to `ContentView`, since the tab bar swaps panes by
-rebuilding them — which discarded any in-progress message on every tab switch, and would have
-made amend impossible, as amend is started from the History tab and finished in the Changes tab.
-Which commit is `HEAD` comes from `status.head_sha`, not from the row's index, in both clients —
-an index into a loaded page is only HEAD for as long as nothing moves the page's top. Undo's own
-gate is shared too: offered only when the commit is provably unpushed, or when no upstream
-resolved at all and nothing can prove it was pushed either.
-
-The embedded terminal crosses as the bridge's second foreign callback trait:
-`TerminalEventListener { on_output(pid, data), on_closed(pid, exit) }` — `exit` is a
-`TerminalExit { exit_code, signal }` mirror of the reaped child's status — adapted to core's
-`EventSink` by a private `TerminalSink` — its own trait rather than variants bolted onto
-`SyncProgressListener`, because the two event shapes share nothing and each sink is scoped
-to what its operation can emit. Everything is synchronous (core's PTY sessions run on plain
-OS threads; no tokio): `start_terminal` — whose session reader thread holds the listener
-until the child exits — plus `write_terminal`, `resize_terminal`, `close_terminal` and a
-`StartedTerminal` mirror. `terminal_pty_info` (Windows-ConPTY metadata xterm.js needs
-before construction; all-`None` on macOS) stays unexported. On the
-Swift side, SwiftTerm renders the emulator (an SPM package pinned in `project.yml`, since
-the generated project's `Package.resolved` is gitignored). A `TerminalController` bridges
-one `TerminalView` to one session: keystrokes and grid sizes go out on a serial I/O queue —
-ordering the blocking writes and keeping them off the main actor — and output comes back
-through a coalescing relay: chunks arrive once per 4 KiB PTY read on the Rust reader
-thread, append to a locked buffer, and at most one main-actor drain is ever in flight, so
-floods batch into a single `feed` — the port plan's byte-stream-throughput question,
-answered. Session lifecycle rides structural identity: `TerminalSessionView` mounts under
-`.id("repoPath:generation")` while `TerminalStore.generation > 0`, so New Session and repo
-switches unmount the old view (whose `onDisappear` kills the PTY) — the native `{#key}`
-remount — and a shell exit nulls the pid *before* anything else, so unmount never
-double-closes a session core already dropped; a *clean* exit then collapses the dock,
-while a non-zero code or fatal signal instead prints `[Process exited with code N]` in
-red and keeps the dead terminal on screen for reading (✕ and ＋ still work — the pid is
-nil, so their teardown is a no-op against core). Collapsing protects the drawn terminal as well as the shell's view of it. The dock pins
-the emulator's frame at the panel height and puts the collapse on an *outer* frame that
-clips it, so SwiftTerm never lays out against a degenerate size. A zero **height** at full
-width was the trap: SwiftTerm's own bail wants width *and* height at zero, so the buffer
-reflowed to one row on every collapse and back on every expand, wrapping the scrollback
-and sending a spurious `SIGWINCH` each way — only the PTY resize was refused (`cols >= 2,
-rows >= 2` in `TerminalController.resize`, plus core's own guard), which kept the child's
-geometry but not the prompt. The pinned view hangs below a collapsed panel rather than
-having no size, so `.allowsHitTesting(store.isExpanded)` stops it answering the mouse as
-well as drawing. The Tauri client's collapse is `display: none` on the terminal container,
-which genuinely changes nothing: a hidden element reports no box, the debounced `fit()` is
-a no-op, and re-expanding paints what was there.
-
-`TerminalController.resize` coalesces on an **80 ms** debounce, matching the Tauri panel's
-`ResizeObserver` and Windows Terminal's reasoning: a divider drag fires `sizeChanged` once
-per column crossed, and every distinct grid is a `SIGWINCH` the shell redraws its whole
-edit buffer for. The debounce is in the controller and not the delegate on purpose — the
-initial `pushCurrentSize` has nothing to coalesce with and goes straight to `pushResize`,
-which is also what `shutdown` cancels against. A degenerate grid is dropped *without*
-cancelling what is pending: the last real size is the one the shell should still hold.
-Scrollback is set explicitly to **1 000 lines** in both clients — SwiftTerm defaults to 500
-and xterm.js to 1 000, so the two were remembering different amounts of the same shell —
-passed through `TerminalOptions` at construction, since SwiftTerm reads its options once.
-Link handling is pinned rather than inherited for the same reason: `linkReporting =
-.implicit` detects bare URLs as well as OSC 8 ones, matching the Tauri link addon, and
-`linkHighlightMode = .hoverWithModifier` is what makes ⌘ required to follow one and leaves
-a plain drag to the selection. SwiftTerm publishes no hover callback — it resolves the
-hovered link and notifies nobody — and on macOS 26 it drops `.mouseMoved` from its
-tracking area to dodge a WindowServer bug that synthesizes mouse-downs, so the native
-client teaches the modifier with SwiftTerm's own ⌘-held highlight and URL preview rather
-than a hint of its own (FRONTEND §8).
-Terminal focus (SwiftTerm's view as first responder) suppresses auto-fetch exactly like the
-field-editor check. Both docks toggle on **⌃`** — VS Code's binding, and deliberately not ⌘`,
-which macOS owns for cycling an app's windows — and both give the *emulator* 280 pt with the
-header strip on top of that, so the same setting hands the shell the same number of rows in
-either client. Focus is a *request*, not a call:
-the dock asks as the panel opens, which on the first expand is before AppKit has attached the
-emulator to a window, and `makeFirstResponder` on a windowless view is a silent no-op — so
-`TerminalController` holds the request and replays it from the host view's
-`viewDidMoveToWindow`, then makes it first responder one main-actor hop later, after SwiftUI
-has settled its own responder for the pass. Collapsing releases it (the window becomes first
-responder again), because a collapsed panel is zero-height but still mounted and would
-otherwise keep typing out of sight.
-
-The dock's header strip is a stock **accessory bar**: `.buttonStyle(.accessoryBar)` over the
-whole row, which AppKit draws as `NSBezelStyleAccessoryBar` — the renamed *recessed* bezel
-behind every scope bar in the system — so hover, press, and on-states come from the control
-class instead of being painted here. The strip has to be hand-assembled because
-`ToolbarItemPlacement.bottomBar` is `@available(macOS, unavailable)` in the macOS 26 SDK
-(`.status` is the top toolbar's centre, and `.accessoryBar(id:)` sits *below the title bar* —
-both the wrong end of the window); the accessory-bar *style*, however, is reusable in plain
-window content, which is what makes the strip native without imitation. The shell label is a
-`Toggle(isOn:).toggleStyle(.button)` over a binding whose setter calls `store.toggle()`
-rather than assigning, so the lazy first PTY spawn still happens on the way up, and the
-right-hand buttons are `Label`s under `.labelStyle(.iconOnly)` — icon-only on screen, titled
-for VoiceOver. Deliberately *no* `glassEffect`: the HIG restricts Liquid Glass to the
-navigation layer, and this bar lives in content, so it keeps the `.bar` material. The dock
-is the last child of the main-content column's `VStack` — under the diff, beside the sidebar,
-and outside the tab switch so the shell survives a tab change — rather than a
-`safeAreaInset`, since nothing should scroll under an opaque 280 pt panel.
-
-Cloning and the Settings window crossed together. `clone_repo` is exported like `pull`
-(async over tokio, progress through the same `SyncProgressListener` seam — `ProgressSink`
-needed no change, since core aggregates clone's phase weights before emitting) and the gh
-pair joins it: `gh_repo_list` (a `GhRepo` mirror; async over `spawn_blocking` like
-`repo_sync_status`, since the 20 s `gh` query must not park a cooperative thread) and
-`gh_clone` (no listener — `gh repo clone` reports nothing parseable, so the sheet shows an
-indeterminate bar; the Tauri dialog shows no bar at all in that case, only its `Cloning…`
-button state, because its bar is gated on a `git-progress` event a gh clone never emits). The destination contract is core's
-`prepare_clone_target`, shared by both paths: the caller passes the *full* target path,
-core expands `~`, refuses an existing path, and creates the parent. What the folder is
-*called* is `core::repos::derive_clone_target` / `clone_target_path`, which both dialogs
-call, so the destination preview and the Clone button's enable condition are the same
-answer and cannot disagree about whether the app is about to succeed. The sheet (reachable
-from either picker's footer) seeds its destination from the shared `last_clone_dir` → first
-scan path → `~/Dev`, persists the parent folder back on success, shares the GitHub tab's
-`clone_sort_mode` with the Tauri dialog through `repos-state.json`, and disables every exit
-while cloning — there is no cancel; a dismissed sheet would orphan the clone. Success hands
-the fresh path to `RepoStore.open`, so the normal `.task(id:)` chain records it as recent
-and runs the warm-up fetch.
-
-`CloneStore` is owned by `ContentView`, not by the sheet: the GitHub list is a
-once-per-run cache, and a store created with each presentation re-ran the 20 s `gh` query
-every time it opened. `reopen()` is therefore what each presentation resets — the URL,
-the filter, the selection and the error — while the tab, the list and the sort mode
-survive, because which tab you clone from is a preference and re-fetching an unchanged list
-is exactly what the cache exists to avoid. A repository created since launch is reached by
-the Refresh button beside the filter; `hasLoadedList` is set only on success, so a failed
-load retries on the next open rather than reopening onto a stale error with no list behind
-it. `visibleRepos` is recomputed when the filter, the sort mode or the list changes rather
-than per layout pass, and it filters *before* it sorts — the query is what shrinks the
-list, so ordering rows it is about to discard is work thrown away, 200 rows at a time, per
-keystroke. Both name orders go through `NameCollation`, which is case- **and**
-diacritic-blind (the Tauri lists' `sensitivity: 'base'`), with an explicit tiebreak after
-it: Swift's sort is not stable, so two same-second pushes would otherwise swap places
-between passes. The
-Settings scene (`Settings { }` in `LeoGitApp`, which is what binds ⌘, and the app-menu
-item) exposes only fields with native consumers — auto-fetch cadence, the Diff section
-(hide whitespace, syntax highlighting, tab size 1–16), scan paths/depth, the terminal
-shell (via the newly exported `list_shells` + `ShellOption` mirror, with a
-stored-but-uninstalled id rendering as Automatic), and the AI knobs — provider, and the
-selected provider's own model, server URL and timeout. Two fields
-go unnamed by the patch, which is what a patch makes expressible: `theme`, a permanent
-exemption because the native app follows the system appearance (FRONTEND.md §8), and
-`side_by_side_diff`, which the diff header owns in both clients — naming it here would
-revert whatever that header last wrote while this window stood open. Each control patches **only the field it owns**. `SettingsStore.Field` is the unit of
-everything in that window: `patch(for:)` builds a one-field `ConfigPatch` from the
-control, `seed(_:from:)` puts the file's value back into it, and the debounce table is
-keyed by it, so a stepper still counting down never delays the toggle beside it. A patch
-naming every field the form holds is D-5's lost update at form scale — it posts them as
-they looked when the window *opened*, so a `tab_size` the other client wrote meanwhile is
-reverted by an unrelated toggle here, and `patch_config` cannot help a caller that does
-not name fields field-wise.
-
-`seed` records what it wrote as `seeded[field]`, and `isDirty` compares the control's
-current patch against it. That one predicate answers all three of the
-window's bookkeeping questions: whether a write is owed at all, what `flush()` must commit when the
-window closes, and which controls an edit made *elsewhere* may repaint
-(`adoptExternalChanges`, driven by an `onChange` on the shared config — a field with an
-edit of its own outstanding keeps it, because the user's uncommitted change is newer than
-the file). Recording it *through* `patch(for:)` rather than from the `Config` is what
-keeps a value the form normalizes on its way out — a trimmed model name, a re-parsed path
-list — from reading as changed and writing itself back on every visit. `flush()` is then
-one rule covering both ways an edit can be pending on ⌘W, which is neither a focus-loss
-nor a Return: cancel every debounce, write every dirty field. Without the second half,
-⌘W silently drops a value typed into a field the user never left — in the one surface
-whose premise is that you never press Save.
-
-Every write re-seeds its own control from the config core handed back — the clamp on
-success, the untouched previous value on refusal, so a rejected write puts its control
-back instead of leaving it claiming a setting that isn't on disk. It is skipped when the
-form moved while the write was in flight: the user's newer edit wins, and the write it
-schedules carries it. Discrete controls debounce 300 ms; text fields commit on
-focus-loss/Return and travel blank (core reads blank as absent); scan paths sit behind
-Edit ▸ Done, whose Done writes through the same path with no debounce, and whose draft
-lives beside the field so leaving mid-edit discards it. The numeric ranges come from
-`config_bounds()`, the two AI timeouts included, so the form cannot offer a value the
-writer clamps away. When the config cannot be read at all, the form renders the failure
-and **no controls**: struct defaults presented as the user's settings are wrong and
-inert at once.
-
-Config has one native owner, and it is now the one native **writer** too:
-`Stores/AppConfigStore.swift` (@MainActor @Observable, created in `LeoGitApp` and put in
-the environment of both the main window and the Settings scene). It holds the shared
-`Config`, exposes it through accessors carrying the Tauri client's own fallback defaults,
-and reloads at three sites — launch, the Settings window opening, and the activation
-resync (edits from the Tauri client arrive on return to the app). A write needs no reload
-of its own: `patch_config` hands back the whole normalized config, which is newer than
-anything a re-read could produce; `reload()` reports whether the read succeeded, so the
-window that opened on a failure can say so, and drops a read a write overtook. The
-auto-fetch loop reads the store each tick, so interval and toggle changes apply within one
-interval — the live re-arm the Tauri client still lacks (its ROADMAP entry) — and
-`DiffView`'s `LoadKey` reads it so the diff toggles re-key the open diff the moment a
-write lands.
-
-`patch(_:)` is the single writer, and it **queues**: core's lock keeps the file coherent
-but decides nothing about order, so two patches in flight are two patches whose winner is
-the scheduler's. `enqueue` registers each write behind the last one synchronously, before
-any `await` — a caller that hopped through a `Task` of its own would be joining in
-scheduler order instead — and bumps `writeGeneration` there for the same reason, so a
-`reload()` already awaiting learns a write started rather than finding out a hop later.
-Two fields carry a pending shadow because their controls must answer on the click rather
-than after a file write: `side_by_side_diff` for the diff header's layout segment, and
-`ai_provider`, which is why `setSideBySideDiff` is deliberately synchronous. A refused
-write is then an observable change *back*, where a setter that left the store untouched
-would leave the pressed control showing something that never took.
-
-`ai_provider` lives there rather than in `CommitStore` because it has two controls — the
-composer's picker and the Settings window's — and two independent owners meant they could
-disagree while both were on screen (ST-5). `CommitStore.aiProvider` is now a read of the
-store, and `refreshProviderStatus`/`generate` await `AppConfigStore.settle()` before
-asking core to resolve the provider config off disk — that read reaches the file the
-picker's write is still landing in, so clicking Generate straight after switching would
-otherwise resolve the previous provider.
-
-The store is handed to the four stores that need it **at construction** rather than
-assigned after the fact: `ContentView.init(appConfig:)` builds `RepoDirectoryStore`,
-`CloneStore` and `CommitStore` with it, and the Settings scene builds `SettingsStore` the
-same way. An optional assigned from a `.task` has a window in which it is nil, and
-`RepoDirectoryStore`'s first walk falling in that window would run against no scan paths
-at all. No surface reads the config file behind the owner's back either: discovery's
-`scanPaths`/`scanDepth` and the clone sheet's destination seed come from its accessors,
-which is what makes "one observation, one staleness window" true rather than
-aspirational. There is exactly one deliberate exception — a new terminal session takes
-`terminal_shell` in `TerminalController.start`, whose promise is "applies to new terminal
-sessions" and whose cost is one read per spawned shell.
-
-The Tauri client reaches the same place from the other side: its chained `patchConfig`
-moved out of `SettingsOverlay` into `stores/config.ts`, so the "two quick edits land in
-the order they were made" guarantee holds across surfaces rather than within one form.
-
-Publish closed the gh surface. `gh_publish_repo` crossed like `gh_clone` (already
-core-async over the blocking pool; no listener — `gh repo create` streams nothing parseable,
-so the sheet and the toolbar banner stay indeterminate), and `SyncStore` gained a `.publish`
-case in the same single `activeOperation` slot as push/pull — Tauri's `'publish'` network op
-— so every background loop pauses for its duration. `check_auth` remains unexported: every gh
-call's own error text already distinguishes "gh missing" from "not authenticated".
-There is deliberately no pull-request surface in either client — PRs are a GitHub
-feature, not a git one, and the web UI serves them.
-
-`scripts/build-rust.sh` builds the static lib and regenerates the bindings, and Xcode runs it as
-a pre-build phase — so the Swift API can never be stale relative to the Rust it calls.
-`ffi/generated/` is gitignored for the same reason. Three things there are load-bearing and
-guarded by assertions in that script:
-
-| Concern | Why it bites |
-|---|---|
-| `module_name` (`uniffi.toml`) ↔ `--module-name` ↔ `SWIFT_INCLUDE_PATHS` | The bindings import the C shim as `#if canImport(LeoGitCoreFFI)`. A mismatch does not error — the guard just goes false and every FFI symbol fails to resolve. |
-| `--link-frameworks SystemConfiguration` | Core's `reqwest` → `hyper-util` chain reads system proxy settings. Declaring the framework in the modulemap keeps the requirement with the library instead of in each consumer's build settings. |
-| `SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated` | Xcode 26 defaults new app targets to `MainActor`, which **breaks** the generated bindings (raw pointers, `deinit`, sync C interop cannot be main-actor isolated — mozilla/uniffi-rs#2818). UI types opt into `@MainActor` explicitly instead. |
+- Collapse pins the emulator's frame inside a clipping frame. A zero height reflows scrollback and sends `SIGWINCH`.
+- Focus is a request replayed from `viewDidMoveToWindow`, since `makeFirstResponder` on a windowless view does nothing.
+- A shell exit nulls the pid first, so unmount can't double-close.
+- SwiftTerm reads options once, so scrollback goes through `TerminalOptions`.
 
 ## Process model
 
-There are two processes at runtime:
-
-1. **Tauri host (Rust)** — owns the window, runs the invoke handler, owns the PTY session pool, shells out to `git` / `gh` / `claude`.
-2. **WebView (Svelte)** — renders the UI, dispatches commands via `invoke(...)`, subscribes to terminal output via Tauri events.
-
-All work flows through Tauri's IPC. There are no HTTP servers, no sidecars, and no Node runtime in production.
+Tauri is two processes, Rust host and WebView, joined only by IPC. Native is one process with core linked in. No servers or sidecars.
 
 ### Startup PATH fix
 
-`process::fix_path_env` runs once, first thing, in both hosts — the top of Tauri's `main`, the SwiftUI `App.init` — before any other thread exists, because it is the one caller of `set_var` and edition 2024 marks that unsafe for exactly the data race a second thread would create. Without it, apps launched from Finder or a `.desktop` entry inherit a minimal PATH (e.g. `/usr/bin:/bin:/usr/sbin:/sbin`) and miss user-installed tools like `claude`, `gh`, or Homebrew binaries. No-op on Windows.
-
-The answer comes from `process::resolve_login_path`, and almost always from a **cache** rather than a shell. Asking the login shell — `$SHELL -ilc` — costs ~350–450 ms on a typical macOS setup, nearly all of it the `-i`, and the `-i` cannot be dropped: `zsh -lc` does not read `~/.zshrc`, and that file is where version managers and most user tooling append to `PATH`. So the probed value is stored in `shell-path-cache.json` beside `config.toml` (the config dir, not a cache dir — a wiped cache must not regress `PATH`), and [core/src/path_cache.rs](core/src/path_cache.rs) owns the one question that raises: *when is the cached value wrong?* Its key records every startup file the shell family reads, **whether or not it exists** (so creating `~/.zshenv` invalidates), the `/etc/paths.d` directory and its entries, the version-manager state files (`nvm`'s default alias, `.tool-versions`, `.python-version`, …) and the `SHELL`/`HOME`/`ZDOTDIR`/`XDG_CONFIG_HOME` values; a 7-day ceiling catches what the key structurally cannot see (a new node version, a moved Homebrew prefix). A valid cache is installed in well under a millisecond; a miss probes as before, installs, and rewrites the cache, logging the first reason it was rejected so a slow launch is explainable from the log.
-
-Once the window exists, both hosts call `process::spawn_path_reprobe()` (Tauri's `.setup` hook; the native window's `.task`). It is a no-op unless startup used the cache; otherwise a named thread re-probes, rewrites the cache, and — only if the answer differs — publishes the fresh value where the `prepare_child*` hooks apply it to each child's own `PATH`. It never touches the process environment: a tool the fresh `PATH` knows is found by the very next child rather than the next launch, and the soundness contract stays with `fix_path_env` alone.
-
-The probe itself is shell-agnostic and bounded. It runs `echo -n "<marker>"; env; echo -n "<marker>"` and reads the `PATH=` line between two per-call markers — never `"$PATH"` in shell syntax, because fish joins that list with spaces, and never a bare `echo`, because any rc file that prints would corrupt the value. Only `PATH` is kept from the dump. It sets `LEOGIT_RESOLVING_ENVIRONMENT=1` (the VS Code convention, so an rc file can skip its slow half), runs through `run_timed` with a 10 s budget in its own process group, and goes through `prepare_child` like any other child, which matters for more than tidiness: a login shell appends to the PATH it inherits, so probing with the AppImage's PATH would report the AppImage's entries back and bake a temporary mount into the PATH every later child starts from.
+- `process::fix_path_env` runs first in both hosts, before any other thread, as the only `set_var` caller (unsafe in edition 2024). Finder and `.desktop` launches otherwise get a minimal PATH.
+- It reads `shell-path-cache.json`. `$SHELL -ilc` costs ~400 ms, and `-i` is required because `~/.zshrc` is where tools append.
+- `path_cache.rs` keys on every startup file whether or not it exists, `/etc/paths.d`, version-manager state and env values, with a 7-day ceiling.
+- `spawn_path_reprobe` refreshes later and only feeds the child hooks, never the process env.
+- The probe reads `PATH=` from `env` between markers. Never `"$PATH"` (fish joins with spaces) or a bare echo (rc files print). It goes through `prepare_child`, or AppImage entries get baked in.
 
 ### Path normalisation
 
-[core/src/paths.rs](core/src/paths.rs) owns the form every path takes once it's inside the app, and **`std::fs::canonicalize` must not be called anywhere else**. On Windows it always answers with a *verbatim* (extended-length) path — `\\?\C:\Users\Leo\Dev\leogit` — which names the right folder but leaks everywhere: the repo tooltip and the picker's empty state rendered the prefix literally, and PowerShell, unable to map a verbatim path onto a `PSDrive`, dropped to a provider-qualified prompt (`PS Microsoft.PowerShell.Core\FileSystem::\\?\C:\…`) that also breaks any script doing string work on `$PWD`.
-
-- `paths::canonicalize` replaces `fs::canonicalize` at every site: `discover_repos` (scan roots and each hit), `repo_root`, `init_repo`, `resolve_launch_target`. Backed by [`dunce`](https://lib.rs/crates/dunce), which strips the prefix only when the legacy namespace can express the same path — never over `MAX_PATH`, never for a reserved DOS name (`CON`, `COM1`), never for a network share — so nothing that genuinely needs the prefix loses it.
-- `paths::simplify_str` does the same conversion without touching the filesystem, for paths that arrive already-absolute from elsewhere: `config::normalize_repo_paths` (see below) and `start_terminal`'s cwd, the boundary where a third-party shell reads the path.
-- **macOS and Linux are untouched by construction**, not by a platform branch of ours: `dunce`'s strip check is a `const fn` returning `false` off Windows and its `canonicalize` is a re-export of `std::fs::canonicalize` there.
-- `paths::expand_tilde` turns a leading `~` into the home directory, and takes that directory from the **OS** (`directories::BaseDirs`, already a dependency) rather than from `$HOME`. That variable is not part of the environment Windows hands a program — Explorer and the Start menu don't set it, only POSIX-flavoured shells (Git Bash, MSYS) do — so reading it directly made `~` resolve or fail *depending on how the app was launched*: scan paths worked under `tauri dev` started from such a shell and matched nothing in an installed build, where discovery skipped every root it couldn't resolve and the picker just said "no repositories found". `BaseDirs` reads `FOLDERID_Profile` on Windows, which no environment can misreport, and `$HOME` on macOS and Linux exactly as before (falling back to the passwd entry), so the fix is Windows-only in effect without a `cfg`. Expansion also accepts either separator and emits the platform's own, so `~\Dev` works and the result never comes out half `\` and half `/` — a form that compares unequal to the same folder discovered any other way.
-- The frontend has the matching rule in [lib/utils/path.ts](apps/tauri-app/src/lib/utils/path.ts): `basename` splits on **either** separator. Four components had their own `/`-only copy, so on Windows the whole path counted as one segment and a repo without a GitHub remote to name it was labelled `C:\Users\Leo\Dev\ryubing\Ryubing`. Deliberately not used for git's own paths (`PathText`, `fileActions`) — git reports forward slashes on every platform, and a separator-agnostic split there would cut a filename that legitimately contains a backslash on Linux or macOS.
+- `paths.rs` owns the form. **Never call `fs::canonicalize` elsewhere**: on Windows it returns `\\?\` paths that break tooltips, de-dupe and PowerShell prompts. `dunce` strips the prefix only when safe.
+- `expand_tilde` asks the OS (`BaseDirs`), not `$HOME`, which Windows sets only under POSIX shells.
+- Frontend `basename` splits on either separator. Don't use it on git's paths: git writes `/`, and a backslash can be in a filename.
 
 ### Command-line repo opening
 
-The `leogit [dir]` shell command (installed by `install.sh`, see *Release pipeline*) opens a repo straight from a terminal. The rule lives in [core/src/launch.rs](core/src/launch.rs) and both clients call it; only how a second invocation reaches a running app differs, and that difference is the platform's.
-
-- **Argv → `LaunchTarget`.** `resolve_launch_target` takes the first non-flag argument, resolves it against the cwd, and **canonicalizes** it (so it de-dupes against the canonical paths from `discover_repos`). It returns `{ path, is_repo }` rather than an optional repo path: an existing directory always produces a target, and `is_repo` decides whether the frontend opens it or offers to create a repository there. `is_repo` comes from `git::repo_root`, which shells out to `rev-parse --show-toplevel` so a **subdirectory resolves to its repo root** (`leogit src/` opens the repo, and can't be mistaken for a fresh folder), falling back to the `.git` probe when the toplevel is unreadable so an existing repo is never offered a nested `git init`. Only a missing path, a non-directory, or a bare `leogit` resolves to `None` — those just launch/focus the window.
-- **Tauri, cold start** (app not running): `main.rs` calls `resolve_launch_target` *before* the builder and stashes the result in a process-global via `set_pending_launch_target`. The frontend claims it once on mount through the `take_pending_launch_target` command (`appApi.takePendingLaunchTarget`), which clears it so a reload won't re-open. In `App.svelte` a repo target wins over the remembered `last_opened_repo` and is added to the repo list even if it lives outside the scan paths; a non-repo target raises the init prompt and lets normal resolution continue behind it.
-- **Tauri, warm start** (app already running): `tauri-plugin-single-instance` — registered **first** in `main.rs`, as the plugin requires — detects the second launch, hands its argv/cwd to `handle_second_instance`, which focuses the window and emits an `open-repo` event carrying the `LaunchTarget`. The plugin keys on the app identifier via a `/tmp/<identifier>_si.sock` Unix socket (the second process connects, forwards, and `exit(0)`s). The frontend splits the event three ways: a **non-repo** target always goes to `App.svelte` (the prompt isn't scoped to the open repo, so `MainLayout` ignores those); a **repo** target goes to `MainLayout` in phase `main` (reusing `handleSwitchRepo` via `openExternalRepo`) and to `App.svelte` in the pre-`main` phases. The repo listeners stay mutually exclusive — `App` ignores repo targets while phase is `main`, and `MainLayout` is only mounted then.
-- **macOS: one callback for both, from LaunchServices.** `project.yml` declares `CFBundleDocumentTypes` with `LSItemContentTypes: [public.folder]`, role `Viewer`, rank `Alternate` — enough for `open -a LeoGit <dir>` to activate the running instance and hand it the folder, and not enough to compete with Finder for the machine's default folder handler. That is exactly the form `install.sh` writes into the `leogit` function on macOS, naming the path it installed to, so the terminal command is one of the routes in. The delivery point is `NSApplicationDelegate.application(_:open:)` (`App/AppDelegate.swift`), which AppKit calls between `applicationWillFinishLaunching` and `applicationDidFinishLaunching` on a cold start and at any time afterwards — so the same code path serves both, and there is no socket, no second process to forward from, and no window to raise by hand. The delegate exists only for this; SwiftUI has no scene-level equivalent of that callback. Core's pending-target slot is deliberately **not** exported: it can hold the argv target but cannot publish the later ones, and a process global the UI would have to poll is not a slot the UI can observe.
-- **`Stores/LaunchStore.swift` is the one slot both native routes write to.** `open(urls:)` (the delegate) and `readProcessArguments()` (a launch that bypassed LaunchServices) each hand core an argv — the delegate's is the single path as a one-element list — and chain onto any resolution already running, so two hand-offs queue rather than race. Two published values, for two readers: `pending`, claimed once and cleared, and `latest`, kept. `ContentView.resolveLaunchRepo` reads `latest` and claims `pending` itself before falling through to the remembered repo, because `.onChange` cannot observe a value that was already set when the modifier was installed — which on a cold start is exactly the case, the delegate having fired before any SwiftUI task ran. The `.onChange` handles every *later* hand-off. `claim()` being one-shot is what lets both run without either double-opening.
-- **Initialising a non-repo folder.** Both clients raise the prompt from the root, not the repository screen, so it can render over the picker, over another open repo, or at first launch — it belongs to none of them. Confirming calls `git::init_repo`, which creates the folder if needed, runs `git init` (naming the branch `main` unless the user configured `init.defaultBranch`), and returns the path to open. It is **idempotent** — a folder already inside a repo returns that repo's root instead of nesting a new one — so a double-confirm, or confirming after the user ran `git init` themselves, opens the repo rather than failing. Tauri's [InitRepoConfirm.svelte](apps/tauri-app/src/lib/components/InitRepoConfirm.svelte) routes the result to `MainLayout.openExternalRepo` (bound via `bind:this`) when one is mounted, since only it can reset the open repo's view state, and otherwise moves the app into `main` itself; native's `InitRepoSheet` hands it to the same `switchRepo` a picker row uses. It is a sheet rather than a `confirmationDialog` because `git init` can fail on permissions and FRONTEND §6.13 keeps a refused dialog's context and states the refusal in place — a confirmation dialog has nowhere to put one, and dismissing to a banner would lose the folder the user was asked about. Unborn HEAD is already handled downstream, so the fresh repo renders immediately.
+- `launch.rs` resolves argv to `LaunchTarget { path, is_repo }`; a subdirectory opens its repo.
+- Tauri cold start stashes the target for `take_pending_launch_target`. Warm start goes through `tauri-plugin-single-instance`, registered first, which emits `open-repo`.
+- macOS declares `public.folder` (Viewer, Alternate), so `open -a <path> <dir>` reaches `application(_:open:)` cold and warm.
+- `LaunchStore` holds `pending` and `latest`. `resolveLaunchRepo` claims `pending` itself, since `.onChange` can't see a value set before it was installed.
+- `init_repo` is idempotent: a folder inside a repo returns that root.
 
 ### Repo-less phases
 
-`loading`, `repo-picker` and `error` render `<Header>` above the phase content. `Header` derives `hasRepo` from `$appState.repoPath` rather than taking a prop — `repoPath` is the single source of truth and a separate flag could disagree with it — and hides the repo chip, branch chip, status area and the sync button when it is false. Settings, Help and the update chip remain, so they are reachable in every phase. `onOpenRepos`/`onOpenBranches` are therefore optional props: only the hidden chips call them. Header's effects already no-op without a repo (each guards on `repoPath`), so mounting it costs nothing.
-
-Two consequences worth knowing:
-
-- `RepoPicker`'s overlay is `position: absolute; inset: 0` inside `.pre-main-body`, **not** `position: fixed`. A viewport-fixed overlay would sit on top of the header and swallow the only controls that can rescue an empty picker.
-- `App.svelte` binds `Escape` / `Ctrl+,` / `?` only while the phase isn't `main`; `MainLayout` owns those keys otherwise, and binding in both would double-handle them. `?` is ignored while a text field has focus, since the picker autofocuses its search box. Only the *binding* is split — both handlers pass `Escape` to the one overlay stack, which is why a dialog that can appear in every phase (the `leogit <dir>` init prompt) needs no rule about which host is listening.
-
-`effective_scan_paths` (git.rs) reports the folders discovery would walk, so the empty state can list them. It and `discover_repos` both route through `resolve_scan_paths`, the sole owner of the "empty config → stock defaults" rule, so the folders shown can't drift from the folders searched — pinned by `effective_scan_paths_matches_the_resolution_discovery_uses`.
+`RepoPicker`'s overlay is `absolute`, never `fixed`, or it covers the header controls that rescue an empty picker. `App.svelte` binds keys only outside `main`.
 
 ### Child-process preparation
 
-Every command LeoGit spawns passes through one hook in [core/src/process.rs](core/src/process.rs) — `prepare_child` (std `Command`), `prepare_child_async` (tokio `Command`) and `prepare_child_pty` (the terminal's `portable-pty` `CommandBuilder`) — which applies the corrections a child needs on the way out. Call sites: `git_cmd` / `git_net_cmd` (git.rs), `apply_patch` (diff.rs), `check_auth` / `gh_repo_list` / `gh_clone` / `gh_publish_repo` (gh.rs), both `claude` spawns (ai.rs), the three file-manager / browser / default-app hand-offs (os.rs), the login-shell PATH probe, and `start_terminal`'s shell. Keeping it one hook is what makes the next cross-cutting correction a one-line change instead of a sweep — and it is also the one place that can **count** children: `process::spawn_count()` ticks in the hooks, and `just bench` reads it to attribute spawns to operations, because a git invocation is mostly fork/exec (~8 ms here) and spawn count is the number every I/O change is measured against. The hooks also apply a re-probed login `PATH` (see *Startup PATH fix*) to the child's own environment, after the AppImage sanitising so the order of corrections is fixed.
+Every spawn passes a `prepare_child*` hook, which also ticks `spawn_count()`.
 
-**No console window (Windows).** Release builds set `windows_subsystem = "windows"` (in `main.rs`), so the app runs with no attached console. On Windows a console-less process that spawns a console subprocess gets a **new console window allocated and briefly flashed** for each call — and because the UI polls `git status` every 2s, that would mean a `cmd` box flickering on screen continuously, plus one on every fetch/commit/diff. The hook sets the `CREATE_NO_WINDOW` creation flag; no-op off Windows. The PTY shell in terminal.rs is intentionally exempt — ConPTY is a pseudo-terminal, not a console subprocess, so it never flashes a window.
-
-**No AppImage environment (Linux).** Owned by [core/src/appimage.rs](core/src/appimage.rs). The Linux client runs from an AppImage, whose `AppRun` exports ~19 variables pointing into the temporary mount the image unpacks itself into (`$APPDIR`, e.g. `/tmp/.mount_leogitXXXXXX`): `LD_LIBRARY_PATH`, `GTK_PATH`, `GIO_EXTRA_MODULES`, `GDK_PIXBUF_MODULE_FILE`, `QT_PLUGIN_PATH`, `PYTHONHOME`, `PERLLIB`, a `PATH` prefix and more. Those values are correct for *this* process and **its own environment is never scrubbed** — they are how the bundled WebKitGTK, its helper processes and every lazily-`dlopen`ed GTK module find their libraries, so removing them would break the app. They are wrong for every program we hand off to: `git`, `gh`, `claude`, the shells in the terminal panel and whatever `xdg-open` launches are system binaries that must link against system libraries. And because the mount is unmounted when LeoGit quits, a child that outlives us — an editor opened from a file row, a terminal — is left pointing at paths that no longer exist. A `PYTHONHOME` under a dead mount stops `python3` starting at all: it cannot find `encodings` and aborts before running a line.
-
-The edits are derived from `$APPDIR` rather than from a list of variable names, because that list is not ours to keep current — every `linuxdeploy` plugin adds its own, and a name we failed to anticipate is exactly the one that would leak. So: drop every `:`-separated entry living under `$APPDIR`; drop the variable entirely when nothing real is left (including the trailing `:` AppRun leaves when it prepends to a variable the session never set, as in `PYTHONPATH=$APPDIR/usr/share/pyshared/:`); leave anything that never mentioned `$APPDIR` byte-identical. `PATH` is filtered but never deleted — no `PATH` at all is worse for a child than a stale one. The self-describing markers (`APPDIR`, `APPIMAGE`, `ARGV0`, `OWD`, `APPIMAGE_EXTRACT_AND_RUN`) go outright, so a child never believes it is running inside an AppImage of its own.
-
-Edits are recomputed per spawn rather than cached, because the environment legitimately changes once at startup: `fix_path_env` replaces `PATH` after probing the login shell, and a snapshot taken before that would re-apply the stale `PATH` to every child forever after. A `ChildEnv` trait states the policy once for the three builder types LeoGit spawns through — `std::process::Command`, `tokio::process::Command` and `portable_pty::CommandBuilder`. The PTY one is reached through `prepare_child_pty`, and it works because `CommandBuilder` materializes the inherited environment into a map at construction, so `env_remove` there is a real removal rather than a shadow. Twelve tests in `appimage::tests` pin the policy; two of them spawn a real child and inspect a real `CommandBuilder` so the plumbing is proven, not assumed.
+- Windows: `CREATE_NO_WINDOW`, or the poll flashes a console. The PTY is exempt.
+- AppImage: children lose everything under `$APPDIR`, derived from values, not a name list. `PATH` is filtered, never deleted. The app's own env stays, since bundled WebKitGTK needs it. Recomputed per spawn because `fix_path_env` changes PATH.
 
 ### Network resilience (offline / flaky)
 
-Every remote-touching command is engineered so an unreachable or flaky network degrades a badge — it never freezes the app. Three layers:
-
-1. **Off the main thread.** Every command that spawns a subprocess or touches the filesystem — the whole of `git.rs` (except the pure `format_commit_message`), all of `diff.rs`, and the four `gh` commands — is declared `#[tauri::command(async)]`. A plain synchronous Tauri command runs inline on the **main thread**: a blocking `git` spawn there freezes the window, and the failure mode is sneaky — commands that are normally instant (`get_status`, `rev-parse`) turn slow exactly when a big push/pull saturates the repo's disk, so a synchronous status poll would stall the UI thread every tick for the whole transfer. `(async)` runs them on tokio worker threads instead. One refinement on top: a `(async)` sync fn still pins one of the ~num-cpus *core* workers for its whole duration, so every command whose body can block for ≥100 ms on the network or the filesystem is an `async fn` delegating to `process::run_blocking` (tokio's dedicated blocking pool): the transfers (`fetch`, `fetch_all`, `pull`, `push`, `clone_repo`, `gh_publish_repo`, `gh_clone`), the badge read `repo_sync_status` (a 12 s `git fetch` budget), `gh_repo_list` and `check_auth` (GitHub round trips), `known_repos` (tens of thousands of stats on a cold cache) and the three `os` launchers (a cold app launch). The SwiftUI bridge makes the same hop explicitly for the same functions; `(async)` on its own supplies no such hop, so it is the delegation, not the attribute, that keeps a 10-minute push from starving the worker pool on a low-core machine. The ~30 local-git and pure-CPU commands stay `(async)`.
-2. **Time-boxed subprocesses that die whole.** `process::run_timed(cmd, label, timeout, scope)` is the single chokepoint. A waiter thread owns the child and its exit arrives over a channel, so the timeout is a `recv_timeout` and completion is observed the instant it happens (a poll would quantise every network op to its tick). Both pipes are drained on helper threads (so a chatty `git --progress` can't pipe-buffer-deadlock) into shared buffers. The `KillScope` decides what a timeout kills: `Group` — every git network op, every `gh` call, the PATH probe — puts the child in its own process group with stdin nulled, and on timeout kills the **whole group before reaping** (the unreaped child pins its pgid, so the signal cannot land on a recycled one; on Windows a job object with `KILL_ON_JOB_CLOSE` plays the same role); `Child` — the `os` launchers, because `xdg-open` runs the user's browser in-group. Killing only `git` was never a backstop: `ssh` and `git-remote-https` inherit our pipe ends, and a reader blocked on a pipe a survivor holds cannot be unblocked by anything, so after the exit (or the kill) the readers get one shared 2 s grace and are then **detached**, returning what they captured — a child that exited normally still succeeds, since a hook that backgrounded something without redirecting its output is the child's business. `run_timed_streaming` is the same runner with an incremental stderr reader — each `\r`/`\n`-terminated line is handed to a callback as it arrives (git repaints its meter with bare `\r`), which is how live `--progress` output reaches the UI. `git_net_cmd` additionally bakes transport timeouts into the command — `GIT_SSH_COMMAND="ssh -o ConnectTimeout=N -o BatchMode=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3"` (SSH connect cap, no interactive prompts, and 30 s of post-connect silence before ssh gives up — `ConnectTimeout` bounds only the handshake, and a remote that accepts and then goes dark would otherwise hold `ssh` open indefinitely) and `-c http.lowSpeedLimit=1000 -c http.lowSpeedTime=N` (abort an HTTP transfer that stalls). Budgets: **background** badge fetches are short (8s connect/stall, 12s hard kill — fail fast, keep last-known counts); **user-initiated** transfers are generous (15/30s, 600s hard kill — never kill a real large transfer, only a wedged one). Pinned in `process::tests`: a timeout leaves the grandchild dead (`kill(pid, 0)` answers `ESRCH`), a normal exit is not held open by a lingering grandchild, and a 20 ms child completes in under 48 ms.
-3. **Don't keep firing when down.** [services/connectivity.ts](apps/tauri-app/src/lib/services/connectivity.ts) gates *automatic/background* fetches (the auto-fetch timer, the tiered scheduler, the refocus/cold-open resync) on `navigator.onLine` plus a consecutive-failure circuit breaker: after 2 failures it opens with an exponential backoff window (30s → 5min cap), suppressing background fetches until the window lapses, when exactly one probe is allowed through. `repo_sync_status` returns a `fetched` flag so the breaker can tell a real fetch failure from a no-remote repo. User-initiated actions (fetch/pull/push/switch) always attempt (still bounded by the backend timeout) and their outcome feeds the breaker, so a successful manual pull — or the OS `online` event — re-opens background syncing immediately and triggers a resync.
-4. **One transfer at a time.** The [stores/networkOps.ts](apps/tauri-app/src/lib/stores/networkOps.ts) `activeNetworkOp` store marks a user fetch/push/pull/publish as in flight — the *automatic* fetches deliberately claim no slot, since nobody waits on them and taking it would disable the action cluster on a timer. All handlers guard on it (mutual exclusion), and the status poll, auto-fetch, wake-up resync, and the tiered scheduler pause while it's set — polling mid-transfer only spawns git processes that contend with the transfer for the repo's disk, locks, and bandwidth; the op's own completion refresh covers what they would have found.
-5. **No two silent fetches of one repo, and none within a minute of the last.** Every *silent* fetch of the active repo claims the same per-path in-flight slot the tiered sweeps use (`repoSync`'s set in Tauri; an `isSilentFetching` flag on the native `SyncStore`), so the wake-up resync, the reconnect kick, the cold-open warm-up and the loop tick can no longer run two `git fetch` in one `.git` — the loser of that race hit a ref lock and was charged to the breaker as a *network* failure, two of which suppressed background fetching app-wide. And every successful fetch stamps its repo (`lastFetchedAt` in `repoSync.ts`; the native `FetchCooldown`, owned by `RepoDirectoryStore` and injected into `SyncStore`, on a monotonic clock so it counts through sleep): a background fetch inside the 60 s window **downgrades to the fetch-less local recompute** — never skips, so the dirty dot keeps tracking local edits, and never charges the breaker. A pull's fetch stamps; a push does not; the user's own Fetch and Pull never consult the window. Nor does the auto-fetch loop's own tick — its default cadence is 30 s, shorter than the window, and consulting it would halve whatever cadence the user configured — only the catch-up triggers (cold open, wake, reconnect, refocus, switch) and the 2/5/10-minute tier sweeps do, which are the paths that used to refetch a repo seconds after another path had.
+- **Threads.** Subprocess commands are `#[tauri::command(async)]`, since plain commands run on the main thread. Anything that can block 100 ms or more is an `async fn` over `run_blocking`, or a long push starves the workers.
+- **Time boxes.** `run_timed` is the chokepoint. `KillScope::Group` kills the whole group before reaping, since `ssh` inherits our pipes. `Child` is for OS launchers, because `xdg-open` runs the browser in-group. Readers get 2 s, then detach.
+- **Budgets.** Connect/stall/kill: background 8/8/12 s, user 15/30/600 s. Plus `BatchMode=yes`, `ServerAliveInterval=10`, `ServerAliveCountMax=3`, `http.lowSpeedLimit=1000`.
+- **Breaker.** It gates automatic fetches only, and only their results feed it. User actions always try and never report to it.
+- **One transfer.** Poll and loops pause during a user transfer. Automatic fetches claim no slot.
+- **Silent fetches.** One in flight per repo, because a ref-lock loser would be charged as a network failure. Catch-up and tier fetches within 60 s of the last success downgrade to a local recompute, never a skip. The auto-fetch tick and the user's Fetch and Pull ignore that window. A pull's fetch stamps it; a push doesn't.
 
 ### Transfer progress (`git-progress` events)
 
-`push`, `pull`, and `clone_repo` run with `--progress` through `run_git_net_streaming`, feeding each stderr line to [core/src/progress.rs](core/src/progress.rs) — a port of GitHub Desktop's step/weight model. Each op has an ordered phase table (push: `Compressing objects` 0.2 / `Writing objects` 0.7 / `remote: Resolving deltas` 0.1; pull: `remote: Compressing objects` 0.1 / `Receiving objects` 0.7 / `Resolving deltas` 0.15 / checkout 0.15; clone: 0.1 / 0.6 / 0.1 / 0.2 — the checkout phase matches both `Updating files` (git ≥2.25) and the older `Checking out files`, a divergence from GitHub Desktop's table, which only knows the legacy label and tops out early on modern git). A line matching phase *i* contributes the full weight of every earlier phase plus `weight × value/total`; unknown lines (e.g. `Enumerating objects`) are *context* — they update the display text but not the bar; the aggregate fraction is monotonic, so out-of-order output can never rewind it. `progress_forwarder` (`core/src/git.rs`) throttles emission — a whole-percent move, 150 ms elapsed, or the finishing 100 % frame — and hands each tick to the host `EventSink` as a `CoreEvent::GitProgress {op, path, percent, text}`; `TauriEventSink` re-emits it as the `git-progress` window event (from the stderr reader thread; same seam as the terminal PTY output). Frontend consumers: `Header` mirrors push/pull events for the active repo into the `networkProgress` store (in-button fill + the raw git line in the header's status area); `CloneOverlay` consumes `clone` events (URL-tab clones only — the GitHub tab clones through `gh`, which reports nothing, so its bar simply never appears). Background fetches deliberately emit nothing.
+`progress.rs` has a step/weight table per op, and the checkout phase matches both `Updating files` and `Checking out files`. Unknown lines change text only; the fraction is monotonic. Background fetches emit nothing.
 
 ## IPC contract
 
-The frontend never touches Tauri's raw `invoke` API directly; every backend call goes through a typed wrapper in [src/lib/api/commands.ts](apps/tauri-app/src/lib/api/commands.ts). The wrappers are grouped into namespaces matching the backend modules:
-
-| Namespace | Commands | Backend file |
-|---|---|---|
-| `configApi` | `loadConfig`, `patchConfig`, `configBounds`, `loadState`, `patchState`, `recordRecentRepo` | `core/src/config.rs` |
-| `gitApi` | `getStatus`, `fileStatusStyles`, `getSelectedDiff`, `getLog`, `getCommitDetail`, `listBranches`, `createBranch`, `switchBranch`, `checkoutCommit`, `deleteBranch`, `commit`, `undoLastCommit`, `classifyDiscard`, `discardFiles`, `appendToGitignore`, `ignorePaths`, `formatCommitMessage`, `repoSyncStatus`, `fetch`, `fetchAll`, `pull`, `push`, `getTrackingRemote`, `getPushRemote`, `getRepoIdentifier`, `mergeBranch`, `mergeSquash`, `commitSquashMerge`, `countCommitsToMerge`, `effectiveScanPaths`, `isGitRepo`, `initRepo`, `cloneRepo` | `core/src/git.rs` |
-| `gitApi` (cont.) | `continueOperation`, `abortOperation` | `core/src/operation.rs` |
-| `gitApi` (cont.) | `rewritePreflight`, `cherryPickCommits`, `squashDraft`, `squashCommits`, `reorderPreflight`, `reorderCommits` | `core/src/history_rewrite/` |
-| `reposApi` | `knownRepos`, `filterRepos`, `deriveCloneTarget`, `cloneTargetPath` | `core/src/repos.rs` |
-| `exclusionsApi` | `reconcile` | `core/src/exclusions.rs` |
-| `diffApi` | `getParsedDiff`, `getParsedCommitDiff`, `copyDiffText`, `generatePatch`, `generateInversePatch` | `core/src/diff.rs` |
-| `highlightApi` | `highlightDiff` | `core/src/highlight.rs` |
-| `updateApi` | `checkForUpdate` | `core/src/update.rs` |
-| `osApi` | `revealPath`, `openPath`, `openUrl` | `core/src/os.rs` |
-| `ghApi` | `checkAuth`, `repoList`, `clone`, `publishRepo` | `core/src/gh.rs` |
-| `aiApi` | `loadAiConfig`, `generateCommitMessage`, `checkProviderStatus`, `providerStatusFromFailure` | `core/src/ai.rs` |
-| `appApi` | `takePendingLaunchTarget` | `core/src/launch.rs` |
-| `terminalApi` | `listShells`, `ptyInfo`, `start`, `write`, `resize`, `close` | `core/src/terminal.rs`, `core/src/shell.rs` |
-
-Every command is registered in [src-tauri/src/main.rs](apps/tauri-app/src-tauri/src/main.rs) via `tauri::generate_handler![…]`. **Adding a new command is four edits** (see *Core / host split*): implement it in `core/src/<module>.rs`, add the `#[tauri::command]` shim in `shims/<module>.rs`, register it in `main.rs`, wrap it in `api/commands.ts`.
+The frontend never calls raw `invoke`; it uses typed namespaces in `lib/api/commands.ts` that match core modules.
 
 ## State management (frontend)
 
-The three core writable Svelte stores, all in [src/lib/stores](apps/tauri-app/src/lib/stores):
-
-- **`appState`** — top-level phase machine (`loading` / `repo-picker` / `main` / `error`), the discovered repo list, the chosen repo path, and whether `gh` is authenticated. `App.svelte` renders `MainLayout` for `main` and, for every other phase, a `.pre-main` column of `<Header>` + the phase's content — so app-level chrome exists in all of them (see *Repo-less phases*).
-- **`repoState`** — everything tied to the currently open repo: status (branch, upstream, ahead/behind, files, the operation in progress), log pagination, branches, the user's selection sets (`selectedFiles`, `userDeselected`), per-file diff selection (`Map<path, DiffSelection>`), active file/diff, active commit/files/diff, loading flags, a `statusLoaded` flag (default status ≠ loaded status — anything that *skips* work on a status field has to know the difference, since `hasRemote` defaults to false and a switch resets it), and **three failure fields with different owners**, written through `reportActionError` / `reportNotice` in the store rather than by each call site building its own `repoState.update` — the classification is then a choice of function, not a shape copied from the site next door, which is how reveal-in-Finder came to seize the window. `error` (with an optional `errorRetry` bound to the same attempt) is an operation the user was waiting on and goes to the blocking `ErrorModal`; `notice` is an OS hand-off that didn't take and goes to a dismissible strip, dismissible because nothing else can ever disprove it; `pollError` is written only by refreshes the app started itself — set after three consecutive failures, cleared by any successful read, rendered in the same strip without a ✕ because its own recovery retires it. `refreshStatus` takes `{silent, background}` as two separate opts for exactly this: *silent* means "don't write `error`", which a user action's follow-up refresh also wants, while *background* means "this one is mine" and is what feeds the streak. Conflating them let three `index.lock` races behind a commit and two discards accuse a healthy repository of having vanished. Keeping the three apart is what lets a repository that really has gone away say so without a modal the user must dismiss every two seconds. A **fourth** kind never reaches any of them: `activeFileDiffError` / `activeCommitFileDiffError` are per-pane and render inline where the diff would have been, always alongside a cleared payload. A failed read of one file blocks nothing (the rest of the repository is on screen and correct) and is the user's own task (so the strip above the content is the wrong place), which puts it outside §6.13's two classes entirely. Re-selecting the row is the retry, and works because the payload is gone: the loader's "already open" short-circuit tests it.
-- **`config`** — the live Config object, and the only copy in the client: Settings renders from it rather than loading a second one, so the form and the diff viewers cannot disagree about what is set. Publishing goes through `applyConfig(cfg)` — the store, `applyTheme()` (which flips `document.documentElement.dataset.theme`), and the resolved `scanFolders`, that last one re-asked only when `scan_paths` actually moved. `refreshConfig()` is `load_config` plus that; Settings hands it `patch_config`'s return value directly, since the patch already answers with the whole normalized config and a second read would only re-ask what it was just told.
-
-Alongside these are smaller purpose-built stores: **`networkOps`** holds the user-initiated network op in flight (`activeNetworkOp` — the poll/auto-fetch/scheduler pause on it and the sync handlers use it for mutual exclusion) and its live transfer progress (`networkProgress`, fed from `git-progress` events), **`repoWrite`** holds the one repository write in flight (below), **`repoIdentifiers`** lazily caches each repo's GitHub identifier (a module-level map that re-publishes on each fetch, so reopening the repo picker is free), **`repoSync`** caches each repo's ahead/behind counts and working-tree `dirty` flag for the picker's pull/push badges and dirty dot (`setRepoSync` records values the active poll already computed; `syncRepo` fetches + recomputes one repo, with per-path in-flight de-duplication; its change-equality guard compares every field, so a new one must be added there too or its transitions get swallowed), and **`reposState`** mirrors the persisted `repos-state.json` document — the `repoSortMode` / `cloneSortMode` / `recentRepos` writables plus thin wrappers over the backend's atomic writers: `patchReposState` → the `patch_state` command (one field-wise read-modify-write under a process-wide lock, so a patch can never clobber another writer's field), `recordRecentRepo` → the `record_recent_repo` command (backend owns the MRU move-to-front/de-dupe/cap, records `last_opened_repo` in the same write, and returns the authoritative list, which reseeds the `recentRepos` store), and `hydrateReposState` (startup seed). Both wrappers log-and-swallow failures, so callers never need a rejection path for lost preferences.
-
-**One repository write at a time, window-wide** ([stores/repoWrite.ts](apps/tauri-app/src/lib/stores/repoWrite.ts)). `activeRepoWrite` is a `RepoWriteKind` or null — commit, continue, switch, create, delete, merge, abort, cherry-pick, squash, reorder, undo-action, checkout, undo-commit, discard, pull. **Pull is the one network transfer among them**: `Header.svelte`'s `handlePull` claims this slot first and the network slot second and releases them in reverse, and the sync face reads `isHeldByAnother($activeRepoWrite, 'pull')` — its own hold is not a reason — to go `aria-disabled` with `REPO_BUSY_REASON` (the hover form of `REPO_BUSY_MESSAGE`) as its title; why only Pull, and why the automatic fetches claim nothing, is under *Swift host*'s gate. Every handler that writes opens with `beginRepoWrite(kind)` and returns without touching its surface when that answers `false` — a refused start is never a success — then `endRepoWrite()` in its `finally`. The **kind** is kept so a surface can tell its own work (`$activeRepoWrite === 'merge'` holds the merge dialog open under *Merging…*) from someone else's (`$activeRepoWrite !== null` greys the branch popover, the composer's buttons and the History actions). It is a store rather than layout state because `CommitMessage.svelte` claims it too and shares no prop with `MainLayout.svelte` for it, and a flag on each side would let an Abort be confirmed under a running Continue. A confirmation that can sit open under another write takes `blocked={blockedFor(kind)}` — `REPO_BUSY_MESSAGE` while `isHeldByAnother`, else undefined — and renders it as its last body line with the confirming button disabled; `ConfirmDialog`, `MergeBranchDialog`, `CheckoutCommitConfirm`, `DiscardConfirm` and `EmbeddedRepoConfirm` all carry the prop, so a claim refused on the click is a race's backstop rather than something a user can reach. The native counterpart is `RepositoryWriteGate` (see *Swift host*).
-
-**Status reads publish in the order they were asked.** `refreshStatus` numbers each read before its `await` (`statusReadsIssued`) and drops one that returns after a later-numbered read has landed (`newestStatusLanded`); natively `RepoStore.issueStatusRead()` / `landStatusRead(_:)` do the same for its three status writers, beside — not instead of — `openGeneration`, which tells *repositories* apart and cannot order two reads of one. The poll is not paused by a repository write, so without this a tick that left before a cherry-pick and came back after its reload repaints the source branch and, through the rules keyed on the status, ends amend mode or forgets the branch a conflicted pick came from.
-
-`MainLayout.svelte` is the orchestrator: it owns the polling intervals, focus listeners, and most of the cross-cutting handlers (commit, switch branch, merge, etc.). Components stay dumb — they receive props and emit callbacks; they don't read or write the stores directly when avoidable.
-
-**Which surface owns `Escape` is a registration, not a list** ([actions/overlayStack.ts](apps/tauri-app/src/lib/actions/overlayStack.ts)). Every dismissable surface carries `use:dismissOnEscape={…}` on its root, which pushes its dismissal onto a module-level LIFO for the element's lifetime; the two window key handlers (`App.svelte` pre-main, `MainLayout.svelte` in `main`) call `dismissTopOverlay()` and do nothing else with the key. Registration order *is* stacking order, because a dialog opened from a popover mounts after it. What it replaced was two hand-written lists of overlay flags — one per host, already drifted — that closed **every** overlay at once, so dismissing a confirmation took the popover that raised it as well; the surfaces that worked around this by answering `Escape` on their own element and calling `stopPropagation()` no longer need to, and the context menu, which did neither, used to close itself *and* the popover underneath. A surface mid-operation registers a dismissal that declines, so `Escape` is consumed rather than falling through to something that would close. The same stack publishes `overlayDepth`, which is what the app's chords read before firing: the old hand-kept `modalOpen` had never been told about four of the dialogs, so ⌘↩ fired a commit straight through the embedded-repo confirmation asking about that commit.
-
-**The two pickers hang from the chips that open them, and the geometry lives in one place.** `Header.svelte` binds its repo and branch chip elements out through two `$bindable` props, and `MainLayout.svelte` measures them *when a picker opens* — `placeUnder` reads the chip's rect and returns a `Placement` (`left`, `top`, the arrow's x for the repo popover, and the room left under the chip as a `maxHeight`) — rather than being handed a rect by the click, because ⌘B opens the branch menu with no click to measure from and one anchoring path is better than two. The repo popover takes `NSPopover`'s geometry (centred on the chip, an arrow that stays on the chip's centre when the viewport clamps the box) and the branch popover a pull-down menu's (leading edges aligned, no arrow), each hosted in a `.popover-frame` that owns the width and hands the dropdown `--popover-max-height`; the arrow is a `::before` on that frame, since the dropdowns clip their own overflow. The layer under them is a transparent click-catcher, not `--overlay-backdrop`: a popover is not modal. A `resize` bumps a version the two placements derive from, so an open picker follows its chip. A frame with no chip to measure — none today, since both are reachable only from a chip — falls back to the layer's centring.
-
-**The chips' right-click menus are the header's, and the header swallows every other one.** Each chip's `oncontextmenu` cancels the event and opens the shared `ContextMenu` at the pointer with `chipMenuItems`, derived for the chip that was clicked from the same values the chips draw — `repoName` for *Copy Repo Name*, so the item copies the words under the pointer, and the live `status.branch` for *Copy Branch Name*, which core leaves empty on a detached `HEAD`; the item is then disabled, with *HEAD is detached* as its hover reason. A copy that fails is logged and reported through `reportNotice`, like the header's other hand-offs. The `<header>` itself cancels every other `contextmenu` event through a listener attached in an `$effect` — not an `oncontextmenu` attribute, which Svelte's a11y check reads as an interaction wanting a role, when all it does is take the webview's own menu (*Reload*) away from the bar. The header is also `user-select: none`, prefixed as [STYLE.md](STYLE.md) *Spacing, radii, focus* requires: WebKit selects the word under the pointer on a right-click, which would leave a chip's label highlighted behind its menu, and nothing in a toolbar is text to select.
-
-Both diff panes — the Changes tab's and the commit detail's — render through **`SeamlessDiffPane`**, a wrapper whose only job is the loading treatment: it dims its children and lays a spinner over them once the load outlives the slow threshold, and never unmounts them. The panes are the same pane twice and the rule had been written twice; the old shape swapped the whole thing for a "Loading diff…" line, discarding the rendered rows, their syntax tokens and the scroll position on every slow load, including the ones that came back identical. The loader stopped nulling the payload at the threshold to match.
+- `appState` is the phase machine, `repoState` the open repo, `config` the only config copy. `repoSync`'s equality guard compares every field, so add new ones there.
+- Failure owners: `error` (modal), `notice` (dismissible), `pollError` (three straight failures, retired by a good read), and inline per-pane diff errors.
+- `refreshStatus` takes `silent` and `background` separately, or `index.lock` races accuse a healthy repo.
+- `statusLoaded` exists because `hasRemote` defaults to false.
+- `repoWrite` is one write per window: `beginRepoWrite(kind)`, return if refused, release in `finally`.
+- Status read ordering lives in `statusReadsIssued` and `newestStatusLanded`; natively `issueStatusRead` and `landStatusRead`.
+- Escape is a registration: `use:dismissOnEscape`, a LIFO in `overlayStack.ts`. `overlayDepth` gates app chords.
+- `SeamlessDiffPane` dims and never unmounts. `showSplit` derives from `sbs_pairs`, not the prop.
 
 ### Selection bookkeeping
 
-The file checkbox state is **opt-out**: every change reported by `git status` is staged unless the user explicitly deselected it. `repoState.userDeselected` is the source of truth for "things the user un-checked", and every status refresh rebuilds `selectedFiles` as `present − userDeselected`. This is what keeps polling unobtrusive: a status refresh never silently re-selects something the user just un-checked.
-
-**An opt-out outlives its path, for 30 seconds and at least two consecutive misses.** Core owns that rule ([core/src/exclusions.rs](core/src/exclusions.rs), `reconcile_exclusions`) and both clients call it, because it was written twice and had already drifted into two opposite answers. Pruning the opt-out the tick its path disappears re-includes a file the user deliberately unchecked — a formatter rewrote it between two reads — and the next commit takes it: a commit nobody meant to make and never saw happen. Never pruning it grows a set of paths that will never be seen again. The grace window bounds the set without reopening the hole, and the asymmetry is why it errs long: an over-long opt-out costs one visible checkbox click.
-
-**The window has two terms, and each covers what the other cannot.** It is **wall-clock**, not a count of ticks, because the poll's cadence is 2 s or 30 s depending on where the window is and "fifteen ticks" would mean anything from half a minute to seven; the caller passes the time actually elapsed, so a tick skipped for a transfer neither shortens nor extends anything. But elapsed time alone fails at the other end of that same ladder: at the 30 s rung a single read is charged the whole window, and a transfer can hand over minutes in one lump, so a purely time-based rule would drop the opt-out on the **first** look — which is exactly the look that can land in the half-second a formatter has the file renamed away. Hence `EXCLUSION_GRACE_READS`: two consecutive misses cannot be one unlucky read, at any cadence. Both counters advance on **every** tick, outside the equality gate, because a path is dropped for having been *absent* long enough — which an unchanged file list keeps being true of — and a single reappearance **resets** both, so a file edited repeatedly through a formatter never accumulates its way out of the set.
-
-Both clients keep the clocks beside their exclusion set rather than inside it — every reader of that set asks "is this path excluded?", and a map of clocks would make each of them carry the answer to a different question — and rebuild both wholesale from core's answer, so they cannot drift apart. The crossing is skipped entirely while nothing is excluded, which is the usual state of the app, so the poll pays for this only once the user has actually unchecked something. `resetPollState()` clears the clocks with the rest of the per-repository poll memory on a switch; natively `CommitStore.reset()` does.
+Inclusion is `present − userDeselected`, rebuilt each refresh, never persisted.
 
 ### Row selection (Tauri)
 
-The changed-file list and the commit list share one set of selection rules, [utils/listSelection.ts](apps/tauri-app/src/lib/utils/listSelection.ts), and keep their own rows, paging and menus — the *rules* are what would otherwise be written twice. A selection is a `ListSelection`: a set of row keys (a path, a sha — never an index, so a reload that replaces every row value keeps the highlight) plus the anchor a shift gesture extends from. Everything in the module is a pure function of the selection and of `order`, the list's keys as drawn, and **returns the same object when nothing changed**, so an identity test is all a caller needs to skip a no-op: `selectCommits` makes it *before* touching `repoState`, because a Svelte store publishes any object it is handed, the same one included. It is also why `FileList` holds its selection in `$state.raw` — a selection is replaced, never mutated, and a deep proxy would break the identity check.
-
-- **Gestures** — `clickGesture` and `keyGesture` turn an event into `replace`, `extend` or `toggle` (the toggle modifier is `platformModifierHeld`, ⌘ on macOS and Ctrl elsewhere, read before Shift), and `applyGesture` lands it: an extend *replaces* the selection with the range from the anchor and leaves the anchor put (Finder's rule), a toggle cannot take the last row out, and toggling the anchor off hands it to the first row still selected. `rowIndexForKey` is the arrow / Home / End arithmetic and `isSelectAllChord` the ⌘A test.
-- **`reseated`** prunes keys that left the list and, only when none survive, re-seats on a fallback the owner names — the file the pane has open, the newest commit.
-- **`contextTargets`** is the right-click rule: the whole selection in **list order** when the click lands inside a multi-row one, otherwise that row alone, which the list then selects.
-- **`activeKey`** is which single row a detail pane shows when no gesture names one — a row toggled off, ⌘A, a reload: the row already showing while it is still selected, otherwise the first selected row in list order. It is the native `ListSelection.activeID`, rule for rule.
-
-`FileList` keeps its selection locally (plus the checkbox column's own anchor, which only it uses). History's lives in `repoState.historySelection` beside `activeCommit`, with `selectCommits` in `MainLayout` as the one writer of the pair — hoisted because an operation that rewrites history has to be able to *set* the selection to the commits it produced. Moving focus to a row that may not be mounted yet is [utils/virtualList.ts](apps/tauri-app/src/lib/utils/virtualList.ts)'s `focusVirtualRow`, shared by both lists: apply the `scrollTop`, hand it to the list synchronously so the visible range re-derives, `tick()`, then focus.
-
-### Icons
-
-[Icon.svelte](apps/tauri-app/src/lib/components/Icon.svelte) is the only place in the client that draws an `<svg>`. It exports a `IconName` union of every glyph the app can show, so a typo is a compile error rather than an empty box, plus an `IconWeight` axis mapping onto stroke widths on a shared 16-unit grid. It replaced 44 inline `<svg>` blocks spread across fifteen components, which is why it exists: nothing enforced consistency, and the same arrow was drawn at three different stroke weights inside one toolbar.
-
-Two facts about it constrain anything added later.
-
-**The glyphs are not Apple's and cannot become Apple's.** SF Symbols are licensed for software running on Apple platforms, and the licence forbids both redistributing the artwork and using it as the basis for derivative glyphs — so the Windows/Linux client could not ship them under any arrangement. Every path here is drawn from scratch to *read* as the same idea. The resemblance is bought with grid, optical centring, stroke weight and round terminals, and that is the whole of what is available: a symbol's stroke tracks the weight of the text beside it at roughly 0.08 em, which is where the `weight` prop comes from and why it is a design axis rather than a fudge factor.
-
-**A parent cannot style what this renders.** Svelte stamps its scope hash only on elements a component emits itself, so a `.icon { … }` rule in the calling component matches nothing once the inline `<svg>` becomes `<Icon>` — it compiles away as an unused selector and takes its declaration with it. Tint through `color:` on the surrounding element, which the svg inherits via `currentColor`; where the rule is structural rather than colour, it has to be written `:global()`. `Header.svelte`'s `.count-button > :global(.icon)` is the case that matters: it lifts the glyph above the absolutely-positioned transfer-progress fill, and as a bare selector it silently stopped applying, leaving the label painted over the fill and the glyph under it. The `spin` prop exists for the same reason — a keyframe animation declared in a parent could never have reached the element.
+`utils/listSelection.ts` holds pure rules keyed by path or sha, never index. Functions return the same object when nothing changed, so `FileList` uses `$state.raw` and `selectCommits` tests identity before touching the store.
 
 ### Pane empty states
 
-[PaneEmptyState.svelte](apps/tauri-app/src/lib/components/PaneEmptyState.svelte) is the one place a pane-level empty state is drawn — a glyph, a heading, a sentence, and optionally an action snippet or git's own text in a mono box. Fourteen sites use it. It stands in for the native's `ContentUnavailableView`, which every native empty state uses unmodified.
-
-**Its metrics are observed, not documented.** Apple publishes no size, colour, gap or width for `ContentUnavailableView` on any platform, and macOS 26 adds no API for it (there is no `ContentUnavailableViewStyle`). The numbers — 400px max width, 20px padding, a 36px glyph, 22/12/12 gaps, a 26px bold title over a 13px sentence — come from resolving compiled constants in the shipped SwiftUI binary (7.5.3, macOS 26.6.2). Apple can change them in any OS update and there is nothing to check them against but another reading, which is the whole argument for one component rather than thirteen call sites.
-
-Two details are load-bearing and easy to remove by accident. The state sets `flex: 1` and its own `--bg-primary`, because `.content-area` paints no background and a state sized to its own content would let the layout centre the pane's entire stack — drifting a pinned header into the middle. And the two size-guarded panes withhold the state under a 150 ms threshold, so a bare `.diff-empty-hold` wrapper (flex, column, background, nothing else) holds the pane open meanwhile; without it a fast file switch flashes a transparent pane, which is the defect the threshold exists to prevent, arriving from the other side.
-
-The native Changes list applies the same rule at a repo switch. `RepoStore.open()` drops the previous repository's `status` with its path (the list, the count badge, the branch name and the sync proposal all read from it, and the proposal is live — ⌘P in that window would have run the old repository's action against the new path), and until the new repository's first `git status` lands `ChangesSidebar` renders a `Color.clear` that holds the layout rather than *No changes*, which would be a false claim for the width of that read. The toolbar deliberately keeps its previous *face* for that window — `ContentView` holds a `ToolbarStatus` mirror of the eight fields the bar draws (the count badge, the branch label with its detached and merging forms, the sync button's title, symbol and chevron, the `↑N ↓N` text) and draws from `liveStatus ?? heldStatus` — because none of those is actionable and each one's absence would shift a toolbar cluster. Everything actionable reads the live status: the sync button's enablement and the action it runs, the ⌘P guard, the branch menu's checkmark and merge target. A first status that *fails* resets the held face rather than keep the previous repository's numbers indefinitely.
+`PaneEmptyState` copies `ContentUnavailableView` metrics read from the SwiftUI binary, so they can drift. `.diff-empty-hold` holds the pane during the slow-load threshold. Natively, `ToolbarStatus` keeps the old face across a switch, but anything actionable reads live status.
 
 ### Large changesets
 
-[FileList.svelte](apps/tauri-app/src/lib/components/FileList.svelte) virtualizes its rows: only the slice currently in the viewport (plus an 8-row buffer above and below) is mounted in the DOM. A spacer div carries the full virtual height (`files.length * 30px`) so the scrollbar represents the real list, and each rendered row is absolutely positioned at `top: index * 30px`. Without this, a 1000-file changeset would block the main thread for hundreds of milliseconds every time the Changes tab pane goes from `display: none` to `display: flex`. Arrow-key navigation updates `scrollTop` synchronously, awaits `tick()`, then focuses the now-rendered target — so Home/End/↑/↓ work even when the target row is far outside the rendered window.
-
-[CommitList.svelte](apps/tauri-app/src/lib/components/CommitList.svelte) virtualizes the same way (44px rows, spacer of `commits.length * 44px`). Both lists publish their row height to CSS as a `--row-height` custom property set from the same constant the scroller does its arithmetic with, so the painted height and the virtualizer's step cannot drift — a second literal in the stylesheet tears the list the moment either number moves. It measures the viewport height with a **ResizeObserver**, not a one-shot `clientHeight` read: the History pane is `display: none` while the Changes tab is active, so a single measurement at mount can capture 0 and strand the rendered range at `ceil(0 / ROW_HEIGHT) + buffer` ≈ 5 rows. The observer re-measures when the pane gains size, so the full window of commits renders once History is shown.
-
-The **log is append-only and rooted at HEAD**: `commits[0]` is the repository's HEAD, always. Paging adds older rows to the end (deduplicated by sha against a concurrent poll reload) and drops nothing, so every visible row keeps its position and there is no scroll compensation to get right. The only move that changes what row 0 *is* is a re-read from HEAD — a commit, a checkout, an undo, a different repository — which `log.resetSeq` marks and the list answers by scrolling to row 0.
-
-It replaced a bidirectional sliding window that tracked the absolute index of row 0 (`windowStartOffset`) and compensated `scrollTop` by `delta × ROW_HEIGHT` on every slide. The window worked, and cost more than it bought: row 0 stopped being HEAD the moment it advanced, which is what let Amend and Undo be offered on the wrong commit; a replacement had to be told apart from a slide by a second signal or the list scrolled to the end of the fresh page and paged again; and the HEAD-moved test it needed could only fire past offset 0, so a commit made while parked at the top of the list moved nothing at all. Re-reading from offset 0 makes `commits[0] === HEAD` true by construction, and none of those cases exist to be handled.
-
-Paging keeps `log.isPaging` rather than the repo-wide `isLoading` it used to set — reading further into the past has nothing to do with whether a commit can be made, and it was disabling the Commit button on the other tab. A failed page goes to the non-blocking banner (`reportNotice`): the history already on screen is still correct, and scrolling again re-asks.
-
-Selection is a `$derived` key read by an `untrack`ed `$effect`, the shape the changes pane's auto-select uses: a string of the loaded shas, gated on History being the visible tab so the pane behind Changes doesn't spend a `git log` and a diff read on a selection nobody is looking at. The effect re-seats on native's two conditions — nothing selected, or the selected sha is no longer in the list, which is what an amend or an undo does to it. Its leading `#` is load-bearing: it keeps "History is showing an empty log" (clear the selection) distinct from "History isn't showing" (do nothing), which a bare empty string cannot.
+- File rows and commit rows virtualize. `--row-height` comes from the same constant.
+- `CommitList` uses `ResizeObserver`, since a hidden pane measures 0.
+- `commits[0]` is always `HEAD`. Paging appends and dedupes by sha; only `log.resetSeq` scrolls to the top.
 
 ### Background cadence
 
-Three background loops run while a repository is open, and they share one policy and one loop primitive.
+The schedule itself is in [FRONTEND.md](FRONTEND.md) §6.1.
 
-**The policy** ([services/backgroundPolicy.ts](apps/tauri-app/src/lib/services/backgroundPolicy.ts)) is the single answer to "may this run now, and how often?", ported from the native `BackgroundSchedulingPolicy`. It reduces the window to one of three states — `active` (visible and focused), `inactive` (visible, not focused), `hidden` (`document.hidden`) — from `visibilitychange`, `focus` and `blur`, attached once for the whole app, and exposes a named predicate per loop rather than a boolean each loop composes for itself. Status poll: 2 s / 10 s / 30 s across the ladder, never stopping. Auto-fetch: the configured interval, ×3 while hidden, never stopping. Multi-repo sweeps: paused unless the window is `active`. The asymmetry is deliberate — a visible-but-unfocused window that has quietly gone stale is the failure the ladder exists to prevent, and hidden work is made cheap rather than absent so returning to the window shows a current screen instead of a catch-up. Only badges for repositories nobody is looking at are genuinely deferrable.
-
-**The loop** ([services/pacedLoop.ts](apps/tauri-app/src/lib/services/pacedLoop.ts)) is a self-scheduling `setTimeout` chain: it asks when the next run is due *after* each run settles. `setInterval` cannot express a cadence that changes, and three properties fall out of re-deciding late — runs can never overlap (so no in-flight guard), a state change applies immediately via `reschedule()` rather than after the current period drains, and a `dueAt` of `Infinity` parks the loop entirely, which is what "auto-fetch is off" means. A 250 ms floor keeps a deadline already in the past from spinning.
-
-- **Status poll** — the ladder above. Every status write in this client goes through the one `refreshStatus` in `MainLayout`, including the header's post-transfer reload (which takes it as a prop) and `Ctrl+R`, because a status write is more than storing what `get_status` returns: it ages the exclusion set, drops the open diff when its file leaves the working tree, and feeds `repoSync`'s badge for this repo. A second implementation would forget some of those. The branch chip's operation suffix is the case that cannot be forgotten at all: it reads `RepoStatus.operation`, which arrives on the status itself. HEAD is compared against `RepoStatus.head_sha` from the read that just landed; when it moved, the commit log is refreshed in place keeping the same loaded count (so the user doesn't lose scroll position) and the branch list reloads with it, since a checkout made in the terminal moves the menu's checkmark too. Each publishing run also pushes the active repo's ahead/behind + dirty flag into `repoSync` via `setRepoSync`, so the picker badges and dot for the open repo stay live without a dedicated fetch. The poll pauses entirely while `activeNetworkOp` is set.
-  - **A tick that changes nothing publishes nothing.** `refreshStatus` compares `JSON.stringify(status)` against the previous reply and returns without touching the store when they match — whole-value, like the native client's `Equatable` compare, rather than a hand-picked list of fields that a later field would silently fall out of. `stat_stamp` rides inside it, which is the only reason an idle repository is recognizable at all: porcelain v2 carries no worktree hash, so a file that was modified and still is reads identically without it. Only *silent* refreshes take the shortcut — an explicit one also clears the error modal on success, which is a change even when the status is not — and a standing poll banner still retires on a skipped tick, because a successful read is what disproves it.
-  - **The open diff reloads from the same stamp.** A `$derived` key of the active file's `path`, `xy` and `stat_stamp` plus the status's `head_sha` feeds an `untrack`ed effect that re-fetches the diff when the *same* path's key moves; a different path means the selection changed and its own load is already in flight. Per-file, so an unrelated edit elsewhere in the tree re-tokenizes nothing. `head_sha` covers the half a stamp cannot see: the diff is HEAD against the working tree, so a `--mixed` reset changes it while leaving the bytes on disk and the status letters exactly as they were.
-- **Auto-fetch** — `fetch_interval_ms` (default 30 000) through the policy's multiplier, rescheduled by an effect watching those two config fields, so a Settings change applies at once and one made in the native client applies on the next wake-up (which re-reads the config). Switched off, the loop parks rather than idling; switching it on reschedules against the last fetch, so it runs as soon as the configured interval says it is due. The first run carries a once-per-session 0–30 s skew so two windows started together don't stay in lockstep on the same repositories. Skipped while a network op is in flight or **text has the keyboard** — asked at the tick through `isTextInputFocused()` rather than latched, since a latch set from `focusin` is only cleared by another one and closing a focused terminal panel used to strand it at `true`, leaving auto-fetch dead for the session. That predicate is `document.hasFocus() && isTextInputElement(document.activeElement)`, and the first half is not decoration: `activeElement` does **not** clear when the window loses focus, so asking about the element alone would answer "still typing" for the entire time the user was away in another app and hold back every fetch the ladder is stretching rather than pausing. The native client gets the same answer for free — `NSApp.keyWindow` is nil while the app is inactive, so its first responder is nil. Calls `fetchActiveRemote` (`git fetch --prune --recurse-submodules=on-demand` against the current branch's remote, `get_tracking_remote`) then a silent `get_status`. `fetchActiveRemote` self-skips when offline / backing off, claims the per-repo in-flight slot so no two silent fetches overlap, and reports its outcome to the connectivity breaker (see *Network resilience*). The loop's own tick never consults the 60 s fetch cooldown — it *is* the cadence the user configured; the catch-up triggers (cold open, wake, reconnect, refocus, switch) do.
-- **Tiered repo-sync scheduler** ([repoSyncScheduler.ts](apps/tauri-app/src/lib/services/repoSyncScheduler.ts)) — **one loop, three deadlines** (2 / 5 / 10 min) with staggered startup kicks, sleeping until the nearest. Each pass slices the `recentRepos` list (active excluded) into tiers — next 4, next 5, next 10 — and refreshes the due ones via `repo_sync_status` sequentially, across tiers as well as within them. Three independent timers came due together on their common multiple and walked all three lists at once, which is precisely what the sequential fan-out is meant to avoid. Tier syncs are tagged `background`, so while offline / backing off — or within 60 s of that repo's last successful fetch by any path — each `syncRepo` downgrades to a **fetch-less local recompute** instead of grinding through dead or redundant fetches — the network goes quiet but the dirty dot keeps tracking local edits, since it needs no remote. `canRunRepoSweeps()` is re-checked before every repository, so a transfer starting or the window going away abandons the rest of the tier; the deadline is already re-armed, so it simply retries. The loop parks on the *activity* half of that predicate only — a network op has nothing that would un-park it, and a tick during one costs nothing. The tiers cover only the ~19 most recent repos, so the dropdown additionally calls `syncVisibleRepos` whenever its list is on screen: a sequential fetch-less sweep that always fills rows with no cached entry and, at most once per 30 s, re-checks the whole visible list. Started in `initialize` (after `hydrateReposState` resolves, so recents are seeded) and stopped on unmount.
-
-When the window **wakes up** — a rise in the activity ladder, so focus returning or the window coming back on screen — `MainLayout` runs a one-shot **resync**: `refreshConfig` *first*, then `fetchActiveRemote` (so a moved upstream surfaces immediately), a silent `get_status`, the HEAD comparison, and `repoSyncScheduler.kickTopTier()` (the throttled top-tier catch-up, since the tier loop was parked while we were away). The config re-read leads because `config.toml` is shared with the native client and editable outside this process: without it a save made anywhere else never reached a running window, so theme, diff settings, provider and auto-fetch stayed at their launch values for the lifetime of the app. Reading it before the refreshes means they already see the new values. A `resyncing` guard collapses a two-step wake-up (hidden → visible → focused, common under tiling WMs) into a single run. Every loop and listener tears down on unmount.
-
-The open diff is deliberately **not** re-read here. It used to be, unconditionally, because there was no way to tell whether the file had changed while the window was away; the per-file stamp effect above is that way, and it fires off the very status read the resync awaits. Keeping both meant two `git diff`s of the same file racing on every activation with nothing deciding which answer won — and one wasted read on every activation where nothing had changed at all. The native client follows the same rule, off the same stamp: its wake-up is a plain `refreshQuietly()`, and the open diff re-keys only if the file it is showing actually moved.
-
-**The one thing this cannot enforce is the hidden rung.** A WebView is free to throttle timers in a backgrounded document, so 30 s is a floor rather than a guarantee — which only ever makes hidden work cheaper, and the wake-up resync is what actually guarantees a current screen. The native client pins the same ladder exactly by holding an App Nap assertion; pinning it here would mean moving the tick to a Rust-side ticker and adding a backend event nothing else needs.
-
-**Repo discovery is re-run, not cached for the session** ([services/repoDiscovery.ts](apps/tauri-app/src/lib/services/repoDiscovery.ts)). `rediscoverRepos()` re-walks the scan paths through `known_repos` and republishes `appState.repos`; it runs whenever a list is about to be looked at (the main-view dropdown on open) and whenever the thing it walks changes — a `scan_paths` or `scan_depth` patch, called by Settings itself, so the setting takes effect where it was made rather than on a later dismissal, identically in both phases. A single in-flight pass is shared rather than duplicated, `discoveringRepos` distinguishes "still walking" from "found nothing" for the empty state, and the currently-open repo is re-added if a walk that raced the fire-and-forget MRU write would otherwise drop its row. Failures log and leave the previous list standing — a stale list beats an empty one.
+- `pacedLoop.ts` is a self-scheduling `setTimeout`, so runs can't overlap and `dueAt = Infinity` parks it.
+- Every status write goes through one `refreshStatus`. An identical silent tick publishes nothing, and `stat_stamp` is what makes edits visible, since porcelain v2 has no worktree hash.
+- The wake-up deliberately doesn't re-read the open diff; the per-file key does it.
+- `isTextInputFocused` asks at the tick and includes `document.hasFocus()`, because `activeElement` survives window blur.
+- Wake-up runs `refreshConfig` first, since `config.toml` is shared.
+- Discovery re-walks when a list opens or scan settings change, with one pass in flight.
 
 ## Git layer
 
-All git operations go through `std::process::Command::new("git")` with these defaults set in `git_cmd`:
+Commands use `git_cmd` or `git_net_cmd`: explicit cwd, `TERM=dumb`, `GIT_TERMINAL_PROMPT=0`, `GIT_OPTIONAL_LOCKS=0` (or a poll's `diff` holds `index.lock` against a commit), `-c core.quotepath=false`.
 
-- `current_dir(repo_path)` — never relies on the cwd of the host process.
-- `TERM=dumb` — suppresses pagers and color codes.
-- `GIT_TERMINAL_PROMPT=0` — prevents a credential prompt from blocking the process indefinitely.
-- `GIT_OPTIONAL_LOCKS=0` (as GitHub Desktop sets globally) — keeps read-only commands (`status`, `diff`) from opportunistically refreshing the index under `index.lock`. Commands run concurrently on worker threads, so without this a poll-time `diff` holding the lock could make a simultaneous `commit` fail with "index.lock exists".
-- `-c core.quotepath=false` — see *Path quoting* below.
-
-Helpers shape the output:
-
-- `run_git_raw` — returns the raw bytes (used for NUL-delimited or binary-ish output, e.g. `status --porcelain=v2 -z`).
-- `run_git` — returns trimmed UTF-8 (most line-oriented commands).
-- `run_git_combined` — returns `(success, stdout+stderr)` regardless of exit code (used for local commands like `merge` where the error message is the value).
-- `run_git_net` / `run_git_net_streaming` — the **network** runners (`fetch`/`pull`/`push`/`clone`/badge fetch; the `_streaming` variant additionally forwards stderr lines live). Both build the command via `git_net_cmd` (SSH/HTTP transport timeouts), run it through `process::run_timed` / `run_timed_streaming` (hard kill-timeout), and collapse `\r`-overwritten progress repaints in the combined output so a failed transfer's error message reads like the terminal rendered it, not pages of meter spew. See *Network resilience* for the full rationale and budgets.
+Judge outcomes by repository state, not git's translated stderr.
 
 ### Path quoting
 
-Git has two ways of naming a file, and only one of them is safe to parse. Under
-`-z` a path is written raw and NUL-terminated. Everywhere it is *printed* —
-patch headers, `Binary files … differ`, `ls-files` — it is C-quoted: the whole
-path wrapped in `"` with the awkward bytes escaped as `\n`, `\"`, `\\` or
-`\nnn` octal.
-
-Two defences, and both are needed:
-
-- **`-c core.quotepath=false`, on `git_cmd` *and* `git_net_cmd`.** By default
-  git escapes every byte ≥ 0x80, so `Capítulo.md` prints as
-  `Cap\303\255tulo.md`. This turns that off, which covers the common case. It
-  is set on the shared builders rather than per call site, because a path that
-  survives `diff` only to be mangled by `log -p` is worse than one mangled
-  everywhere — and on the network builder too because `pull` runs a merge, and
-  a merge that refuses names the files it would overwrite straight into the
-  text the user is shown. Note that `-c` is inherited: git exports it as
-  `GIT_CONFIG_PARAMETERS`, so the user's hooks, merge drivers and submodule
-  sub-invocations run with it too.
-- **`git::unquote_path`.** The setting cannot switch quoting off: `"`, `\`, TAB
-  and LF are escaped whatever it says. So every printed path is decoded, and an
-  unquoted one is returned untouched. Git's escape set is exactly `\a \b \t \n
-  \v \f \r \" \\ \nnn`, and all of it is handled.
-
-One ordering subtlety in the patch header: when a name contains a space, git
-writes a **real** trailing TAB after it, *outside* any quotes. A tab *inside* a
-name is written `\t`, two characters, even with quoting otherwise off. So
-`strip_path_prefix` splits on TAB before it decodes — no real separator can hide
-inside a quoted name, and no escape can be mistaken for one.
-
-The order matters in the patch header. The `a/`/`b/` prefix sits **inside** the
-quotes (`"a/Cap\303\255tulo.md"`), so `strip_path_prefix` decodes first and
-strips second. Doing it the other way round matched nothing and left the prefix,
-the quotes and the octal in `FileDiff.old_path`/`new_path` — which reached
-`resolve_language` as a file with the extension `md"`, so **any** path holding a
-non-ASCII byte silently rendered with no syntax colours at all, in both clients,
-and would have reached `read_blob` as a rev-spec naming nothing.
-
-`build_patch` is unaffected by design: it replays the captured `file_header`
-verbatim, so what `git apply` reads is exactly what `git diff` wrote. Its
-`format_patch_path` fallback — which writes a decoded path back unquoted, and
-so is only correct for a name with no tab or newline in it — is reached only
-when `file_header` is empty, which real git output never is.
+- `-z` paths are raw; printed paths are C-quoted. `core.quotepath=false` is on both builders, because `pull` prints names into refusals. `"`, `\`, TAB and LF stay quoted anyway, so `git::unquote_path` decodes every printed path.
+- `strip_path_prefix`: split on the real TAB, decode, then strip `a/` or `b/`, which sits inside the quotes.
+- `build_patch` replays `file_header` verbatim.
 
 ### Status parsing
 
-`get_status` uses `status --untracked-files=all --branch --porcelain=v2 -z`. Under `-z` the **whole** stream is NUL-terminated — `# branch.*` headers included (there are no newlines anywhere) — so the parser walks the leading `# `-prefixed records by splitting on NUL, stops at the first non-header record, then splits the remainder on NUL for the file entries. Type-2 (rename) entries occupy two NUL segments — the second holds the original path — so the loop manually advances `i` when it sees `2 `. (Splitting headers on `\n` instead of NUL was a long-standing latent bug: it parsed zero headers, so `has_upstream` silently stayed false and ahead/behind survived only via the rev-parse + remote-tracking fallbacks — `repo_sync_status`, lacking those fallbacks, returned 0/0. Regression-tested in `status_parses_upstream_and_ahead_behind_from_porcelain_headers`.)
+- `status --untracked-files=all --branch --porcelain=v2 -z`. Everything is NUL-terminated, headers included. Type-2 rows take two segments. Plain `--porcelain` corrupts paths.
+- The poll is one subprocess. `has_remote`, `has_commits` and `operation` come from disk, falling back to a spawn for shapes files can't answer (`GIT_CONFIG*`, `include`, `extensions.worktreeConfig`, reftable, a global remote). Tests assert which path answered.
+- `(detached)` sets `detached` and leaves `branch` empty; `head_sha` is empty when unborn.
+- With no upstream, `remote_tracking_ahead_behind` measures against `fallback_remote`, leaving `has_upstream` false.
+- `repo_sync_status` uses `--untracked-files=normal` and, after a fetch, measures the remote it fetched. The active repo's dirty dot comes from `status.files`.
+- `unpushed_shas` falls back to `rev-list HEAD --not --remotes`: it may under-mark, never a false arrow.
+- `embedded` is an untracked entry with a trailing slash. `submodule_dirty` is `S` with `c == '.'` and `m` or `u` set; `git add` would no-op, so the row isn't selectable.
 
-Branch fallback: if `# branch.head` is absent (empty repo) the code calls `git rev-parse --abbrev-ref HEAD` to fill in.
+Operation probe order, first match wins:
 
-**Two more answers come from disk rather than from git, for the same reason `operation` does — a subprocess costs ~8 ms of fork/exec whatever it asks, so the status poll is one `git status` and nothing else.** `RepoStatus.has_remote` and the remote names behind it (`remote_names_in` on the status path, `remote_names` for `repo_sync_status` and the remote resolvers in *Notable invariants*, which need a failure reported rather than swallowed) are read from `<common_dir>/config` through a port of git's own `config.c` lexer — section headers, quoted subsections with escapes, the legacy `[remote.Name]` form lowercased, comments, continuation lines — and byte-sorted and de-duplicated exactly as `git remote` prints them. It declines, and `git remote` is spawned instead, for every shape the file cannot answer: any `GIT_CONFIG*` variable in the process, an `include`/`includeIf` section, `extensions.worktreeConfig`, an unreadable or malformed file, and a global or system config that defines a remote (probed once per process with `git config --includes`, re-keyed on the global files' mtime; an `includeIf` there means permanent fallback, since it can only be answered from inside the matching repo). `common_dir` follows a linked worktree's `commondir` pointer, which is where a worktree's remotes actually live. Likewise `has_commits` — which anchors every diff at `HEAD` or the empty tree and gates the first history page — reads `HEAD` and then the loose ref or the `packed-refs` line it names, and falls back to `git rev-parse --verify HEAD` for a reftable ref store, a symbolic-ref chain or a torn ref file. Each of these has an equivalence test per shape that asserts *which* path answered and that the answer matches git's, because a silent regression to the spawn would still be correct and is the whole thing being removed.
+| Probe | Answer | Why here |
+|---|---|---|
+| `rebase-merge/` | Rebase | a stopped `--rebase-merges` also has `MERGE_HEAD` |
+| `rebase-apply/` | Rebase, or none with `applying` | that's `git am` |
+| `sequencer/todo` first word | Revert or CherryPick | shared sequencer; the todo outlives `CHERRY_PICK_HEAD` |
+| `REVERT_HEAD`, `CHERRY_PICK_HEAD` | Revert, CherryPick | single commits have no sequencer |
+| `MERGE_HEAD` | Merge | nothing else can also be |
 
-Operation in progress: `RepoStatus.operation` is an
-`Option<OperationInProgress>` — `Merge`, `Rebase`, `CherryPick`, `Revert` — read
-by `operation::in_progress` from the files git keeps in the repo's git directory,
-which `git_dir` resolves — a **filesystem** answer, not a git one. `<repo>/.git`
-is either the directory itself or, for a linked worktree or a submodule, a
-one-line `gitdir: <path>` pointer; reading it costs no subprocess, which is what
-lets the status poll carry the field for free, and it is as true of an operation
-begun in a terminal as of one begun here. `git rev-parse --git-dir` stays as the
-fallback for shapes that file can't describe (a bare repo, or a path somewhere
-inside the work tree rather than at its root). It is one field rather than a
-flag per operation because flags that can disagree are how a header ends up
-claiming a clean branch mid-rebase, and there is deliberately no separate "is
-anything in progress" command, because a second route to the same answer is how
-they diverge. The probe order is load-bearing, each rung checked against git:
+`AUTO_MERGE` is never a signal: a `stash pop` conflict leaves it.
 
-| Order | Probe (in the git dir) | Answer | Why here |
-| --- | --- | --- | --- |
-| 1 | `rebase-merge/` | Rebase | a rebase stopped on a `merge` line of its todo (`--rebase-merges`) also has `MERGE_HEAD`, and `git merge --abort` there strands the rebase |
-| 2 | `rebase-apply/` | Rebase — or **nothing** when `rebase-apply/applying` exists | that is `git am`; every `git rebase` command refuses there, so reporting a rebase would offer two buttons that can only fail |
-| 3 | `sequencer/todo`, first command word | `revert` → Revert, otherwise CherryPick | cherry-pick and revert share the sequencer and git does not keep them apart — `cherry-pick --abort` silently aborts a revert. The todo outlives `CHERRY_PICK_HEAD`: after a conflicted pick is committed by hand the head file is gone and the sequence is still open |
-| 4 | `REVERT_HEAD`, then `CHERRY_PICK_HEAD` | Revert, CherryPick | a single-commit revert or pick has no sequencer at all |
-| 5 | `MERGE_HEAD` | Merge | the only state none of the others can also be |
+### Continue and abort
 
-`AUTO_MERGE` is never a signal: it exists after a `stash pop` conflict, which is
-an unmerged index with no operation open. Covered by
-`status_reports_a_merge_in_progress_and_its_end`,
-`status_reports_a_rebase_and_a_cherry_pick_in_progress_and_their_end`,
-`a_revert_is_not_mistaken_for_a_cherry_pick`,
-`a_hand_committed_pick_still_reads_as_a_cherry_pick_in_progress`,
-`an_am_in_progress_is_not_reported_as_a_rebase` and
-`git_dir_resolves_through_a_worktree_git_file`.
+`continue_operation`, with both refusals before the first write:
 
-**The two ways out live beside the probe, in
-[core/src/operation.rs](core/src/operation.rs), and dispatch on it.**
-`continue_operation` runs, in order — **both refusals before the first write, so
-an `Err` leaves the index exactly as it found it**: (1) **the marker check** —
-`git --literal-pathspecs diff --check -- <unmerged paths>` under `LC_ALL=C`, in
-batches of 500 paths because `git diff` takes no pathspec on stdin and a large
-conflicted merge must not outgrow the argument limit. It is read line by line
-for `: leftover conflict marker` rather than by exit status, because run bare it
-also reports trailing whitespace in any dirty file; a `fatal:` line is an `Err`,
-so a check that could not run never reads as "no markers". `--check` prints
-paths raw where `ls-files` quotes them, so a reported line is matched against
-the unmerged paths already in hand rather than parsed — exact whatever the name
-holds, colons included — and a flagged line no held path accounts for is refused
-as git wrote it. It looks at added lines only, so a fixture that legitimately
-contains marker text is not mistaken for a conflict, and a flagged line counts
-only when the worktree line opens or closes a conflict (`<<<<<<<` / `>>>>>>>`),
-because a bare `=======` is also a Markdown heading underline and a refusal
-nobody can get past is the worse failure; (2) **for a rebase only, the
-unstaged-edits check** — `git diff --name-only --ignore-submodules`, mirroring
-git's own `has_unstaged_changes(ignore_submodules)`, with the unmerged paths
-left out (`git diff` lists each of them, once per conflicted stage, and staging
-is what is about to happen to them), because `rebase --continue` refuses there
-with "You must edit all merge conflicts…", which names the wrong cause (a merge
-or a pick does not mind); (3) **staging** — `git_add` over exactly the paths
-`ls_files_unmerged` reported, never `git add -u`, which would sweep a file
-edited for some other reason into the replayed commit; a resolution that deleted
-the file is staged as its removal; (4) **the step** — `git <op> --continue` under
-`GIT_EDITOR=:`, so the replayed commit keeps its own message and nothing waits on
-a terminal that isn't there, or `--skip` when a pick or revert is stopped on a
-commit (`CHERRY_PICK_HEAD` / `REVERT_HEAD` exists) whose resolution left the
-index identical to `HEAD`. `--continue` refuses that case and asks for a
-decision, `--empty=keep` does not cover it (it is about commits that were empty
-to begin with); the index is asked (`git diff --cached --quiet`) rather than
-git's translated refusal matched. **A rebase in the same position drops the
-commit on `--continue` without asking**, whatever `--empty` says, so there the
-step stays `--continue` and only the report changes. What says a rebase is
-stopped on a `pick` that has yet to become a commit is two of its own files
-(`rebase_stopped_on_a_pick`): `rebase-merge/stopped-sha` exists — it is gone once
-the commit is made, which leaves out a `break` and a failed `exec` — and
-`rebase-merge/amend` does not, which leaves out an `edit` stop and a conflicted
-`fixup`, where continuing amends a commit that exists and nothing is lost.
-"This continue staged a conflict" is no guide: a resolution staged from the
-embedded terminal leaves nothing unmerged, and the commit goes all the same. The answer
-is an `OperationOutcome` shaped like `MergeResult`: stopping on the next
-conflict is data, and only a refusal before git was asked is an `Err`. Its
-`skipped` flag says the commit was left out, by this function's `--skip` or by
-the rebase itself — git drops it without a word, so both clients put
-"The resolution left nothing to commit, so the *cherry-pick* skipped that
-commit." in the notice banner, or a commit that never landed would read as one
-that did. Its `started_at` is **where git's own state says the operation
-began**, read before `--continue` or `--skip` runs, since a finished operation
-deletes that state: the `orig-head` of whichever of `rebase-merge/` and
-`rebase-apply/` is there, else `sequencer/head` when `sequencer/` is. With none
-of the three directories — a merge, and a cherry-pick or revert of **one**
-commit, which records only its `*_HEAD` file — the operation has committed
-nothing yet, so **`HEAD` is still where it began** and is the answer; inside a
-rebase or a sequence `HEAD` is wherever the replay has got to, which is why the
-directory decides and not the file's absence. `ORIG_HEAD` is never read: no
-cherry-pick writes it, and anything may overwrite it. `None` means only that the
-state could not be read. It is what lets a client tell that the
-operation it just finished is the one its History action began (*Undo after a
-conflict*, below). `abort_operation` is `git <op> --abort` and returns
-whatever git printed on success — nothing for a full rewind, and
-`You seem to have moved HEAD. Not rewinding` when a multi-commit pick had a
-hand-made commit in the middle, in which case git clears the sequence and keeps
-HEAD. The core never resets over commits the user made themselves. Covered by
-the `continue_*` (the three `continue_reports_…` tests pin `started_at` for a
-rebase, a sequence of picks in every round, and a single pick under a stale
-`ORIG_HEAD`), `a_continue_that_conflicts_again_is_data`,
-`a_pick_resolved_to_nothing_is_skipped_and_the_sequence_goes_on`,
-`a_moved_commit_resolved_to_nothing_is_dropped_and_continue_says_so`,
-`a_resolution_staged_from_a_terminal_still_reports_the_dropped_commit`,
-`a_fold_resolved_to_nothing_is_not_reported_as_a_skipped_commit` and
-`abort_after_a_hand_made_commit_…` tests, and end to end through the bridge by
-`operation_flow_names_refuses_and_continues_a_cherry_pick`.
+1. `--literal-pathspecs diff --check` on unmerged paths, 500 per batch. Only `<<<<<<<` and `>>>>>>>` count, since `=======` is also a Markdown underline.
+2. For a rebase, refuse unstaged edits, because git's refusal names the wrong cause.
+3. Stage exactly `ls_files_unmerged`, never `add -u`.
+4. `<op> --continue` under `GIT_EDITOR=:`, or `--skip` when a pick's index equals `HEAD`.
 
-**`git_add` is literal.** It runs `git --literal-pathspecs add
---pathspec-from-file=-`, for the ordinary commit path as much as for a continue:
-the paths are file names, and as pathspecs `weird[1].txt` is a glob that would
-also stage a modified `weird1.txt`. A directory and an embedded repository still
-stage as before — literal only turns the glob characters off.
+- A rebase in that position drops the commit silently; `rebase_stopped_on_a_pick` lets `skipped` report it.
+- `started_at` reads `orig-head` or `sequencer/head` before running, else `HEAD`. Never `ORIG_HEAD`.
+- Core never resets over commits the user made.
+- `git_add` is literal (`--literal-pathspecs`), or `weird[1].txt` globs.
 
-**The git floor** is [core/src/git_version.rs](core/src/git_version.rs):
-`FLOOR` is 2.45 (the newest flag the history-rewrite plan relies on,
-`cherry-pick --empty=keep`), `GitVersion::parse` reads the leading numbers of
-the third word of `git --version` so every vendor's decoration parses
-(`2.54.0 (Apple Git-157)`, `2.46.0.windows.1`, `2.47.0-rc1`, `2.54.GIT`),
-`installed()` asks once per process and remembers only a successful answer, and
-`require_floor()` is the one-sentence refusal naming both versions. There is no
-degraded mode and no second spelling of any flag. Its caller is
-`rewrite_preflight`, so every History action stands behind it; `continue` and
-`abort` use no flag that young and do not ask.
+### History rewrites
 
-**History's multi-commit actions are
-[core/src/history_rewrite/](core/src/history_rewrite/mod.rs), behind one
-preflight** — `mod.rs` holds what they share (the preflight and its
-constructors `ready`, `refused` and `for_a_replay`; `RewriteResult` and its
-three, `landed`, `unchanged` and `stopped`), and each action has a file.
-`rewrite_preflight(repo, replayed_from)` answers a
-`RewritePreflight` whose refusal is **data** (`blocked`), in this order: the git
-floor, an operation in progress, a detached HEAD, an unborn one, then tracked
-changes — `git status --porcelain=v1 -z --untracked-files=no
---ignore-submodules=dirty`, the first ten named, because "you have uncommitted
-changes" without the names sends the user hunting. `-z` is what keeps the names
-right: the line format quotes odd paths and writes a rename as `old -> new`,
-where `-z` leaves paths raw and puts a rename's origin in a field of its own,
-which is skipped.
-Untracked files pass: git refuses the one that is actually in the way, by name,
-and that is a failure path the action already has. `replayed_from` is the oldest
-commit the action would replay on the current branch — `None` for cherry-pick —
-and turns on the two checks that only a rewrite needs: a **merge commit in the
-replayed range** (`rev-list -1 --merges HEAD --not <oldest>^@`, read by stdout
-since it exits 0 either way, and spelled with `^@` so a root commit is a valid
-oldest), and `rewrites_pushed` — `merge-base --is-ancestor <oldest> <upstream>`,
-the upstream read with `for-each-ref --format=%(upstream)` so a branch with no
-upstream is a quiet *no* rather than an error. Someone else's push moves the
-upstream without containing the commit, and rightly answers *no*.
-The third is **a shallow clone that ends on `replayed_from`**: git's history
-walk hides the parents of the commit a shallow clone ends on, so `rev-list
---parents -1` — which is how a replay finds what to rebase onto (`parent_of`) —
-reads it as a root, and `rebase --root` from there *succeeds*, leaving a branch
-with no connection to the history below it. `records_a_parent` reads the commit
-object itself (`cat-file commit`), and a commit that names a parent the walk
-does not show is refused, with `git fetch --unshallow` as the way out. The
-preflight is two functions — `branch_ready_for_an_action`, which every action
-asks before it reads anything else off the repository, and `replay_refusal`
-(the id check, `merge_refusal`, the shallow check) — so squash and reorder can
-place their commits between the two. **Reorder has a preflight of its own**,
-`reorder_preflight(repo, shas, before_sha)`, because where its replay starts
-depends on the destination as much as on the commits; it is the same two
-functions around reorder's own plan, and answers the same `RewritePreflight`.
+- Floor: git 2.45 for `cherry-pick --empty=keep`, with no degraded mode.
+- Preflight names up to ten tracked changes. Untracked files pass.
+- Cherry-pick passes `-m 1`, so a merge commit can be picked against its first parent.
+- Replays refuse a shallow boundary because that's where `rebase --root` succeeds and disconnects history. `records_a_parent` reads the commit object, since the walk hides those parents.
+- Cherry-pick: `Ok(success)`, `Ok(!success)` only for a conflict, or `Err` with the repo restored. `git switch --no-guess` is judged by where `HEAD` lands, because a failing `post-checkout` exits non-zero after switching.
+- A stop is a conflict only with unmerged paths. A dead signer or failing hook has nothing to resolve, so core aborts, then switches back, in that order. Never `--quit`.
+- Replays are a todo this app writes, via `GIT_SEQUENCE_EDITOR`, with paths in env vars and a unique tempdir: `git rebase -i --no-autostash --no-update-refs --no-rebase-merges --no-autosquash --reschedule-failed-exec --empty=keep`. Full ids, no comments.
+- Squash's message lives at `rebase-merge/leogit-message`, so git owns its lifetime. The `exec git commit --amend --no-verify --cleanup=whitespace` sits right after the last `fixup`; at the end it would reword the wrong commit.
+- `Lineage::of` finds the oldest with `merge-base --octopus` and ignores input order.
+- Reorder judges a no-op by the resulting order and runs no git for it, since even a null rebase writes reflog entries.
+- Undo requires the branch tip to equal `after_sha`. Checked out: `update-index --refresh`, then `reset --keep`. Not `--hard` (deletes untracked), `--merge` (drops staged) or `switch -C` (hook exit codes lie). The refresh matters because `GIT_OPTIONAL_LOCKS=0` leaves stat data stale.
+- Not checked out: `branch -f`, never `update-ref`, which moves a branch another worktree holds.
+- A half-failed reset is put back with `read-tree -m -u <before> <after>`.
+- Undo names moved submodules instead of updating them, since `git submodule update` may hit the network. It probes where it came to rest (`diff-index --raw -z`, both modes `160000`).
+- `UndoOffer` and `OpenAction` are client memory, set after the reload because their rules read status. Continue remembers the open action before asking core, since a poll can forget it mid-flight. Only cherry-pick is held to its branch; a stopped rebase reports `detached`.
 
-`cherry_pick_commits(repo, shas, target)` takes the shas newest first — History's
-order — and **its three outcomes are a contract** (FRONTEND §3.7): `Ok(success)`
-on the target with the new commits; `Ok(!success)` **only** for a conflict, left
-open on the target; `Err` with the repository back where it began. Everything
-that can be refused is refused before anything moves: no shas, a sha that is not
-an object id (which is also what keeps a `-`-leading string out of git's
-arguments), a blocked preflight, a target equal to the current branch, a target
-that is not a local branch (`rev-parse --verify --quiet refs/heads/<t>^{commit}`,
-which also yields the `before_sha` the `UndoStart` records). Then `git switch
---no-guess -- <target>` — `checkout refs/heads/x` would detach, and a bare
-`switch x` would *create* `x` from a same-named remote branch — **judged by
-where HEAD is afterwards, not by the exit status** (`switch_to`): git switches
-and *then* exits non-zero when a `post-checkout` hook fails, which is what
-git-lfs's hook does wherever `git-lfs` is not on a GUI app's `PATH`, and reading
-that as "still on the source" would answer `Err` with the user on the target.
-Then one `git cherry-pick --empty=keep -m 1 <oldest … newest>` under
-`GIT_EDITOR=:`.
-`--empty=keep` is the 2.45 flag the floor exists for: without it a pick the
-target already contains stops the sequence with `CHERRY_PICK_HEAD` set and no
-conflict, a state with no good button. `-m 1` is a no-op on an ordinary commit
-and lets a merge commit be picked as what it brought to its first parent. On
-success the selection is `rev-list <before>..HEAD`; if the new tip cannot be
-read back the answer is still `Ok(success)`, with no selection and no undo
-point, because an `Err` there would claim a rollback that did not happen.
+### Sync ladder
 
-**A failure is a conflict exactly when `CHERRY_PICK_HEAD` exists *and* the index
-holds unmerged paths** — two facts read off the repository, not a reading of
-git's translated stderr. The file alone is not enough: a signer that cannot run
-(`commit.gpgsign` with no `gpg` on the app's `PATH`) and a failing
-`prepare-commit-msg` hook both stop the sequence on a commit with nothing to
-resolve, and Continue would re-run the same failure forever. Those, like an
-untracked file the pick would overwrite (sequencer open, no `CHERRY_PICK_HEAD`),
-leave the user on the wrong branch with some picks already made, so `return_to`
-runs `cherry-pick --abort` and then switches back to the source, in that order:
-git refuses to switch branches while cherry-picking. `--abort` restores the target's tip and keeps nothing of the
-partial run; it is never `--quit`, which would leave the picks on the target.
-When either step fails the `Err` carries a second paragraph saying where the
-user has been left. A clean pick runs only `prepare-commit-msg` and
-`post-commit`; `--continue` runs `pre-commit` and `commit-msg` as well, so a
-hook can refuse a continue that it let through as a pick. Covered by the
-`cherry_pick_*`, `preflight_*`, `rewrite_refuses_*` and `rewrites_pushed_*`
-tests, and through the bridge by
-`cherry_pick_flow_preflights_copies_and_stops_on_a_conflict`.
-
-**A rewrite of the current branch is a todo this app writes, replayed by
-`git rebase -i`** ([replay.rs](core/src/history_rewrite/replay.rs)). git asks a
-*sequence editor* to edit the todo it generated; ours replaces it:
-
-```
-LEOGIT_TODO=<tmp>/todo  LEOGIT_MESSAGE=<tmp>/message | ""  GIT_EDITOR=:
-GIT_SEQUENCE_EDITOR='sh -c '\''cp "$LEOGIT_TODO" "$1" && { [ -z "$LEOGIT_MESSAGE" ] || cp "$LEOGIT_MESSAGE" "$(dirname "$1")/leogit-message"; }'\'' --'
-git rebase -i --no-autostash --no-update-refs --no-rebase-merges --no-autosquash \
-    --reschedule-failed-exec --empty=keep <parent of the oldest commit | --root>
-```
-
-Both paths travel in environment variables, so nothing is spliced into a shell
-string, and they sit in a `tempfile::tempdir()` — unique per run, so two windows
-on one repository cannot hand each other's todo to git. The message is optional
-(`Replay.message: Option<&str>`): a replay that writes no commit message of its
-own — reorder — passes an empty `LEOGIT_MESSAGE`, and the editor copies the todo
-alone. The todo names full
-object ids and holds no comment lines, which puts it beyond
-`rebase.abbreviateCommands` and `rebase.instructionFormat`, and beyond
-`core.commentChar` short of one that is the first letter of a command: `p` makes
-every `pick` a comment, and git answers "nothing to do" before it touches
-anything. That is left as the refusal it is — forcing `-c core.commentChar=#`
-for this run would have the rounds Continue runs read the rebase's files under a
-different character. The four `--no-…`
-flags pin the settings that would change what it *means*, and
-`GIT_SEQUENCE_EDITOR` outranks a configured `sequence.editor`. `--empty=keep`
-because `rebase -i` otherwise halts on a commit the new order made empty.
-`commit.gpgsign` is left alone — a user who signs wants the replayed commits
-signed, the amended one included. **The message lives at
-`rebase-merge/leogit-message`**, the directory git passes the editor as
-`$(dirname "$1")`: it shares the rebase's lifetime exactly, surviving every
-conflict round and being deleted by git itself when the rebase finishes or is
-aborted, from this app or from a terminal — there is no leftover for anyone to
-clean up. `git rev-parse --git-path` resolves it from a linked worktree and from
-a subdirectory alike (an `exec` runs from the worktree root).
-
-The driver's answer is `Done`, `Conflict(paths, text)` or an `Err`, by the rule
-cherry-pick established: **a stop is a conflict only if the index holds unmerged
-paths.** A signer that cannot run, a failing `prepare-commit-msg` hook (it runs
-on every pick, every fixup and the amend, `--no-verify` notwithstanding), an
-untracked file in the way and a failing `exec` all stop with nothing to resolve;
-the driver runs `rebase --abort` and answers `Err`. A refusal that never opened
-a rebase (a `pre-rebase` hook, a bad sequence editor) leaves no `rebase-merge/`,
-and is an `Err` with no abort. `--reschedule-failed-exec` is for the rounds that
-follow a conflict, which are Continue's: a failed `exec` is otherwise crossed
-off the todo as it fails, and the next `--continue` finishes the rebase without
-it. git stores the setting with the rebase, so it holds from a terminal too.
-git's text is passed through `operation::without_progress` — a rebase writes
-`Rebasing (2/5)` over itself with carriage returns even into a pipe —
-as `continue_operation`'s is.
-
-**Squash** ([squash.rs](core/src/history_rewrite/squash.rs)) folds the selected
-commits into the **oldest** of them. `Lineage::of(repo, shas, landmark)`
-([lineage.rs](core/src/history_rewrite/lineage.rs), shared with reorder) places
-the shas on the branch without trusting their order: the oldest is `merge-base
---octopus <shas> <landmark>` — on one line of history, the commit all the others
-descend from — the replayed range is `rev-list --reverse HEAD --not <oldest>^@`,
-and a selection is refused unless every sha and the landmark are in that range
-and the range starts at the oldest. The `landmark` is one more commit the range
-must reach without being selected — reorder's destination; squash passes none.
-Its answer is a `Result` inside a `Result`: the inner `Err` is `merge_refusal`'s,
-asked of the merge-base *before* the walk, because a walk across a merge is not
-one line and would otherwise report a merge commit as "not all on the current
-branch". The reverse mistake is closed first: the merge question is asked from
-`HEAD` down, so it is only put once the base is **one of the named commits**
-(lines that forked share a base nobody named) and **an ancestor of `HEAD`** —
-otherwise any merge in the branch's past would be blamed for a commit that is
-simply somewhere else. A well-formed id that names no commit (a tree, all
-zeros) fails `merge-base` and is answered with the same sentence, git's own
-text going to the log. Squash counts its commits *before* placing them, so one
-commit is "select at least two" wherever it sits. The todo is
-
-```
-pick  <oldest selected>
-fixup <every other selected commit, oldest first>
-exec  git commit --amend --no-verify --cleanup=whitespace -q -F "$(git rev-parse --git-path rebase-merge/leogit-message)"
-pick  <every unselected commit of the range, oldest first>
-```
-
-**The amend sits straight after the last `fixup`**, which is the whole safety
-of it — at the end of the todo it would reword the branch's last commit — and
-because it is a *line of the todo* it runs whenever the rebase reaches it: the
-message survives a conflict in the fold itself, where a message handed to the
-first command alone is lost. `--amend -F` keeps the oldest commit's author and
-author date. `--cleanup=whitespace`, which `commit()` names as well, because a
-message typed into a field holds no comment lines, and `commit.cleanup=strip`
-would silently delete a line beginning with `#`. The squashed commit is
-`HEAD~<unselected commits in the range>`, which is the `selection`; the
-`UndoPoint` has no `return_branch`. A selection whose commits cancel out is an
-`Err`: git will not fold a commit into nothing, and stops with nothing to
-resolve. `squash_draft` reads the selected commits with `read_commits`
-(`git log --no-walk=unsorted`, through the record parser `get_log` uses, now
-under `--encoding=UTF-8`) and builds the three parts FRONTEND §3.7 describes.
-Covered by the `squash_*`, `a_failed_amend_*`, `a_squash_that_*`,
-`an_aborted_squash_*`, `a_repository_path_*` and `draft_*` tests, and through
-the bridge by `squash_flow_drafts_the_message_and_folds_the_selection`.
-
-**Reorder** ([reorder.rs](core/src/history_rewrite/reorder.rs)) moves the
-selected commits, in their own order and as one block, to just *under*
-`before_sha` in a newest-first list — immediately older than it — or to the tip
-for `None`. `before_sha` is `Lineage::of`'s landmark, and may itself be one of
-the moved commits: the rule is "take the moved rows out, put them back where the
-line is". `Move::plan` builds the new order by walking the range and emitting
-the block just before the destination, and **judges a no-op by that result, not
-by where the destination lies** — "adjacent to the selection" is a no-op for a
-contiguous selection only. Two things follow from comparing the orders:
-
-- **A move that changes nothing runs no git.** Even a rebase that ends where it
-  began writes `ORIG_HEAD` and a pair of HEAD reflog entries, so the answer is
-  `RewriteResult::unchanged` — success, the commits as they stand, no `undo`.
-- **The leading commits that keep their place are left out of the todo.** The
-  range reaches down to the older of the oldest moved commit and the
-  destination, and its head may well stay put (`{B, D}` to just under `C` leaves
-  `B` first). The replay starts at `from`, the first commit that is displaced,
-  `--onto` its parent — so what the preflight judges (a merge, a shallow
-  boundary, `rewrites_pushed`) is what is rewritten, and nothing below it.
-
-The todo is a `pick` per line and the driver gets no message. Because
-`--empty=keep` turns every line into a commit, the block is where the todo put
-it: the `selection` is `rev-list -n <above + moved> HEAD` from `above` on. A
-conflict and a stop with nothing to resolve are the driver's; a moved commit
-resolved to nothing is the rebase `skipped` case above. `--no-update-refs` means
-another branch that pointed into the range still points at the old commits.
-Covered by the `reorder_*`, `an_aborted_reorder_*` and `a_moved_commit_*` tests,
-and through the bridge by
-`reorder_flow_preflights_the_destination_and_moves_the_selection`.
-
-**Undo** ([undo.rs](core/src/history_rewrite/undo.rs)) takes any of the three
-back: `undo_operation(repo, UndoPoint)` puts `branch` on `before_sha`, and only
-while the branch's tip is still exactly `after_sha`. The check is on the branch
-and not on `HEAD`, because after a cherry-pick the user may be anywhere. Its
-answer has the actions' three shapes — `UndoResult { undone, message }`:
-`undone`; **expired** (`undone` false: the branch is gone, its tip has moved, or
-`before_sha` is no longer an object — checked with `rev-parse --verify --quiet
-<sha>^{commit}`, which is silent where `cat-file -e` is not), which can never
-succeed again; and an `Err` for a refusal that may not hold next time. Nothing
-has moved unless `undone`. Refused first: ids that are not object ids, and an
-operation in progress (`open_operation_refusal`, the preflight's sentence).
-
-**Every action reads its way back before it runs anything**: an `UndoStart` —
-`branch`, `before_sha`, `return_branch` — built by
-`UndoStart::on_the_current_branch` for squash and reorder and by hand in
-`cherry_pick.rs`, where the branch is the target. A run that lands completes it
-(`landed_on(after_sha)` → the `UndoPoint` in `RewriteResult.undo`); a run that
-stops on a conflict hands it back as it is (`RewriteResult::stopped(…, start)` →
-`RewriteResult.start`), for the client to complete once Continue has finished
-the operation. Core keeps nothing between the two calls: `undo_operation`
-judges any point by the branch's tip alone, so a completed `start` needs no
-second entry point, and the round trips are pinned by
-`a_squash_continued_past_two_conflicts_…`,
-`a_cherry_pick_continued_past_a_conflict_…` and
-`a_reorder_whose_continue_dropped_a_commit_can_still_be_undone`.
-
-- **The branch is checked out here**: `tracked_changes` — the preflight's
-  refusal, naming the files — then `update-index -q --refresh`, then **`git
-  reset --keep <before>`**, then `switch_to(return_branch)` for a cherry-pick
-  (shared with `cherry_pick.rs` from `mod.rs`; a refused switch is a `message`
-  on an undo that worked). `--keep` and not `--hard`: on a clean tree the two
-  end in the same place, but `--hard` deletes an untracked file standing where
-  a tracked one comes back, and `--keep` refuses by name. Not `--merge`, which
-  throws away a staged change to a file the two commits differ in, exit 0. Not
-  `switch -C`, which is as careful but runs `post-checkout` and **exits 1 on
-  that hook's failure after moving everything**, and cannot be told from a real
-  refusal. The refresh is not optional: `reset --keep` trusts the index's stat
-  data and refuses a file whose content is unchanged but whose inode is not — an
-  editor's save-by-rename — with `Entry '…' not uptodate`. `status` would have
-  refreshed the index on its way, but core runs every command under
-  `GIT_OPTIONAL_LOCKS=0`. It bites only where the two commits differ in that
-  file, so a squash or a reorder, which end on the tree they began with, never
-  meet it; a cherry-pick's undo does.
-- **It is not**: `git branch -f -- <branch> <before>`. `update-ref <ref> <new>
-  <old>` has the compare-and-swap, and no idea about worktrees: it moves a
-  branch that is checked out — here or in another worktree — and leaves that
-  worktree's index and files describing a commit it is no longer on. Asking
-  first does not close it either: `%(worktreepath)` and `worktree list
-  --porcelain` both report a worktree that is **detached in the middle of a
-  rebase or bisect of the branch** as holding nothing, while `branch -f` reads
-  `rebase-merge/head-name` and `BISECT_START` and refuses (`used by worktree
-  at …`). What is given up is atomicity between the tip check and the move — on
-  a branch nothing has checked out, where only plumbing could move it.
-
-**A reset that fails half way is put back** (`after_a_failed_reset`). `reset
---keep` writes the index and the files first and the ref last, so a ref it
-cannot lock — a stale `refs/heads/<branch>.lock` left by a git that crashed, a
-`reference-transaction` hook that says no — leaves the old commit's files under
-a branch that has not moved: every file the undo touched reads as a staged
-change, and the next try is refused over them. A refusal made up front leaves
-the index as `HEAD` has it, so `diff-index --quiet --cached HEAD` tells the two
-apart — the tree held no tracked changes a moment earlier. The way back is the
-same two-way merge the other way round, `read-tree -m -u <before> <after>`,
-which moves no ref and so is not stopped by whatever stopped the reset; the
-`Err` then ends *Nothing has changed*, or says where the user was left if that
-failed too. `reset --keep <after>` does not do it: `HEAD` is on `after` already,
-so it resets the index and leaves the files where they are.
-
-**An undo names the submodules it left behind, and does not update them.** A
-reset moves a submodule's pointer and not its files, so the submodule then reads
-as an uncommitted change and the next action's preflight — and the next undo —
-refuses over it. `git submodule update` may reach the network and is the user's
-to run; how the app treats submodules at all is a roadmap item of its own. What
-core does is say so, in `UndoResult.message`: after the reset **and after the
-switch back**, `submodules_left_behind` runs `git diff-index --raw -z
---no-renames --ignore-submodules=dirty HEAD` and keeps the paths whose two modes
-are both `160000` — a gitlink on both sides whose commit differs
-(`gitlinks_on_both_sides`, the parse on its own so it can be tested against
-listings no undo can produce). `-z` is what keeps a path holding a quote or a
-line feed raw: git quotes those in its line format whatever `core.quotepath`
-says.
-`submodules_not_updated` words them (*The submodule “sub” was not updated, so it
-reads as an uncommitted change until you run git submodule update.*, with a
-plural form), after the stranded-branch note when both apply, as separate
-paragraphs. It is a probe of **where the undo came to rest, not a diff of the
-point's two commits**, which would lie four ways: an undo that removes a
-submodule leaves an untracked directory and nothing to update; one that restores
-a submodule leaves a clean, empty directory; a submodule that was never checked
-out reads clean; and under `submodule.recurse=true` — the user's configuration
-is read in production — the reset updates the submodule itself. A cherry-picked
-bump undone from its target reads clean too, once the source branch is back.
-`--ignore-submodules=dirty` keeps a submodule that is only dirty *inside* out of
-the list and a moved pointer in it, whatever its inside looks like;
-`tracked_changes`, the refusal up front, passes the first and not the second, so
-an undo never starts over a pointer that has already moved. The `branch -f` path
-touches no tree and gives no note. A probe that fails is logged and says
-nothing: the undo worked.
-
-Known and not defended: git overwrites an **ignored** file in the way in every
-mode, `--keep` included. Covered by the
-`undo_*` tests — both sides of a cherry-pick, a detached HEAD, the expiries, an
-untracked file in the way, the stale index, a branch that cannot be locked, both
-worktree holds, a source branch that is gone, and the sync ladder before and
-after a force push — by the submodule tests over `fixtures::repo_with_a_submodule`
-(a bump, a path with a space, a non-ASCII letter and a double quote, a moved
-pointer that is also dirty inside, **a submodule that is only dirty inside**, a
-submodule taken away, `submodule.recurse`, a picked bump, both notes at once,
-two submodules, and the parse alone), and through the bridge by
-`undo_flow_takes_an_action_back_and_then_says_the_point_has_expired`.
-
-**In the clients a History action ends on one path.** Natively
-`HistoryActionOutcome` (`landed` / `stoppedOnConflict` / `refusedBusy` /
-`failed`) is every action's answer and `ContentView.finishHistoryAction` is what
-follows it; in `MainLayout.svelte` every `run…` hands its `RewriteResult` to
-`finishHistoryAction({ repoPath, result, reload, stoppedOnConflict, action, leavesOpen, asked })` —
-reload, then select the resulting commits and put the way back on offer, or go
-to Changes, say the action stopped and keep it as the open action (below;
-`leavesOpen` is the operation a stop leaves open, `CherryPick` or `Rebase`) — with
-`reloadAfterBranchChange` for cherry-pick and `reloadAfterRewrite` for the two
-that rewrite the branch in place. `CommitList.svelte` brings a selection made in
-code into view with an effect on `activeSha` alone (`revealVirtualRow` in
-`utils/virtualList.ts`, the scroll half of `focusVirtualRow`) — a squashed or
-moved commit is rarely the tip.
-The merge gate on Squash and Reorder is a pure helper mirrored in each client —
-[utils/historyRange.ts](apps/tauri-app/src/lib/utils/historyRange.ts) and
-`Services/HistoryRange.swift`, `replaysMergeCommit` — read off the rows'
-`parents`. The native description field and git's-refusal block are shared views
-(`Design/DescriptionEditor.swift`, used by the composer and the squash sheet;
-`Design/RefusalText.swift`, used by the force-push, squash and reorder sheets).
-
-**Reorder's insertion mode is a pure placement model and a list that stops
-listening.** The model is mirrored —
-[utils/reorderPlacement.ts](apps/tauri-app/src/lib/utils/reorderPlacement.ts)
-and `Services/ReorderPlacement.swift`: a *slot* `i` is the gap above row `i`,
-slot `count` the one under the last loaded row, and a slot's destination for
-core is the sha of the row above it (`null` for slot 0). The slots the line may
-rest in exclude everything under the newest merge commit and every slot that
-would change nothing **except home** (the one above the topmost moved row, where
-the line starts), so each step of the line is a different move; the item is
-offered only when there is more than one. The slot under the last loaded row is
-real even with more history to page in — core takes any commit of the branch —
-and paging only adds slots. The mode itself holds `{ moving, slot }` and ends
-when its ground moves: a list reset, a moved commit gone, a slot no longer
-allowed, another action starting.
-
-- **Tauri** (`CommitList.svelte`): while armed, window **capture-phase**
-  listeners take ↑/↓/⏎ before the rows' own handlers — leaving alone a chord
-  (⌘↩ is the composer's) and a key typed into the terminal or a text field —
-  and `click` /
-  `contextmenu` end the mode and are swallowed when they land inside the list —
-  `click`, not `mousedown`, because cancelling on the press lets the click that
-  follows re-select a row. `confirmReorder` judges the no-op **before** it
-  clears the mode: the moving set is a `$derived` of the mode, and reads as
-  empty the moment the mode is null. Escape is the caption's `dismissOnEscape`, which also
-  raises `overlayDepth` so the app's chords stay quiet. The line is one
-  absolutely positioned element inside `.virtual-scroll`, a sibling of the
-  translated window of rows, at `slot × ROW_HEIGHT`; `revealVirtualBand` (what
-  `revealVirtualRow` is built on) keeps the two rows around it in view.
-- **Native** (`HistorySidebar.swift`): `.onKeyPress` for the four keys on the
-  `List` runs before `NSTableView` sees them, and `.handled` keeps the selection
-  still; `.selectionDisabled` freezes clicks and arrows without dimming the
-  highlight. **Apple documents no precedence between `onKeyPress` and `List`** —
-  it is measured behaviour, to be measured again on an OS bump. `.onMoveCommand`
-  never fires on a `List`. A click anywhere ends the mode through
-  `Design/MouseDownMonitor.swift` (`View.onMouseDown(while:)`, an `NSEvent`
-  local monitor that only observes): a clear view laid over the list to catch
-  the click also catches the scroll wheel. The line is a row overlay, which a
-  `List` row clips 4pt outside its content box — hence the 4pt offset and no
-  more. `proxy.scrollTo(id)` with no anchor scrolls the least it can. **The
-  mode's watchers — the monitor, the `.onChange`s that end it, the caption's
-  clock — hang off `body`'s `Group`, not the list**: the list unmounts whenever
-  `commits` empties, which a repository switch does first, and `@State` on the
-  sidebar would otherwise bring the mode back armed over another repository.
-
-The frontend's pure helpers are tested with Node's own runner — `pnpm test` is
-`node --test 'tests/*.test.ts'`, Node stripping the types — in
-[apps/tauri-app/tests/](apps/tauri-app/tests/), outside `src` so `svelte-check`
-needs no `@types/node`; a helper under test imports only types.
-
-**The way back is client memory too, and one line of the strip.** An
-`UndoOffer` — the sentence, the `UndoPoint`, and the commits the action was
-asked for — is set by `finishHistoryAction` **after the reload** (`undoOffer` in
-`MainLayout.svelte`; `HistoryActionStore.offer(_:)`), because the rule that
-retires it reads the status and the one from before the action still shows the
-old tip. That rule is pure and mirrored —
-[utils/undoOffer.ts](apps/tauri-app/src/lib/utils/undoOffer.ts) `undoStillStands`,
-`Services/UndoOffer.swift` `stillStands(under:)`, with the sentences beside it:
-the offer falls when a status shows the point's branch checked out, not
-detached, at a HEAD other than `after_sha`, and otherwise stands, core being
-the judge of what the status cannot see. It is fed by an `$effect` on the
-status — natively the `.onChange`s of `headSha` and `branch` — and a second `$effect` / `HistoryActionStore.reset()` drops it with the
-repository. `runUndo` / `ContentView.undoHistoryAction` claim the write slot
-(`'undoAction'`; `HistoryActionStore.undo` → `UndoOutcome`), reload with the
-branch list, then select `restores` or raise the modal, keeping the offer on an
-`Err` alone. The strip is one component per client —
-[StatusStrip.svelte](apps/tauri-app/src/lib/components/StatusStrip.svelte),
-`Design/StatusStrip.swift` — with a `warning` and a `done` tone, an optional
-detail, link and ✕; the poll's line and the notice are the same component.
-
-**An action that stopped on a conflict is client memory as well: the open
-action** (`openAction` in `MainLayout.svelte`, `HistoryActionStore.openAction`)
-— the operation it left open, core's `UndoStart`, which action it was, and the
-commits it was asked for. It is set from a result that carries `start`, **after
-the reload** in both clients (natively the outcome carries it —
-`.stoppedOnConflict(_, open:)` — and `ContentView.finishHistoryAction` hands it to
-`HistoryActionStore.keepOpen`), and serves two things. *Abort* reads
-`start.return_branch` off it — git records the pre-pick tip but not the branch the
-user left — **before** aborting, and switches back afterwards in its own `try`,
-so a failed switch is reported as that and not as a failed abort. *Continue*
-**remembers it as it starts, before core is asked** — the composer's
-`onOperationContinuing` → `beginContinue` / `HistoryActionStore.continueBegins()`
-— because the status poll does not wait for a write: a read that shows the
-operation over can land, and forget `openAction`, between git finishing and the
-Continue's own answer arriving, and the Undo would be lost without a trace.
-`finishContinue` (reached through `onOperationContinued`, which carries the
-`OperationOutcome`) takes what was remembered on every path, so it never outlives
-its Continue, reloads, and then asks the second of two pure, mirrored rules in
-`utils/undoOffer.ts` / `Services/UndoOffer.swift`:
-
-- `openActionStillStands` / `OpenAction.stillStands(under:)` — the one rule on
-  the status read that forgets it: the status's `operation` must be the one the
-  action left open, and **only a cherry-pick is held to its branch**. While a
-  rebase is stopped core's status is `detached: true, branch: ""`, so holding a
-  rebase to `start.branch` would forget every squash and reorder on the first
-  read. Finishing, aborting, doing either in a terminal and switching
-  repositories all clear it through this rule, without a line each.
-- `undoPointAfterContinue` / `OpenAction.undoPoint(startedAt:under:)` — the
-  `UndoPoint` a finished Continue leaves, or none: `start` completed with the
-  reloaded status's `head_sha` as `after_sha`, refused when the status is
-  detached, on another branch or without a HEAD, when `started_at` is not
-  `before_sha` — null included — and when `head_sha == before_sha`.
-  `started_at == before_sha` is what vouches that the operation just finished is
-  the one the action began, for every action: core answers for a single-commit
-  pick too. Nothing switches back after a Continue, so the user is on
-  `start.branch` when the rule reads the status.
-
-The offer then goes through the same `offerUndo` / `HistoryActionStore.offer`
-an uninterrupted landing uses, with the sentence counting the commits asked
-for. A refusal to offer is logged (`[undo] no offer after the continue`), since
-from the outside it looks like nothing. Both rules are covered by
-[tests/undoOffer.test.ts](apps/tauri-app/tests/undoOffer.test.ts).
-
-**Test fixtures shared across core's modules live in
-[core/src/test_support.rs](core/src/test_support.rs)** — `init_test_repo`,
-`commit_file`, `subjects`, `git_stopping` (run a git command that is expected to
-stop), `conflicting_repo()`, and for anything that needs a remote `published_repo()`
-(a bare `origin.git` beside a clone whose `main` is pushed and tracking) with
-`clone_of()` for somebody else's clone — so `operation.rs`, `history_rewrite/`,
-`sync_ladder.rs` and `git.rs` build their repositories the same way, **isolated
-from the developer's own git configuration**: `isolate_from_user_config`
-(`GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` at `/dev/null`, `LC_ALL=C`) is
-applied by the helpers and, under `#[cfg(test)]`, by `git_cmd` itself — a global
-`core.hooksPath` would otherwise disarm every hook a test installs. It does not
-reach the bridge crate's tests, which run core as a dependency. The History
-actions' own (`linear_repo()`, `five_commits()`, `edits_of_one_line()`,
-`failing_hook()`) are `history_rewrite/fixtures.rs`.
-
-**In the clients the operation is one table of words and one swapped button.**
-[utils/operationWords.ts](apps/tauri-app/src/lib/utils/operationWords.ts) and
-`Services/OperationWords.swift` give each `OperationInProgress` its noun, Title
-Case and gerund, and the chip suffix, the abort item, its confirmation and the
-composer all read from it — a `switch` per site is how a fifth site comes to
-show a rebase as a merge. Both also hold the one rule `continuesFromComposer`
-(everything but a merge). The abort confirmation is worded from the operation
-captured when it opened (`abortTarget` in `MainLayout.svelte`, `pendingAbort` in
-`BranchMenu.swift`), so a status poll landing underneath cannot reword the
-question; core aborts whatever is open when it is answered. Continue claims
-the window's write slot as a commit does — `isContinuing` is
-`$activeRepoWrite === 'continue'` in `CommitMessage.svelte`, and
-`CommitStore.continueOperation` claims the `RepositoryWriteGate` natively — and
-answers through the owner:
-`onOperationContinued(outcome)` → `finishContinue` → `reloadAfterBranchChange`
-(status, history and branches, since finishing a rebase re-attaches HEAD), and
-natively `ChangesSidebar.continueOperation` → `onOperationContinued` →
-`ContentView.finishContinue` (the same three reloads), then `onFailure`. The
-native answer is `CommitStore.continueOperation`'s pair of an `OpOutcome` and
-git's `OperationOutcome` — nil when git was never asked — so a busy refusal
-re-reads and reports nothing.
-`BranchMenu.menuLabel` appends the suffix to whatever `placeLabel` says —
-including `Detached at <sha7>`, since a rebase detaches HEAD for as long as it
-runs — and both clients ask about the operation before the detached HEAD when
-explaining why Merge is unavailable, for the same reason.
-
-HEAD identity: `# branch.head` reading `(detached)` sets `RepoStatus.detached` (and leaves `branch` empty) so the UI can distinguish a detached HEAD from a still-loading status; `# branch.oid` yields `head_sha` for free (no extra `rev-parse`), or stays empty for an unborn branch (`(initial)`). The branch chip shows `Detached at <short-sha>` — the native chip's own label (`BranchMenu.placeLabel`), which reports the state in the control rather than in a separate badge beside it — and the sync button disables itself while detached; the History "Check Out Commit…" item is disabled on the current HEAD. Covered by `get_status_reports_branch_and_head_sha`.
-
-Sync proposal: `RepoStatus.proposal` is `sync_ladder::propose(&status, …)`
-(`core/src/sync_ladder.rs`) — the precedence ladder (detached → publish repository →
-publish branch → force push → pull → push → fetch), **total** over the status, so the
-combinations three independent booleans could hold at once are unrepresentable rather
-than merely unhandled. That is what retires the "push offered on a diverged branch"
-class: pull outranks push, so the rejected state has no way to be proposed.
-
-The ladder's one question a status cannot answer is *why* a branch diverged, and it
-arrives as a closure so that it is asked on the diverged rung only (`has_upstream`,
-`behind > 0` **and** `ahead > 0` — a branch that is only behind is never asked, because
-after a `pull --rebase` its reflog would say "rewritten" about a branch that simply
-fast-forwards). `upstream_was_rewritten_away` answers it statelessly, in three local
-subprocesses:
-
-1. `measured_push_target`:
-   `for-each-ref --format=%(upstream)%00%(upstream:remoteref)%00%(push:remotename) refs/heads/<b>` —
-   the push has to land on the ref the divergence was measured against. A push here
-   names the branch once, which git reads as `<b>:<b>`, so the upstream's branch is
-   `refs/heads/<b>` and the upstream itself is `refs/remotes/<push remote>/<b>`.
-   `%(push:remotename)` is git's push remote whatever `push.default` says
-   (`pushRemote`, `remote.pushDefault`, the tracking remote) — the order
-   `get_push_remote` follows — where `%(push)` is empty under `push.default=simple`
-   with a fork and *equals the upstream* under `push.default=upstream` with one.
-2. `reflog_holds`, first half: `rev-list -g refs/heads/<b>` — the reflog, from plumbing:
-   `log -g` and `reflog show` put `log.showSignature`'s and
-   `i18n.logOutputEncoding`'s output on stdout.
-3. `reflog_holds`, second half: `rev-list -1 --stdin`, fed the commit and then `^<sha>`
-   per entry. Nothing left means the commit is reachable from something the branch used
-   to be — `ForcePush`. Stdin because a reflog has no length limit; no
-   `--ignore-missing`, because it would forgive a missing *commit* too and an empty
-   answer reads as yes.
-
-Every doubt — no reflog, the rewrite aged out of it, a pruned object, git failing — is
-`Pull`, logged once per distinct complaint rather than once per poll tick. Nothing is
-cached: the honest key is the upstream's sha, which costs a subprocess of its own, and a
-reflog can change under an unchanged pair of tips (`reflog expire`), which would leave a
-stale *Force Push*. The cost is paid only while a branch is diverged.
-`run_git_with_stdin` is the one "spawn, feed a list, wait" in core, shared with
-`update_index` and `git_add`.
-
-The force push is `push --force-with-lease=refs/heads/<b>:<sha>`, the argument built by
-`sync_ladder::force_push_lease`: `<sha>` is the tip of `refs/remotes/<remote>/<b>`, and
-it is pinned only after `reflog_holds` has shown the branch contained it — otherwise
-`push` fails before spawning git, in core's words. Pinning is what makes the check mean
-something: a bare lease compares the remote with the remote-tracking ref *at push time*,
-which the automatic fetches keep moving, so it compares somebody else's commit with
-itself and passes. Sharing `reflog_holds` and the ref with the ladder is what makes a
-proposed `ForcePush` one that `push` accepts.
-
-It is deliberately not git's `--force-if-includes`, which is the same test with a
-defect (git 2.54, `remote.c`, `is_reachable_in_reflog`): the reflog walk is bounded by
-the newest entry of the **remote-tracking** ref's reflog, and that timestamp is read
-uninitialised when the ref has no reflog — which is every `refs/remotes/origin/*` of a
-fresh clone until a fetch moves it. There, clone → amend → `push --force-with-lease
---force-if-includes` is refused `(remote ref updated since checkout)`. An explicit lease
-value also turns that flag into a no-op, so the two cannot be combined.
-
-Pinned by `force_push_publishes_a_rewrite_of_pushed_commits`,
-`force_push_publishes_a_rewrite_made_in_a_fresh_clone`,
-`force_push_publishes_a_rewrite_of_a_branch_with_a_slash_in_its_name`,
-`force_push_refuses_a_fetched_commit_this_branch_never_held` (core refuses),
-`force_push_refuses_a_commit_pushed_since_the_last_fetch` (the remote refuses, `stale
-info`), `force_push_refuses_when_the_reflog_cannot_show_the_remote_tip`,
-`force_push_refuses_a_branch_that_was_never_fetched`, and across the bridge by
-`force_push_spares_a_commit_this_branch_never_held`.
-
-`get_status` is a thin wrapper around
-`read_status` that fills the field once, on the single exit — the read itself has
-three returns, and an early one that forgot is exactly the bug the field exists to
-remove. It rides the status rather than answering a separate command for the same
-reason `operation` does, plus one the Tauri host feels directly: a command would be
-an IPC crossing per poll tick, carrying the whole file list up, to run a handful of
-comparisons. `SyncProposal::Loading` is what an unfilled status maps to (empty
-branch, not detached), which is also what each client holds before its first read —
-so "nothing known yet" reads the same whether the host has no status or an empty
-one. Covered by `sync_ladder_follows_its_precedence`,
-`sync_ladder_never_asks_the_reflog_about_a_branch_that_is_only_behind`,
-`sync_ladder_waits_for_a_real_status`,
-`sync_ladder_offers_publish_for_an_unborn_repository`, the six `sync_proposes_…` tests
-that run the probe against a bare origin and two clones (`test_support::published_repo`,
-`clone_of`), and `get_status_carries_the_proposal`.
-
-Ahead/behind: `# branch.ab` is only emitted when the branch has a tracking upstream. For a branch that was never `push -u`'d but has a matching `refs/remotes/<remote>/<branch>` — `<remote>` being `fallback_remote`'s answer over the same remote list (`origin`, else the first name `git remote` prints), which is where Fetch and Pull go and where Push goes unless `pushRemote` or `pushDefault` redirects it — the shared `remote_tracking_ahead_behind` helper computes the counts with `git rev-list --left-right --count HEAD...<ref>` (left = ahead, right = behind) without flipping `has_upstream` (which still gates whether the next push needs `--set-upstream`). `repo_sync_status` — the lighter sibling powering the picker badges and dirty dot — reuses both that ladder and the helper but runs `status --untracked-files=normal` (an untracked directory stays a single `dir/` record instead of being enumerated, which answers "any change at all?" identically to `-uall`) and optionally fetches the current branch's remote (`tracking_remote_of`, over the list it has already read) first — and then measures against *that* remote rather than the ladder's tail, because refreshing one remote's refs while measuring another's leaves a badge that never moves however well the fetch went. Besides the branch headers it reports `dirty`: whether any `? `/`1 `/`2 `/`u ` record with a UTF-8-decodable path follows them (`is_change_record`) — precisely the records `get_status` turns into Changes-tab rows (it skips non-UTF-8 paths, so the dot must too). The active repo's `dirty` never comes from here: the status poll writes `status.files.length > 0` into the store, so the dot and the visible Changes tab agree by construction. Its fetch is best-effort and **time-boxed** (`run_git_net`, background budget): a failure/timeout swallows so a stale-but-known count still comes back, and the outcome is surfaced as the `fetched` flag for the frontend's connectivity breaker.
-
-Unpushed markers (`unpushed_shas`, the History view's up-arrow): when the branch has a resolved upstream (real or inferred) and is ahead, the set is `git rev-list HEAD ^<upstream>`. When there's **no** resolvable upstream — a new local branch never pushed, with no same-named remote ref (the cloned-`main`-then-branched case) — but the repo has remote-tracking refs, it falls back to `git rev-list HEAD --not --remotes`: local commits not reachable from **any** remote branch. That marks the new commits while leaving the shared base (on `origin/main`) unmarked, matching GitHub Desktop; without the fallback `ahead` stays 0 there and the History view showed no arrows at all. `--remotes` (every remote) is chosen deliberately over scoping to a single push remote: it's conservative — it can only ever *under*-mark (miss an arrow on a commit that also lives on some unrelated remote ref), never draw a *false* arrow on an already-pushed commit, which a wrong-remote guess would. The one accepted divergence from GitHub Desktop is a multi-remote/fork repo where a commit was pushed only to a non-default remote. A repo with a remote but no `refs/remotes/*` yet (just `remote add`, never pushed) correctly marks every commit. Both forms are skipped when there's nothing to compute (in-sync upstream branch, or a repo with no remotes) so the status poll stays cheap. Covered by `unpushed_shas_marks_local_commits_on_unpublished_branch`, `unpushed_shas_empty_without_a_remote`, and `unpushed_shas_marks_all_commits_when_remote_has_no_tracking_refs`.
-Branch switching: `switch_branch` takes the short name as the UI shows it. `list_branches` surfaces remote branches with their prefix (`origin/feature`), so a naive `git checkout origin/feature --` would treat the ref as a commit-ish and detach HEAD. Instead `switch_branch` probes with `git show-ref --verify --quiet` (which exits non-zero — i.e. `run_git` returns `Err` — when the ref is missing): if the name isn't a local branch (`refs/heads/<name>`) but is a remote one (`refs/remotes/<name>`), it routes through `checkout_tracking_branch`, which drops the first path segment to get the local name (`origin/team/x` → `team/x`, matching `git switch`'s DWIM) and runs `git checkout -b <local> --track <remote>`. The local-branch-first guard means a local branch whose name legitimately contains a slash is never misread as remote, and if the derived local name already exists it's switched to as-is rather than recreated (so a second remote's same-named branch reuses the existing local branch).
-
-Checkout commit (detached HEAD): `checkout_commit` runs a plain `git checkout <sha>` (full SHA from the History list, so no ref/path ambiguity), landing the user on a detached HEAD — mirroring GitHub Desktop's "Checkout commit". It uses `run_git_combined` and surfaces git's message verbatim on failure (most commonly "local changes would be overwritten"), so a refused checkout never silently loses work and leaves HEAD attached. Reattaching is just `switch_branch` to any branch. Covered by `checkout_commit_detaches_then_branch_reattaches` and `checkout_commit_fails_when_local_changes_would_be_overwritten`.
+- `sync_ladder::propose` is total over the status. It rides `RepoStatus` to save a crossing per tick.
+- `upstream_was_rewritten_away` runs only on the diverged rung, from the reflog (`rev-list -g`, then `rev-list -1 --stdin`). Every doubt is `Pull`. Never cached, because `reflog expire` changes the answer.
+- Force push is `--force-with-lease=refs/heads/<b>:<sha>`, pinned after `reflog_holds`. A bare lease compares against a ref automatic fetches keep moving. Not `--force-if-includes`: it misreads a fresh clone's missing reflog.
 
 ### Commit detail
 
-`get_commit_detail` returns a commit's changed files **and** its `+`/`−` totals
-from one `git log <sha> -1 --first-parent --format= --raw --numstat --root
---no-color -z`. `--name-status` and `--numstat` do *not* combine — git honours
-only the former — but `--raw` and `--numstat` do, and `--raw` carries the same
-status letter plus both paths of a rename. `--first-parent` (rather than
-`diff-tree`) is what makes a merge commit report its files at all.
-
-The two sections are told apart by **shape**, not by position: a `--raw` record
-opens with `:`, a `--numstat` record with its two counts, so the parse is
-correct whichever order git emits them in. Under `-z` a rename's raw record is
-followed by *two* path segments and its numstat record leaves the inline path
-column empty and puts both paths in following segments, so the walk advances by
-a variable number of segments — the arithmetic every bug here would live in.
-Binary files appear in the file list and contribute nothing to the totals
-(`--numstat` prints `-` for them, which fails to parse and is skipped rather
-than counted as zero). Covered by
-`commit_detail_reports_files_and_totals_in_one_pass` and
-`commit_detail_lists_binary_files_without_counting_their_lines`.
+`git log <sha> -1 --first-parent --format= --raw --numstat --root --no-color -z`. `--name-status` doesn't combine with `--numstat`. Sections are told apart by shape. `--first-parent` shows merges; `--root` beats `log.showRoot=false`.
 
 ### Diff read + parse
 
-`get_parsed_diff` / `get_parsed_commit_diff` read the raw patch and parse it in
-one call. Fusing them removed a full round trip per file selection from each
-client and — more importantly — gave the *whitespace-only* answer somewhere to
-be computed: when `hide_whitespace` leaves nothing to render, core re-reads the
-unfiltered diff and asks whether *that* has anything to render. The question is
-not "is the unfiltered patch non-empty" — a pure rename's header is non-empty
-and has no lines either — so the comparison is on the parse, not the string. The
-second `git diff` runs only on the path where the pane would otherwise be blank.
-
-`parse_diff_with` is a hand-rolled unified-diff parser (no `regex` crate). It captures the full file header (`diff --git`, `index ...`, `--- a/...`, `+++ b/...`) into `file_header` because `git apply` requires it for new/deleted/renamed files. Each hunk stores its own `@@` header line as the first entry in `lines` so flat/global line indexing stays consistent across the frontend and backend. `DiffLine.text` — the raw patch line — is filled only for `Hunk` and `NoNewline` rows, the only two whose meaning *is* their text; every other row's `text` duplicated `content` byte for byte, once per line of every diff, on both wires.
-
-`DiffOptions` decides what is built alongside the parse. The phase-1 HTML array exists for a `WebView` host; the native host renders from the line model and never asks for it, so it is never built, marshalled, or dropped at the bridge. The side-by-side pairing is asked for by whichever host is about to render the split layout and by neither in the unified one, so a pairing per line is built only when something reads it. `show_anyway` is the escape from the size guard below.
-
-**Size guard.** A patch over 4 MiB, or one containing a line over 5 000 bytes, is *withheld* rather than parsed: `ParsedDiff.size_guard` carries the measurements and the viewer offers to render it anyway. The long-line limit earns its place separately from the byte total — a minified bundle or a base64 blob is slow at a size the total waves through. This withholds, it never refuses; the escape re-asks with `show_anyway`. Each client remembers **which diff** was revealed — the file, plus the commit where there is one, and deliberately not what makes that diff *stale* — so every re-read of that diff keeps it (a layout change, a whitespace toggle, a poll that finds the file rewritten) while a different one gets the guard back. A per-request flag instead would re-arm the guard under the reader on any of those, and since the layout control lives inside the viewer, taking the diff away also takes away the control that got them past it.
-
-**Empty is not one thing.** `EmptyDiffReason` separates `NoChanges` (the file matches its committed state), `WhitespaceOnly` (the change is there and the setting is hiding it), and `NoTextualChanges` (a mode change or a pure rename — a header with zero hunks). A *failed* read is none of these: it is an `Err`, which is what lets a viewer clear a stale diff instead of captioning it.
-
-**Clipboard.** `copy_text` rebuilds a flat line range from the model — `content` for ordinary rows, `text` for the two that have it — so a copy carries the file's own lines with real tabs, immune to gutters, `+`/`−` prefixes, side-by-side filler cells and a viewer's tab expansion. Out-of-range indices clamp rather than panic: a viewer's selection and the model can briefly disagree while a new diff loads.
+- Hunks store `@@` as `lines[0]`.
+- `WhitespaceOnly` compares parses, since a rename header isn't empty.
+- Size guard: clients remember which diff was revealed, not per request.
+- A failed read is `Err`, never an `EmptyDiffReason`.
+- `copy_text` clamps indices and drops `\ No newline`, which has no row.
 
 ### Patch generation
 
-`build_patch` rebuilds a unified diff from a `FileDiff` plus a per-line `DiffSelection`:
-
-- Unselected ADDs are dropped (they don't exist in the old file).
-- Unselected DELETEs become context lines (` `-prefixed) so the hunk still describes a contiguous slice of the old file.
-- The `@@` header is regenerated with recomputed counts.
-- `\ No newline at end of file` markers are echoed back.
-
-`apply_patch` pipes the patch via stdin to `git apply --unidiff-zero --whitespace=nowarn` with optional `--cached` (stage) and `--reverse` (discard / inverse). `--reject` is deliberately NOT passed; it silently writes `.rej` files and would mask failures.
+`build_patch`: unselected adds drop, unselected deletes become context, `@@` recomputed. `git apply --unidiff-zero --whitespace=nowarn`, never `--reject`, which hides failures in `.rej` files.
 
 ### Commit pipeline
 
-`commit` is the safest path through a partial-stage commit:
-
-1. `git reset -- .` to clear the index (only the user's selection should make it into the commit). The pathspec form is used instead of `git reset HEAD` so the same step works on a fresh repo whose HEAD is still unborn — `reset HEAD` fails there with "ambiguous argument 'HEAD'", while `reset -- .` (the repo root is the cwd, so `.` covers the whole index) succeeds and still unstages everything.
-2. `stage_files` splits the selection into **removals** (rename source paths, deletions — staged via `git update-index --force-remove`, the precise tool for dropping an index entry) and **additions/modifications** (staged via `git_add`, which runs `git add --pathspec-from-file=- --pathspec-file-nul`). Additions deliberately go through porcelain `git add`, **not** `update-index --add`: the latter silently ignores any path that resolves to a directory (it prints `Ignoring path …/` and exits 0), which left an **embedded git repository** — a nested repo git reports as a single untracked directory entry — unstaged and surfaced the misleading `staging produced no changes` error. `git add` stages a directory's files normally and an embedded repo as a **gitlink** (mode 160000), matching the git CLI. Embedded-repo advice is silenced via `-c advice.addEmbeddedRepo=false` since the UI explains the gitlink up front. Both helpers pipe paths NUL-separated to dodge arg-length/quoting limits.
-3. `has_staged_changes` validates the index isn't empty (`git diff --cached --quiet` returns 1 when there are staged changes).
-4. The commit message is piped to `git commit -F -` via stdin (avoids arg-length and shell-quoting issues).
-
-**Embedded-repo detection.** `get_status` flags an entry `embedded: true` when git reports it as an untracked entry whose path keeps a **trailing slash**. Under `--untracked-files=all` git expands every ordinary untracked folder into individual files, so the only entry that stays a directory is an embedded git repo (git never recurses into one). The frontend uses the flag to (a) render a distinct ↪ link badge instead of the green `A` in [FileList.svelte](apps/tauri-app/src/lib/components/FileList.svelte), and (b) pop a confirm modal ([EmbeddedRepoConfirm.svelte](apps/tauri-app/src/lib/components/EmbeddedRepoConfirm.svelte)) before committing, since committing a gitlink — rather than the folder's files — is a surprising outcome. Covered by the `commits_embedded_repo_as_gitlink` test.
-
-**Dirty-submodule detection.** A tracked submodule whose working tree is dirty *inside* but whose recorded commit hasn't moved has nothing the parent repo can stage — `git add` is a no-op, so a commit would dead-end with `staging produced no changes`. `get_status` flags these `submodule_dirty: true` by reading the porcelain-v2 **`sub` field** (the 3rd token of a changed entry): `S<c><m><u>`, where the entry is flagged only when it's a submodule (`S`) with the commit-pointer char `c == '.'` (unmoved) and at least one of `m`/`u` set (`is_dirty_submodule`). A moved pointer (`c == 'C'`) stays committable — the gitlink change stages normally. The frontend treats a flagged entry as non-selectable: every writer to `selectedFiles` ([MainLayout.svelte](apps/tauri-app/src/lib/views/MainLayout.svelte) — refresh seed, select-all, range-toggle, single-toggle) skips it via `isCommittable`, the row's checkbox is `disabled` with an explanatory tooltip, and the diff pane shows a "Submodule changes" message instead of the opaque `Subproject commit …-dirty` line. The user can therefore never reach the failing commit path. Covered by the `classifies_only_unstageable_dirty_submodules` and `parses_dirty_submodule_flag_from_ordinary_entry` tests.
+1. `reset -- .`, because `reset HEAD` fails when unborn.
+2. Removals via `update-index --force-remove`; additions via `git add`, because `update-index --add` skips embedded repos.
+3. `git diff --cached --quiet` checks the index.
+4. `git commit -F -` on stdin.
 
 ### Discard & ignore
 
-`discard_files` powers the Changes-tab "Discard" menu. It classifies each target by **HEAD membership**, not by the porcelain status code, via `head_paths` — a single `git ls-tree -r -z --name-only HEAD -- <paths>` that returns which of the targets exist as committed blobs (empty on an unborn HEAD). That sidesteps the ambiguity in the status code (an `AA` add/add conflict has no HEAD blob; a rename's new path doesn't either) and needs no per-file `cat-file`. The classification is `classify_discard`, which both the action and the **confirmation dialog** call, so the promise and the outcome come from one decision — a status letter gets three cases wrong (a staged re-add of a path that exists in HEAD is restorable, a rename whose original is *not* in HEAD is not, and under an unborn HEAD nothing is). Then:
-
-- **In HEAD** (modified / deleted / conflicted / a rename's *original* path) → restored with `git checkout HEAD -- <paths>` (index + worktree both reset to the committed version).
-- **Not in HEAD** (untracked, staged adds, a rename's *new* path) → can't be "reverted", so the working-tree file is moved to the **OS trash** (the `trash` crate — recoverable, unlike `rm`; best-effort per file, a failure is logged and skipped) and any staged entry is dropped with `git reset -- <paths>` (pathspec form, unborn-HEAD-safe like the commit reset). `discard_files` is a sync command taking `repo_path: &str` — it's local and fast, like `commit`. Covered by `discard_*` / `head_paths_*` tests.
-
-`append_to_gitignore(repo_path, patterns)` appends ready-to-write lines to the repo-root `.gitignore`, ensuring a trailing newline first and skipping any pattern already present (compared trimmed, de-duped within the batch). "Ignore All .ext" calls it with a raw `*.ext` glob; "Ignore File" goes through its sibling `ignore_paths(repo_path, paths)`, which escapes each literal path's glob metacharacters (`[ ] ! * # ?`, GitHub Desktop's set) in Rust before delegating — so the escaping contract and its implementation live next to each other, covered by `ignore_paths_escapes_glob_metacharacters`.
+`classify_discard` uses HEAD membership (`ls-tree -r -z`), not status letters, for both dialog and action. In HEAD: `checkout HEAD --`. Otherwise: OS trash plus `reset --`. `ignore_paths` escapes `[ ] ! * # ?`.
 
 ### Log parsing
 
-`get_log` uses a custom format with `%x01` field separators and `%x00` record separators:
-
-```
-%H%x01%h%x01%s%x01%b%x01%an%x01%ae%x01%ad%x01%cn%x01%ce%x01%cd%x01%P%x01%(trailers:unfold,only)%x01%D%x00
-```
-
-Dates come back in `--date=raw` form (`<unix> <tz>`). To avoid pulling in `chrono`, the code implements `civil_from_unix` using Howard Hinnant's proleptic Gregorian algorithm and emits ISO-8601 strings manually.
-
-The trailing `%D` captures every symbolic ref pointing at the commit (branches, `HEAD`, tags). `get_log` keeps only the `tag: `-prefixed entries (`tags_from_decorations`) and ships them as `CommitInfo.tags`, which the commit list renders as pills directly — branch/HEAD decorations never cross the IPC boundary since no UI consumes them. `get_log` also pre-derives the two fields the commit composer needs when amending or restoring an undone commit: `co_authors` (the values of `Co-Authored-By:` trailers, matched case-insensitively via `co_author_value`) and `body_without_coauthors` (the body with those lines stripped) — the inverse of `format_commit_message`, so both directions of the co-author round trip live in Rust.
-
-On a fresh repo with an unborn HEAD, `get_log` short-circuits to an empty list rather than letting `git log` fail with exit 128 ("does not have any commits yet"). It uses the shared `has_commits` helper (`git rev-parse --verify --quiet HEAD`, exit 0 only when HEAD resolves to a commit) — a precise check that, unlike blindly accepting exit 128, never masks a genuinely broken repo. The History tab then renders its "No commits yet" empty state instead of an error.
-
-The same `has_commits` check guards diffs. `run_diff` anchors a tracked file's diff at `HEAD`, but on a fresh repo `git diff HEAD -- <file>` fails with "fatal: bad revision 'HEAD'". When there are no commits, it substitutes git's canonical empty-tree SHA (`EMPTY_TREE_SHA = 4b825dc642cb6eb9a060e54bf8d69288fbee4904`, which git always recognizes) so the staged/working file shows as fully added. Untracked files are unaffected — they already diff against `/dev/null` via `--no-index`.
+`%x01` fields, `%x00` records, `--date=raw`. Unborn HEAD returns an empty log, and diffs use `EMPTY_TREE_SHA`. `switch_branch` routes `origin/x` through `checkout -b --track`, or it detaches.
 
 ### Discovery
 
-`discover_repos` expands `~` and canonicalizes each scan root through `paths` (never `fs::canonicalize` — see [Path normalisation](#path-normalisation)), de-duplicates the roots by **file identity** (`dev`/`ino` on unix, falling back to the canonical text where a mount reports no inode; the canonical text on Windows, where it already carries the on-disk casing), then recursively walks up to `max_depth` levels. The identity step exists because the stock scan list contains both `~/Dev` and `~/dev`, and on a case-insensitive volume canonicalization resolves both without folding the case — walking the same tree twice and listing every repo twice. An empty `scan_paths` list (config cleared, or config load failed upstream) falls back to `config::default_scan_paths()` — the same stock folders a fresh config gets — so the frontend passes the configured list through verbatim with no path resolution of its own. `effective_scan_paths` de-duplicates the same way, keeping the first spelling, so the folders it reports as searched are the folders that were. A directory is a repo if it contains a `.git` file or directory (handles worktrees). Hidden directories are skipped, and the scan does not descend into a discovered repo. Each entry's kind comes from the `dirent` (`file_type()`, no syscall on macOS and Linux); only a symlink is `stat`ed, because that is the one shape a `dirent` cannot answer and a symlinked project folder must still be found. The walk spawns nothing; a depth-3 pass over ~70 repos is under a millisecond warm.
+`discover_repos` de-dupes roots by file identity (`~/Dev` and `~/dev` on a case-insensitive volume) and stats only symlinks. `resolve_scan_paths` owns the defaults, so what's shown is what's searched. `known_repos` unions the walk with the MRU.
 
-What a client actually lists is `repos::known_repos`, which unions that walk with the persisted MRU and drops any entry no longer on disk. Discovery alone forgets everything the user reached another way — a clone, a CLI open, a folder picked outside the scan paths — on every restart, even though the MRU that remembers them is already on disk; the MRU alone goes stale, and where it also feeds the background sweep, a dead entry costs a time-boxed fetch per tier interval.
-
-A root that doesn't resolve is skipped rather than failing the scan, so every run logs one `[discover]` line with the counts and, when anything was skipped, a second naming those folders **as expanded**. A `~` still visible there means the home lookup came up empty, which is a different fault from a folder that isn't on disk; without the line, both looked identical from the outside — an empty picker. `effective_scan_paths`, which backs the picker's "searched these folders" list, expands for the same reason: that list exists to be checked against the disk.
+`repos::match_repo` ranks exact, prefix, substring, initials, subsequence, path substring. Path matching is contiguous and trimmed below the deepest root, or `llm` matches every shared ancestry.
 
 ## AI layer
 
-Both providers share `build_prompt` — a strict JSON-only instruction with rules for imperative-mood, 50-char-or-less titles. Its text is `core/src/commit_prompt.txt`, compiled in with `include_str!`, with `{diff}` marking where the diff goes; it is a plain file so tools outside the app (the separate commit-message-tester, which compares Ollama models on this prompt) send exactly what the app sends. Responses are parsed by `parse_commit_message_text` which:
-
-1. Strips markdown code fences (```json … ```).
-2. Tries `serde_json::from_str` and accepts any of `title`/`summary`/`subject`/`message` and `description`/`body`/`details`.
-3. Falls back to "first line = title, rest = description" if JSON parsing fails entirely.
-
-**Claude** spawns `claude --print --output-format json --model <model>` and pipes the prompt to stdin. `parse_claude_envelope` reads the CLI's JSON envelope `{"type":"result","subtype":…,"is_error":bool,"result":"<text>", "api_error_status":…}`:
-
-- **`is_error == true`** (e.g. a transient `529 Overloaded`) → the CLI's own message is surfaced verbatim as an `Err`. Critically, the CLI exits **0** in this case, so the `is_error` flag — not the exit code — is what distinguishes a failure; without this check the error text would be parsed straight into the commit title.
-- otherwise the model's reply lives in `result` and is parsed as the commit message (falling back to parsing raw stdout when the text isn't the envelope).
-
-On a **non-zero exit** the CLI is inconsistent about where the failure lands: API/auth errors go into the stdout envelope (with an *empty* stderr — the cause of a bare "Claude CLI failed:" in the UI), crashes write to stderr, and a killed process may emit nothing. `claude_failure_message` therefore tries the stdout envelope's `result` (only when it's a non-empty string, so a contentless envelope can't short-circuit the chain) → trimmed stderr → trimmed stdout → the exit status itself, so the surfaced error is never blank. Error text is capped at 1000 chars on both exit paths (a Node stack trace's useful part is at the top).
-
-Two robustness measures around the spawn: the prompt is streamed on a separate task (so a large diff can't deadlock against the child filling its stdout pipe before we drain it), and the child is `kill_on_drop` so a slow CLI doesn't outlive a timeout as an orphan. The spawn also sets `CLAUDE_CODE_MAX_RETRIES = 2`: by default the CLI retries a transient overload with backoff for *minutes*, far past our timeout, so the user only ever saw "timed out"; the cap makes it fail in seconds with the real error while still riding out a single blip.
-
-**Ollama** posts to `<base_url>/api/generate` with `{model, prompt, stream: false, format: "json", options: {num_ctx}}`. `num_ctx` is sized to the prompt by `ollama_num_ctx` — about 2.5 bytes per token plus 4096 for the reply, rounded up to a power of two between 4096 and 32768 — because a prompt longer than Ollama's 4096-token default is cut from the front without an error, leaving a message about only the last files of the diff. A 404 is translated to a friendly `ollama pull <model>` hint.
-
-**Provider resolution.** `ai::provider_config` maps the user's `Config` onto the
-`AiProviderConfig` a request needs, and `load_ai_config` is what each client
-calls before every generate — read fresh, never cached, so an edit in either
-client applies on the next click. The mapping lives here rather than in each
-host because two copies had drifted over which config read the provider came
-from; resolving it in one place is what guarantees the model, the server URL and
-the timeout all belong to the provider actually about to run. Each provider
-keeps its **own** model (`[claude]` / `[ollama]` in the config): one shared
-field meant a model set for Claude was handed to Ollama, which has never heard
-of it, and Generate failed with nothing on screen explaining why. The timeout is
-per provider too, and is read — a settings control that persisted a value
-nothing consumed was worse than no control, because the user believed the
-timeout was set.
-
-Both providers run with the timeout from their own config section (120 s by default, clamped by `config_bounds().ai_timeout_secs`). Diff caps: 20 MB (Claude) / 50 MB (Ollama).
-
-`check_provider_status` lets the UI gate features without surfacing raw errors, and answers with a reason and a fix command rather than a bare boolean: `claude --version` then `claude auth status` for Claude, `GET /api/tags` for Ollama with a 5 s timeout. `provider_status_from_failure` answers the same question from a request that already failed — the only route to the expired-session state, which leaves its credentials on disk and so reads as signed in.
+- `commit_prompt.txt` is a plain file so outside tools send the same prompt.
+- Claude: check `is_error`, because the CLI exits 0 on failures. `CLAUDE_CODE_MAX_RETRIES=2`, or retries outlast our timeout.
+- Ollama: `num_ctx` from `ollama_num_ctx`, about 2.5 bytes per token plus 4096, power of two, 4096 to 32768. Longer prompts lose their start silently.
+- `provider_config` resolves per generate, never cached.
+- `check_provider_status` counts unparseable answers as ready. `provider_status_from_failure` catches expired sessions, which still read as signed in, and only ever raises a block.
 
 ## Terminal layer
 
-`PtySession` holds the master PTY, the writer half, and the child process. Sessions are stored in a global `Mutex<HashMap<u32, Arc<Mutex<PtySession>>>>` keyed by a monotonic `AtomicU32`.
-
-`start_terminal`:
-1. Opens a PTY at 24×80 via `portable-pty`.
-2. Resolves the shell via `shell::resolve(shell_id)` — see *Shell discovery* below.
-3. Spawns it with cwd = repo path, adding only `TERM=xterm-256color`, `COLORTERM=truecolor`, and (Git Bash only) `CHERE_INVOKING=1`.
-4. Stores the session, then spawns **two** threads (see *Output coalescing and flow control* below): a reader that loops on `read()`, feeds bytes through a `Utf8Decoder` and hands them to a bounded channel, and an emitter that drains that channel into the sink as `TerminalOutput`. When the reader hits EOF it drops its end of the channel; the emitter flushes whatever is left, removes the session, **reaps the child with `child.wait()`** — safe to block there: post-EOF the child is already dead (or its status was cached by a kill's internal `try_wait`), and the session is out of the map so nothing else can want its mutex — and emits `TerminalClosed` carrying a `TerminalExit { exit_code, signal }`. Flushing before the close event is what keeps "session over" from arriving ahead of the text that preceded it — a dying shell's last words are exactly the ones worth keeping. Both clients key off the exit VS Code-style: a clean exit closes the panel; a non-zero code or a fatal signal keeps the dead terminal on screen with `[Process exited with code N]` rather than flashing it away. The wait is also what stops each session leaving a zombie behind, which the old drop-without-wait teardown did.
-
-It returns `StartedTerminal { pid, shell_id, shell_label }` — the label is resolved backend-side because the stored preference may name an uninstalled shell, and the panel header shows what actually launched.
-
-`write_terminal` / `resize_terminal` / `close_terminal` go through `session_for(pid)`, which locks the session map, clones the `Arc`, and drops the map lock before the caller touches the session. `close_terminal` calls `child.kill()` (portable-pty's escalation: SIGHUP → a short `try_wait` grace loop → SIGKILL) but deliberately does **not** remove the entry — the emitter thread owns teardown, and it needs the child handle still in the session to collect the exit status after the kill (which then reports the fatal signal rather than a clean exit).
-
-`resize_terminal` **ignores a grid smaller than 2×2** rather than passing it on. A collapsed or not-yet-laid-out panel legitimately measures 0 or 1 cells, and pushing that through costs real damage: the emulator reflows its whole scrollback to one row and the shell gets a `SIGWINCH` announcing a window nobody has. There is no new size to report, so it returns `Ok`. Enforcing it here rather than per client is the point — one client had an explicit guard and the other relied on its layout library's internals.
+- The emitter thread owns teardown: flush, remove, `child.wait()`, emit `TerminalClosed`. So the last output precedes close and no zombies stay. `close_terminal` kills but doesn't remove.
+- `child.kill()` (SIGHUP, grace, SIGKILL), never `clone_killer()`, which only sends SIGHUP.
+- `resize_terminal` ignores grids under 2×2, which reflow scrollback and send a false `SIGWINCH`. Both clients debounce 80 ms.
+- `session_for` drops the map lock before touching a session.
 
 ### Output coalescing and flow control
 
-The reader thread does not emit; it `send`s to a `sync_channel` bounded at 64 chunks (~256 KiB in flight), and a second thread drains it. Both properties come from that bound:
-
-- **Flow control.** A full queue blocks the reader, which stops draining the PTY, which fills its buffer, which makes the *shell* wait. Slowing a runaway `cat` down is the correct answer; the alternatives are an unbounded buffer that grows until something dies, or discarding output the user asked for.
-- **Coalescing, driven by back-pressure rather than a fixed window.** A delivery takes whatever is *already* queued behind its first chunk; if nothing is, it goes out immediately. So an echoed keystroke or a prompt costs no added latency, while a flood — where the queue is always backed up — arrives in a few dozen large deliveries instead of one per 4 KiB read (each of which was a JSON IPC message on one host and a main-actor hop on the other). Once gathering, a delivery stops at 256 KiB or 8 ms, whichever comes first. A fixed byte threshold would have been strictly worse: at 8 KiB against 4 KiB reads it can only ever halve the count, and it holds a small reply hostage waiting for company that never arrives.
+`sync_channel` of 64 chunks at 4 KiB; a full queue blocks the reader, which makes the shell wait. A delivery takes what's queued, up to 256 KiB or 8 ms, and goes immediately when alone, so keystrokes add no latency.
 
 ### Session transport (Tauri)
 
-A session's output does not go on the event bus. `start_terminal` takes a
-`tauri::ipc::Channel<TerminalEvent>` as an argument, and `TerminalChannelSink` writes
-the session's two message kinds into it — `{event:"output", data}` and
-`{event:"closed", exit}`, an internally-tagged serde enum the frontend reads as a
-discriminated union. Two tests in `event_sink.rs` pin that JSON, because it is
-hand-written TypeScript on the other side and nothing between the two languages
-would notice a rename.
-
-**The argument is the whole point.** A Tauri event emitted with no listener attached
-is dropped, not queued, and a `listen()` is itself an async round trip — so
-registering after `start_terminal` returned left a two-round-trip window in which
-the reader thread was already emitting. A fast-printing shell lost its first prompt;
-a shell that died instantly (the broken `.zshrc` case) could lose its error output
-*and* its exit notice, leaving the panel to close on nothing. A `Channel`'s id is
-minted in its JS constructor, before any IPC, so the handler exists before Rust can
-possibly hold the channel: the race isn't narrowed, it is unrepresentable. That also
-makes this seam the same shape as the bridge's — a listener handed to the spawn —
-rather than two different answers to one problem.
-
-Two consequences the frontend has to honour. **`closed` can overtake
-`start_terminal`'s own return**, since they travel as independent messages, so
-`Terminal.svelte` records that the session ended and refuses to adopt the pid
-afterwards — a handle the backend has already dropped would make the panel's ✕ kill
-a session that is gone. And the channel's ordering guarantee is the transport's, not
-the frontend's: Tauri stamps each send with a monotonic index and the JS side
-reassembles on it, which it needs because deliveries fork by size (a JSON payload
-under 8 KiB is eval'd directly; anything larger is fetched by a second async invoke).
-
-`start`, `resize` and `close` are `#[tauri::command(async)]`, so they run off the main
-thread — `close_terminal` alone can block ~250 ms in portable-pty's kill escalation.
-**`write_terminal` is deliberately still synchronous**: Tauri runs a sync command
-inline in the order its IPC messages arrive, and that arrival order *is* the
-keystroke-ordering guarantee. Spawning each write onto the async runtime would let
-two keystrokes race, which is the one thing a terminal may never do. For that to be
-safe, nothing a keystroke touches may be held across the escalation: the PTY child
-sits behind its **own** lock inside the session (`Arc<Mutex<Box<dyn Child>>>`), and
-`close_terminal` and `reap_child` take only that one across `kill()`/`wait()`, so a
-write that lands mid-close finds the session's lock free. Not portable-pty's
-`clone_killer()`, which looks like the obvious lock-free route: its handle sends a
-bare SIGHUP with no grace loop and no SIGKILL, so a shell that ignores SIGHUP would
-outlive the panel and never reach the reaper. Pinned by a test that holds the
-child's lock and asserts a write returns in under 50 ms.
+- Output uses a `tauri::ipc::Channel` passed to `start_terminal`, not the event bus, which drops events before `listen()`.
+- `write_terminal` is deliberately sync: IPC arrival order is keystroke order. The child has its own lock, so a write mid-close doesn't wait on the ~250 ms kill.
 
 ### Key ownership between the app and the shell (Tauri)
 
-Every key the app binds is `Ctrl`-or-`Cmd`, and on Windows and Linux `Ctrl` is also the shell's modifier — so inside the terminal a single keystroke had two owners. Two mechanisms, one rule (FRONTEND.md §6.11): **while the terminal has focus, the shell gets everything except the chord that toggles the panel.**
-
-- `Terminal.svelte` installs an `attachCustomKeyEventHandler` that returns `false` only for the toggle. Returning `false` means xterm neither handles the event nor calls `preventDefault`, so it bubbles to the window listener that owns it; returning `true` for everything else keeps `Ctrl+P`, `Ctrl+R` and `Escape` with readline and vim. The handler runs for `keyup` and `keypress` as well as `keydown`, so it matches on the phase too — releasing an event xterm had already begun processing is not the same as declining it.
-- The window-level handlers (`MainLayout.handleKeyDown`, `Header.handleGlobalKeyDown`) re-check the event's origin through `utils/keyboard.ts`'s `isFromTerminal`, which tests for an `.xterm` ancestor — the class xterm puts on the element it was opened into. An `instanceof HTMLTextAreaElement` test cannot do this job in either direction: xterm's input sink *is* a textarea, so the old `if (inField) return` swallowed the toggle exactly where it was most wanted, while the push shortcut, deliberately ungated, fired straight through it.
-
-`.xterm` rather than the dock's `.terminal-section` is deliberate: the dock header's buttons are ordinary app chrome and must keep the app's shortcuts.
-
-The toggle itself is **`Ctrl` only**, on every platform. It is the one chord in this client that does not also answer to `Cmd`: ⌘` is macOS's window cycling, and a Tauri build that answered to it took a system gesture away from the user. The narrowing has to be made in both places at once — the xterm handler and `MainLayout`'s — or the chord stops working from inside the panel.
-
-`MainLayout`'s test sits **above** the `if (inField) return` bail, with the composer's chords and `Ctrl/Cmd+R`. The bail exists to keep app shortcuts out of what someone is typing, and `Ctrl` + `` ` `` is not that; the native client never had the question, since the chord lives on a menu item and AppKit matches a menu key equivalent before it consults the responder chain. So the handler's order is load-bearing in three steps: terminal origin first, then the chords that must work inside a field, then the bail, then everything else.
+While the terminal has focus, the shell gets everything except the toggle. `attachCustomKeyEventHandler` declines only that chord. Window handlers check `isFromTerminal` (`.xterm` ancestor), because xterm's input is a textarea. Order: terminal origin, in-field chords, field bail, the rest. The toggle is `Ctrl` only, since ⌘\` is macOS's.
 
 ### Pointer and clipboard (Tauri)
 
-`WebLinksAddon` takes our own activation handler, which returns unless the platform's modifier is held (⌘ on macOS, `Ctrl` elsewhere) and then hands the URL to `os::open_url` rather than `window.open`. The addon has no modifier option and no way to make its decorations conditional, so a gated link still underlines on a bare hover — which is why the affordance is not optional: `options.hover` builds a small "Follow link (⌘ + click)" tooltip inside `Terminal.element`, carrying xterm's own `xterm-hover` class so xterm's mouse tracking stops at it and the link cannot flicker out from under the pointer. The class has no styles of its own; it is purely that marker.
+`WebLinksAddon` gates on the modifier and opens through `os::open_url`. OSC 52 reads are swallowed, since answering would type the clipboard into the TTY. Writes use the plugin, because WebKit needs a user gesture.
 
-OSC 52 is registered by hand — xterm implements idents 0/1/2/4/8/10/11/12/104/110/111/112 and nothing for the clipboard. `parser.registerOscHandler(52, …)` receives the payload with `52;` already stripped, so what arrives is `Pc;Pd`: a selection *set* (`c` clipboard, `s` select, `p` primary, digits for cut buffers; empty means the spec's default) and base64 data. **Only writes are honoured.** `Pd === "?"` is a read request, which would type the clipboard back down the TTY — an exfiltration route for anything that can print to the terminal — so it is swallowed with `true` rather than declined, which also stops a fallback handler answering it. The write goes through `tauri-plugin-clipboard-manager`, not `navigator.clipboard`: WebKit refuses a programmatic clipboard write without a recent user gesture, and a shell asking for the clipboard has none.
+### Child environment: do not forward the parent env
 
-### Child environment — do not forward the parent env
-
-`CommandBuilder::new` already assembles the right environment. On Windows it seeds from the current process, then overlays `HKLM\…\Session Manager\Environment` and merges `HKCU\Environment`, so `PATH` becomes the same system+user merge Explorer and Windows Terminal hand their children.
-
-`start_terminal` deliberately does not copy `std::env::vars()` over the top of that — doing so breaks the terminal two ways on Windows:
-
-- **Launched from Git Bash** (the `leogit` shell function), the inherited `PATH` is MSYS-style (`/usr/bin`, `/c/Program Files/...`). Win32 cannot resolve a single entry, so essentially every command fails.
-- **Launched from Explorer**, the inherited `PATH` is a login-time snapshot that misses anything installed since.
-
-Only deliberate additions go on top. `session_env` is a pure function returning those additions, and `session_env_never_overrides_path` is the regression test.
+`CommandBuilder::new` already builds the right environment. Never copy `std::env::vars()`: on Windows a Git Bash launch has an MSYS `PATH` and an Explorer launch a stale one. `session_env` adds only `TERM`, `COLORTERM` and, for Git Bash, `CHERE_INVOKING=1`.
 
 ### UTF-8 across read boundaries
 
-PTY reads split wherever the 4 KiB buffer fills, so multi-byte characters routinely straddle two reads. Decoding each chunk with `String::from_utf8_lossy` turned every such split into a permanent U+FFFD — stray marks through box-drawing, accented text and emoji. `Utf8Decoder` holds the truncated tail (bounded at 3 bytes) until its continuation bytes arrive, which is what conhost does. Invalid bytes still collapse to one replacement character and decoding resumes.
+`Utf8Decoder` holds up to 3 trailing bytes, because `from_utf8_lossy` per chunk leaves permanent U+FFFD.
 
 ### Shell discovery
 
-[core/src/shell.rs](core/src/shell.rs) probes for shells rather than naming them, so the picker can never offer one that fails to spawn. Windows, best-first: **Git Bash** (install root from `HKLM\SOFTWARE\GitForWindows\InstallPath`, falling back to the default dirs then `git.exe`'s grandparent; launched `--login -i` so `/etc/profile` populates the MSYS `PATH`), **PowerShell** (`pwsh.exe`), **Windows PowerShell** (`powershell.exe`), **Command Prompt**. Git Bash leads because it is the shell git workflows assume; pwsh beats 5.1, whose in-box PSReadLine 2.0 repaints badly under ConPTY. Unix: `$SHELL` first, then zsh/bash/fish/sh de-duplicated by path.
-
-`resolve` falls back to the best available shell when the stored id is unknown or uninstalled — the terminal opening with the wrong shell beats it not opening. `available()` is total and never empty, so neither function can panic.
-
-The frontend mounts `<Terminal>` keyed by `${repoPath}:${terminalSessionId}` so swapping repos or hitting "New session" forces a fresh component, which in turn dispatches a new `start_terminal`. The previous component's cleanup invokes `close_terminal` on its tracked pid. Changing the shell preference applies to new sessions, not running ones — and the preference the next session reads is fresh, because the config store is re-read on window activation, so a shell chosen in the native client's Settings is already in hand.
-
-The component also puts the caret back when the app becomes active: WebKit leaves xterm *painted* as focused while the hidden textarea behind it holds nothing, so keystrokes vanish until the user clicks. The condition is read at that moment — `container.contains(document.activeElement)` — rather than latched on the way out. A flag set from `focusin` is only ever cleared by another `focusin`, and clicking a plain element raises none, so it would strand `true` and the shell would take the caret back from wherever the user had actually gone. AppKit does this for the native client on its own.
-
-`terminal_pty_info` reports `{backend, build_number}` and must be called *before* the xterm instance is constructed — xterm reads `windowsPty` when it builds its buffer, so setting it afterwards does nothing. Declaring ConPTY on a build ≥ 21376 is what enables reflow on resize; without it xterm assumes any line whose last cell is non-blank is wrapped, which is what smears a resized prompt. The `ResizeObserver` is debounced 80 ms because an undebounced panel drag pushes a `ResizePseudoConsole` per frame and PSReadLine repaints its whole edit buffer on each one.
+- `shell.rs` probes, so the picker can't offer a shell that fails. Git Bash starts with `--login -i`.
+- `terminal_pty_info` must run before xterm is constructed; ConPTY on build 21376+ enables reflow.
+- Refocus reads `container.contains(activeElement)` at that moment rather than latching.
 
 ## GitHub layer
 
-Everything in `gh.rs` shells out to the `gh` CLI, time-boxed through `process::run_timed` (20 s for metadata queries, 600 s for transfers), with errors as gh's own stderr verbatim (a `stderr_or` fallback covers the rare silent failure) and spawn failures mapped to "GitHub CLI (gh) is not installed.":
-
-- `check_auth` → `gh auth status` (exit code only; total — missing, unauthenticated, and timed out all collapse to `false`). The Tauri client runs it once at launch into a field nothing reads; kept for future gh-backed gating.
-- `gh_repo_list` → `gh repo list --no-archived --json <fields>` (the Clone dialog's GitHub tab).
-- `gh_publish_repo` → `gh repo create <name> --source <repo> --remote origin --push [--private|--public]` (see the bullet under *Design decisions*).
-- `gh_clone` → `gh repo clone <owner/name> <target>` through the same `prepare_clone_target` guard as `git clone`.
+`gh.rs` shells out with `run_timed`: 20 s metadata, 600 s transfers, stderr verbatim. Deliberately no pull-request surface. `check_auth` stays wired but unused, since sign-in happens outside the app and a launch-time read goes stale.
 
 ## OS integration layer
 
-[core/src/os.rs](core/src/os.rs) holds the two file-manager hand-offs behind the Changes-tab menu. Both take a repo-relative path and join it onto the repo path **in Rust** (`PathBuf::from(repo_path).join(rel_path)`) so git's forward-slash paths never clash with Windows separators, then spawn a platform launcher:
-
-- `reveal_path` — macOS `open -R`, Windows `explorer /select,<path>`, Linux `xdg-open <parent dir>` (no portable "select file" there).
-- `open_path` — macOS `open`, Windows `cmd /c start "" <path>`, Linux `xdg-open <path>`.
-
-They're `#[tauri::command(async)]` (worker thread) and routed through `process::run_timed` (15 s cap, so a wedged file manager can't hang a thread) with `prepare_child` for the Windows no-flash and clean-child-environment guarantees. The launchers are treated as fire-and-forget: a completed run is success regardless of exit code, because some launchers (notably `explorer /select,`) return non-zero even on success — only a spawn failure (e.g. `xdg-open` absent) or a timeout surfaces as an error. The frontend side (clipboard copy, label selection) lives in [services/fileActions.ts](apps/tauri-app/src/lib/services/fileActions.ts); the menu is built in `FileList.svelte` and the destructive-discard confirmation in [DiscardConfirm.svelte](apps/tauri-app/src/lib/components/DiscardConfirm.svelte).
+`os.rs` hands off with a 15 s cap. A completed run is success whatever the exit code, because `explorer` returns non-zero on success. `open_url` allows only `https` and rejects whitespace, ``&^<>|"'` `` and `%`, which are syntax to `cmd`.
 
 ## Config & persistence
 
-Defined in [core/src/config.rs](core/src/config.rs).
+`LEOGIT_CONFIG_DIR` overrides the config dir for development. Files: `config.toml`, `repos-state.json`, `shell-path-cache.json`, `<file>.lock` sidecars.
 
-- Config dir is resolved via `directories::BaseDirs::config_dir().join("leogit")` (`~/.config/leogit` on Linux, `~/Library/Application Support/leogit` on macOS, `%APPDATA%\leogit` on Windows). It's created if missing. A `LEOGIT_CONFIG_DIR` environment variable overrides it — a seam for the measurement harness and development runs, not a setting, so nothing documents it to users. It also holds `shell-path-cache.json` (see *Startup PATH fix*) and, transiently, the `<file>.lock` sidecars below.
-- **Every write is atomic.** `write_atomically` writes a sibling temp file (`create_new`, so two writers can never interleave into one), renames it over the target — atomic within one directory on every platform we ship, with a short retry on Windows when the other client holds the file open — copies the target's permissions onto it on unix, and removes the temp on any failure. A reader therefore sees the whole old file or the whole new one, never zero bytes or a prefix. `config.toml` is also **durable** (`sync_all` plus a directory fsync): it is written only from Settings and holds text the user typed. `repos-state.json` is deliberately not — `sync_all` is `F_FULLFSYNC` on macOS, tens of milliseconds, and that file is rewritten on every repo switch with the Tauri client awaiting the write; torn reads are the hazard it has, not power loss.
-- **Two clients, two locks.** A process-local mutex (`CONFIG_LOCK`, `STATE_LOCK`) orders the threads inside one process; a `File::lock` on a `<file>.lock` sidecar (never on the file being renamed over, since the rename would replace the locked inode) orders the two clients against each other. The sidecar is taken with `try_lock` for up to ~2 s and then given up, proceeding unlocked with a log line — a peer suspended in a debugger must not wedge the repo switch — and a filesystem that answers `Unsupported` proceeds unlocked at once.
-- `config.toml` — every field on the `Config` struct, ending with the `[claude]` and `[ollama]` tables. **Field order is load-bearing**: `toml` serializes in declaration order and a table swallows every key after it, so nothing scalar may be declared below those two — a file that writes cleanly and reads back wrong is the failure mode, pinned by `config_round_trips_through_toml_with_its_tables_last`. New fields carry `#[serde(default = "…")]` so users on older configs keep working, and unknown keys — a retired field still sitting in an older file — parse as ignored, never an error (`config_ignores_retired_keys` pins it, guarding against a future `deny_unknown_fields` invalidating files already on disk). Defaults are written to disk on first run so the file is discoverable.
-- **`patch_config` is the only writer**, and it reads-edits-normalizes-writes under both locks. Two clients share this file and each runs its commands concurrently, so the whole-object write it replaces was a lost update waiting to happen: a save posted the entire config as it looked when a dialog *opened*, silently reverting whatever the other client had written since. A patch names only the fields its surface owns. Clearing an optional field is patching it to `""` — the config's standing blank-means-absent rule, rather than a second `Option` layer every host would have to model. `load_config` takes the same locks and **self-heals**: a file that reads but does not parse is moved aside as `config.toml.corrupt-<secs>-<pid>-<nanos>` (the user's own text, kept for inspection; the name is unique so two concurrent heals cannot overwrite each other's backup), defaults are written and returned, and one log line names the backup. A file that cannot be *read* still errors — that is a permissions or hardware problem, and overwriting it would destroy settings that are intact. `patch_config` calls the lock-free body, since a std mutex is not re-entrant and a second `File::lock` on the sidecar would block on this thread's own descriptor forever.
-- **`Config::normalized()` runs on the way in and on the way out.** Numbers clamp to `config_bounds()` — landing on the nearest bound, not the default, so an out-of-range entry keeps the user's intent ("as big as allowed"); blank-after-trim strings become absent; an unrecognized `ai_provider` folds onto `claude`; blank and duplicate scan paths drop (a blank one would expand to the whole home directory). Applying it on the *read* is what heals a file another client already poisoned — `Some("")` is not `None`, so an emptied model box used to run `claude --model ""` and an emptied server URL made Ollama POST to a hostless path. `config_bounds()` is also what a settings control's `min`/`max` are built from, so a form cannot offer a value the writer then clamps away; the three hand-copied bound tables (two of them in different units, one disagreeing with its own control's starting value) are gone.
-- `repos-state.json` — `last_opened_repo`, `last_clone_dir`, the two sort-toggle preferences (`repo_sort_mode`, `clone_sort_mode`), and `recent_repos` (MRU order, capped at `MAX_RECENT_REPOS = 50`). Every field is `Option`/`#[serde(default)]` so older state files load fine. JSON instead of TOML to keep it cheap to extend.
-- Every read runs `normalize_repo_paths`, which converts the stored paths (see [Path normalisation](#path-normalisation)) and de-dupes `recent_repos` afterwards. A file written before that change holds Windows verbatim paths, which no longer match anything `discover_repos` returns — `last_opened_repo` would silently stop resolving (the app forgets the open repo and lands in the picker) and the MRU list would grow a second entry per folder. It runs on every read rather than as a one-shot migration because it's idempotent and the next write persists it, so the file heals itself with no schema version to carry.
-- Writes go through two commands that each run one read-modify-write under both locks (Tauri runs commands concurrently, and the other client runs at the same time; interleaved load+save cycles would drop the slower writer's fields): `patch_state(ReposStatePatch)` merges the supplied fields (`None` = leave as-is; `recent_repos` and `last_opened_repo`-on-open are deliberately not its job), and `record_recent_repo(path)` owns the MRU move-to-front/de-dupe/cap **and** records `last_opened_repo` in the same write — opening a repo is one fact, and every caller of it in both clients is an open, so a switch costs one rewrite of the file rather than two with a window between them in which the file named one repo as most recent and another as the one to reopen. Tauri makes that call from `MainLayout.initialize()` for every path that mounts it and from `handleSwitchRepo` for the in-app switch; the native client from `RepoDirectoryStore.noteOpened`. Both return the resulting state so the frontend reseeds from the authoritative copy. A corrupt state file self-heals inside `update_state`: it logs, starts from defaults, and lets the save rewrite it, instead of wedging every future patch on the same parse error. Covered by the `prepend_recent_*` / `apply_patch_*` tests, plus a writer/reader race over `write_atomically` that asserts no read ever sees a half-written file.
+- `write_atomically`: temp file, then rename. Only `config.toml` fsyncs, since `F_FULLFSYNC` per repo switch is too slow.
+- Two locks: a process mutex and a `File::lock` sidecar, never the renamed file. Sidecars try ~2 s, then proceed unlocked with a log line.
+- New `Config` fields need `serde(default)`; unknown keys are ignored.
+- An unparseable file moves to `config.toml.corrupt-*` and defaults are written; an unreadable one errors.
+- Blank scan paths drop, since one would walk all of home.
+- `record_recent_repo` writes MRU (cap 50) and `last_opened_repo` in one go.
 
 ## Tauri capabilities
 
-[capabilities/default.json](apps/tauri-app/src-tauri/capabilities/default.json) is intentionally minimal:
-
-```json
-"permissions": [
-  "core:default",
-  "core:path:default",
-  "core:event:default",
-  "core:window:default",
-  "core:window:allow-set-title",
-  "core:app:default",
-  "dialog:allow-open",
-  "clipboard-manager:allow-write-text"
-]
-```
-
-No filesystem, shell, or HTTP plugins are exposed to the WebView. All side effects route through our explicit `#[tauri::command]` functions, which is a deliberate security boundary. The three entries beyond the default sets are each one capability, not a set: `allow-set-title` because the window is named after the open repository, `dialog:allow-open` for the Clone dialog's destination picker — the folder chooser is the only native dialog the frontend raises — and `clipboard-manager:allow-write-text` for the terminal's OSC 52 writes. **Write, deliberately without read**: the sequence's read form is the one an untrusted shell could use to lift the clipboard, and a capability that isn't granted cannot be reached by mistake.
+`core:*` defaults plus `core:window:allow-set-title`, `dialog:allow-open`, `clipboard-manager:allow-write-text`. No filesystem, shell or HTTP plugins reach the WebView. Clipboard read is withheld on purpose.
 
 ## Build / dev
 
-```bash
-# From the project root
-just install         # pnpm install inside apps/tauri-app
-just dev             # pnpm tauri dev   (Vite on :5173 + Tauri host)
-just build           # pnpm tauri build (debug bundle)
-just build-release   # pnpm tauri build --release with RUST_BACKTRACE=1
-just check           # pnpm svelte-check + cargo check --workspace
-just test            # cargo test --workspace (core + both hosts)
-just lint            # cargo clippy --workspace --all-targets (pedantic)
-just bench <repo> [--fetch] [--scan <dir>]   # wall time + spawns per call, release build
-just format          # prettier + cargo fmt --all
-just clean           # nuke dist/, target/, node_modules, generated macOS artifacts
+You need Rust 1.91+, Node.js 20.19+ or 22.12+, and `pnpm`. The macOS client also needs Xcode, `brew install xcodegen`, and once, `xcodebuild -downloadComponent MetalToolchain`.
 
-# Native macOS client (needs Xcode + `brew install xcodegen`)
-just mac-generate    # project.yml → LeoGit.xcodeproj
-just mac-bindings    # cargo build -p leogit-ffi + regenerate Swift bindings
-just mac-build       # xcodebuild (runs mac-bindings first, via a pre-build phase)
-just mac-run         # build, then launch LeoGit.app
-just mac-run --no-build  # relaunch the last build, skipping xcodebuild
+```bash
+just install        # pnpm install in apps/tauri-app
+just dev            # dev build with hot reload
+just build          # debug bundle
+just check          # svelte-check + cargo check --workspace
+just test           # cargo test --workspace
+just lint           # clippy pedantic
+just bench <repo>   # time core git operations against a real repo
+just mac-run        # build and launch the macOS app (--no-build to relaunch)
+just bundle         # this platform's release bundle
+just install-local  # install a Release build from this tree
+just release        # publish a GitHub release; pass x.y.z to bump first
 ```
 
-`just check` covers the whole Cargo workspace, so `leogit-ffi` type-checks alongside core and
-the Tauri host. The macOS app is not part of it — it needs Xcode, so it stays behind `mac-*`.
+On Windows, `just` needs the `sh` from [Git for Windows](https://git-scm.com/download/win), so add `C:\Program Files\Git\usr\bin` to your `PATH`. The `bash` in `System32` is the WSL launcher, not what you want.
 
-`just bench` is the measurement harness ([core/examples/bench.rs](core/examples/bench.rs), a cargo example so it never ships): one untimed warm-up then three timed calls per operation — `get_status`, `repo_sync_status`, `get_log`, `get_diff`, `get_selected_diff`, the discovery walk, the login-`PATH` resolution — printing median, spread and **spawns per call** from `process::spawn_count()`, with a `git --version` row as the fork/exec floor to read the others against. The warm-up is not politeness: the first `git status` on a cold repository pays for the page cache, and any measurement in this area that does not warm up first is wrong. It redirects the config dir to a temp folder through `LEOGIT_CONFIG_DIR`, so it never touches the user's files. Every I/O change in this codebase is measured with it before and after.
-
-Inside `tauri-app`, `pnpm run check:native` runs the same tsconfig through the TypeScript 7 native compiler (`tsc --noEmit`, ~0.2 s full check) for fast feedback on `.ts` files; `pnpm check` (svelte-check, on the TS 6 JS line) stays authoritative because the native compiler doesn't see `.svelte` files. `src/vite-env.d.ts` (`vite/client` types) declares the CSS side-effect imports that TS 6/7's stricter resolution (TS2882) would otherwise reject.
-
-The Tauri dev command uses `beforeDevCommand: pnpm run dev:vite` (per `tauri.conf.json`) so the Vite dev server starts in-process. Release builds use `beforeBuildCommand: pnpm run build:frontend` which writes static assets to `tauri-app/dist`, then `frontendDist: "../dist"` points the bundle at them.
-
-Bundle targets declared in `tauri.conf.json` are `app` + `dmg` (macOS), `deb` + `appimage` (Linux), `msi` (Windows), but the release pipeline asks for one at a time (`--bundles app` / `appimage` / `nsis`) so nothing is built that no release uploads.
+- `just bench` warms up once, then times three calls and counts spawns. Measure I/O changes with it, before and after.
+- `pnpm check` is authoritative; `pnpm run check:native` is the fast TS 7 pass and can't read `.svelte`.
+- `test_support.rs` isolates git config, because a global `core.hooksPath` disarms test hooks.
+- `just check` doesn't build the macOS app.
 
 ### App icon (native client)
 
-`apps/swift-ui-app/Resources/AppIcon.icon` is an **Icon Composer** document — one 1024×1024 source layer over an automatic gradient, with the shadow and translucency that give it the macOS 26 Liquid Glass treatment. `actool` compiles it into `AppIcon.icns` plus the layered variants in `Assets.car`, and merges `CFBundleIconFile` / `CFBundleIconName` into the Info.plist itself.
-
-Two things about wiring it up are easy to get wrong, and both fail *silently* — the build succeeds and ships the generic icon:
-
-- **An `.icon` is a directory, and XcodeGen walks directories.** Left alone it adds `icon.json` and `Assets/icon.png` as two loose resources and nothing in the bundle is an icon any more. `options.fileTypes.icon.file: true` makes it a single reference, which is how Xcode itself treats the package.
-- **`ASSETCATALOG_COMPILER_APPICON_NAME` must match the file's basename** (`AppIcon`). It is set explicitly rather than left to the default, since finding the icon at all depends on it.
-
-It is deliberately **not** inside an asset catalog: Xcode 26 consumes an `.icon` standing on its own, and Apple's instructions say not to put one in a catalog. There is no `.xcassets` in this app at all. The Tauri client keeps its own PNG/ICO/ICNS set under `apps/tauri-app/src-tauri/icons/`, listed in `tauri.conf.json` — the two clients do not share icon assets, since the formats have nothing in common.
+`Resources/AppIcon.icon` sits outside any catalog. Two silent failures: without `options.fileTypes.icon.file: true`, XcodeGen walks it as loose files; `ASSETCATALOG_COMPILER_APPICON_NAME` must equal `AppIcon`.
 
 ### Release pipeline (`scripts/`)
 
-**One product, one version, one artifact per platform.** A release is a single tag holding one artifact per OS, and each is a build of whichever client covers that OS: **macOS ships the native SwiftUI app (`LeoGit.app`), Linux and Windows ship Tauri**. That mapping is `RELEASE_CLIENT` in [scripts/_common.py](scripts/_common.py) and it is a requirement rather than a preference — `core::update::artifact_name` decides whether a release contains *this* build's artifact from `cfg!(target_os)` alone, and no cfg distinguishes a native macOS build from a Tauri one, so two macOS artifacts would leave each client looking for a name that could belong to either. The two macOS bundle names (`LeoGit.app`, `leogit.app`) are also the same path on a case-insensitive volume, which is the macOS default.
-
-The maintainer scripts are Python and share three modules — [_common.py](scripts/_common.py) (console, subprocesses, paths, platform and artifact naming), [_version.py](scripts/_version.py) (the version and the files that state it) and [_build.py](scripts/_build.py) (build, sign, package, install):
-
-Every subprocess those modules spawn goes through `_common.py`'s `run`, `capture` and `quietly`, which resolve the executable with `shutil.which` before spawning — the same lookup `require_tools` used to approve it. That is a Windows requirement rather than tidiness: a bare name handed to `subprocess.run` becomes a `CreateProcess` call that tries only `<name>` and `<name>.exe`, while npm installs its tools — pnpm included — as `<name>.cmd` shims that only a PATHEXT-aware search finds. An unresolved `pnpm` therefore passes the prerequisite check and then fails to spawn at the build; resolving once, in one place, keeps the check and the spawn from ever disagreeing.
-
-| Script | What it does |
-|---|---|
-| `build.py` | Builds this platform's release bundle. `--client tauri` forces the Tauri build, which on macOS is a supported client that no release publishes — the flag is how that path stays exercised. |
-| `deploy_release.py` | The full release: validate → resolve/bump version → tag → build → package → upload. |
-| `install_local.py` | Installs this tree's Release build where the platform's users launch it from: `/Applications` on macOS, `~/.local/bin` plus icon and desktop entry on Linux. On Windows it runs the release's NSIS installer with `/S`, so the result is the downloaded install — same folder (read back from the HKCU uninstall entry, since NSIS reuses an earlier install's choice), Start-menu entry and uninstall record. A running copy is stopped first, on Windows matched by the installed executable's path so a `tauri dev` build is left alone. |
-| `cleanup_releases.py` | Deletes every release older than the latest, and their tags. |
-
-`just bundle`, `just release`, `just install-local` and `just cleanup-releases` are thin wrappers.
-
-`install_local.py` and `install.sh` write the *same paths*, so a machine that has run both ends up with one copy rather than two: on Linux that is `~/.local/bin/leogit.AppImage`, the `~/.local/bin/leogit` wrapper that execs it (which is also the `leogit [dir]` command), `~/.local/share/icons/leogit.png` and `~/.local/share/applications/leogit.desktop`. The wrapper's text is duplicated in `_build.py`'s `LAUNCHER` because install.sh is fetched and piped and can import nothing; each file names the other, and a test-free duplication like that is kept honest by both being short. Installing stops a running copy first — on Linux that matters more than on macOS, because the AppImage file *is* the squashfs the running app is still reading from.
-
-`deploy_release.py` runs **once per OS against the same tag** — the first run creates the release, the rest upload into it — because nothing here cross-compiles. It refuses a dirty tree, refuses a tree whose version files disagree, and guards against shipping behind the live release: it queries GitHub's `/releases/latest` (the endpoint `install.sh` installs from) and aborts if the version it is about to ship is older, since a stale local tree would otherwise clobber artifacts onto a superseded release. Re-running an already-released version is the supported retry — the tag is reused and the artifact replaces the one on the release — so a run that died at the upload is fixed by running it again rather than by inventing a version to get past it. Tagging happens *before* the build, so a long build is never thrown away by a name collision found at the end.
-
-- **macOS** — `build-rust.sh release`, `xcodegen generate`, then a `clean` Release `xcodebuild`. Clean rather than incremental: an incremental Release build re-copies the SPM resource bundles without re-signing the app around them, leaving a seal that no longer matches its contents, which Gatekeeper refuses. Ad-hoc signed by the build itself (`CODE_SIGN_IDENTITY: "-"`), verified with `codesign --verify --deep --strict`, then zipped with `ditto -c -k --sequesterRsrc --keepParent` into `LeoGit-<ver>-macOS-<arch>.zip`. Per-architecture, not universal: the app links `libleogit_ffi.a`, which cargo builds for one target triple, so `ONLY_ACTIVE_ARCH: YES` holds in Release too and going universal would mean lipo-ing two cargo targets together first.
-- **Linux** — `pnpm tauri build --bundles appimage`, no signing, copied to `LeoGit-<ver>-linux-<arch>.AppImage`.
-- **Windows** — `pnpm tauri build --bundles nsis`, copied to `LeoGit-<ver>-windows-<arch>-setup.exe`. The `bundle/nsis` directory is wiped first, since Tauri never prunes it and a leftover would be packaged under this version's name.
-
-Only the bundle format a release ships is built. The default set would also produce a `.dmg`, `.deb` and `.msi` nobody uploads — and on macOS the `.dmg` step drives Finder through AppleScript and fails outright without a user session.
-
-**The version lives in five places and [_version.py](scripts/_version.py) moves them together.** `tauri.conf.json`'s `"version"` is the declared source of truth; `package.json`, the host crate's `Cargo.toml`, `project.yml`'s `MARKETING_VERSION` (plus `CURRENT_PROJECT_VERSION`, stepped) and `Cargo.lock` follow it. Two of those are load-bearing at runtime rather than bookkeeping: the Tauri host passes its crate's `CARGO_PKG_VERSION` to `check_for_update`, and XcodeGen writes `MARKETING_VERSION` into the generated `Info.plist` as `CFBundleShortVersionString`, which is where the native app reads the same answer. Both keys are declared explicitly in `project.yml`'s `info.properties`, because XcodeGen does not derive them from the build settings — an undeclared `CFBundleShortVersionString` is written as the literal `"1.0"`. A test in each host crate pins its half of the agreement, so drift fails `cargo test` rather than waiting for release day. `leogit-core` and `leogit-ffi` keep their own `0.1.0` manifest versions deliberately: they are libraries, no release is named after them, and nothing compares against them.
-
-`install.sh` is the curlable installer and the **one script still written in bash** — it runs on a machine with no checkout, so it can import nothing and needs no interpreter beyond the shell already running it. It pays for that with a second copy of the platform detection and artifact naming that `_common.py` holds; the two change together, and `core::update::artifact_name` is the third copy, pinned by a golden test.
-
-It auto-detects the platform: on macOS it unpacks `LeoGit.app` into `/Applications`, removes *both* bundle names (a machine upgrading from the Tauri macOS build has its old copy under the other spelling), strips only `com.apple.quarantine` rather than every xattr, and re-registers with Launch Services. On Linux it drops the AppImage at `~/.local/bin/leogit.AppImage` behind a `~/.local/bin/leogit` wrapper, extracts the bundled icon, and writes a `~/.local/share/applications/leogit.desktop` launcher (warning if FUSE 2 is absent, since Arch ships only FUSE 3). The wrapper exports `WEBKIT_DISABLE_DMABUF_RENDERER=1` at launch when `/dev/nvidia0` is present (the proprietary NVIDIA driver's DMABUF/GBM path crashes WebKitGTK with "Failed to create GBM buffer" errors); it's detected per-launch rather than at install time because the active GPU is a runtime property, stays inert on AMD/Intel/nouveau, and honors a pre-set value. The desktop environment (GNOME, COSMIC, …) is irrelevant — both run the same WebKitGTK/GTK runtime — so one AppImage serves every Arch machine.
-
-As a final step — *after* the install, because it names the path the install actually used — it writes the `leogit [dir]` shell command into the user's login shell. It detects `$SHELL` (which survives `curl … | bash`, being inherited from the parent) and writes a `leogit()` function into `~/.zshrc` (zsh), `~/.bashrc` on Linux / `~/.bash_profile` on macOS (bash), or an autoloaded `~/.config/fish/functions/leogit.fish` (fish); an unknown shell gets the snippet printed for manual setup. For zsh/bash the function lives inside an idempotent `# >>> leogit >>>` … `# <<< leogit <<<` marker block that re-installs replace rather than stack.
-
-Two things about the macOS form are load-bearing, and both are answerable only because the installer is the thing that knows where it put the app:
-
-- **A path, not `open -b <bundle id>`.** A bundle id resolves through Launch Services to whichever copy was registered last, which on a machine that also builds the app is a Debug build in a derived-data directory.
-- **`open -a "<path>" "$dir"`, not `open -na … --args "$dir"`.** The native app declares `public.folder` under `CFBundleDocumentTypes`, so LaunchServices delivers the folder to `application(_:open:)` on a cold start *and* to an already-running instance — the case `--args` cannot serve, argv being read once at launch. Linux keeps the backgrounded PATH wrapper, the Tauri client having no document types to route through. See *Command-line repo opening* for the app side.
+- One tag, one artifact per OS: macOS ships native, Linux and Windows ship Tauri (`RELEASE_CLIENT`). Required, because `update::artifact_name` only knows `cfg!(target_os)`.
+- `deploy_release.py` runs once per OS against one tag. It refuses a dirty tree, disagreeing versions, or a version older than the live release. Re-running a version is the supported retry.
+- Subprocesses resolve with `shutil.which`, because `CreateProcess` can't find npm's `.cmd` shims.
+- macOS: clean `Release` xcodebuild, since incremental builds break the seal. Ad-hoc signed, per-arch because `libleogit_ffi.a` is one triple.
+- Windows wipes `bundle/nsis` first, since Tauri never prunes it.
+- `tauri.conf.json` is the version source; `_version.py` moves the rest. `CFBundleShortVersionString` must be declared in `project.yml`, or it's `1.0`. `leogit-core` and `leogit-ffi` stay at `0.1.0`.
+- Platform naming exists three times: `install.sh`, `_common.py`, `artifact_name` (golden test).
+- macOS `leogit()` is `open -a "<path>" "$dir"`: a path, since a bundle id may resolve to a Debug build, and not `--args`, which can't reach a running app.
+- The Linux wrapper sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` per launch if `/dev/nvidia0` exists.
+- Linux builds need `/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders` to exist, plus `NO_STRIP=true` and `APPIMAGE_EXTRACT_AND_RUN=1`.
+- `_drop_bundled_gio_module()` removes `usr/lib/gio/`, because the half-bundled `libgiognutls.so` segfaults `ld.so` at window creation.
 
 ### In-app update check
 
-[core/src/update.rs](core/src/update.rs) closes the loop on that pipeline: `check_for_update(current_version)` issues one unauthenticated `GET /repos/LeoManrique/leogit/releases/latest` (10 s timeout, `User-Agent: leogit/<ver>` — GitHub 403s without one) and compares the `v`-stripped `tag_name` against the version passed in. The compare is a three-part numeric tuple, not `semver` or a string compare — it matches the ordering `_version.py` applies to the same tags. The parse is **strict**: anything that isn't exactly three numeric parts (`0.2.0-beta.1`, `0.1.28+build.5`, `1.2.3.4`) yields `None` and means "no update". Coercing those instead is wrong in *both* directions — a lenient parse reads `0.2.0-beta.1` as `(0, 2, 0)` and announces a phantom update over `0.1.27`, and reads `0.1.28+build.5` as `(0, 1, 0)` and hides a real one — and it's reachable, since `deploy_release.py` only regex-validates the version when one is passed as an argument.
-
-**The running version is a parameter, and has to be.** `env!("CARGO_PKG_VERSION")` expands to the version of the crate the *source file* belongs to, so read inside core it answers with `leogit-core`'s own — a number no release is ever named after, which makes every published release compare newer than every build for ever. Each host supplies its own instead, and is the only thing that can: the Tauri shim passes the `leogit` crate's `CARGO_PKG_VERSION`, which `_version.py` bumps alongside `tauri.conf.json`; `GitBridge.latestRelease()` reads `Bundle.main`'s `CFBundleShortVersionString`, which is where `project.yml`'s `MARKETING_VERSION` lands and which never reaches Cargo at all. A bundle with no such key is not a release build, and the `"0.0.0"` fallback compares low against every tag — surfacing as "an update exists" rather than as silence.
-
-A version match alone isn't enough to announce, though: `deploy_release.py` runs **once per platform onto one shared release**, so the first platform to finish publishes a release the others aren't in yet. `check_for_update` therefore also requires an asset named exactly `LeoGit-<ver>-<platform>-<arch>.<ext>` (`-setup.exe` on Windows) — the same string `install.sh` resolves — and stays quiet otherwise. Without that gate a Windows user gets sent to a page holding only a macOS zip, and on macOS/Linux it's worse: `install.sh` kills the running app at step 2 and only discovers the missing artifact at step 4, leaving the user with no app *and* no update. `artifact_name` is pinned to those literal strings by a golden test, since a drifted name would silently hide every update rather than fail loudly.
-
-`Ok(None)` means current; `Err` means the check itself failed and is a retry signal, never a user-facing error. There is no auto-download, no signed feed, and no `tauri-plugin-updater` — the payload's `install_command` carries the `install.sh` one-liner on macOS/Linux and is `None` on Windows, where the release page's installer is the path instead. In debug builds only, `LEOGIT_FAKE_UPDATE=<ver>` short-circuits the whole request (artifact gate included) so the UI can be exercised without publishing a release.
-
-Both clients run it once per session from their root — Tauri's `App.svelte` (not `MainLayout`) and native's `ContentView` — so it also covers the repo-picker phase, via [services/updateChecker.ts](apps/tauri-app/src/lib/services/updateChecker.ts) and `Stores/UpdateStore.swift`. The 30-minute interval is a **retry** interval, not a poll: it fires only while attempts keep failing, and any *answer* ends the loop for the session, "you are current" included — releases do not ship often enough to poll for. An `online` listener retries the moment connectivity returns, so launching offline (a plane, a captive portal) doesn't wait out the window; natively that is a keyed subscriber on `NetworkPathObserver` rather than a second monitor. The gate is the OS connectivity signal **alone** — Tauri's `shouldAttemptBackground()` additionally consults the breaker, which the native store deliberately does not, since a breaker open for git-remote reasons would silently suppress the check for the whole session. In neither client does the outcome feed the breaker (`recordResult` is never called from here): a rate-limited GitHub API says nothing about the git remotes it guards. The result lands in [stores/update.ts](apps/tauri-app/src/lib/stores/update.ts) / `UpdateStore` (`available` plus a session-only dismissal; neither is persisted, so a skipped release resurfaces next launch). One `UpdateChip` renders it in both native hosts — a toolbar item on the repository screen, a control beneath the list on the picker, which has no toolbar. Opening the release page uses `os::open_url`, a sibling of `open_path` reusing the same `open` / `cmd /c start` / `xdg-open` hand-off — no opener/shell plugin was added, and the native client routes through it rather than `NSWorkspace` so the guard is not written twice. It rejects non-`https` URLs and any URL containing whitespace or ``&^<>|"'` `` — syntax to `cmd`'s parser even unquoted — plus `%`, since `cmd` expands `%VAR%` *before* that check's characters are handled and could smuggle them back in. That also rules out percent-encoding and (via `&`) query strings, which is fine for the `https://github.com/...` paths we open and keeps the door deliberately narrow.
-
-A hand-off to the browser can fail, and the two clients class that failure differently *because their chips live in different places*: Tauri's `reportNotice` banner is rendered only inside `MainLayout`, so a failure raised from the picker phase goes nowhere, while the native chip has to work on a screen with no banner at all — so it raises an alert, which is also what §6.13 asks for, the user having just chosen the item and being sat waiting on a browser.
-
-**Linux build host (one-time setup).** Building the AppImage needs the Rust toolchain plus Tauri's GTK/WebKit deps and AppImage tooling:
-
-```bash
-sudo pacman -S --needed rustup base-devel webkit2gtk-4.1 librsvg \
-  libappindicator-gtk3 patchelf file openssl fuse2
-rustup default stable
-# linuxdeploy's gtk plugin copies gdk-pixbuf's loader dir, which current Arch
-# no longer creates (loaders are built into gdk-pixbuf; librsvg dropped its
-# pixbuf loader). An empty dir satisfies it — LeoGit only renders PNG icons:
-sudo mkdir -p /usr/lib/gdk-pixbuf-2.0/2.10.0/loaders
-gdk-pixbuf-query-loaders | sudo tee /usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache >/dev/null
-```
-
-[_build.py](scripts/_build.py) sets `NO_STRIP=true` (linuxdeploy's bundled `strip` chokes on the `.relr.dyn` section modern binutils emits) and `APPIMAGE_EXTRACT_AND_RUN=1` (run nested plugin AppImages by extracting, not FUSE-mounting) for the Linux build, and fails fast with the `mkdir` command above if the gdk-pixbuf dir is missing. `pnpm-lock.yaml` is committed (not ignored) so its `--frozen-lockfile` install is reproducible on a fresh clone.
-
-After `tauri build`, `_drop_bundled_gio_module()` deletes `usr/lib/gio/` from the AppDir, strips the `GIO_EXTRA_MODULES` export from `apprun-hooks/linuxdeploy-plugin-gtk.sh`, and repacks the AppImage with `linuxdeploy-plugin-appimage`. linuxdeploy's gtk plugin ends by copying `libgiognutls.so` in with a raw `cp --parents` — bypassing its own dependency resolution — so the module's chain (libgnutls → libnettle/libhogweed → libgmp) ships incomplete: `libgmp.so.10` is absent and resolves against the host mid-`dlopen`. GTK reaches that module on the first window, because `ApplicationWindow` construction calls `gtk_css_provider_load_from_path` → `g_vfs_get_default`, which dlopens every GIO module it can find; loading the half-bundled one segfaults inside `ld.so` and kills the app during `create_window`, before it paints. Without the bundled module GIO uses the host's, which matches the host's GLib — LeoGit reaches git through subprocesses alone, never GIO's network VFS, so it needs no bundled TLS backend. The step is idempotent and skips the repack when there is nothing to strip.
-
-Frontend bundle is now under 1 MB (Shiki + grammars moved out). Vite's default `chunkSizeWarningLimit` is sufficient.
+- The running version is a parameter, because `CARGO_PKG_VERSION` inside core is core's own `0.1.0`.
+- Parsing is strict: exactly three numeric parts, else no update.
+- It requires the exact artifact name, because releases fill one platform at a time.
+- `Err` is a retry signal, never shown.
+- `LEOGIT_FAKE_UPDATE=<ver>` works in debug builds.
 
 ### Diff syntax highlighting
 
-The `highlight_diff` command (in [src-tauri/src/commands/highlight.rs](core/src/highlight.rs)) tokenises every `Context | Add | Delete` row of a `FileDiff` using `syntect` against `two-face::syntax::extra_newlines()`, then returns **render-ready HTML strings** (one per flattened diff line) via [core/src/render.rs](core/src/render.rs). Tokens (`{ start, end, class }`, code-point indices matching `IntraLineRange`) are internal to the backend now — `TokenClass` never crosses the wire, so it carries no `repr`/serde contract.
-
-**Tokenise the file, never the diff.** syntect is a stateful, line-sequential parser: a line's classification depends on every line above it. A diff supplies neither a line-1 start nor contiguous lines, so parsing the diff's own rows leaves the parser in whatever context a fresh `ScopeStack` begins in. For a `.svelte` file that context is top-level **markup**, so a hunk inside `<script lang="ts">` got tokenised as markup — a `listen<string>` generic came back as an HTML *tag*, and comments got no `Comment` class at all. A markup hunk looked perfect and a script hunk looked broken purely by where the hunk landed, which read as "highlighting is inconsistent".
-
-`highlight_diff` therefore takes an optional `BlobSource` (`workingTree { repoPath }` for uncommitted changes, `commit { repoPath, sha }` for a committed diff — the frontend states *what it is looking at*, Rust owns the rev-specs). `highlight_from_blobs` reads each side's full blob via `git::read_blob` / `git::read_working_tree_file`, parses each from line 1 in `tokenize_file`, and maps tokens onto rows by line number: **`Delete` rows take the old blob, `Add`/`Context` the new**. The two sides never share a `ParseState`, so a deleted line's unterminated string or comment can no longer bleed into the rows below it. Parsing is the cost and recording is nearly free, so the `wanted` line set bounds the payload, not the work.
-
-When `source` is absent or a blob can't be read (added/deleted file paths, an oversized file), it falls back to `highlight_from_diff_lines` — the legacy diff-only parse — so highlighting degrades rather than disappears.
-
-**Scope resolution walks the stack, leaf-first.** `scope_to_class` descends `ScopeStack` rather than reading only the top scope, because a delimiter carries its container beneath it: `//` is `[source.ts, comment.line, punctuation.definition.comment]`. Reading just the leaf classified that as `Punctuation` (which renders with no class), so **every line comment was two-tone** — an uncoloured `//` before an italic body. Punctuation is treated as *transparent*: remembered as a fallback while the walk continues, so `//` inherits `Comment` from below. Leaf-first order keeps genuine nesting correct — the `name` in `` `hi ${name}` `` has `variable.other` above `string.template`, so it stays `Variable`. Matching uses `Scope::is_prefix_of` against a `LazyLock` table (most-specific first), which is allocation-free in what is the module's hottest loop.
-
-**Markup languages need their own scope family.** The `TokenClass` table maps the *code* scopes (`keyword`, `string`, `entity.name.function`, …) that programming languages emit. Markdown — and reStructuredText, AsciiDoc, Textile — emit almost none of those; they tag their text with a `markup.*` family (`markup.heading`, `markup.bold`, `markup.italic`, `markup.strikethrough`, `markup.raw.inline`, `markup.quote`) plus `markup.underline.link` / `meta.link` / `meta.image` for links. With none of those in the table, `scope_to_class` fell through to `Plain` for every token, so a `.md` diff rendered as flat text while every code language highlighted. Those scopes now map to the `Heading | Strong | Emphasis | Strikethrough | Link | Raw | Quote` classes. The same leaf-first descent that colours `//` with its comment also colours a heading's `#`, a bold span's `**`, and a link's brackets with their construct, since each delimiter's `punctuation.*` scope sits above its `markup.*` container. Covered by `markdown_constructs_get_markup_classes`.
-
-**A single tilde must not strike text through.** Sublime's Markdown grammar opens a strikethrough on a run of *one or two* tildes; GitHub (cmark-gfm) and markdown-it — VS Code's preview, which refuses a delimiter run shorter than two outright — both need two. Opened by one tilde, the grammar then closes on the next stray `~`, or, finding none, strikes the rest of the paragraph, so ordinary prose (`~25 min · ~2 h`, `~/leogit`) rendered muted and struck through. The syntax set ships pre-compiled, so the grammar is not ours to correct; its delimiter scopes are. [`single_tilde_strikes`](core/src/highlight.rs) measures each `punctuation.definition.strikethrough.begin|end` run against the following op's offset and returns the byte ranges of every single-tilde run, which `drop_strikethrough` puts back to `Plain` — leaving nested constructs (a bold span inside the run) on their own classes. Runs are tracked on **every** line, recorded or not, since a `~~` run may legitimately open above the recorded window and span lines; `~~` runs are never touched. Pinned by `single_tilde_does_not_strike_through` and `double_tilde_run_survives_across_lines`.
-
-**Fenced code blocks are re-highlighted by their info string.** A ```` ```lang ```` fence *should* highlight its body as `lang`, but the Markdown grammar only **embeds** a fixed subset of languages: `rust`, `python`, `js`/`ts`, `json`, `c`, `java`, `ruby`, `bash` come back with real `source.*` scopes, while `go`, `yaml`, `html`, `shell` (and many more) come back as opaque `markup.raw.code-fence` — a whole block of one scope. Relying on embedding therefore leaves *most* real-world code blocks flat (Go blocks were the tell). So `tokenize_file` resolves the fence itself: [`fence_role`](core/src/highlight.rs) reads syntect's own fence scopes (`meta.code-fence.definition.begin|end`, `constant.other.language-name`) to find each fence's boundaries and info string — no hand-rolled CommonMark scanner — and [`resolve_fence_language`](core/src/highlight.rs) maps that info string to a syntax via `find_syntax_by_token` (which matches names *and* extensions, so `go`, `ts`, `c++` all resolve). The body is then tokenized with **that language's own `ParseState`**, run in parallel with the Markdown parser (which keeps advancing so it still detects the closing fence). Every labelled fence highlights uniformly, embedded or not; an unlabelled or unknown-language fence (`mermaid`, `text`) has nothing to resolve and stays plain. This is why the table maps only `markup.raw.inline` (inline `` `code` ``) and *not* bare `markup.raw` — a code-fence body must never take the flat `Raw` tint. The fence path is gated to Markdown (`text.html.markdown`) since only it emits those scopes. Pinned by `markdown_fenced_code_block_highlights_by_info_string` (Go **and** Python) and `markdown_unlabelled_fence_body_stays_plain`.
-
-**HTML emission lives in [core/src/render.rs](core/src/render.rs), shared by both render phases.** `parse_diff` calls `plain_html` (escaped text + intra-line backplate) so phase 1 ships inside the parse payload; `highlight_diff` calls `highlighted_html`, which lays one `.syn-*`-classed span per token over the *same* backplate — one implementation, so the phases can't drift. `render_line` clamps malformed token bounds, fills inter-token gaps as plain text, escapes only `&`/`<`/`>` (element content, never attribute values), and splits spans around the intra-line range, merging classes on the overlap. Theme swap is pure CSS — `--syn-*` variables in [app.css](apps/tauri-app/src/app.css) flip with `:root[data-theme]`. `Plain`/`Variable`/`Punctuation` deliberately map to no class and inherit `--text-primary`. The markup classes carry font styling as well as colour — `.syn-strong` is bold, `.syn-emphasis`/`.syn-quote` italic, `.syn-strike` struck, `.syn-link` underlined — so a Markdown diff reads the way the rendered document would. Pinned by the `render::tests` (escaping, class merging, code-point indexing, bound clamping).
-
-Guards: lines over `MAX_HIGHLIGHT_LINE_LEN = 1024` chars are still *parsed* (state below them depends on it) but not recorded, mirroring `MAX_INTRA_LINE_LEN` in `core/src/diff.rs`; files over `MAX_HIGHLIGHT_FILE_LINES = 20_000` bail to the fallback — decided from the diff's own line numbers (the highest line either side wants) **before** either blob is read, so a generated or minified file costs no `git show` at all; a test asserts the fallback is taken without a spawn.
-
-**`highlight_diff` must stay `#[tauri::command(async)]`.** A plain `#[tauri::command]` runs on the **main thread**. Tokenising whole blobs is ~20× more expensive than the old diff-only parse — the repo's largest file (`git.rs`, 3286 lines) measures **~52 ms release / ~284 ms debug** vs ~2 ms / ~14 ms diff-only — which is enough to beachball the cursor on every file switch. The old parse was cheap enough to hide that the command was on the UI thread at all. The sibling diff commands (`parse_diff`, `get_diff`, `get_commit_diff`, `generate_patch`) are now `(async)` too, along with every other subprocess/filesystem command (see *Network resilience*, layer 1).
-
-DiffViewer's debounced (80 ms) phase 2 and its `lastDiff` guard (which keeps the status poll from re-tokenising) mean each file switch costs one tokenise, off the UI thread, after plain text has already painted — so there is no token cache yet.
-
-**`parse_diff` returns a `ParsedDiff` wrapper, not a bare `FileDiff`.** Alongside `file_diff` it carries everything else the viewer would otherwise re-derive per render: `html` (the phase-1 lines above), `sbs_pairs` (the side-by-side pairing — context/header rows spanning both columns, each delete run zipped against the following add run, `NoNewline` markers rowless), and `additions`/`deletions` for the header badge. The pairs reference lines by **flat/global index** — the same indexing the per-line HTML, the token lines and the selection map use — and each viewer resolves them against its own flat line list (`flatLines` in Svelte, `DiffStore.rows` natively), so the pairing algorithm itself lives only in [diff.rs:build_sbs_pairs](core/src/diff.rs) and the two clients cannot arrange one diff differently. `FileDiff` itself deliberately stays lean and wire-identical to before, because the frontend round-trips it back into `highlight_diff` / `generate_patch` — putting the derived artifacts on it would echo them over IPC on every highlight. Covered by the `diff::tests` (run zipping, `NoNewline`, backplate HTML).
+- Tokenize the file, never the diff: syntect is stateful. `Delete` rows read the old blob, the rest the new, with separate `ParseState`s.
+- `scope_to_class` walks leaf-first with punctuation transparent, so `//` inherits `Comment`.
+- Only `markup.raw.inline` maps to `Raw`, so fences never go flat.
+- `single_tilde_strikes` undoes strikethrough from one tilde, because the compiled grammar is wrong there.
+- Fences resolve by info string and run their own `ParseState` beside Markdown's.
+- Lines over 1,024 parse but don't record; files over 20,000 lines bail before reading blobs.
+- `highlight_diff` must stay `(async)`, or whole-blob tokenizing stalls the main thread.
+- `FileDiff` stays lean because it round-trips over IPC. `build_sbs_pairs` is the only pairing.
 
 ## Accessibility patterns
 
-The frontend builds warning-free (`pnpm check` and `vite build` both report 0 a11y warnings). These conventions keep it that way — Svelte's compiler enforces them:
-
-- **Overlays close via backdrop target-check, not `stopPropagation`.** Every modal/dropdown backdrop is `role="presentation"` with `onclick={(e) => { if (e.target === e.currentTarget) close() }}`. The inner dialog is `role="dialog" tabindex="-1"` with **no** click handler — `aria-modal="true"` on the dialogs, and none on the two picker frames, which are popovers and take no scrim. The old pattern (inner `onclick={e => e.stopPropagation()}`) tripped both "click handler needs a keyboard handler" and "dialog role needs a tabindex". Affects [ErrorModal](apps/tauri-app/src/lib/components/ErrorModal.svelte), [ForcePushConfirm](apps/tauri-app/src/lib/components/ForcePushConfirm.svelte), [SettingsOverlay](apps/tauri-app/src/lib/views/SettingsOverlay.svelte), [HelpOverlay](apps/tauri-app/src/lib/views/HelpOverlay.svelte), and the repo/branch overlays in [MainLayout](apps/tauri-app/src/lib/views/MainLayout.svelte).
-- **Resize handles are `role="slider"`, not `role="separator"`.** A focusable separator (the ARIA "window splitter") is flagged by Svelte either way — the mouse listener warns on a non-interactive role, and adding `tabindex` warns again (`a11y_no_noninteractive_tabindex`). `slider` is the interactive role Svelte accepts, and it fits: each handle has `tabindex=0`, `aria-orientation`, `aria-valuenow/min/max`, and an `onkeydown` (Arrow keys nudge by `RESIZE_STEP` = 16px, Home/End jump to min/max). The keyboard handlers share one `splitterKey()` helper in MainLayout. Native's `RowResizeHandle` binds the same four keys to the same 16 pt step through `.onKeyPress`, reports itself with `accessibilityAdjustableAction`, and calls one `onCommit` when a gesture or key settles — so `UserDefaults` is written **once** per drag rather than per frame, from a transient `draggingHeight` the owner flushes. It is `.focusable(interactions: .activate)` rather than plain `.focusable()`: the default `.automatic` enables `.edit` as well, which makes the divider an unconditional first-responder candidate, and on a clean working tree — where the file list is replaced by a `Text` placeholder that takes no focus — it is then the *only* focusable view in the sidebar, so AppKit hands it the initial focus every time the window becomes key and paints the focus ring across the whole gutter. `.activate` is the documented way to say "focusable like a button": it scopes the handle to users who have macOS keyboard navigation on, which is the only way Tab reaches a non-text control anyway. Initial focus then falls where it belongs — the file list, or the composer's summary field when the tree is clean. The composer's handle additionally clamps against measured geometry, mirroring native's `ChangesSidebar`: a wrapper around both tab panes carries `bind:clientHeight` (the Changes pane itself is `display: none` on History and would report zero), `commitMax` is that height less an 80px list floor, and both the drag and the rendered height obey it. The stored `leogit:commitHeight` is left alone, so a window that grows gives the height back without a fresh drag — while capping the *drag* too keeps the divider moving on the first pixel instead of spending an invisible surplus.
-- **`use:autofocus`, never the `autofocus` attribute.** The attribute is flagged (`a11y_autofocus`) and is unreliable for inputs that mount inside `{#if}` blocks. The [autofocus action](apps/tauri-app/src/lib/actions/autofocus.ts) calls `node.focus()` on mount instead.
-- **Autocorrect is disabled once, at the root.** `<html>` in [index.html](apps/tauri-app/index.html) carries `autocorrect="off" autocapitalize="off" spellcheck="false"`. All three are inheritable HTML attributes, so every descendant input/textarea/contenteditable inherits them — no field opts out individually, and WebKit's macOS autocorrect pills, inline predictions, and spell squiggles stay off app-wide. Only add these attributes to a specific field if it needs to *re-enable* the behavior.
-- **The app hands a fix to its own terminal rather than running it.** `Terminal.svelte` exports `runCommand`, which writes `<command>\r` to the PTY and queues when the shell is still starting — so a caller need not know whether the panel is warm, since it may have been created by the very click calling it (`MainLayout.runInTerminal` starts and expands the panel, `await tick()`s for the mount, then hands the command over). The queue is flushed *after* the output listener is registered, or the command would run with its echo dropped into D-4's window and the user would see a bare prompt. This exists because the one command worth offering — `claude auth login` — opens a browser and then blocks on stdin for a pasted code: driving that ourselves would mean rebuilding a terminal beside the one we ship, and asking for an auth code in app chrome is a habit worth not teaching. Core supplies the command string (`ProviderStatus.fix_command`), the client supplies the shell, and the button spells the command out because the app is about to type into the user's shell.
-- **A shortcut is either window-level or it doesn't exist.** Svelte treats `<div>` and `<form>` as non-interactive and warns on listeners attached to them, so a chord has only two homes: one interactive field, or a `window` `keydown` listener bound in `onMount`. The field is a trap for anything the user might want *before* clicking in — the composer's Cmd+Enter / Cmd+G lived there and were unreachable until you were already typing — so the window is the default and the composer's container stays a plain `role="form"` landmark. `MainLayout`'s single handler owns them all (Cmd+R, Cmd+L, Cmd+B, Escape, the terminal toggle, and now the composer's two), reaching the composer through `bind:this` and two exported functions that gate exactly as its buttons do. Ordering inside that handler is load-bearing: terminal-origin events return first (`utils/keyboard.ts`), then Escape, then the composer's chords — which sit deliberately *above* the "a field has focus, leave it alone" bail, since they are for the fields — and everything else below it. Cmd+P is the exception, still in [Header](apps/tauri-app/src/lib/components/Header.svelte) with the transfer state it acts on.
-- **Searchable repo lists share one keyboard-nav helper** (and, for the two that search repo *paths*, one match rule — see *Repo search* above). The startup picker ([RepoPicker](apps/tauri-app/src/lib/views/RepoPicker.svelte)), header switcher ([RepoDropdown](apps/tauri-app/src/lib/views/RepoDropdown.svelte)), and Clone dialog ([CloneOverlay](apps/tauri-app/src/lib/views/CloneOverlay.svelte)) all let you type-then-arrow: ↑/↓ move a keyboard cursor (`activeIndex`, reset to the top match whenever the query changes) and Enter picks the highlighted row (opens it, or in Clone sets the clone target). The two reusable pieces live in [listNavigation.ts](apps/tauri-app/src/lib/actions/listNavigation.ts) — `nextActiveIndex()` (wrapping index math) and the `scrollIntoViewWhenActive` action (`block: 'nearest'`, so already-visible rows never jump). The active row shows a `--border-active` inset ring, distinct from hover/selected fills. MainLayout's global `keydown` never interferes because it early-returns when focus is in a field and only handles Escape + meta-combos. The native side keeps the same two pieces under the same names — `ListNavigation.nextIndex` and `scrollTo(_:anchor: nil)` — so an arrow key answers identically in both clients.
-- **Both repo pickers read one set of label rules.** `repoLabel` / `repoFullLabel` / `repoSearchLabels` / `collidingRepoLabels` live in [repoIdentifiers.ts](apps/tauri-app/src/lib/stores/repoIdentifiers.ts), beside the cache they read, and the native `RepoIdentifierStore` carries the same four. They are what keeps a row's *displayed* label and its *searched* labels the same set: a row is found by what it shows, including the owner-qualified form, and the `owner/` prefix appears only where another row shares the name and an identifier exists to disambiguate with.
-- **The Clone dialog list is one tab stop, not one-per-row.** Its repo rows are `role="option" tabindex="-1"` inside a `role="listbox" tabindex="0"` container, so Tab flows filter input → sort button → list → Local path → Browse → Cancel/Clone (rows are reached by arrows, not Tab). The filter input is a `role="combobox"` with `aria-controls`/`aria-activedescendant` pointing at the listbox and its active option, and `handleListKeyDown` is shared by the input and the listbox so arrows/Enter work from either.
+- Overlays close on a backdrop target check, not `stopPropagation`.
+- Resize handles are `role="slider"`, since Svelte flags a focusable separator.
+- `use:autofocus`, never the attribute.
+- `autocorrect`, `autocapitalize` and `spellcheck` are off once, on `<html>`.
+- Shortcuts live on `window`, since a field can't catch them before focus.
+- `runCommand` queues until the shell is up and flushes after output is attached.
 
 ## Notable invariants
 
-These are easy to break and hard to debug; respect them when touching the relevant area.
-
-- **Hunk lines include the `@@` header.** `hunks[i].lines[0]` is the hunk header itself. The flat line index used by `DiffSelection.diverging_lines` is `sum(prev_hunk.lines.length) + line_idx_in_current`, and this sum *includes* every header line. Both the Rust patch builder and the Svelte diff viewer rely on this.
-- **File inclusion is derived from status, not stored.** It's recomputed on every status refresh from `present − excluded`. Never persist the inclusion set — persist the *exclusions* (and we don't even do that across sessions today). How long an exclusion outlives its path leaving the list still differs between the clients; the convergence is filed as CH-7/H-20 in the parity plan.
-- **`git status` uses porcelain v2 `-z` (NUL-delimited).** Plain `--porcelain` will silently corrupt paths with spaces or unicode. If you change the args, make sure the parser stays NUL-aware.
-- **Which remote an operation talks to is git's answer, resolved in core at call time.** Deliberately never the first name `git remote` prints: that list is alphabetical, so a `fork` + `origin` checkout would fetch `fork` for a branch tracking `origin`, fail its pull and push `master` to the fork. `get_tracking_remote` answers the automatic fetches, `repo_sync_status`'s fetch and Pull — the current branch's `branch.<name>.remote`, else `origin`, else the first remote, which is a bare `git fetch`'s order, going further only where git would name an `origin` that does not exist. `get_push_remote` answers Push, Publish Branch and force push — `branch.<name>.pushRemote`, then `remote.pushDefault`, then the tracking remote. The user's Fetch is `fetch_all` (`git fetch --all --prune`), which refuses a remote-less repo itself, since git would exit 0 having fetched nothing, and fails naming any remote it could not reach. Both resolvers spawn `git config` for the keys rather than using the config-file reader, because `branch.*` and `remote.pushDefault` may live in any scope; that is two local subprocesses for `get_tracking_remote` (`symbolic-ref`, `config --get`) and up to three `config --get` for `get_push_remote`, in front of a network round trip, with the remote list itself still read from the repository's `config` where that file settles it — and none of it on the status poll. The tail of the same ladder, `fallback_remote`, is what the no-upstream ahead/behind fallback measures against in `read_status` — and in `repo_sync_status` whenever it did not just fetch a remote of its own (see *Status parsing*) — so a badge describes the remote the next operation will talk to. Both return the remote's NAME, not its URL, take a configured name only while the repository still has that remote (`.`, a branch tracking a local branch, passes through; a renamed or deleted remote falls back, because handing git a dead name fails every automatic fetch and enough of those read as the network being down), are resolved immediately before each operation and never cached — a branch switch changes the answer — and return **`None` when the repo has no remote**, never an invented `"origin"`: an invented name makes every "skip when there's no remote" guard unfireable, so a doomed `git fetch` runs on every tick and its failures are read as the network being down, opening the connectivity breaker against every *other* repo. `RepoStatus.has_remote` remains the cheap signal (`get_status` reads the remote names from the repository's `config` file, spawning `git remote` only for the shapes that file cannot answer — see *Status parsing*), and it is one of the six fields core's `sync_proposal` reads to decide the header's face. The one place a remote may be named before one exists is a publish, which is what creates it — `git::DEFAULT_PUBLISH_REMOTE`, used by `gh_publish_repo` and nowhere else.
-- **An automatic fetch uses the background budget.** `fetch(.., background: true)` runs under 8/8/12 s, the same as the badge sweep; a fetch the user asked for keeps 15/30/600 s. Nobody is waiting on the automatic one, and there is a single global network slot — an unreachable remote holding it for ten minutes stalls every other repo's refresh behind it.
-- **Publishing uses `gh repo create`, not our own API.** `gh_publish_repo` shells out to `gh repo create <name> --source <repo_path> --remote origin --push [--private|--public] [--description ...]`, inheriting the user's `gh` auth. It's the one-shot equivalent of GitHub Desktop's "Publish Repository": creates the remote repo, adds `origin`, and pushes. `gh`'s stderr (missing auth, name collision) is surfaced verbatim to the error modal.
-- **A repo path is whatever `paths::canonicalize` returns.** Discovery, `repo_root`, `init_repo` and `resolve_launch_target` must all produce the identical string for the same folder — they feed one de-dupe set, the `last_opened_repo` comparison, the persisted MRU that orders the switcher, and the `repoIdentifiers` / `repoSync` cache keys, so a path only one of them can produce shows up as a duplicate repo with no badges, sorted into the tail. Calling `fs::canonicalize` directly re-introduces the Windows verbatim prefix and breaks exactly that. Pinned by `repo_paths_are_ordinary_and_agree_across_producers`.
-- **Terminal sessions die with the repo.** When `appState.repoPath` changes, `MainLayout`'s effect resets `terminalSessionId = 0`, which keys the `<Terminal>` component to unmount and call `close_terminal`. Don't try to "carry" a session across repos.
-- **Diff content `\n` round-trip.** Empty diff lines come through as `""` from `String::split('\n')` but in real unified diff format are ` ` (a single space). `parse_diff` reconstructs the leading space so the patch builder generates valid unified diffs.
+- Flat line indices include every `@@` row. Patch builder and viewers rely on it.
+- `parse_diff` restores the leading space on empty lines so patches stay valid.
+- The remote is git's answer, resolved at call time, never cached, and never the first name `git remote` prints, since that list is alphabetical.
+  - `get_tracking_remote` (automatic fetches, badge fetch, Pull): `branch.<name>.remote`, else `origin`, else first.
+  - `get_push_remote` (Push, Publish Branch, force push): `pushRemote`, then `remote.pushDefault`, then tracking.
+  - The user's Fetch is `fetch_all`, reaching every remote.
+  - No remote returns `None`, never an invented `origin`, because doomed fetches open the breaker for other repos. Only a publish names one, via `DEFAULT_PUBLISH_REMOTE`.
+  - A branch pointing at a renamed or deleted remote falls back, because the dead name would fail every automatic fetch.
+- Automatic fetches use the background budget, or one dead remote holds up everything.
+- Deliberately not in core: per-keystroke `$derived`s and scroll-frame logic (fuzzy matchers, arrow-key math, relative dates, `PathText` measurement), because an async IPC call visibly lags.
+- A repo path is whatever `paths::canonicalize` returns. Every producer must agree, since the string keys de-dupe, MRU and caches.
+- Terminal sessions die with the repo.

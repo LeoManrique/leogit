@@ -7,7 +7,8 @@ Constantly update these documents without repeating information between them.
 - Update `./STYLE.md` after significantly changing the frontend style. Remove stale information.
 - Update `./DESIGN.md` after completing any functional design feature or big change. Remove stale information.
 - Update `./TECHNICAL.md` after changing any technical architecture or implementation detail. Remove stale information.
-- Update `./ROADMAP.md` after completing any point mentioned there. Also add new features that come up while developing.
+- Update `./FRONTEND.md` after changing the contract both clients share: commands, events, DTOs, cross-client behavior, or a platform divergence. Remove stale information.
+- Update `./ROADMAP.md` by removing a point when it ships; it lists open work only, and git log is the history. Also add new features that come up while developing.
 - Update `./README.md` after completing some change that affects the escense of the project. Keep it concise and remove stale information.
 
 "Remove stale information" means rewrite: these documents describe the current
@@ -17,16 +18,6 @@ never leave a stale claim standing next to its correction — delete the claim a
 say only what is true now. When an obsolete passage carried a constraint worth
 keeping, restate the constraint in present tense ("deliberately does not X,
 because…").
-ROADMAP's checked entries log what each completed chunk did at the time and may
-be contradicted by later entries; that is fine — but never patch one with a note.
-
-## Implementation order
-
-Don't implement too many multiple features at once, make the feature implementation order what the user flow is, and make sure it is tested before proceeding to the next one.
-
-## Long-term correctness over immediate fixes
-
-- Our objectives are now not about fixing bugs, instead we need to focus on making the app as solid as possible. When deciding something try to take the approach that involves a long-term correctness.
 
 ## Clean, Mantainable, and Readable Code
 
