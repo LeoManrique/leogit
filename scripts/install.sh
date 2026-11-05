@@ -25,6 +25,26 @@ success() { echo -e "  ${GREEN}✓ $1${NC}"; }
 warn()    { echo -e "  ${YELLOW}⚠ $1${NC}"; }
 error()   { echo -e "  ${RED}✗ $1${NC}"; exit 1; }
 
+# Runs one /bin/sh command as root behind macOS's authorization dialog. `sudo`
+# refuses a standard (non-admin) account outright; this dialog accepts any
+# administrator's name and password instead. The command travels as an argument
+# to the run handler, so it needs no AppleScript string escaping. Mirrors
+# _run_as_admin in scripts/_build.py; change the two together.
+run_as_admin() {
+  local output
+  if output=$(/usr/bin/osascript \
+      -e 'on run argv' \
+      -e 'do shell script (item 1 of argv) with administrator privileges' \
+      -e 'end run' \
+      "$1" 2>&1); then
+    return 0
+  fi
+  case "$output" in
+    *"(-128)"*) error "Cancelled at the administrator prompt — nothing was changed" ;;
+    *) error "Administrator step failed: $output" ;;
+  esac
+}
+
 REPO="LeoManrique/leogit"
 API_URL="https://api.github.com/repos/$REPO/releases/latest"
 TMP_DIR="/tmp/leogit-install"
@@ -258,28 +278,47 @@ if [ "$OS" = "darwin" ]; then
   ditto -x -k "$TMP_DIR/$ARTIFACT" "$TMP_DIR"
   [ -d "$TMP_DIR/$MAC_BUNDLE" ] || error "Expected $MAC_BUNDLE inside $ARTIFACT, but didn't find it"
 
-  # Both spellings, not just the one being written. On the usual
-  # case-insensitive volume the second removal is a no-op; on a case-sensitive
-  # one they are two directories, and leaving the older client behind would put
-  # two LeoGits in /Applications with the same purpose.
-  for existing in "$MAC_BUNDLE" "$MAC_BUNDLE_LEGACY"; do
-    if [ -d "/Applications/$existing" ]; then
-      rm -rf "/Applications/$existing"
-      warn "Replaced existing /Applications/$existing"
-    fi
+  # Both spellings are removed, not just the one being written. On the usual
+  # case-insensitive volume they are one directory; on a case-sensitive one
+  # they are two, and leaving the older client behind would put two LeoGits in
+  # /Applications with the same purpose. Listed before anything is removed so
+  # each directory is reported once: `-ef` finds the legacy spelling to be the
+  # current one when the volume makes it so.
+  OLD_BUNDLES=""
+  for existing in "/Applications/$MAC_BUNDLE" "/Applications/$MAC_BUNDLE_LEGACY"; do
+    [ -d "$existing" ] || continue
+    [ -n "$OLD_BUNDLES" ] && [ "$existing" -ef "$OLD_BUNDLES" ] && continue
+    OLD_BUNDLES="${OLD_BUNDLES:+$OLD_BUNDLES }$existing"
   done
-  mv "$TMP_DIR/$MAC_BUNDLE" "$DEST"
 
-  # Strip the quarantine xattr Gatekeeper adds to anything downloaded via curl.
-  # Without this, ad-hoc-signed bundles trigger a "developer cannot be verified"
-  # dialog and won't open with a double-click. Only that attribute, not every
-  # xattr: a blanket clear is a needless swing at the code signature.
-  xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
+  # Remove the old bundles, move the new one in, then strip the quarantine
+  # xattr Gatekeeper adds to anything downloaded via curl. Without that,
+  # ad-hoc-signed bundles trigger a "developer cannot be verified" dialog and
+  # won't open with a double-click. Only that attribute, not every xattr: a
+  # blanket clear is a needless swing at the code signature.
+  #
+  # One /bin/sh command, so a standard account can run all of it behind a
+  # single administrator prompt. Absolute tool paths because the elevated
+  # shell's PATH is not guaranteed; every path in it is a constant with no
+  # spaces, so it needs no quoting.
+  REPLACE="/bin/rm -rf /Applications/$MAC_BUNDLE /Applications/$MAC_BUNDLE_LEGACY"
+  REPLACE="$REPLACE && /bin/mv $TMP_DIR/$MAC_BUNDLE $DEST"
+  REPLACE="$REPLACE && (/usr/bin/xattr -dr com.apple.quarantine $DEST 2>/dev/null || true)"
+  if [ -w /Applications ]; then
+    /bin/sh -c "$REPLACE" || error "Failed to install to $DEST"
+  else
+    warn "/Applications needs an administrator — macOS will ask for a name and password"
+    run_as_admin "$REPLACE"
+  fi
+  for existing in $OLD_BUNDLES; do
+    warn "Replaced existing $existing"
+  done
 
   # Register with Launch Services so Spotlight, Launchpad and `open -a` resolve
   # the freshly-unpacked bundle — the last of those is how the `leogit` shell
   # function below reaches the app. Without this, Launch Services only learns
-  # about it the first time Finder touches it.
+  # about it the first time Finder touches it. Never elevated: it writes the
+  # invoking user's database, not root's.
   LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
   [ -x "$LSREGISTER" ] && "$LSREGISTER" -f "$DEST" >/dev/null 2>&1 || true
 

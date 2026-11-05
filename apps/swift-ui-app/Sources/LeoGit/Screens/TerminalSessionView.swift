@@ -253,8 +253,8 @@ final class TerminalController {
     /// Belt-and-braces for the case where the view settled before the
     /// session existed and `sizeChanged` therefore never fired.
     private func pushCurrentSize() {
-        guard let terminal = terminalView?.getTerminal() else { return }
-        pushResize(cols: terminal.cols, rows: terminal.rows)
+        guard let size = terminalView?.terminalDimensions else { return }
+        pushResize(cols: size.cols, rows: size.rows)
     }
 
     private func feed(_ bytes: [UInt8]) {
@@ -393,7 +393,7 @@ private struct TerminalHostView: NSViewRepresentable {
     }
 
     @MainActor
-    final class Coordinator: NSObject, @preconcurrency TerminalViewDelegate {
+    final class Coordinator: NSObject, TerminalViewDelegate {
         private let controller: TerminalController
 
         init(controller: TerminalController) {

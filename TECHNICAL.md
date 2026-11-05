@@ -15,7 +15,7 @@ The pre-monorepo design is at tag `v0.1.32`. Recall it with `git worktree add ..
 | Bridge | UniFFI 0.32 | Static lib |
 | Xcode project | XcodeGen | `project.yml` is the truth |
 | Highlighting | syntect 5.3, two-face 0.5 | Colors live in `--syn-*` |
-| Terminal | portable-pty 0.9, xterm.js 6, SwiftTerm 1.20 | Core owns the PTY |
+| Terminal | portable-pty 0.9, xterm.js 6, SwiftTerm 1.99 | Core owns the PTY |
 | HTTP | reqwest 0.13 | Ollama, update check |
 | Discard | trash 5 | Recoverable |
 
@@ -435,6 +435,7 @@ On Windows, `just` needs the `sh` from [Git for Windows](https://git-scm.com/dow
 - Windows wipes `bundle/nsis` first, since Tauri never prunes it.
 - `tauri.conf.json` is the version source; `_version.py` moves the rest. `CFBundleShortVersionString` must be declared in `project.yml`, or it's `1.0`. `leogit-core` and `leogit-ffi` stay at `0.1.0`.
 - Platform naming exists three times: `install.sh`, `_common.py`, `artifact_name` (golden test).
+- macOS installs go through `osascript … with administrator privileges` when `/Applications` isn't writable, since `sudo` refuses a standard account. Remove, copy and quarantine strip share one prompt; `lsregister` stays unelevated because it writes the user's own database. `run_as_admin` exists in both `install.sh` and `_build.py`.
 - macOS `leogit()` is `open -a "<path>" "$dir"`: a path, since a bundle id may resolve to a Debug build, and not `--args`, which can't reach a running app.
 - The Linux wrapper sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` per launch if `/dev/nvidia0` exists.
 - Linux builds need `/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders` to exist, plus `NO_STRIP=true` and `APPIMAGE_EXTRACT_AND_RUN=1`.

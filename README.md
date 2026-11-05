@@ -21,7 +21,7 @@ On Mac or Linux, paste this in a terminal:
 curl -fsSL https://raw.githubusercontent.com/LeoManrique/leogit/main/scripts/install.sh | bash
 ```
 
-Run it again whenever you want to upgrade. It also adds a `leogit` command, so you can open a project straight from your terminal.
+Run it again whenever you want to upgrade. It also adds a `leogit` command, so you can open a project straight from your terminal. On a Mac account without admin rights, macOS asks for an administrator's name and password.
 
 On Windows, or if you'd rather install by hand, grab a download from the [latest release](https://github.com/LeoManrique/leogit/releases/latest).
 

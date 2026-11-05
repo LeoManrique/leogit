@@ -10,7 +10,9 @@ Not a script: it does nothing on its own.
 
 from __future__ import annotations
 
+import os
 import platform
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -424,6 +426,24 @@ def _install_macos_bundle(source: Path) -> Path:
     verify_signature(source)
     destination = APPLICATIONS / source.name
 
+    if os.access(APPLICATIONS, os.W_OK):
+        _replace_macos_bundle(source, destination)
+    else:
+        _replace_macos_bundle_as_admin(source, destination)
+
+    # Register with Launch Services so Spotlight and Launchpad know about the
+    # new bundle instead of waiting for Finder to notice it — and so `open -a`
+    # resolves it, which is how the `leogit` shell function reaches the app.
+    # Never elevated: it writes the invoking user's database, not root's.
+    if LSREGISTER.is_file():
+        quietly([str(LSREGISTER), "-f", str(destination)])
+
+    success(f"Installed: {destination}")
+    return destination
+
+
+def _replace_macos_bundle(source: Path, destination: Path) -> None:
+    """Remove both bundle names, copy `source` in, and drop its quarantine flag."""
     for name in BUNDLE_NAME.values():
         existing = APPLICATIONS / name
         if not existing.exists():
@@ -445,14 +465,64 @@ def _install_macos_bundle(source: Path) -> Path:
     # is a needless swing at the signature. A no-op for a locally built bundle.
     quietly(["xattr", "-dr", "com.apple.quarantine", str(destination)])
 
-    # Register with Launch Services so Spotlight and Launchpad know about the
-    # new bundle instead of waiting for Finder to notice it — and so `open -a`
-    # resolves it, which is how the `leogit` shell function reaches the app.
-    if LSREGISTER.is_file():
-        quietly([str(LSREGISTER), "-f", str(destination)])
 
-    success(f"Installed: {destination}")
-    return destination
+def _replace_macos_bundle_as_admin(source: Path, destination: Path) -> None:
+    """`_replace_macos_bundle` for an account that cannot write `/Applications`.
+
+    The same three steps, joined into one shell command so a single
+    administrator prompt covers all of them.
+    """
+    warn(f"{APPLICATIONS} needs an administrator — macOS will ask for a name and password")
+
+    # Listed before anything is removed, so the warnings below match what the
+    # writable path reports: once per directory, which on a case-insensitive
+    # volume both names are.
+    replaced: list[Path] = []
+    for name in BUNDLE_NAME.values():
+        existing = APPLICATIONS / name
+        if existing.exists() and not any(existing.samefile(p) for p in replaced):
+            replaced.append(existing)
+
+    bundles = " ".join(shlex.quote(str(APPLICATIONS / name)) for name in BUNDLE_NAME.values())
+    dest = shlex.quote(str(destination))
+    # Absolute paths: the elevated shell's PATH is not guaranteed. xattr's exit
+    # status is ignored, as `quietly` ignores it on the writable path.
+    _run_as_admin(
+        f"/bin/rm -rf {bundles}"
+        f" && /usr/bin/ditto {shlex.quote(str(source))} {dest}"
+        f" && (/usr/bin/xattr -dr com.apple.quarantine {dest} || true)"
+    )
+    for existing in replaced:
+        warn(f"Replaced the existing {existing}")
+
+
+# The command travels as an argument to the run handler, so the AppleScript
+# source stays constant and the command needs shell quoting only, never
+# AppleScript string escaping.
+ADMIN_SCRIPT = (
+    "on run argv",
+    "do shell script (item 1 of argv) with administrator privileges",
+    "end run",
+)
+
+
+def _run_as_admin(command: str) -> None:
+    """Run a `/bin/sh` command as root behind macOS's authorization dialog.
+
+    `sudo` refuses a standard (non-admin) account outright; this dialog accepts
+    any administrator's name and password instead. Needs a GUI session, so over
+    SSH it fails with osascript's own error. Mirrored by `run_as_admin` in
+    install.sh; change the two together.
+    """
+    osascript = ["/usr/bin/osascript"]
+    for line in ADMIN_SCRIPT:
+        osascript += ["-e", line]
+    result = subprocess.run([*osascript, command], capture_output=True, text=True, check=False)
+    if result.returncode == 0:
+        return
+    if "(-128)" in result.stderr:
+        error("Cancelled at the administrator prompt — nothing was changed")
+    error(f"Administrator step failed: {result.stderr.strip() or f'osascript exited {result.returncode}'}")
 
 
 # The launcher `install.sh` writes verbatim. The duplication is deliberate and
